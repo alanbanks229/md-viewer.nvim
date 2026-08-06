@@ -1,10 +1,10 @@
 ---
 part: 2
 title: Portable rendering — generic Kitty backend and reliable geometry
-status: not-started
+status: done
 model: Sonnet 5
 depends_on: part 1
-commit: ""
+commit: "PENDING"
 ships: v0.2.0
 ---
 

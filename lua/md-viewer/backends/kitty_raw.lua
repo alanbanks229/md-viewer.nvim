@@ -26,7 +26,33 @@ local function at(placement, sequence)
   return ("\27[s\27[%d;%dH%s\27[u"):format(placement.row + 1, placement.col + 1, sequence)
 end
 
-local function zindex() return math.floor(config.get().image.raw_zindex or -1) end
+local function active_profile()
+  local capability = terminal.detect()
+  return terminal.profiles[capability.profile_id] or terminal.profiles.unknown, capability.profile_id
+end
+
+--- Effective z-index and where it came from: an explicit `image.raw_zindex`
+--- always wins; otherwise the active terminal profile's default.
+local function resolve_zindex()
+  local explicit = config.get().image.raw_zindex
+  if explicit ~= nil then return math.floor(explicit), "explicit override (image.raw_zindex)" end
+  local profile, profile_id = active_profile()
+  return math.floor(profile.default_raw_zindex or -1), ("profile default (%s)"):format(profile_id)
+end
+
+--- Effective double-buffer policy and where it came from: an explicit
+--- `image.double_buffer` always wins; otherwise the active terminal
+--- profile's default.
+local function resolve_double_buffer()
+  local explicit = config.get().image.double_buffer
+  if explicit ~= nil then return explicit, "explicit override (image.double_buffer)" end
+  local profile, profile_id = active_profile()
+  local default = profile.default_double_buffer
+  if default == nil then default = true end
+  return default, ("profile default (%s)"):format(profile_id)
+end
+
+local function zindex() return (resolve_zindex()) end
 
 local function png_dimensions(bytes)
   if type(bytes) ~= "string" or #bytes < 24 or bytes:sub(1, 8) ~= "\137PNG\r\n\26\n" or bytes:sub(13, 16) ~= "IHDR" then
@@ -158,7 +184,8 @@ function M.show(image_bytes, placement)
 end
 
 function M.update(image_id, image_bytes, placement)
-  if image_id and not config.get().image.double_buffer then
+  local double_buffer = resolve_double_buffer()
+  if image_id and not double_buffer then
     M.clear(image_id)
     return M.show(image_bytes, placement)
   end
@@ -195,16 +222,23 @@ function M.health()
   for _, item in pairs(owned) do
     placements = placements + #(item.placement_ids or {})
   end
+  local zindex_value, zindex_source = resolve_zindex()
+  local double_buffer_value, double_buffer_source = resolve_double_buffer()
   return {
     available = ok,
     reason = reason,
-    advertised = vim.env.TERM_PROGRAM == "iTerm.app",
+    -- Whether the terminal advertises Kitty-compatible graphics at all; no
+    -- longer hardcoded to iTerm2's own advertisement string.
+    advertised = capability.graphics ~= "unavailable",
     -- Neovim owns terminal input, so md-viewer never runs a synchronous
     -- response probe; this stays false even when graphics are available.
     probe_succeeded = false,
     owned_images = vim.tbl_count(owned),
     owned_placements = placements,
-    zindex = zindex(),
+    zindex = zindex_value,
+    zindex_source = zindex_source,
+    double_buffer = double_buffer_value,
+    double_buffer_source = double_buffer_source,
     profile = capability.profile_id,
     profile_label = capability.label,
     evidence = capability.evidence,

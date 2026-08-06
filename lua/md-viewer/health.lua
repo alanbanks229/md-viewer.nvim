@@ -1,5 +1,6 @@
 local backends = require("md-viewer.backends")
 local config = require("md-viewer.config")
+local coordinates = require("md-viewer.coordinates")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
 local terminal = require("md-viewer.terminal")
@@ -89,6 +90,11 @@ function M.collect(renderer_result, renderer_error)
     selected_backend = backend.selected,
     backend_decision = backend.decision,
     raw_graphics_zindex = backend.kitty_raw.zindex,
+    raw_graphics_zindex_source = backend.kitty_raw.zindex_source,
+    raw_graphics_double_buffer = backend.kitty_raw.double_buffer,
+    raw_graphics_double_buffer_source = backend.kitty_raw.double_buffer_source,
+    raw_graphics_owned_images = backend.kitty_raw.owned_images,
+    raw_graphics_owned_placements = backend.kitty_raw.owned_placements,
     node_version = command({ "node", "--version" }) or "unavailable",
     playwright_package = vim.uv.fs_stat(root() .. "/renderer/node_modules/playwright/package.json") and "available"
       or "missing",
@@ -103,8 +109,7 @@ function M.collect(renderer_result, renderer_error)
     raw_html = sec.raw_html,
     local_image_root = sec.document_root,
     security_overrides = sec.overrides,
-    viewport_calibration = (vim.env.MD_VIEWER_CELL_WIDTH_PX and vim.env.MD_VIEWER_CELL_HEIGHT_PX) and "explicit"
-      or "aspect-ratio estimate",
+    viewport_calibration_tier = coordinates.calibration_tier(),
   }
 end
 
@@ -127,6 +132,11 @@ local order = {
   "selected_backend",
   "backend_decision",
   "raw_graphics_zindex",
+  "raw_graphics_zindex_source",
+  "raw_graphics_double_buffer",
+  "raw_graphics_double_buffer_source",
+  "raw_graphics_owned_images",
+  "raw_graphics_owned_placements",
   "node_version",
   "playwright_package",
   "chromium_executable",
@@ -138,7 +148,7 @@ local order = {
   "raw_html",
   "local_image_root",
   "security_overrides",
-  "viewport_calibration",
+  "viewport_calibration_tier",
 }
 
 local function lines(report)

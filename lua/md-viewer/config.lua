@@ -29,9 +29,12 @@ M.defaults = {
   image = {
     backend = "auto",
     zindex = 20,
-    double_buffer = true,
+    -- nil defers to the terminal profile's default (see md-viewer.terminal);
+    -- set explicitly to override every profile.
+    double_buffer = nil,
     -- Raw Kitty layers use terminal semantics, not Neovim float z-indices.
-    raw_zindex = -1,
+    -- nil defers to the terminal profile's default_raw_zindex.
+    raw_zindex = nil,
     raw_statusline_guard_cells = 1,
     ui_poll_ms = 50,
   },
@@ -91,10 +94,17 @@ local function validate(cfg)
     "md-viewer: render.estimated_cell_width_px must be positive"
   )
   assert(
-    type(cfg.image.raw_zindex) == "number"
-      and cfg.image.raw_zindex >= -2147483648
-      and cfg.image.raw_zindex <= 2147483647,
-    "md-viewer: image.raw_zindex must be a signed 32-bit integer"
+    cfg.image.raw_zindex == nil
+      or (
+        type(cfg.image.raw_zindex) == "number"
+        and cfg.image.raw_zindex >= -2147483648
+        and cfg.image.raw_zindex <= 2147483647
+      ),
+    "md-viewer: image.raw_zindex must be a signed 32-bit integer, or nil to use the terminal profile default"
+  )
+  assert(
+    cfg.image.double_buffer == nil or type(cfg.image.double_buffer) == "boolean",
+    "md-viewer: image.double_buffer must be a boolean, or nil to use the terminal profile default"
   )
   assert(
     type(cfg.image.raw_statusline_guard_cells) == "number" and cfg.image.raw_statusline_guard_cells >= 0,

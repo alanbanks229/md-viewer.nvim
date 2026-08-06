@@ -14,11 +14,20 @@ local function default_env() return vim.fn.environ() end
 --- Static, terminal-specific metadata. Evidence, platform, and multiplexer
 --- state are runtime facts and are attached by M.capability(), not stored
 --- here.
+-- `default_double_buffer` is the profile's default answer to "should
+-- placement replacement show the new image before deleting the old one
+-- (place-then-delete, avoids a blank frame) or the reverse?". Every profile
+-- below implements the same Kitty graphics protocol with the same placement
+-- semantics, so this is uniformly `true` today; it is still sourced from the
+-- profile (not hardcoded in the encoder) so a future profile with a real,
+-- verified reason to differ has somewhere to say so. `image.double_buffer`
+-- in user config always overrides it.
 M.profiles = {
   iterm2 = {
     id = "iterm2",
     label = "iTerm2",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
@@ -30,6 +39,7 @@ M.profiles = {
     id = "kitty",
     label = "Kitty",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = { "Kitty is the reference implementation of the graphics protocol this backend uses." },
@@ -38,6 +48,7 @@ M.profiles = {
     id = "wezterm",
     label = "WezTerm",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = { "WezTerm implements the Kitty graphics protocol." },
@@ -46,6 +57,7 @@ M.profiles = {
     id = "ghostty",
     label = "Ghostty",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = { "Ghostty implements the Kitty graphics protocol." },
@@ -54,6 +66,7 @@ M.profiles = {
     id = "warp",
     label = "Warp",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
@@ -65,6 +78,7 @@ M.profiles = {
     id = "generic_kitty",
     label = "Kitty-compatible (TERM only)",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
@@ -76,6 +90,7 @@ M.profiles = {
     id = "unknown",
     label = "Unknown terminal",
     default_raw_zindex = -1,
+    default_double_buffer = true,
     placement = { deletion = "unsupported", crop = "unsupported" },
     validation = "not-attempted",
     caveats = { "No evidence of Kitty graphics protocol support was found." },

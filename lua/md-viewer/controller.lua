@@ -124,7 +124,7 @@ function M.refresh(session, render_options)
     session.last_capture_ms = meta.captureMs
     session.viewport_width_px = result.viewport.widthPx
     session.viewport_height_render_px = result.viewport.heightPx
-    session.viewport_calibrated = result.viewport.calibrated
+    session.viewport_calibration_tier = result.viewport.tier
     session.last_image_bytes = result.image
     if update_occlusion(session) then
       clear_image(session)
@@ -450,7 +450,11 @@ function M.setup_autocmds()
       vim.schedule(reconcile_occlusion)
     end,
   })
-  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume" }, {
+  -- FocusGained covers the terminal-side transitions Neovim has no direct
+  -- event for (alternate-screen returns, multiplexer pane/window switches):
+  -- any of them can silently drop a raw Kitty placement, so treat regained
+  -- focus the same as VimResume and recreate it from the cached PNG.
+  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume", "FocusGained" }, {
     group = group,
     callback = function(args)
       local source_session = state.get(args.buf)
