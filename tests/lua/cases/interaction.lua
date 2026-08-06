@@ -59,56 +59,42 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- A drag that never crosses the threshold, followed by release, performs
-  -- a click (a real interact request is issued).
+  -- A plain click no longer navigates to source (removed per operator
+  -- decision: it fought the drag-to-select gesture, since clicking to
+  -- dismiss a highlight also relocated the cursor). With nothing selected it
+  -- does nothing at all -- no interact request, no cursor movement. With an
+  -- active selection, it clears it, matching VS Code's own Markdown
+  -- preview: drag to select, click anywhere to deselect.
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
     local requests = {}
     local original_request = process.request
-    process.request = function(method, params, callback)
-      requests[#requests + 1] = { method = method, params = params }
-      callback({ kind = "source", sourcePosition = { line = 1, byteColumn = 0, precision = "line" } }, nil)
-    end
+    process.request = function(method, params, callback) requests[#requests + 1] = { method = method, params = params } end
 
     interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
     interaction.on_drag(session, point(10, 10))
     interaction.on_release(session, point(10, 10))
     process.request = original_request
+    t.eq(0, #requests, "a plain click with nothing selected issues no interact request at all")
 
-    t.eq(1, #requests, "a below-threshold press/release performs exactly one interact request")
-    t.eq("interact", requests[1].method, "the click request uses the interact method")
-    t.eq("activate_at", requests[1].params.action, "clicks resolve through activate_at for both source and link hits")
-    t.eq("line", session.last_interaction_precision, "the resolved precision is recorded on the session")
-    t.eq("source", session.last_interaction_kind, "the resolved kind is recorded on the session")
-
-    -- An unmodified click carries no modifiers, and `vim.json.encode({})` emits
-    -- `[]` -- which validateEnvelope refuses ("modifiers must be an object of
-    -- booleans"). The refusal was swallowed by the error branch in M.click, so
-    -- every plain click silently did nothing. Assert the encoded wire form, not
-    -- the Lua table, because the Lua table looked correct the whole time.
-    local encoded = require("md-viewer.protocol").encode(requests[1].params)
-    t.eq(
-      true,
-      encoded:find('"modifiers":{', 1, true) ~= nil,
-      "modifiers must encode as a JSON object, never as an empty array"
-    )
-    t.eq(false, encoded:find('"modifiers":[]', 1, true) ~= nil, "the empty-array encoding is what the renderer rejects")
-    local decoded = vim.json.decode(encoded).modifiers
-    t.eq(
-      { ctrl = false, shift = false, alt = false, meta = false },
-      decoded,
-      "all four modifiers are stated explicitly"
-    )
-
-    -- A drag never issues a request at all.
-    local drag_requests = {}
-    process.request = function(...) drag_requests[#drag_requests + 1] = true end
+    -- With an active selection, the same below-threshold press/release
+    -- clears it via a real selection_clear interact request.
+    session.selection_active = true
+    local clear_requests = {}
+    process.request = function(method, params, callback)
+      clear_requests[#clear_requests + 1] = { method = method, params = params }
+      callback({ kind = "selection", cleared = true }, nil)
+    end
     interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
-    interaction.on_drag(session, point(10, 20))
-    interaction.on_release(session, point(10, 20))
+    interaction.on_drag(session, point(10, 10))
+    interaction.on_release(session, point(10, 10))
     process.request = original_request
-    t.eq(0, #drag_requests, "a drag creates no selection and issues no interact request in this part")
+
+    t.eq(1, #clear_requests, "a plain click with an active selection clears it")
+    t.eq("interact", clear_requests[1].method)
+    t.eq("selection_clear", clear_requests[1].params.action)
+    t.eq(false, session.selection_active, "the selection is marked inactive once cleared")
 
     -- A press captured while the pointer is over the content, then dragged
     -- until a different, occluding window claims the same screen area (a
@@ -124,159 +110,60 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Cursor movement: clamping, UTF-8 byte-boundary safety, the sync guard,
-  -- and focus_source_on_click.
-  -- ---------------------------------------------------------------------
-  do
-    local source_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "h\xc3\xa9llo w\xc3\xb6rld", "second" })
-    vim.cmd("botright new")
-    local source_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(source_win, source_buf)
-    local other_win = vim.api.nvim_get_current_win()
-
-    local session = { source_buf = source_buf, source_win = source_win, sync_guard = false }
-
-    config.setup({ interaction = { focus_source_on_click = true } })
-    -- byte_column 2 lands on the continuation byte of the 2-byte 'é'
-    -- (starting at byte offset 1); it must clamp back to offset 1.
-    interaction.move_source_cursor(session, { line = 1, byte_column = 2, precision = "block" })
-    t.eq({ 1, 1 }, vim.api.nvim_win_get_cursor(source_win), "a mid-sequence byte column clamps to the UTF-8 boundary")
-    t.eq(true, session.sync_guard, "the sync guard is held synchronously while the cursor moves")
-    vim.wait(200, function() return session.sync_guard == false end)
-    t.eq(false, session.sync_guard, "the sync guard releases on the next event-loop turn")
-    t.eq(source_win, vim.api.nvim_get_current_win(), "focus_source_on_click=true focuses the source window")
-
-    -- Line and byte-column clamping against buffer bounds.
-    interaction.move_source_cursor(session, { line = 9999, byte_column = 0, precision = "block" })
-    t.eq(2, vim.api.nvim_win_get_cursor(source_win)[1], "an out-of-range line clamps to the last buffer line")
-    interaction.move_source_cursor(session, { line = 1, byte_column = 9999, precision = "block" })
-    local clamped_col = vim.api.nvim_win_get_cursor(source_win)[2]
-    local line_bytes = #vim.api.nvim_buf_get_lines(source_buf, 0, 1, false)[1]
-    -- We clamp to the line's byte length (per spec); Neovim's own normal-mode
-    -- cursor semantics then clamp that further to the last real column, since
-    -- "one past the last byte" only exists as a cursor position in insert
-    -- mode. Both clamps are honest -- neither guesses -- so the observable
-    -- floor is length-1, not length.
-    t.eq(line_bytes - 1, clamped_col, "an out-of-range byte column clamps to the line's last valid column")
-
-    -- focus_source_on_click = false updates the cursor without stealing focus.
-    vim.api.nvim_set_current_win(other_win)
-    config.setup({ interaction = { focus_source_on_click = false } })
-    interaction.move_source_cursor(session, { line = 2, byte_column = 0, precision = "line" })
-    t.eq(other_win, vim.api.nvim_get_current_win(), "focus_source_on_click=false does not change the active window")
-    t.eq(2, vim.api.nvim_win_get_cursor(source_win)[1], "the source cursor still moves when focus is not stolen")
-
-    -- A nil source position (precision "none") is a deliberate no-op.
-    local cursor_before = vim.api.nvim_win_get_cursor(source_win)
-    interaction.move_source_cursor(session, { line = nil, byte_column = nil, precision = "none" })
-    t.eq(cursor_before, vim.api.nvim_win_get_cursor(source_win), "an unresolved source position never moves the cursor")
-
-    -- ...including when "no position" arrives the way the renderer actually
-    -- sends it. A click on empty space resolves to precision "none" with
-    -- `line: null`, and `vim.NIL` is truthy userdata that compares `~= nil`, so
-    -- a nil-check alone lets it through and the first arithmetic on it throws.
-    -- protocol.lua now decodes null as absent; this asserts the function is
-    -- also safe against the raw sentinel, whatever the transport did.
-    local decoded = require("md-viewer.protocol").decode(
-      '{"id":1,"ok":true,"result":{"kind":"source","sourcePosition":{"line":null,"byteColumn":null,"precision":"none"}}}'
-    )
-    local position = decoded.result.sourcePosition
-    t.eq("nil", type(position.line), "the transport decodes a null line as absent, not as vim.NIL")
-    t.eq("nil", type(position.byteColumn), "the transport decodes a null byteColumn as absent")
-    local ok_decoded = pcall(interaction.move_source_cursor, session, position)
-    t.eq(true, ok_decoded, "a decoded precision-none position is a no-op, not an error")
-    local ok_sentinel =
-      pcall(interaction.move_source_cursor, session, { line = vim.NIL, byteColumn = vim.NIL, precision = "none" })
-    t.eq(true, ok_sentinel, "even a raw vim.NIL position is declined rather than crashing")
-    t.eq(cursor_before, vim.api.nvim_win_get_cursor(source_win), "neither form moved the cursor")
-
-    vim.api.nvim_win_close(source_win, true)
-  end
-
-  -- ---------------------------------------------------------------------
-  -- Part 5: a real, non-zero byte column arriving with precision "exact".
-  --
-  -- Part 4 built the clamping and the UTF-8 boundary walk this relies on, but
-  -- every column it ever saw was 0. The renderer's UTF-16 -> UTF-8 conversion
-  -- is tested on its own in tests/node/utf.test.js; what is checked here is
-  -- the other half of the claim -- that a column derived from multibyte text
-  -- survives this function unchanged instead of being clamped or shifted.
-  -- ---------------------------------------------------------------------
-  do
-    local source_buf = vim.api.nvim_create_buf(false, true)
-    local prefix = "Unicode line: caf\xc3\xa9 "
-    local cjk = "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e"
-    local emoji = "\xf0\x9f\x8e\x89"
-    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { prefix .. cjk .. " " .. emoji .. " done." })
-    vim.cmd("botright new")
-    local source_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(source_win, source_buf)
-    local session = { source_buf = source_buf, source_win = source_win, sync_guard = false }
-    config.setup({ interaction = { focus_source_on_click = false } })
-
-    -- The columns the renderer reports for a click on each run: 20 bytes of
-    -- "Unicode line: café " (19 characters -- the é is two bytes), then 10 more
-    -- for the three 3-byte CJK characters plus a space.
-    local cjk_column = #prefix
-    local emoji_column = cjk_column + #cjk + 1
-    t.eq(20, cjk_column, "the CJK run starts 20 bytes in, where a column count would say 19")
-    t.eq(30, emoji_column, "the emoji starts 30 bytes in, where a column count would say 23")
-
-    -- `byteColumn`, not `byte_column`: this is the renderer's own wire field,
-    -- which is what result.sourcePosition actually carries. Part 4's tests used
-    -- the snake_case name only, which is why the field-name mismatch in
-    -- move_source_cursor survived until a non-zero column existed to expose it.
-    interaction.move_source_cursor(session, { line = 1, byteColumn = cjk_column, precision = "exact" })
-    t.eq({ 1, cjk_column }, vim.api.nvim_win_get_cursor(source_win), "an exact column onto CJK is used verbatim")
-
-    interaction.move_source_cursor(session, { line = 1, byteColumn = emoji_column, precision = "exact" })
-    t.eq({ 1, emoji_column }, vim.api.nvim_win_get_cursor(source_win), "an exact column onto an emoji is used verbatim")
-
-    -- The boundary walk still protects against a column inside a character,
-    -- which is what a broken conversion upstream would produce.
-    interaction.move_source_cursor(session, { line = 1, byteColumn = emoji_column + 2, precision = "exact" })
-    t.eq(
-      { 1, emoji_column },
-      vim.api.nvim_win_get_cursor(source_win),
-      "a column inside the emoji clamps back to its start"
-    )
-
-    -- The snake_case alias still works, so nothing Part 4 wrote regressed.
-    interaction.move_source_cursor(session, { line = 1, byte_column = cjk_column, precision = "exact" })
-    t.eq({ 1, cjk_column }, vim.api.nvim_win_get_cursor(source_win), "the snake_case alias is still honoured")
-
-    vim.api.nvim_win_close(source_win, true)
-  end
-
-  -- ---------------------------------------------------------------------
-  -- Part 5: an exact hit round-trips through the click path and is recorded
-  -- for :MdViewerDebug, which is the only place a user ever sees the label.
+  -- Ctrl/Cmd-click (M.activate) is the only remaining caller of
+  -- request_hit/modifiers now that a plain click no longer is. The
+  -- wire-encoding discipline it guards against is still real: an empty
+  -- modifiers table must still never encode as `[]` (`vim.json.encode({})`
+  -- emits `[]`, and validateEnvelope refuses an array for `modifiers`). A
+  -- non-link hit does nothing -- no fallback to source navigation remains --
+  -- and a link hit still activates normally.
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
-    local source_buf = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "Some **bold text** here." })
-    vim.cmd("botright new")
-    local source_win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(source_win, source_buf)
-    session.source_buf, session.source_win = source_buf, source_win
-
+    local requests = {}
     local original_request = process.request
     process.request = function(method, params, callback)
-      callback({ kind = "source", sourcePosition = { line = 1, byteColumn = 12, precision = "exact" } }, nil)
+      requests[#requests + 1] = { method = method, params = params }
+      callback({ kind = "source", sourcePosition = { line = 1, byteColumn = 0, precision = "line" } }, nil)
     end
-    config.setup({ interaction = { focus_source_on_click = false } })
-    interaction.click(session, { x = 1, y = 1 }, 1)
+
+    interaction.activate(session, { x = 1, y = 1 }, {})
     process.request = original_request
 
-    t.eq("exact", session.last_interaction_precision, "an exact precision is recorded on the session")
-    t.eq({ 1, 12 }, vim.api.nvim_win_get_cursor(source_win), "the click lands on 'text', past the '**'")
-    local entry = debug.snapshot().sessions[tostring(session.source_buf)]
-      or { interaction_last_precision = session.last_interaction_precision }
-    t.eq("exact", entry.interaction_last_precision, "the debug snapshot reports the exact label")
+    t.eq(1, #requests, "ctrl/cmd-click issues exactly one interact request")
+    t.eq("activate_at", requests[1].params.action)
 
-    vim.api.nvim_win_close(source_win, true)
+    local encoded = require("md-viewer.protocol").encode(requests[1].params)
+    t.eq(
+      true,
+      encoded:find('"modifiers":{', 1, true) ~= nil,
+      "modifiers must encode as a JSON object, never as an empty array"
+    )
+    t.eq(false, encoded:find('"modifiers":[]', 1, true) ~= nil, "the empty-array encoding is what the renderer rejects")
+    local decoded = vim.json.decode(encoded).modifiers
+    t.eq(
+      { ctrl = false, shift = false, alt = false, meta = false },
+      decoded,
+      "all four modifiers are stated explicitly"
+    )
+    t.eq(nil, session.last_interaction_kind, "a non-link ctrl/cmd-click hit records nothing and moves no cursor")
+
+    -- A link hit under ctrl/cmd-click still activates normally.
+    local original_open = vim.ui.open
+    local opened = {}
+    vim.ui.open = function(target)
+      opened[#opened + 1] = target
+      return { wait = function() end }
+    end
+    process.request = function(method, params, callback)
+      callback({ kind = "link", link = { type = "https", href = "https://example.invalid" } }, nil)
+    end
+    interaction.activate(session, { x = 1, y = 1 }, { ctrl = true })
+    process.request = original_request
+    vim.ui.open = original_open
+
+    t.eq({ "https://example.invalid" }, opened, "ctrl/cmd-click on a link still activates it")
+    t.eq("link", session.last_interaction_kind, "a link hit still records its kind")
   end
 
   -- ---------------------------------------------------------------------
@@ -408,8 +295,6 @@ return function(t)
     config.reset()
     for _, case in ipairs({
       { interaction = { enabled = "yes" } },
-      { interaction = { click_to_source = 1 } },
-      { interaction = { focus_source_on_click = "no" } },
       { interaction = { links = 0 } },
       { interaction = { double_click = "true" } },
       { interaction = { drag_threshold_cells = -1 } },

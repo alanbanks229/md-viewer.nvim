@@ -123,8 +123,46 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
+  -- VS Code-style click-to-deselect, end to end: drag to commit a real
+  -- selection, then a separate, later plain click (no drag) clears it. A
+  -- click never navigates to source -- that fallback was removed because it
+  -- fought this exact gesture (dismissing a highlight used to also relocate
+  -- the cursor).
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callback({ kind = "selection", ok = true, text = "committed", collapsed = false }, nil)
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 1 end, 5)
+    interaction.on_release(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq(true, session.selection_active, "the drag committed a real selection")
+    t.eq("selection_commit", requests[#requests].params.action, "sanity: the drag ended in a commit")
+
+    -- A later, separate press/release with no movement is a plain click. It
+    -- must clear the selection via selection_clear, never re-navigate to
+    -- source (there is no source-navigating action left to send at all).
+    local before = #requests
+    interaction.on_press(session, point(20, 20), { x = 300, y = 300 }, 1)
+    interaction.on_release(session, point(20, 20))
+    t.eq(before + 1, #requests, "the plain click issued exactly one more request")
+    t.eq("selection_clear", requests[#requests].params.action, "a plain click clears the selection, not activate_at")
+    t.eq(false, session.selection_active, "the selection is inactive once the click clears it")
+
+    process.request = original_request
+  end
+
+  -- ---------------------------------------------------------------------
   -- Double-click word selection dispatches on press, and the matching
-  -- release does not also perform a click-to-source navigation.
+  -- release performs no other action (there is no click-to-source fallback
+  -- for it to fall into).
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
@@ -141,30 +179,31 @@ return function(t)
     t.eq(true, session.selection_active)
 
     interaction.on_release(session, point(10, 10))
-    t.eq(1, #requests, "release after word_select fired performs no additional click-to-source request")
+    t.eq(1, #requests, "release after word_select fired performs no additional request")
 
     process.request = original_request
   end
 
   -- ---------------------------------------------------------------------
-  -- word_select = false falls through to today's single-click-shaped
-  -- behaviour, unchanged -- the "keep it selectable" requirement.
+  -- word_select = false disables double-click word selection outright --
+  -- the "keep it selectable" requirement -- rather than falling through to
+  -- click-to-source, which no longer exists as a fallback for any click.
   -- ---------------------------------------------------------------------
   do
     setup_interaction({ word_select = false })
     local session = fake_session()
     local requests = {}
     local original_request = process.request
-    process.request = function(method, params, callback)
-      requests[#requests + 1] = params
-      callback({ kind = "source", sourcePosition = { line = 1, byteColumn = 0, precision = "line" } }, nil)
-    end
+    process.request = function(method, params, callback) requests[#requests + 1] = params end
 
     interaction.on_press(session, point(10, 10), { x = 50, y = 50 }, 2)
     t.eq(0, #requests, "on_press alone issues nothing when word_select is disabled")
     interaction.on_release(session, point(10, 10))
-    t.eq(1, #requests, "a disabled word_select falls through to click-to-source on release")
-    t.eq("activate_at", requests[1].action)
+    t.eq(
+      0,
+      #requests,
+      "a disabled word_select issues no request on release either -- there is no click fallback anymore"
+    )
 
     process.request = original_request
     setup_interaction({})

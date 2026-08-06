@@ -53,8 +53,6 @@ M.defaults = {
   security = { network = false, document_root = nil },
   interaction = {
     enabled = true,
-    click_to_source = true,
-    focus_source_on_click = true,
     links = true,
     drag_threshold_cells = 1,
     -- Gates installing the <2-LeftMouse> mapping at all. Part 6 hangs
@@ -153,11 +151,6 @@ local function validate(cfg)
   assert(tri_state[cfg.terminal.kitty_graphics], "md-viewer: terminal.kitty_graphics must be auto, on, or off")
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
   assert(type(cfg.interaction.enabled) == "boolean", "md-viewer: interaction.enabled must be boolean")
-  assert(type(cfg.interaction.click_to_source) == "boolean", "md-viewer: interaction.click_to_source must be boolean")
-  assert(
-    type(cfg.interaction.focus_source_on_click) == "boolean",
-    "md-viewer: interaction.focus_source_on_click must be boolean"
-  )
   assert(type(cfg.interaction.links) == "boolean", "md-viewer: interaction.links must be boolean")
   assert(type(cfg.interaction.double_click) == "boolean", "md-viewer: interaction.double_click must be boolean")
   assert(

@@ -267,8 +267,10 @@ changing those options.
 
 ## Known beta limitations
 
-- The rendered preview is a PNG surface, so its text cannot be selected,
-  searched, copied, or interacted with. Use the source split for those actions.
+- The rendered preview is a PNG surface, not native terminal text. Drag to
+  highlight rendered text (a real, browser-painted selection), press `y` or
+  run `:MdViewerCopy` to copy it, and use `/`, `n`, `N` to search — clicking
+  anywhere clears the current highlight rather than moving the source cursor.
 - Direct iTerm2 use is the supported terminal configuration; tmux is untested.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.

@@ -3,7 +3,6 @@ local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
-local sync = require("md-viewer.sync")
 
 local M = {}
 
@@ -392,52 +391,6 @@ function M.escape(session)
   return false
 end
 
----Move the source cursor to `position` (a hit-test source position: `line`,
----`byteColumn`, `precision`), clamped to the buffer and to a valid UTF-8
----byte boundary, going through the same sync-guard technique
----`sync.update_source_from_scroll` uses so this cannot feed back into a
----preview scroll.
----
----`byteColumn` is the renderer's own wire field, which is what
----`result.sourcePosition` actually carries. `byte_column` is accepted as an
----alias: Part 4 read only the snake_case name, and because every column the
----renderer produced back then was 0 the mismatch was invisible -- the cursor
----landed at column 0, which was also the correct answer. Part 5 is the first
----part that sends a column worth getting wrong.
-function M.move_source_cursor(session, position)
-  -- Typed, not merely non-nil. A click on empty space resolves to precision
-  -- "none" and the renderer honestly sends `line: null` -- which arrives as a
-  -- number only if protocol.lua decoded it as absent. Checking the type here
-  -- too means this function cannot be made to crash by a position it should
-  -- simply decline to act on, whatever the transport did.
-  if type(position) ~= "table" or type(position.line) ~= "number" then return end
-  local win = session.source_win
-  if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then return end
-  local buf = session.source_buf
-  local line_count = vim.api.nvim_buf_line_count(buf)
-  local line = math.max(1, math.min(line_count, math.floor(position.line)))
-  local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-  local requested = position.byteColumn
-  if type(requested) ~= "number" then requested = position.byte_column end
-  if type(requested) ~= "number" then requested = 0 end
-  local byte_col = math.max(0, math.min(math.floor(requested), #text))
-  while byte_col > 0 and byte_col < #text do
-    local byte = text:byte(byte_col + 1)
-    if not (byte and (byte & 0xC0) == 0x80) then break end
-    byte_col = byte_col - 1
-  end
-
-  session.sync_guard = true
-  if config.get().interaction.focus_source_on_click then pcall(vim.api.nvim_set_current_win, win) end
-  pcall(vim.api.nvim_win_set_cursor, win, { line, byte_col })
-  -- Neovim's own normal-mode clamping can land the cursor short of the column
-  -- we asked for, so the echo is recorded from where the cursor actually is.
-  -- Recording the requested position instead would fail to match and the
-  -- preview would scroll itself to re-anchor the line the user just clicked.
-  sync.suppress_echo(session, win)
-  vim.schedule(function() session.sync_guard = false end)
-end
-
 local function record_result(session, result)
   session.last_interaction_kind = result.kind
   session.last_interaction_precision = (result.sourcePosition and result.sourcePosition.precision) or "none"
@@ -483,9 +436,11 @@ function M.activate_link(session, result)
 end
 
 ---Resolve `point` against the Part 3 `interact` transport. Always uses
----`activate_at`: it reports a link when the point is over one and falls back
----to source semantics otherwise, so a plain click on a link still navigates
----to source without a second round trip.
+---`activate_at`, which reports a link when the point is over one and source
+---semantics otherwise. The only remaining caller is the ctrl/cmd-click
+---gesture (`M.activate`) -- a plain click no longer navigates to source at
+---all (removed per operator decision; see `M.on_release`), so this only ever
+---needs the link half of `activate_at`'s answer now.
 function M.request_hit(session, point, modifiers, click_count, callback)
   if not session.renderer_revision then
     callback(nil, "md-viewer: no rendered content to interact with yet")
@@ -534,27 +489,16 @@ function M.request_hit(session, point, modifiers, click_count, callback)
   }, callback)
 end
 
-function M.click(session, point, click_count)
-  if not config.get().interaction.click_to_source then return end
-  M.request_hit(session, point, {}, click_count, function(result, err)
-    if err or not result then return end
-    record_result(session, result)
-    M.move_source_cursor(session, result.sourcePosition)
-  end)
-end
-
+---Ctrl/Cmd-click: activate a link, if the point is over one. A non-link hit
+---does nothing -- there is no more "jump to source" fallback here (removed
+---per operator decision, matching the plain click's own removal below).
 function M.activate(session, point, modifiers)
-  if not config.get().interaction.links then
-    M.click(session, point)
-    return
-  end
+  if not config.get().interaction.links then return end
   M.request_hit(session, point, modifiers, 1, function(result, err)
     if err or not result then return end
-    record_result(session, result)
     if result.kind == "link" and result.link then
+      record_result(session, result)
       M.activate_link(session, result)
-    else
-      M.move_source_cursor(session, result.sourcePosition)
     end
   end)
 end
@@ -565,7 +509,6 @@ function M.on_release(session, mouse)
   pointer.latest_cell = screen_cell(mouse)
   local distance = cell_distance(pointer.press_cell, pointer.latest_cell)
   local is_drag = pointer.drag_started or distance >= config.get().interaction.drag_threshold_cells
-  local click_count = pointer.click_count
   local word_select_fired = pointer.word_select_fired
   local last_drag_point = pointer.newest_pending_drag_point
   pointer.pressed = false
@@ -584,9 +527,13 @@ function M.on_release(session, mouse)
     return
   end
   if word_select_fired then return end -- already handled on press; not also a click.
-  local point = M.locate(session, mouse)
-  if not point then return end -- released outside resolvable content; nothing to click.
-  M.click(session, point, click_count)
+  -- VS Code-style click-to-deselect: a plain click no longer navigates to
+  -- source at all (removed per operator decision -- it fought the drag-to-
+  -- select gesture, since clicking to dismiss a highlight also relocated the
+  -- cursor). It only clears an existing selection, matching how a browser or
+  -- VS Code's own Markdown preview clears a selection on the next click
+  -- regardless of where that click lands.
+  if session.selection_active then M.clear_selection(session) end
 end
 
 ---Entry point called by mouse.lua once a gesture and its owning session are
