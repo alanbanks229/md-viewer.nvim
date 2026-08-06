@@ -2075,3 +2075,495 @@ fresh (`/clear` first per `prompts/README.md`). Settled contracts it can rely on
   nodes, which is what makes highlighted code blocks resolvable.
 - Any optional map in an envelope must always carry a key or use
   `vim.empty_dict()`, and its test must assert the encoded wire form.
+
+---
+
+## What Part 6 actually built
+
+The headline feature: dragging over rendered text creates a real Chromium
+`Selection`, painted natively by the browser and captured into the same PNG
+the user sees; `y` (or `:MdViewerCopy`) copies it to Neovim registers; and
+`/`/`n`/`N` (or `:MdViewerFind*`) search the rendered document with match
+navigation. All nine of Part 3's reserved actions
+(`selection_preview`/`commit`/`clear`/`text`, `word_select`,
+`find_set`/`next`/`previous`/`clear`) are now implemented; `RESERVED_ACTIONS`
+in `renderer/src/interact.js` is `[]`.
+
+### Renderer: seven new page-evaluate functions, all self-contained
+
+`renderer/src/interact.js` gained `resolveSelectionInPage`,
+`readSelectionTextInPage`, `clearSelectionInPage`, `wordSelectInPage`,
+`setFindInPage`, `stepFindInPage`, `clearFindInPage` — each a second,
+independent `page.evaluate` body alongside `hitTestInPage`, dispatched from
+`browser.js`'s new `evaluateAction()`/`buildResult()` pair rather than a
+single hardcoded call.
+
+**A real bug found and fixed during this part, worth recording precisely
+because it is exactly the trap this part's own "Verified repository facts"
+warned about for something else:** the first implementation declared the
+~140-line cell-probe/caret-resolution routine (`resolveSelectionPoint`) and
+the direction-aware `applySelectionRange` as ordinary top-level functions in
+`interact.js`, called from `resolveSelectionInPage` and `wordSelectInPage`.
+Every Node-side unit test that stubs `globalThis.document` passed, because
+those tests call the exported function directly in the same JS module.
+Against a real page, every one of them threw `ReferenceError:
+resolveSelectionPoint is not defined` — `page.evaluate(fn, arg)` serializes
+only `fn.toString()` and evaluates it standalone inside the page, with no
+access to sibling module-scope functions. This is stated as a design
+constraint in `hitTestInPage`'s own header comment and was reasoned through
+correctly during planning, then violated anyway during implementation because
+the two helpers were extracted for tidiness without re-checking that
+constraint. The fix (now the actual shape of the code) is to declare
+`resolveSelectionPoint`/`applySelectionRange` as *nested* functions inside
+each of `resolveSelectionInPage` and `wordSelectInPage` (duplicated between
+the two), and `unwrapFindMarksInPage` nested inside both `setFindInPage` and
+`clearFindInPage` for the same reason. Only the real, browser-backed tests in
+`tests/node/selection.test.js` caught this — the pure/stubbed-DOM tests could
+not, structurally, since they never go through Playwright's actual
+serialization path. Recorded here as a concrete instance of "a library
+function passing its unit tests is not the same claim as the real path
+working," the lesson this project has now hit for the fourth time (Parts 1,
+4, 5, and this).
+
+**A second real bug, found the same way:** `setFindInPage`/`stepFindInPage`
+call `element.scrollIntoView({block:"center"})` to bring the active match into
+view, but the result object they returned never reported the page's resulting
+`window.scrollY` — `browser.js`'s `interact()` had already computed
+`result.scrollY` from `ensureDocumentActive`'s *pre*-mutation applied scroll
+position, and nothing overwrote it afterward (unlike `activate_at`'s fragment
+scrolling, which already does exactly this via `scrollToFragment`'s return
+value). The screenshot itself was correctly scrolled — `captureViewport()`
+photographs whatever the page currently shows — so this was invisible in any
+test that only checked the PNG; it was caught by
+`tests/node/find.test.js`'s "a match far down the document scrolls into view"
+test asserting on `result.scrollY` directly. Both find page-evaluate functions
+now return `scrollY: window.scrollY`, and `browser.js`'s `interact()`
+overwrites `result.scrollY` (and `this.active.scrollY`) with it whenever a raw
+result carries one — the same pattern the fragment-scroll code already used,
+just not yet generalized to the second caller that needed it.
+
+**A third bug, found by the Node integration suite rather than by hand:**
+moving `interactionStateFor(...)` (which creates an entry if none exists)
+earlier in `dispatchInteract`'s task — needed so `find_next`/`find_previous`
+could read the prior match set before calling `browser.interact()` — meant a
+request that ultimately *fails* (a never-rendered document, a stale revision)
+now fabricated a fresh, empty interaction-state entry for it anyway, since the
+call ran unconditionally before the success/failure was known. The existing
+`tests/node/interact.test.js` cross-document-isolation test caught this
+immediately (`interactionDocuments` read 2 instead of 1 after an edit that
+should have dropped exactly one document's state). Fixed by splitting the
+function in two: `peekInteractionState(documentId, contentRevision)` is a
+non-mutating read used only to forward `find_next`/`find_previous`'s prior
+match set into `cached.findState`, and the original, mutating
+`interactionStateFor` moved back to running only after a successful
+`browser.interact()` call, exactly where it ran before this part. Only a
+successful interact may create or touch interaction state — recorded as an
+explicit invariant in a comment at the call site now.
+
+### Renderer: action registry, result shaping, and the `matches` cap
+
+`INTERACT_ACTIONS` (`renderer/src/interact.js`) now has eleven entries. The
+nine new ones add `requiresAnchor` (`selection_preview`/`selection_commit`,
+validated against a new `anchorCoordinates` envelope field) and
+`requiresQuery` (`find_set`, validated against a new, `.trim()`-normalized
+`query` field). `selection_text` is the only new action with
+`mutatesVisibleState: false` — it re-reads `window.getSelection().toString()`
+live rather than trusting any cached state, and `main.js`'s `dispatchInteract`
+explicitly excludes it from writing `state.selection` so a copy can never
+"commit" a selection that was only ever previewed.
+
+`find_set`'s page-side match list is capped at `MAX_FIND_MATCHES_REPORTED`
+(500, alongside the existing `TEXT_PREVIEW_LIMIT`) — DOM highlighting still
+marks every match regardless (a correctness requirement), but a document with
+thousands of hits for a common word must not serialize thousands of per-match
+source positions through Playwright's evaluate channel on every keystroke.
+`matchCount` always reports the true total. The resolved (capped) array itself
+never reaches Lua: `main.js` reads it once into `state.find.matches` (for
+`find_next`/`find_previous` to resolve their active match against) and
+`delete`s it from the outward-facing `result` before returning — Lua only ever
+sees `matchCount`/`activeIndex`/`activeSourcePosition`.
+
+Search highlighting uses `Text.splitText` plus programmatically created
+`<span data-md-viewer-find-mark>` wrappers — never `innerHTML` — inserted
+directly into the live page DOM at interact time. This is *after* and
+entirely outside `renderer/src/markdown.js`'s one-time `sanitizeHtml()` pass
+(confirmed by reading the code: sanitization runs exactly once, at initial
+render, cached alongside the source map, never again), so no sanitizer
+allowlist change was needed — the same way the existing
+`data-md-viewer-doc` token attribute on `<html>` already bypasses it. Query
+matching is a lower-cased `String.prototype.indexOf` loop, never
+`new RegExp(...)`, so HTML and regex metacharacters in a query are inert by
+construction rather than by escaping.
+
+New CSS custom properties `--find-mark-bg`/`--find-mark-active-bg` in both
+theme files, consumed by two new rules in `preview.css`
+(`[data-md-viewer-find-mark]` / `[...][data-active]`). The real DOM
+`Selection` needs no CSS at all — `Selection.setBaseAndExtent()` (preferred;
+falls back to a `Node.compareDocumentPosition`-ordered `Range` only on an
+engine that lacks it, which the bundled Chromium never does) is what makes
+Chromium paint the highlight itself, satisfying the "do not draw your own"
+requirement structurally rather than by discipline.
+
+### Reverse dragging and element-boundary normalization
+
+`setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset)` tracks
+direction natively, so reverse (right-to-left or bottom-to-top) dragging needed
+no special-case logic — `tests/node/selection.test.js`'s backward-selection
+test asserts the extracted text is identical regardless of drag direction,
+which is the strongest available proof that direction is handled by the
+primitive and not accidentally by argument order. When a point resolves to a
+block but no caret (padding between inline runs, or space past a short line's
+last character, both still inside the block's own box), `resolveSelectionPoint`
+picks a text boundary — start or end of the block's rendered text — by
+comparing the click x-coordinate to the clicked element's bounding-rect
+midpoint, rather than reporting a miss: a selection endpoint must always
+resolve to *something*, unlike a hit-test miss. A point genuinely outside every
+block (the page's own padding) still honestly misses (`anchor_miss`/
+`focus_miss`), matching `hitTestInPage`'s existing "none" semantics for the
+same region — verified as two separate tests, not conflated into one.
+
+### Lua: the drag→selection backpressure chain
+
+`lua/md-viewer/interaction.lua`'s `session.pointer` gained `anchor_point` (the
+drag's fixed start, set once on the first threshold crossing),
+`word_select_fired`, and `pending_settle`. `M.schedule_selection_preview`
+mirrors `controller.schedule_scroll`'s exact one-in-flight/one-coalesced-
+pending shape (`pointer.selection_request_in_flight`, always sending
+`pointer.newest_pending_drag_point`, never a fixed frame rate), debounced by
+the new `interaction.drag_debounce_ms` (default 40) via
+`debounce.call(session, "selection_debounce_timer", ...)`. Release routes the
+final device-scale frame through `M.settle_selection`, which shares the same
+`selection_request_in_flight` guard as preview — if a preview is still
+in-flight when release fires, the settle request is deferred via
+`pointer.pending_settle` and picked up by that preview's own completion
+callback rather than racing a second request against it — debounced again by
+`interaction.settle_ms` (default 120), mirroring `scroll_settle_ms`'s role in
+`schedule_scroll`.
+
+Double-click word selection dispatches from `M.on_press` (not `on_release`):
+`<2-LeftMouse>` was already routed there with `click_count = 2` by Part 4, and
+a real double-click resolves synchronously on mousedown, matching this.
+`pointer.word_select_fired` tells the matching `on_release` not to also
+perform a click-to-source navigation. `interaction.word_select = false` (the
+gate is independent of `interaction.double_click`, which still controls
+whether `<2-LeftMouse>` is mapped at all) falls through to exactly today's
+single-click-shaped behavior on release — unchanged, per the part prompt's
+explicit "keep it selectable" requirement, and regression-tested.
+
+### Lua: selection/find state is split from pointer/capture state, on purpose
+
+`session.selection_active`, `selection_content_revision`, `find_active`,
+`find_query`, `find_match_count`, `find_active_index` are new session fields
+(`lua/md-viewer/state.lua`), deliberately **not** part of the button-scoped
+`session.pointer` table and **not** touched by the existing `TabLeave`/
+`VimSuspend` autocmd (`controller.lua`) that calls `interaction.forget()` to
+drop pointer capture. §6.3 requires selection to survive preview focus
+changes, which is in direct tension with reusing that autocmd's existing
+cleanup call — a new `interaction.forget_selection(session)` is the Lua-side-
+only (no renderer request) reset for this state, called from three places:
+`controller.close_session`, `controller.M.refresh`'s success path when
+`session.selection_content_revision` disagrees with the just-updated
+`session.renderer_revision` (dropping a stale-revision selection in the same
+tick new content lands, before it is ever displayed), and a new
+`process.on_exit` listener registered once in `controller.setup_autocmds()`.
+
+`lua/md-viewer/process.lua` gained `M.on_exit(callback)` — a process-lifetime
+listener list, fired from the spawn's existing `on_exit` handler alongside the
+pre-existing `deliver_error()` call. `deliver_error` already correctly fails
+every outstanding *request* callback on a renderer crash or restart; what was
+missing was a hook for *session-level* Lua display state that is not tied to
+any specific in-flight request — the renderer's own in-memory
+`interactionState` (Node-side) does not survive a process restart at all,
+since it is a plain `Map` in the now-dead process, so the Lua-side cached
+flags describing it would otherwise go stale silently. `tests/lua/cases/
+selection.lua`'s "cleanup on renderer restart" test spawns the real
+subprocess (the same pattern `tests/lua/cases/process.lua` already
+established for `ping`), registers a listener, calls the real
+`process.stop()`, and asserts the listener actually fires.
+
+### Lua: copy, commands, and keymaps
+
+`interaction.copy_selection(session, silent)` always issues a live
+`selection_text` request rather than trusting any cached string, writes the
+unnamed register unconditionally and `+` only when `vim.fn.has("clipboard") ==
+1` — Neovim's own configured clipboard provider decides what actually happens
+there; md-viewer never shells out to `pbcopy`/`xclip`/`wl-copy`/`clip.exe`
+itself. The notification reports a character count, never the text.
+`copy_on_select` (new, default `false`) is read once per successful
+`selection_commit`/`word_select` response, not on every drag-preview frame.
+
+Six new commands (`lua/md-viewer/commands.lua`): `:MdViewerCopy`,
+`:MdViewerClearSelection`, `:MdViewerFind [query]` (prompts via
+`vim.ui.input` — the first use of that API anywhere in this codebase,
+confirmed by grep before using it — when called with no argument),
+`:MdViewerFindNext`, `:MdViewerFindPrevious`, `:MdViewerFindClear`, each a
+thin wrapper in `controller.lua` (`M.copy`/`clear_selection`/`find`/
+`find_next`/`find_previous`/`find_clear`) resolving the current session and
+delegating into `interaction.lua`. Five new preview-local mappings
+(`lua/md-viewer/navigation.lua`): `y`, `/`, `n`, `N` (each gated by its own
+`interaction.*` config flag) and `<Esc>` (always installed, so it can fall
+through cleanly to normal Neovim `<Esc>` behavior — replayed via
+`nvim_feedkeys`+`nvim_replace_termcodes` — regardless of which features are
+enabled). `interaction.escape(session)` implements the §6.6 precedence: clear
+an active find, else clear the selection, else return `false` for the caller
+to fall through.
+
+### Lua: displaying an interact-returned frame
+
+`controller.lua` factors the backend-display logic that used to live inline in
+`M.refresh`'s success branch into a shared local `apply_image(session,
+image_bytes, capture_scale, png_bytes, capture_ms)`, used both by `M.refresh`
+(render/capture path, unchanged call sites) and by a new
+`M.display_interact_result(session, result)` (the interact path). Every
+mutating selection/find action always captures its own PNG in the same queued
+operation it mutated in (`envelope.capture` is forced by `mutatesVisibleState`
+— unchanged machinery from Part 3, now exercised by nine real actions instead
+of zero); `display_interact_result` is the fetch-and-display half Lua needs
+for that PNG, since interact requests bypass `renderer.lua`'s request/response
+envelope entirely (`interaction.lua` calls `process.request("interact", ...)`
+directly, exactly as `request_hit` already did before this part).
+`renderer.lua`'s private `read_bytes` local is now the exported
+`M.read_png(path, limit)`, used by both paths.
+
+### Configuration
+
+```lua
+interaction = {
+  ...,
+  selection = true,
+  drag_debounce_ms = 40,
+  settle_ms = 120,
+  copy = true,
+  copy_on_select = false,   -- disabled by default, per the part prompt
+  word_select = true,
+  find = true,
+}
+```
+
+Validated with the same per-field `assert(type(...) == ..., "md-viewer:
+interaction.<name> ...")` pattern every other field already uses.
+
+---
+
+## Tests run and results (Part 6)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+  -> added 30 packages, 0 vulnerabilities
+
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+  -> md-viewer Lua tests: 479 assertions passed (382 at the end of Part 5's
+     post-commit fixes; +97 from the new tests/lua/cases/selection.lua and the
+     expanded config-validation/wire-form sections of tests/lua/cases/interaction.lua)
+
+npm test --prefix renderer   (node --test ../tests/node/*.test.js)
+  -> tests 125, pass 125, fail 0   (96 before this part; +29 from the new
+     tests/node/selection.test.js and tests/node/find.test.js, net of the two
+     interact.test.js tests rewritten for the now-empty RESERVED_ACTIONS)
+
+stylua --check lua/ plugin/ tests/lua/
+  -> clean (no diff)
+```
+
+All four commands were run on this development machine (macOS, Apple Silicon,
+Neovim 0.12.4, Node 24, Google Chrome installed at the standard `/Applications`
+path). The browser-backed Node tests in `selection.test.js`/`find.test.js`
+drive a real Chromium subprocess through the real renderer, matching the
+established `t.skip(...)`-if-no-Chromium pattern from every prior part.
+
+Per policy §5, all six new commands were invoked directly as commands — not
+as library functions — in a headless session, following a single combined
+script:
+
+1. `:MdViewerOpen` against `tests/fixtures/kitchen-sink.md` (headless
+   auto-selection lands on the `cells` backend, as in every prior part).
+2. `:MdViewerCopy`, `:MdViewerFindNext`, `:MdViewerFindClear`,
+   `:MdViewerClearSelection` invoked immediately, **before any selection or
+   search had ever been created** — the state the part prompt explicitly
+   calls out as most likely to be under-tested. All four notified cleanly
+   (`vim.log.levels.WARN`, "nothing selected" / "no active search") with no
+   error, and no register was touched.
+3. The session's backend was then swapped to a fake graphical-shaped stub
+   (`clear`/`show`/`update`/`move` recording calls only — the same technique
+   `tests/lua/cases/mouse.lua` already uses to exercise the non-cells code
+   path without an attached TUI) and `controller.refresh()` was called
+   directly, driving a **real** render through the real renderer subprocess
+   and real Chromium (`session.renderer_revision` became non-nil).
+4. `:MdViewerFind Kitchen` against that real render found exactly one match
+   (`tests/fixtures/kitchen-sink.md` line 1, `# Kitchen Sink` — confirmed
+   present by `grep` before choosing it, rather than assumed) —
+   `find_active = true`, `match_count = 1`, `active_index = 0` — a genuine
+   Lua → NDJSON → Node subprocess → Chromium → back round trip, not a stub.
+5. `:MdViewerFindNext`, `:MdViewerFindPrevious`, and `:MdViewerFindClear`
+   all completed without error against that real, active search
+   (`find_active` correctly became `false` after the clear).
+6. `:MdViewerCopy` against the real renderer (with no DOM selection ever
+   made) notified cleanly rather than erroring.
+7. `:MdViewerFind` with **no** argument correctly invoked the `vim.ui.input`
+   prompt (confirmed via a stubbed `vim.ui.input` that recorded the call and
+   simulated cancellation) and did not error. **This is the one part of the
+   six commands' surface that could not be exercised end-to-end** — a
+   headless session cannot type into the prompt, so only "does not error
+   while the prompt's callback never fires" is proven, not the prompt's
+   interactive UX itself. Stated honestly as unvalidated for that specific
+   path, per policy §4.
+8. `:MdViewerClearSelection` against the real renderer completed without
+   error.
+
+No crash, no unhandled error, anywhere in this sequence.
+
+**No graphical validation was performed.** This development environment has
+no attached graphical terminal (`TERM_PROGRAM=vscode`, unchanged from every
+prior part). The headless verification above proves the transport, the
+backpressure chain, the six commands, and a real search round trip are wired
+correctly; it does not and cannot prove a real drag in a real terminal paints
+a moving highlight, that reverse dragging looks correct to a human eye, or
+that dragging feels responsive rather than stepwise — see "Operator
+verification" in `prompts/part-6-selection-and-search.md`.
+
+---
+
+## Known limitations and unresolved risks (Part 6)
+
+- **No graphical validation was performed for this part's own work.** The
+  entire drag-to-select experience — the moving highlight, reverse-drag
+  correctness, copy-then-paste, double-click word selection, and search
+  responsiveness — is unvalidated in a real terminal, as of this part's own
+  commit. This is the single highest-value open item before Part 7.
+- **A selection cannot survive its document being swapped out of the single
+  shared page.** Discovered while writing `tests/node/selection.test.js`'s
+  cross-document-isolation test: rehydrating document A back into the shared
+  page after document B took it over is a real `page.setContent()` reload
+  (Part 3's architecture; no page-per-document), which destroys any live
+  `window.getSelection()` state that referenced A's now-gone DOM nodes. This
+  is architecturally honest — A's *old* selection is gone rather than
+  resurrected from a stale reference, and B's selection never leaks into A —
+  not a bug, but it means §6.3's "selection survives preview focus changes"
+  should be read as covering a single session's own Neovim-side focus
+  changes (tab leave, window switch), not surviving being displaced by a
+  second, independently-interacting preview session sharing the same
+  renderer process. A fresh selection on the rehydrated document works
+  normally immediately afterward; the test asserts this explicitly.
+- **The `Range`-fallback path in `applySelectionRange` is untested against
+  real engine behavior.** `Selection.setBaseAndExtent()` has shipped in every
+  Chromium version this project could plausibly bundle (since Chrome 27), so
+  the fallback branch is realistically unreachable and exists only so a
+  future engine swap fails safely instead of throwing outright.
+- **`Intl.Segmenter` availability for word-select is assumed, with a regex
+  fallback.** `tests/node/selection.test.js`'s word-select test does not hard-
+  fail if the bundled Chromium lacks it; nothing in this project's supported
+  range should, but it is not independently verified per-platform.
+- **The `matches` array a `find_set` response carries internally is capped at
+  500** (`MAX_FIND_MATCHES_REPORTED`). DOM highlighting still marks every
+  match; a document with more than 500 matches for one query will still
+  report the true `matchCount` and step through every match correctly via
+  `find_next`/`find_previous` (the DOM `data-md-viewer-find-mark` elements are
+  the actual source of truth for stepping), but `activeSourcePosition` for a
+  match past the cap resolves to `null` rather than a real position, since
+  its descriptor was never resolved on the Node side. Not expected to matter
+  in practice — a search returning 500+ hits in one document is not a
+  realistic "find the thing I'm looking for" use case — but stated here
+  rather than left implicit.
+- Carried forward and unchanged: the CI matrix's Ubuntu leg is still
+  untriggered; the `config.setup()` reassign-before-validate quirk is still
+  unfixed; `terminal.probe = "safe"` is still unimplemented; Windows discovery
+  remains unadvertised; Kitty, Ghostty, Warp, and all Linux terminals remain
+  graphically unvalidated for the whole project; the multibyte click-precision
+  cases (`日本語`, `🎉`) from Part 5 remain unconfirmed by eye on real hardware.
+
+---
+
+## Decisions that changed assumptions in the original specification (Part 6)
+
+- **`selection_preview` and `selection_commit` share one page-side
+  implementation** (`resolveSelectionInPage`), differing only in the
+  `captureScale` field the envelope already carried before this part. Two
+  action *names* still exist because Lua's two call sites — mid-drag versus
+  on-release — are genuinely distinct moments (only a commit should be
+  treated as "the" selection for `state.selection` purposes), but there was
+  no reason to duplicate the DOM/range-resolution logic itself.
+- **Point-resolution helpers (`resolveSelectionPoint`, `applySelectionRange`,
+  `unwrapFindMarksInPage`) are duplicated as nested functions inside every
+  page-evaluate function that needs them, not shared as module-level
+  siblings.** Not anticipated by the part prompt's file list, and initially
+  implemented wrong (see "What Part 6 actually built" above) before the
+  browser-backed test suite caught it. This is the single most consequential
+  correction this part made to its own first draft.
+- **Renderer-restart cleanup is a new `process.on_exit(callback)` listener
+  registry in `process.lua`, not a generation counter threaded through every
+  session field.** `deliver_error()` already correctly fails in-flight
+  requests; the gap was specifically session-level display state with no
+  associated in-flight request, and a listener list is the smaller, more
+  direct fix.
+- **Selection/find state is a new, separate set of session fields, explicitly
+  excluded from the existing `TabLeave`/`VimSuspend` cleanup autocmd.** Not
+  stated explicitly in the part prompt, but required by §6.3's own wording —
+  reusing `interaction.forget()` (pointer/capture cleanup) for this too would
+  have cleared a valid selection on every tab switch, which is exactly what
+  that section forbids.
+- **A `find_set` response's per-match position array is capped at 500 and
+  never crosses the Lua boundary at all** — a constraint the part prompt did
+  not name, added after reasoning about what a common-word search against a
+  large document would otherwise serialize on every keystroke. `matchCount`
+  and DOM-side stepping remain correct past the cap; only a match's exact
+  reported source position past index 500 is affected. See "Known
+  limitations" above.
+- **`interactionStateFor`'s mutating create-if-missing behavior had to be
+  split from a new, non-mutating `peekInteractionState`** so that
+  `find_next`/`find_previous`'s need to read prior match state before calling
+  `browser.interact()` did not also mean a failing interact request
+  fabricates interaction state for a document it never successfully touched.
+  Not anticipated by the plan; found by the existing Part 3 cross-document-
+  isolation test, which is exactly the kind of regression coverage it was
+  written to catch even for later parts' changes.
+
+No part boundaries moved. No downstream prompt needed edits — Part 7's stated
+approach (regression pass, security review, compatibility matrix,
+documentation) is unaffected by anything discovered here; nothing in this
+part's implementation invalidates Part 7's own scope as written.
+
+---
+
+## Safe stopping point and first next action
+
+The tree is green: all four policy §5 commands pass (479/479 Lua assertions,
+125/125 Node tests, stylua clean), and all six new `:MdViewerCopy`/
+`:MdViewerClearSelection`/`:MdViewerFind`/`:MdViewerFindNext`/
+`:MdViewerFindPrevious`/`:MdViewerFindClear` commands have been invoked
+directly as commands in a headless session per policy §5 — including a real
+end-to-end search round trip through the real renderer subprocess and real
+Chromium, and the two "no active state" edge cases the part prompt calls out
+by name. Part 6 is commit `c06f4bc` on `feat/interaction-transport`, a branch
+cut from `main` (where Parts 1–2 landed via PR #1). Neither the branch nor
+this doc commit has been pushed, and no PR has been opened.
+
+**The one thing that has not been done is the manual check, and for this part
+it is the entire point of the feature.** Nothing in this project's automated
+suite — Lua or Node — can synthesize a real terminal mouse-drag sequence or
+show a human whether a highlight visibly moves during a drag. Run "Operator
+verification" in `prompts/part-6-selection-and-search.md` in a real graphical
+terminal before treating drag-to-select as shippable: drag across a paragraph
+and confirm a moving (not frozen) highlight, drag upward and confirm no
+collapse, press `y` and paste elsewhere, double-click a word, search a
+repeated term and cycle `n`/`N`, and confirm dragging feels responsive rather
+than stepwise.
+
+**First next action for Part 7:** read `prompts/part-7-hardening-and-docs.md`
+fresh (`/clear` first per `prompts/README.md`). Part 7 can rely on these
+settled contracts from Part 6:
+
+- `INTERACT_ACTIONS` in `renderer/src/interact.js` has all eleven actions this
+  project defines; `RESERVED_ACTIONS` is `[]` and is expected to stay that way
+  unless a future part reserves something new.
+- `interactionState` entries are `{contentRevision, selection, find, lastHit}`,
+  where `selection` is `{text, collapsed, anchorSourcePosition,
+  focusSourcePosition}` and `find` is `{query, matchCount, activeIndex,
+  activeSourcePosition, matches}` (the last field internal-only; stripped
+  before the wire response reaches Lua).
+- `interaction.forget_selection(session)` is the single Lua-side reset point
+  for selection/find display state; a future part adding any further
+  session-level display state tied to the renderer's lifetime should extend
+  it rather than invent a second cleanup path.
+- `process.on_exit(callback)` exists now for exactly this kind of
+  renderer-lifetime hook; a future part needing to react to a renderer
+  restart should use it rather than polling `process.status()`.

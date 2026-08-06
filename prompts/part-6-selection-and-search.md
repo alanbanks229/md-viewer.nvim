@@ -1,10 +1,10 @@
 ---
 part: 6
 title: DOM selection, copy, and rendered-text search
-status: not-started
+status: done
 model: Sonnet 5
 depends_on: parts 3-4 (part 5 optional)
-commit: ""
+commit: c06f4bc
 ---
 
 # Part 6 of 7 — DOM Selection, Copy, and Search
