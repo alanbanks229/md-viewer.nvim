@@ -14,7 +14,7 @@ repository right now, not what was planned.
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 | 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
 | 4 | Mouse layer, click-to-source, safe links | `e3139e8` |
-| 5 | Exact source provenance — inline mapping, byte-accurate columns | see the Part 5 section below |
+| 5 | Exact source provenance — inline mapping, byte-accurate columns | `1db9cfe` |
 
 Parts 1–2 were merged to `main` via PR #1. Parts 3–5 are on the branch
 `feat/interaction-transport`, cut from `main`, and have not been pushed.

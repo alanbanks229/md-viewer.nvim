@@ -1,10 +1,10 @@
 ---
 part: 5
 title: Exact source provenance — inline mapping and byte-accurate columns
-status: not-started
+status: done
 model: Opus 5 (plan and implement)
 depends_on: parts 3-4
-commit: ""
+commit: "1db9cfe"
 ---
 
 # Part 5 of 7 — Exact Source Provenance
