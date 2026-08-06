@@ -77,6 +77,34 @@ stylua --check lua/ plugin/ tests/lua/    # if stylua is installed
 
 Never run `playwright install`. Never download a browser.
 
+**These commands are necessary but not sufficient.** They exercise Lua and
+Node functions directly; they do not prove a user-facing `:MdViewer*` command
+works when a user actually types it. Part 1 shipped `:MdViewerHealth`
+callable-but-crashing — `nvim_buf_set_lines` rejects a replacement line
+containing an embedded newline — because the automated smoke test called
+`health.check()` (the `:checkhealth` code path) and never called
+`health.show()`, the actual handler behind `:MdViewerHealth`. The bug was
+real, shipped, and was found by the operator, not by testing.
+
+**If a part adds or changes a `:MdViewer*` command, or changes what
+`:MdViewerHealth`, `:MdViewerDebug`, or `:checkhealth md-viewer` report,**
+invoke that exact command — not the library function underneath it — in a
+headless Neovim session before reporting the part done:
+
+```bash
+nvim --headless -u NONE -i NONE \
+  -c "set runtimepath+=." \
+  -c "lua require('md-viewer').setup({})" \
+  -c "<TheCommand>" \
+  -c "lua vim.wait(8000, function() return <condition proving it finished> end, 50)" \
+  -c "qa!"
+```
+
+This needs no graphical terminal and no real terminal image protocol — it only
+proves the command runs to completion without error and produces sane output.
+That is a different, cheaper claim than the graphical validation required by
+§4, and where a part touches both, both are required.
+
 If a graphical terminal is unavailable in your environment — it usually is —
 complete all automated work, write precise manual test instructions, and mark
 the graphical combinations unvalidated. Do not claim visual success you did not

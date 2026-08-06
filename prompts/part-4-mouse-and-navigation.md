@@ -178,7 +178,9 @@ interaction = { focus_source_on_click = true }
 
 When `false`, update the source cursor without changing the active window.
 
-Record the last interaction's precision in debug output.
+Record the last interaction's precision in debug output. Verify by invoking
+`:MdViewerDebug` directly in a headless session (policy §5), not just
+`debug.snapshot()` — the new field must actually render in the buffer.
 
 ### 4.4 Safe link activation
 
