@@ -13,9 +13,10 @@ repository right now, not what was planned.
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 | 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
+| 4 | Mouse layer, click-to-source, safe links | `PART4_COMMIT_HASH` |
 
-Parts 1–2 were merged to `main` via PR #1. Part 3 is on the branch
-`feat/interaction-transport`, cut from `main`, and has not been pushed.
+Parts 1–2 were merged to `main` via PR #1. Parts 3–4 are on the branch
+`feat/interaction-transport`, cut from `main`, and have not been pushed.
 
 ---
 
@@ -1131,7 +1132,7 @@ neither is expected to change shape again before Part 7.
 
 ---
 
-## Safe stopping point and first next action
+## Safe stopping point after Part 3 (historical)
 
 The tree is green: all four policy §5 commands pass (210/210 Lua assertions,
 59/59 Node tests, stylua clean). Part 3 is commit `dbd151f` on
@@ -1168,3 +1169,338 @@ it can rely on these settled contracts:
 - `lua/md-viewer/renderer.lua`'s existing result validation requires
   `result.blocks` to be a table; interaction results have no `blocks`, so Part 4
   needs its own response handler rather than reusing `M.request`'s.
+
+---
+
+## What Part 4 actually built
+
+### `lua/md-viewer/interaction.lua` (new) — the gesture engine
+
+All press/drag/release classification, the interact-transport round trip, cursor
+movement, and link dispatch live in one new module rather than growing
+`mouse.lua` into a second responsibility. `mouse.lua` stays what the part prompt
+asked it to remain: the expr-mapping install/detach technique, extended with a
+gesture list alongside the existing wheel list.
+
+**Mouse capture is button-scoped, not window-scoped.** A module-level `captured`
+variable records which session owns an in-progress press. `mouse.lua`'s
+`gesture_session()` resolves press/activate gestures from whichever preview is
+currently under the pointer (`state.from_preview_win`), but resolves drag/release
+from `interaction.captured_session()` unconditionally. This was not obvious from
+the part prompt and was found by reasoning through a concrete failure mode
+before writing any dispatch code: if drag/release resolved by window like press
+does, a drag that leaves the preview's screen rectangle before the button comes
+up would report no session (`state.from_preview_win` finds nothing under the
+pointer's new position), the `pressed` flag would never clear, and the *next*
+unrelated click would measure its distance against a stale `press_cell` and
+misclassify. Routing drag/release through capture instead of window lookup fixes
+this the same way real GUI toolkits handle mouse capture, and
+`tests/lua/cases/interaction.lua` exercises exactly this scenario (drag reported
+under a different `winid` than the one that pressed).
+
+A second, related design point: `install_gesture()` only ever swallows a
+drag/release keystroke when `interaction.is_captured(session)` is true for the
+resolved session. Resolving drag/release by window (the initially obvious
+approach) would have swallowed *any* `<LeftDrag>` that happened to cross a
+preview window — including a source-buffer text selection dragged across the
+split boundary — even when that preview never captured the press. This is a real
+regression class the capture-scoped design avoids by construction, not just by
+the specific stuck-flag bug above.
+
+### Coordinate conversion (`lua/md-viewer/coordinates.lua`)
+
+`M.cell_to_css(mouse, placement, viewport)` is pure: 1-based `screenrow`/
+`screencol` in, a screen-space `placement` rect (0-based, matching
+`M.for_window`'s existing convention) and the CSS-pixel `viewport` that produced
+the currently displayed image, nil-or-`{x, y}` out. It reuses `M.for_window`'s
+screen-position derivation transitively (via `session.last_placement`, which is
+always built from `M.for_window`/`preview.placement`), so winbar, statusline,
+global statusline, tabline, and split-separator accounting all come for free —
+they were already correct in the rectangle this function receives, and
+duplicating that logic here would have been a second place for it to drift.
+Exclusion rectangles (`placement.exclusions`, the passive-overlay cutouts Part 2
+built) are checked in screen space before the cell→CSS conversion runs, so a
+point inside a notification cutout refuses to resolve rather than reporting a
+plausible but wrong coordinate.
+
+Cell centring is `(local + 0.5) / count * viewportPx`, exactly as specified — no
+guessed pixel constant anywhere in the conversion.
+
+### Link dispatch and the document-root guard (`lua/md-viewer/security.lua`)
+
+`M.is_inside(root, candidate)` mirrors `renderer/src/security.js`'s `isInside()`
+byte-for-byte in intent: both sides resolved with `fs_realpath` before the prefix
+comparison, so a symlink cannot walk a `local_file` link target outside the
+document root and still read as contained. `M.resolve_local_link(href, base_dir,
+document_root)` strips a `file://`/`file:` prefix, percent-decodes, joins against
+`base_dir` (or treats the href as already-absolute), and refuses anything
+`is_inside` rejects. This is the second real security-relevant path validator in
+the codebase — `security.js`'s `isInside` was the first — and reuses the same
+realpath-containment *approach* while necessarily being separate code, since Lua
+cannot call into the renderer's Node module. Both now exist so a future part
+touching either has a documented pattern to match rather than inventing a third.
+
+### Fragment links actually work — a renderer-side discovery
+
+The part prompt's dispatch table says a `fragment` link should "scroll within
+the controlled Chromium document," and Part 3 already classified `fragment`
+hrefs, but nothing in the renderer could resolve *where* a fragment target
+actually is: **markdown-it generates no heading `id` attributes today, and
+`id` was not in the sanitizer's allowlist for any tag.** Every fragment link in
+every document would have resolved to nothing, permanently, regardless of what
+Lua-side code this part wrote — this was verified by reading
+`renderer/src/markdown.js` directly, not assumed. No later part prompt mentions
+heading anchors either (checked `part-5` through `part-7` for "anchor"/"slug"/
+"heading id" before deciding this wasn't intentionally deferred).
+
+Two small, additive changes fix this, kept inside `renderer/src/markdown.js`
+because they are the same rendering concern the file already owns:
+
+- `headingAnchorPlugin` (markdown-it core-ruler plugin) assigns a GitHub-style
+  slug (lowercase, punctuation stripped, spaces to hyphens, numeric-suffix
+  dedup for repeats) as each heading's `id`, from the heading's own inline text.
+- `id` was added to `allowedAttributes` for `h1`–`h6` specifically (not the
+  global `"*"` entry), so raw HTML from other tags cannot inject an `id` via
+  the `rawHtml` override — the sanitizer's existing minimal-allowlist posture
+  is preserved.
+
+`renderer/src/browser.js` gained `scrollToFragment(href)`: a `page.evaluate()`
+call that runs `document.getElementById(id)` and `Element.scrollIntoView()` —
+trusted Node-injected code, the same mechanism `hitTestInPage` and
+`collectBlockGeometry` already use, not a page script, so
+`javaScriptEnabled: false` is untouched and the hidden page still never
+navigates (this is a same-page scroll, not a navigation). `interact()` calls it
+automatically whenever `activate_at` classifies the hit as a `fragment` link,
+and reports `fragmentResolved` plus the resulting `scrollY` on the result — a
+miss (no matching id) is reported honestly (`fragmentResolved: false`, scroll
+unchanged) rather than silently doing nothing unexplained. Lua's
+`interaction.activate_link()` reads `fragmentResolved`/`scrollY` straight off
+the already-completed `activate_at` response and calls the existing
+`controller.schedule_scroll()` — no second interact round trip, matching the
+same "no follow-up request" property Part 3 built for links in general.
+
+This is scope precisely bounded to what Part 4's own dispatch table requires: it
+does not touch selection, search, or inline provenance (Part 5/6 territory), and
+`renderer/src/interact.js`'s `INTERACT_ACTIONS`/`RESERVED_ACTIONS` registries are
+unchanged — `activate_at` still validates and behaves exactly as Part 3 left it
+for every non-fragment case.
+
+### Click-to-source, cursor safety, and the sync guard
+
+`interaction.move_source_cursor()` clamps the line to the buffer's line count,
+clamps the byte column to the target line's byte length, then walks backward
+over UTF-8 continuation bytes (`(byte & 0xC0) == 0x80`) so a click can never
+split a multi-byte character. It sets `session.sync_guard = true` before
+`nvim_win_set_cursor` and clears it on the next scheduler tick — the exact
+technique `sync.update_source_from_scroll()` already uses — rather than adding a
+second guard mechanism. `focus_source_on_click = false` calls
+`nvim_win_set_cursor` without `nvim_set_current_win`, so the cursor moves in the
+(possibly unfocused) source window without stealing focus.
+
+Every click and modifier-click resolves through `activate_at`, never `hit_test`
+— Part 3's comment in `interact.js` says this exact simplification is the reason
+`activate_at` exists (link when present, source fallback otherwise), and this
+part is the first to actually exercise it end to end. `session.last_interaction_kind`/
+`last_interaction_precision` are recorded on every resolved click and surfaced in
+`debug.lua`'s snapshot (`interaction_last_kind`, `interaction_last_precision`,
+`interaction_pointer_pressed`), verified by directly invoking `:MdViewerDebug` in
+a headless session per policy §5, not just the underlying function.
+
+### Configuration
+
+`interaction = { enabled, click_to_source, focus_source_on_click, links,
+drag_threshold_cells, double_click }` as specified, plus `double_click` (not in
+the part prompt's exact list but requested by its own text: "make the binding
+configurable now so Part 6 does not have to break anything" — `double_click`
+gates whether the `<2-LeftMouse>` mapping installs at all, which is the lever
+Part 6's word-select needs). All six fields validate with `assert()`-style
+actionable messages matching the existing convention.
+
+`mouse.M.attach()` now installs the wheel mappings and the gesture mappings
+independently — `installed_wheel`/`installed_gestures` are two separate flags —
+gated on `sync.mouse_scroll` and `interaction.enabled` respectively, so
+disabling one doesn't silently disable the other. Interaction is never enabled
+for the `cells` backend: `controller.open()` already only calls `mouse.attach()`
+for non-cells backends (unchanged from Part 1), and `interaction.locate()`
+independently refuses to resolve a point when `session.backend.name == "cells"`,
+so the guard holds even if a future caller attaches gestures directly.
+
+---
+
+## Tests run and results (Part 4)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+  -> added 30 packages, 0 vulnerabilities
+
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+  -> md-viewer Lua tests: 348 assertions passed (210 at the end of Part 3; the
+     net +138 comes from two new files, tests/lua/cases/interaction.lua and
+     tests/lua/cases/mouse.lua, plus an expanded tests/lua/cases/coordinates.lua)
+
+npm test --prefix renderer   (node --test ../tests/node/*.test.js)
+  -> tests 61, pass 61, fail 0   (59 before this part; +2 from the new fragment-
+     scroll tests in tests/node/interact.test.js)
+
+stylua --check lua/ plugin/ tests/lua/
+  -> clean (no diff)
+```
+
+All four commands were run on this development machine (macOS, Apple Silicon,
+Neovim 0.12.4, Node 24, Google Chrome installed at the standard `/Applications`
+path).
+
+Per policy §5, `:MdViewerDebug` — the command whose output this part changed —
+was invoked directly (not just `debug.snapshot()`) in a headless session with a
+real `controller.open()` session, confirming `interaction_last_kind`,
+`interaction_last_precision`, and `interaction_pointer_pressed` all render
+without error and carry the values set on the session.
+
+**Beyond the policy §5 minimum**, because this part's whole point is a real
+mouse gesture reaching a real command, a second headless script exercised the
+actual installed keymaps end to end rather than only the library functions
+underneath them: it called `require("md-viewer").setup({})`, ran the real
+`:MdViewerOpen` command, forced a graphical backend, stubbed
+`vim.fn.getmousepos()` and `process.request`, then invoked the *actual Lua
+callback* Neovim would run for `<LeftMouse>` and `<LeftRelease>` (available via
+`vim.fn.maparg(lhs, mode, false, true).callback`, which exposes a
+`vim.keymap.set`-installed function directly — no synthetic terminal input
+needed). Result: the press correctly swallows the keystroke and captures the
+session on the next scheduler tick, the release correctly swallows its
+keystroke, issues one real `interact` request with `action = "activate_at"`,
+and the source cursor lands on the expected line with `precision = "line"`
+recorded on the session. This is the same class of gap Part 1's post-commit
+`:MdViewerHealth` fix taught this project to check for — a library function
+passing its unit tests is not the same claim as the actual keystroke path
+working — applied proactively here instead of found after the fact.
+
+**No graphical validation was performed in a real terminal.** This development
+environment has no attached graphical terminal (`TERM_PROGRAM=vscode`,
+consistent with every prior part). The keymap-level check above proves the
+dispatch, coordinate conversion, transport round trip, and cursor movement are
+wired correctly against a stubbed renderer; it does not prove a real click in a
+real Kitty/iTerm2/WezTerm/Ghostty/Warp session lands where a human's eye expects
+it to, because no code path in this project can synthesize a real terminal
+mouse-report escape sequence. Per policy §4, this is stated as unvalidated, not
+implied as tested. See "Operator verification" in
+`prompts/part-4-mouse-and-navigation.md` for the manual steps this needs.
+
+---
+
+## Known limitations and unresolved risks (Part 4)
+
+- **No graphical validation in a real terminal**, as above — the highest-value
+  open risk of this part, since coordinate conversion is exactly the kind of
+  code that can pass every synthetic unit test and still be off by half a cell
+  against a real terminal's actual mouse-report geometry.
+- **Double-click (`<2-LeftMouse>`) currently performs the same click-to-source
+  navigation as a single click.** The part prompt reserves double-click for
+  Part 6's word-select and asks only that the binding be configurable now, which
+  it is (`interaction.double_click`); this part does not invent interim
+  double-click behavior beyond "still useful, not a silent no-op."
+  `pointer.click_count` is recorded and available for Part 6 to branch on.
+- **Drag state is tracked (`pointer.drag_started`, `pointer.newest_pending_drag_point`)
+  but creates no selection**, per the part prompt's explicit scope boundary.
+  Part 6 is the first consumer of `newest_pending_drag_point`.
+- **A ctrl/cmd-click activates immediately on mouse-down**, not on a matched
+  press+release pair. This was a deliberate design choice, not an oversight:
+  Neovim only reports the modifier on the press keycode (`<C-LeftMouse>`,
+  `<D-LeftMouse>`) — there is no `<C-LeftRelease>` to pair it with — so waiting
+  for a release would mean guessing which unmodified `<LeftRelease>` belongs to
+  a modified press. Most editors' ctrl/cmd-click-to-open is immediate-on-press
+  behavior anyway. Not covered by an automated test beyond the dispatch-table
+  unit tests in `tests/lua/cases/interaction.lua`, since it requires no
+  press/drag/release state machine to exercise.
+- **`renderer/src/markdown.js` now generates heading `id`s unconditionally**,
+  which is a real (if narrow) behavior change to every rendered document, not
+  only ones with fragment links. It was necessary for the fragment-link feature
+  this part's own dispatch table requires to be anything other than permanently
+  dead code (see "What Part 4 actually built" above). `tests/node/markdown.test.js`
+  and every existing snapshot-style assertion in `tests/node/interact.test.js`
+  still pass unchanged, since none of them assert an exact heading tag string.
+- Carried forward and unchanged: the CI matrix's Ubuntu leg is still
+  untriggered; the `config.setup()` reassign-before-validate quirk is still
+  unfixed; `terminal.probe = "safe"` is still unimplemented; Windows discovery
+  remains unadvertised; Kitty, Ghostty, Warp, and all Linux terminals remain
+  graphically unvalidated for the whole project, not just this part.
+
+---
+
+## Decisions that changed assumptions in the original specification (Part 4)
+
+- **Mouse capture is button-scoped (a module-level `captured` session in
+  `interaction.lua`), not resolved per-event by window.** The part prompt does
+  not say this explicitly; it was derived from reasoning through the drag-leaves-
+  the-window failure mode described above before writing the dispatch code, and
+  confirmed by a dedicated regression test. This is the single most
+  consequential design decision in this part's implementation and the one most
+  likely to matter to Part 6, which will extend the same drag state machine to
+  create real selections — Part 6 should keep routing drag/release through
+  `interaction.captured_session()`, not through `state.from_preview_win()`.
+- **Fragment links required a small, additive renderer change** (heading-id
+  generation in `markdown.js`, `scrollToFragment()` in `browser.js`) that the
+  part prompt's own "read these files first" list (Lua files only) did not
+  anticipate. This was judged in-scope rather than deferred because: (a) it is
+  required by this part's own §4.4 dispatch table, not a later part's; (b) it
+  does not touch selection, search, or exact provenance — the three things
+  explicitly reserved for Parts 5/6; and (c) `renderer/src/interact.js`'s action
+  registry was explicitly designed in Part 3 to be additive for exactly this
+  kind of narrow extension. If this judgment call should have gone the other
+  way (documenting fragment activation as permanently unimplemented instead),
+  that is a one-file revert (`browser.js`'s `scrollToFragment` call site) plus
+  reverting the two `markdown.js` additions.
+- **Clicks always resolve through `activate_at`, never `hit_test`.** Part 3's
+  own code comment already named this simplification; this part is the one that
+  actually relies on it, confirming the Part 3 design held up against a real
+  caller rather than only its own tests.
+- **`session.applied_scroll_y` is what's sent in every interact request, not
+  `session.scroll_y`**, per the contract Part 3's closing section documented.
+  Recorded here because it was easy to get wrong silently (both fields hold a
+  plausible scroll position; only one matches the currently displayed image) and
+  worth confirming explicitly landed correctly.
+
+No part boundaries moved. No downstream prompt needed edits — Part 5's stated
+approach (adding real inline provenance to the same `sourcePosition` shape this
+part already consumes) and Part 6's stated approach (extending the drag state
+machine and the `<2-LeftMouse>` binding this part already wired) are both
+supported as written by what this part actually built.
+
+---
+
+## Safe stopping point and first next action
+
+The tree is green: all four policy §5 commands pass (348/348 Lua assertions,
+61/61 Node tests, stylua clean), and `:MdViewerDebug` plus the actual installed
+`<LeftMouse>`/`<LeftRelease>` keymap callbacks have been invoked directly in
+headless sessions per policy §5 — not just the library functions underneath
+them. Part 4 is commit `PART4_COMMIT_HASH` on `feat/interaction-transport`, a
+branch cut from `main` (where Parts 1–2 landed via PR #1). Neither the branch
+nor this doc commit has been pushed, and no PR has been opened.
+
+Part 4 is the first part a human can actually see working, and the automated
+verification here is real but structurally bounded: it proves dispatch,
+coordinate math, the transport round trip, and cursor movement are wired
+correctly against a stubbed renderer and a headless Neovim instance. It does
+not and cannot prove a real click in a real graphical terminal lands where a
+human's eye expects — see "Known limitations" above and the manual steps in
+`prompts/part-4-mouse-and-navigation.md`'s "Operator verification" section.
+
+**First next action for Part 5:** read `prompts/part-5-source-provenance.md`
+fresh (`/clear` first per `prompts/README.md`; that part recommends planning and
+implementing with Opus 5 throughout). Part 5 can rely on these settled
+contracts from Part 4:
+
+- `interaction.move_source_cursor(session, { line, byte_column, precision })`
+  is the landing point for exact provenance — it already clamps and validates
+  correctly for `line`/`block` precision, and Part 5 only needs to start
+  feeding it real (non-zero) `byte_column` values.
+- Every click already resolves through `activate_at`, and
+  `result.sourcePosition.precision` is asserted `never "exact"` today by both
+  `tests/node/interact.test.js` (Part 3) and this part's Lua tests — Part 5
+  should either update or add to those assertions once `exact` is real, not
+  leave them silently describing stale behavior.
+- `interaction.lua`'s pointer state (`pressed`, `press_cell`, `drag_started`,
+  `newest_pending_drag_point`, `click_count`) and the button-scoped
+  `captured`/`is_captured` capture model are the state machine Part 6 extends;
+  Part 5 should not need to touch `interaction.lua`'s gesture handling at all,
+  only the source-position precision it consumes.

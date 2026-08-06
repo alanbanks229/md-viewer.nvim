@@ -9,6 +9,7 @@ local process = require("md-viewer.process")
 local debounce = require("md-viewer.debounce")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
+local interaction = require("md-viewer.interaction")
 
 local M = {}
 local group
@@ -232,6 +233,7 @@ local function close_session(session)
     pcall(vim.api.nvim_win_close, session.preview_win, true)
   end
   if not next(state.all()) then process.stop() end
+  interaction.forget(session)
   mouse.detach_if_unused()
 end
 
@@ -578,6 +580,10 @@ function M.setup_autocmds()
           session.backend.clear(session.image_id)
           session.image_id = nil
         end
+        -- The preview survives a tab leave or suspend, but a mouse press
+        -- captured against it does not: there is no guarantee the matching
+        -- release ever reaches Neovim across that boundary.
+        interaction.forget(session)
       end)
     end,
   })

@@ -1,10 +1,10 @@
 ---
 part: 4
 title: Mouse layer, click-to-source, and safe links
-status: not-started
+status: done
 model: Sonnet 5
 depends_on: parts 1-3
-commit: ""
+commit: "PART4_COMMIT_HASH"
 ---
 
 # Part 4 of 7 — Mouse Layer, Click Navigation, and Safe Links

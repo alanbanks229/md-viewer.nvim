@@ -317,6 +317,32 @@ export class BrowserRenderer {
     return { rehydrated: true, record, scrollY, documentHeight: loaded.documentHeight };
   }
 
+  /// Scroll the shared page to an in-document anchor (`#id`) natively, i.e.
+  /// via `Element.scrollIntoView()` run through `page.evaluate` -- not
+  /// browser navigation. `javaScriptEnabled: false` blocks scripts the
+  /// rendered Markdown could smuggle in; it does not affect this call, which
+  /// runs trusted code injected by Node, the same mechanism `hitTestInPage`
+  /// and `collectBlockGeometry` already rely on. The page never navigates
+  /// away from the generated document.
+  async scrollToFragment(href) {
+    let id;
+    try {
+      id = decodeURIComponent(href.slice(1));
+    } catch {
+      return { found: false };
+    }
+    if (!id) return { found: false };
+    const scrollY = await this.page.evaluate((rawId) => {
+      const target = document.getElementById(rawId);
+      if (!target) return null;
+      target.scrollIntoView({ block: "start" });
+      return window.scrollY;
+    }, id);
+    if (typeof scrollY !== "number") return { found: false };
+    if (this.active) this.active.scrollY = scrollY;
+    return { found: true, scrollY };
+  }
+
   async interact(envelope, cached, requestId) {
     const started = performance.now();
     const rehydrateStarted = performance.now();
@@ -353,6 +379,16 @@ export class BrowserRenderer {
     result.scrollY = scrollY;
     result.viewportHeightPx = record.height;
     result.documentHeightPx = documentHeight;
+
+    // §4.4's "fragment -> scroll within the controlled Chromium document":
+    // activate_at already classified the link, so resolve the anchor and
+    // report where the page ended up. A miss (no matching id) is reported
+    // honestly rather than left unscrolled and unexplained.
+    if (envelope.action === "activate_at" && hit.link && hit.link.type === "fragment") {
+      const fragment = await this.scrollToFragment(hit.link.href);
+      result.fragmentResolved = fragment.found;
+      if (fragment.found) result.scrollY = fragment.scrollY;
+    }
 
     if (envelope.capture) {
       const capture = await this.captureViewport({

@@ -21,10 +21,41 @@ function alertPlugin(md) {
   });
 }
 
+// GitHub-style heading slug: lowercase, strip punctuation, spaces to hyphens,
+// collapse runs, dedupe repeats with a numeric suffix. This is what a
+// fragment link's href is written against, so activate_at's fragment
+// scrolling (§4.4) has an id to find.
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\p{L}\p{N}\s-]/gu, "")
+    .replace(/\s+/g, "-")
+    .replace(/-{2,}/g, "-");
+}
+
+function headingAnchorPlugin(md) {
+  md.core.ruler.after("md-viewer_alerts", "md-viewer_heading_anchors", (state) => {
+    const seen = new Map();
+    for (let i = 0; i < state.tokens.length; i += 1) {
+      const open = state.tokens[i];
+      if (open.type !== "heading_open") continue;
+      const inline = state.tokens[i + 1];
+      const text = inline && inline.type === "inline" ? inline.content : "";
+      let slug = slugify(text) || "section";
+      const count = seen.get(slug) ?? 0;
+      seen.set(slug, count + 1);
+      if (count > 0) slug = `${slug}-${count}`;
+      open.attrSet("id", slug);
+    }
+  });
+}
+
 function createMarkdown(options) {
   const md = new MarkdownIt({ html: Boolean(options.rawHtml), linkify: true, typographer: false, breaks: false });
   md.use(taskLists, { enabled: false, label: true, labelAfter: true });
   md.use(alertPlugin);
+  md.use(headingAnchorPlugin);
 
   const defaultImage = md.renderer.rules.image;
   md.renderer.rules.image = (tokens, index, ruleOptions, env, self) => {
@@ -76,6 +107,7 @@ export function renderMarkdown(markdown, options) {
       "*": ["class", "data-source-start", "data-source-end", "data-alert-title"],
       a: ["href", "title"], img: ["src", "alt", "title", "class"],
       input: ["type", "checked", "disabled"], label: ["class"], th: ["style"], td: ["style"],
+      h1: ["id"], h2: ["id"], h3: ["id"], h4: ["id"], h5: ["id"], h6: ["id"],
     },
     allowedSchemes: ["data", "http", "https", "mailto"],
     allowedSchemesByTag: { img: ["data"], a: ["http", "https", "mailto"] },

@@ -51,6 +51,9 @@ function M.snapshot()
       passive_cutouts = session.last_placement and #(session.last_placement.exclusions or {}) or 0,
       loading = session.loading,
       render_failed = session.render_failed,
+      interaction_last_kind = session.last_interaction_kind,
+      interaction_last_precision = session.last_interaction_precision,
+      interaction_pointer_pressed = session.pointer ~= nil and session.pointer.pressed or false,
     }
   end
   return {

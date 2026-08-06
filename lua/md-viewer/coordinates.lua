@@ -161,4 +161,43 @@ function M.viewport(rect, render)
   }
 end
 
+---Convert a `vim.fn.getmousepos()`-style screen point into CSS pixel
+---coordinates inside the browser viewport that produced the currently
+---displayed image, or `nil` when the point cannot be resolved to addressable
+---content: outside the placement's cell rectangle, or inside one of its
+---excluded rectangles (a passive overlay cutout).
+---
+---`mouse` needs 1-based `screenrow`/`screencol` (exactly what getmousepos()
+---returns). `placement` is the screen-space rect the image was actually drawn
+---into (0-based `row`/`col`, cell `width`/`height`, optional `exclusions`).
+---`viewport` is the browser viewport, in CSS pixels, that produced that image
+---(`widthPx`/`heightPx`). The cell is addressed at its centre (+0.5) because
+---the terminal cannot report a sub-cell pointer position.
+function M.cell_to_css(mouse, placement, viewport)
+  if not (mouse and placement and viewport and viewport.widthPx and viewport.heightPx) then return nil end
+  if placement.width <= 0 or placement.height <= 0 then return nil end
+  if viewport.widthPx <= 0 or viewport.heightPx <= 0 then return nil end
+  local screen_row = (tonumber(mouse.screenrow) or 0) - 1
+  local screen_col = (tonumber(mouse.screencol) or 0) - 1
+  local local_row = screen_row - placement.row
+  local local_col = screen_col - placement.col
+  if local_row < 0 or local_col < 0 or local_row >= placement.height or local_col >= placement.width then return nil end
+  for _, rect in ipairs(placement.exclusions or {}) do
+    if
+      screen_row >= rect.row
+      and screen_row < rect.row + rect.height
+      and screen_col >= rect.col
+      and screen_col < rect.col + rect.width
+    then
+      return nil
+    end
+  end
+  local x = ((local_col + 0.5) / placement.width) * viewport.widthPx
+  local y = ((local_row + 0.5) / placement.height) * viewport.heightPx
+  return {
+    x = math.max(0, math.min(viewport.widthPx - 1e-6, x)),
+    y = math.max(0, math.min(viewport.heightPx - 1e-6, y)),
+  }
+end
+
 return M

@@ -146,4 +146,90 @@ return function(t)
   vim.o.laststatus = original_laststatus
   vim.api.nvim_win_close(guard_win, true)
   vim.api.nvim_set_current_win(original_win)
+
+  -- cell_to_css: Part 4's mouse-cell -> browser-CSS-pixel conversion.
+  local placement = { row = 5, col = 10, width = 40, height = 20, exclusions = {} }
+  local view = { widthPx = 800, heightPx = 400 }
+
+  -- Cell centring: the first cell (row=5,col=10 in 0-based screen space,
+  -- i.e. screenrow=6/screencol=11 in getmousepos()'s 1-based coordinates)
+  -- must land on its own centre, not its top-left corner.
+  local origin = coords.cell_to_css({ screenrow = 6, screencol = 11 }, placement, view)
+  t.near(10, origin.x, 0.01, "first cell's CSS x sits at half a cell width (+0.5 centring)")
+  t.near(10, origin.y, 0.01, "first cell's CSS y sits at half a cell height (+0.5 centring)")
+
+  -- The last addressable cell (row=24,col=49 0-based) also centres, and never
+  -- reaches the far edge of the viewport.
+  local last_cell = coords.cell_to_css({ screenrow = 25, screencol = 50 }, placement, view)
+  t.ok(last_cell.x < view.widthPx, "last cell's CSS x stays inside the viewport")
+  t.ok(last_cell.y < view.heightPx, "last cell's CSS y stays inside the viewport")
+
+  -- 1-based -> 0-based origin conversion: screenrow/screencol of exactly
+  -- placement.row+1/placement.col+1 is cell (0,0), not (1,1).
+  local one_based =
+    coords.cell_to_css({ screenrow = placement.row + 1, screencol = placement.col + 1 }, placement, view)
+  t.eq(origin, one_based, "1-based getmousepos() coordinates align to the 0-based placement origin")
+
+  t.eq(
+    nil,
+    coords.cell_to_css({ screenrow = placement.row, screencol = placement.col + 1 }, placement, view),
+    "a point one row above the placement is outside it"
+  )
+  t.eq(
+    nil,
+    coords.cell_to_css({ screenrow = placement.row + 1, screencol = placement.col }, placement, view),
+    "a point one column left of the placement is outside it"
+  )
+  t.eq(
+    nil,
+    coords.cell_to_css(
+      { screenrow = placement.row + placement.height + 1, screencol = placement.col + 1 },
+      placement,
+      view
+    ),
+    "a point below the placement's last row is outside it"
+  )
+  t.eq(
+    nil,
+    coords.cell_to_css(
+      { screenrow = placement.row + 1, screencol = placement.col + placement.width + 1 },
+      placement,
+      view
+    ),
+    "a point right of the placement's last column is outside it"
+  )
+
+  -- Excluded rectangles (passive overlay cutouts) refuse to resolve even
+  -- though the point is inside the placement's outer bounds.
+  local guarded = {
+    row = 5,
+    col = 10,
+    width = 40,
+    height = 20,
+    exclusions = { { row = 8, col = 12, width = 4, height = 2 } },
+  }
+  t.eq(
+    nil,
+    coords.cell_to_css({ screenrow = 9, screencol = 13 }, guarded, view),
+    "a point inside a passive-overlay cutout does not resolve"
+  )
+  t.ok(
+    coords.cell_to_css({ screenrow = 20, screencol = 13 }, guarded, view) ~= nil,
+    "a point outside the cutout, but still inside the placement, resolves normally"
+  )
+
+  -- Resize: the same screen cell maps to a different CSS point once the
+  -- viewport or placement dimensions change.
+  local resized_view = { widthPx = 1600, heightPx = 800 }
+  local after_resize = coords.cell_to_css({ screenrow = 6, screencol = 11 }, placement, resized_view)
+  t.near(20, after_resize.x, 0.01, "widening the viewport scales the resolved CSS x proportionally")
+  t.near(20, after_resize.y, 0.01, "heightening the viewport scales the resolved CSS y proportionally")
+
+  t.eq(nil, coords.cell_to_css(nil, placement, view), "a missing mouse point never resolves")
+  t.eq(nil, coords.cell_to_css({ screenrow = 6, screencol = 11 }, nil, view), "a missing placement never resolves")
+  t.eq(
+    nil,
+    coords.cell_to_css({ screenrow = 6, screencol = 11 }, placement, { widthPx = 0, heightPx = 0 }),
+    "a missing/zero viewport never resolves"
+  )
 end
