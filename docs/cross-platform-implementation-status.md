@@ -10,7 +10,7 @@ repository right now, not what was planned.
 
 | # | Part | Commit |
 |---|------|--------|
-| 1 | Foundations — capability layer, browser discovery, CI, test harness | `c638674` |
+| 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
 
 ---
 
@@ -226,6 +226,45 @@ replicate the full Node-side search (Flatpak, Windows, `~/Applications`) —
 that would duplicate `browser-discovery.js` in Lua for a fallback path that's
 rarely hit.
 
+### Post-commit fix: `:MdViewerHealth` crashed in a real session
+
+The initial Part 1 commit (`0d62c1f`) reported all automated checks passing,
+but the operator hit a real crash running `:MdViewerHealth` interactively:
+
+```
+'replacement string' item contains newlines
+  at health.lua:162 nvim_buf_set_lines
+```
+
+Root cause: `lines()` called `vim.inspect(value)` on any table-valued report
+field, and `vim.inspect` produces multi-line output by default for anything
+non-trivial (`graphics_caveats`, `renderer_process`). That multi-line string
+was then embedded in a single formatted line and handed to
+`nvim_buf_set_lines`, which rejects any item containing `\n`.
+
+**This is a real gap in Part 1's own testing, not just an edge case.** My
+smoke test called `health.check()` (the `:checkhealth` path, which uses
+`vim.health.*` and never touches `nvim_buf_set_lines`) and never actually
+invoked `health.show()` — the literal `:MdViewerHealth` code path — end to
+end. The Lua unit suite had no coverage of `health.lua` at all before this.
+Both gaps are now closed:
+
+- `lines()` (`lua/md-viewer/health.lua`) special-cases `graphics_caveats` to
+  render as its own indented lines, and collapses any other table value with
+  `vim.inspect(value, { newline = " ", indent = "" })` instead of the
+  multi-line default.
+- `tests/lua/cases/health.lua` is new: it calls `health.show()` for real
+  (forcing a multiplexer env var so the multi-entry-caveats branch is
+  actually exercised), asserts no buffer line contains `\n`, and asserts the
+  multiplexer caveat renders as a separate indented line. Verified this test
+  actually fails against the buggy code (reverted it locally, confirmed the
+  same crash reproduces and the assertions fail) before confirming it passes
+  against the fix.
+
+Fixed in a follow-up commit (see table above) on the same branch. 128/128 Lua
+assertions and 24/24 Node tests pass after the fix; `stylua --check` is
+clean.
+
 ---
 
 ## Tests run and results
@@ -235,7 +274,8 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
   -> added 30 packages, 0 vulnerabilities
 
 NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
-  -> md-viewer Lua tests: 124 assertions passed
+  -> md-viewer Lua tests: 128 assertions passed (124 at the initial commit,
+     +4 from tests/lua/cases/health.lua added in the post-commit crash fix)
 
 npm test --prefix renderer   (node --test ../tests/node/*.test.js)
   -> tests 24, pass 24, fail 0
@@ -328,9 +368,19 @@ profile-driven placement/geometry work.
 
 ## Safe stopping point and first next action
 
-The tree is green: all four policy §5 commands pass, nothing is known to be
-broken, and every change is committed as a single reviewable unit (see commit
-hash at the top of this document once recorded).
+The tree is green: all four policy §5 commands pass (128/128 Lua assertions,
+24/24 Node tests, stylua clean), and `:MdViewerHealth` has now actually been
+exercised end-to-end in a real headless session, not just its automated-test
+proxy. Two commits make up Part 1: `0d62c1f` (the original implementation)
+and `b2ceaf9` (a same-day fix for the `:MdViewerHealth` crash the operator
+found by actually running the command — see "Post-commit fix" above). Both
+are on `feat/cross-platform-markdown-preview`; neither has been pushed.
+
+**Lesson for future parts' testing, not just this document:** "all automated
+tests pass" is not the same claim as "the actual user-facing command was
+run." Before reporting a part done, run every new or changed `:MdViewer*`
+command interactively in a real headless session (or ask the operator to),
+not just its underlying library function.
 
 **First next action for Part 2:** read `prompts/part-2-portable-rendering.md`
 fresh (do not carry this session's context forward — `/clear` first per
