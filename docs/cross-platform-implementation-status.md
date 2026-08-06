@@ -1540,6 +1540,94 @@ operator should confirm the preview now stays put.
 
 ---
 
+## Two more operator findings: the first character of a line, and the scroll again
+
+### 3. The first character of a line could not be clicked
+
+Clicking the left edge of `F` in a `## Features` heading did nothing; only
+clicking a character or so to the right moved the cursor.
+
+**A terminal reports which cell was clicked and never where inside it**, so a
+click genuinely covers a whole cell — typically wider than a rendered character.
+`cell_to_css()` collapsed that cell to its centre, and the centre is exactly the
+wrong representative at the edges of the text: the cell holding the first
+character of a line also holds the page's left padding, so its centre lands on
+the `article`, finds no block, and honestly reports `none` — a click that does
+nothing.
+
+This was measured rather than reasoned about. Mapping every cell column across
+the heading, at 60 cells over a 600px viewport (10 CSS px per cell):
+
+```
+cell col  0 -> css x=  5.0  outside_content  none          <- dead
+cell col  1 -> css x= 15.0  outside_content  none          <- dead
+cell col  2 -> css x= 25.0  hit              exact col 3   <- first hit is already 'F'
+```
+
+Two dead cells at the start of every line, and the first live one already sits
+on `F` — so the whole left edge of the text was unaddressable.
+
+The fix passes the cell's own CSS extent along with the point
+(`cell_to_css` now returns `cellWidthPx`/`cellHeightPx`, `request_hit` forwards
+them) and has `hitTestInPage` probe outward from the centre, **bounded by that
+one cell**, taking the nearest content. After the fix:
+
+```
+cell col  0 -> css x=  5.0  outside_content  none          <- still none, correctly
+cell col  1 -> css x= 15.0  hit  snapped     exact col 3   <- 'F'
+cell col  2 -> css x= 25.0  hit              exact col 3
+```
+
+Cell 0 spans `[0,10)` and contains no text at any point across its width, so
+`none` remains the honest answer there; cell 1 spans `[10,20)` and does overlap
+the text, so it resolves. This is **not** the blanket clamping Part 3 refused —
+it never reaches beyond the single cell the user clicked, so a click in the
+middle of the scroll-past-end padding still finds nothing across the whole cell
+and still reports `none`. A test asserts exactly that.
+
+Probing is horizontal only. A cell is about as tall as a rendered line, so
+probing vertically could answer from the line above or below — a worse error
+than the one being fixed. The hit descriptor carries `cellSnapped` so the
+difference between "the pointer was over this" and "the pointer's cell
+overlapped this" stays visible in `:MdViewerDebug`.
+
+### 4. The preview still scrolled on click
+
+The previous fix consumed the echo record on its first check. That was not
+enough, because **one cursor move produces more than one event**: clicking a
+preview line whose source line is off screen moves the cursor, which scrolls the
+source window, so `CursorMoved` is followed by `WinScrolled` — and
+`controller.lua` routes both into `sync.source_cursor`. The first consumed the
+record; the second found it gone and scrolled the preview.
+
+The record now survives being checked and is dropped only once the cursor is
+somewhere else. An echoed event also adopts the block the cursor landed in
+(`last_source_block`) without scrolling to it, so the *next* keyboard move —
+even one inside the block just clicked — does not look like a block change and
+scroll the preview after all.
+
+The net behaviour is stronger than "don't scroll when the target is already
+visible", which is what was asked for: **a click never scrolls the preview at
+all**, and normal cursor-follow syncing resumes the moment the user moves the
+cursor themselves.
+
+Both fixes have tests confirmed to fail against the previous code — the cell
+test by forcing the probe list back to the centre alone, the echo test by
+restoring the consume-on-check version. A headless end-to-end run against a real
+Chromium confirms both against `README.md`: the first addressable cell of the
+`## Features` heading resolves to `F` with `snapped=true`, and neither the
+`CursorMoved` nor the `WinScrolled` that follow a click moves the preview, while
+a cursor move the user makes still does.
+
+Suite totals: **382 Lua assertions**, **97 Node tests**, stylua clean.
+
+**Still unconfirmed in a real terminal.** Both fixes are verified against the
+code paths the autocmds and the mouse layer call, with real cell geometry — not
+against a human clicking in iTerm2.
+
+
+---
+
 ## Safe stopping point and first next action
 
 The tree is green: all four policy §5 commands pass (348/348 Lua assertions,

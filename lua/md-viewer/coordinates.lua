@@ -192,11 +192,18 @@ function M.cell_to_css(mouse, placement, viewport)
       return nil
     end
   end
+  local cell_width = viewport.widthPx / placement.width
+  local cell_height = viewport.heightPx / placement.height
   local x = ((local_col + 0.5) / placement.width) * viewport.widthPx
   local y = ((local_row + 0.5) / placement.height) * viewport.heightPx
   return {
     x = math.max(0, math.min(viewport.widthPx - 1e-6, x)),
     y = math.max(0, math.min(viewport.heightPx - 1e-6, y)),
+    -- How much of the image one cell actually covers. The centre above is only
+    -- a representative point inside this box; the renderer needs the box itself
+    -- to resolve a click that lands on a cell straddling the edge of the text.
+    cellWidthPx = cell_width,
+    cellHeightPx = cell_height,
   }
 end
 

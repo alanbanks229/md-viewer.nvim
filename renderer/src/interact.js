@@ -194,6 +194,19 @@ export function validateEnvelope(params) {
   const scrollY = envelope.scrollY === undefined ? 0 : requireFiniteNumber(envelope.scrollY, "scrollY");
   if (scrollY < 0) throw createInteractError("INVALID_INTERACTION", "scrollY must not be negative");
 
+  // How much of the image one terminal cell covers, in CSS pixels. Optional:
+  // absent or zero means "resolve the given point only", which is what every
+  // caller did before this existed.
+  const cellWidthPx = envelope.cellWidthPx === undefined || envelope.cellWidthPx === null
+    ? 0
+    : requireFiniteNumber(envelope.cellWidthPx, "cellWidthPx");
+  const cellHeightPx = envelope.cellHeightPx === undefined || envelope.cellHeightPx === null
+    ? 0
+    : requireFiniteNumber(envelope.cellHeightPx, "cellHeightPx");
+  if (cellWidthPx < 0 || cellHeightPx < 0) {
+    throw createInteractError("INVALID_INTERACTION", "cellWidthPx and cellHeightPx must not be negative");
+  }
+
   return {
     documentId: envelope.documentId,
     contentRevision: envelope.contentRevision,
@@ -209,6 +222,8 @@ export function validateEnvelope(params) {
     clickCount,
     strategy,
     scrollY,
+    cellWidthPx,
+    cellHeightPx,
     viewportWidthPx,
     viewportHeightPx,
     // An action that mutates visible state always captures. Anything else may
@@ -253,15 +268,47 @@ export function hitTestInPage(input) {
     return miss("outside_viewport");
   }
 
-  const element = document.elementFromPoint(x, y);
-  if (!element) return miss("no_element");
+  // A terminal reports which *cell* was clicked and never where inside it, so
+  // the click genuinely covers a whole cell -- typically wider than a rendered
+  // character. Resolving only the cell's centre discards that, and it discards
+  // it exactly at the edges of the text: the cell holding the first character
+  // of a line also holds the page's left padding, so its centre lands on the
+  // article and the click does nothing at all. That was reported as "I cannot
+  // click the first character of a line".
+  //
+  // So probe outward from the centre, bounded by the cell the user actually
+  // clicked, and take the nearest content. This is not the clamping Part 3
+  // refused: it never reaches beyond one cell, so a click in the middle of the
+  // scroll-past-end padding still finds nothing across the whole cell and still
+  // honestly reports "none". Horizontal only -- a cell is about as tall as a
+  // rendered line, so probing vertically could answer from the line above or
+  // below, which is a worse error than the one being fixed.
+  const cellWidth = input.cellWidthPx > 0 ? input.cellWidthPx : 0;
+  const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
 
-  // The article carries the page padding and the scroll-past-end padding, and
-  // has no data-source-* attributes of its own, so side padding, top padding,
-  // bottom padding, and the gaps between blocks all land here and all honestly
-  // report "none".
-  const block = element.closest("[data-source-start][data-source-end]");
+  let element = null;
+  let block = null;
+  let pointX = x;
+  let sawElement = false;
+  for (const dx of offsets) {
+    const px = x + dx;
+    if (!(px >= 0 && px < window.innerWidth)) continue;
+    const candidate = document.elementFromPoint(px, y);
+    if (!candidate) continue;
+    sawElement = true;
+    // The article carries the page padding and the scroll-past-end padding, and
+    // has no data-source-* attributes of its own, so side padding, top padding,
+    // bottom padding, and the gaps between blocks all land here.
+    const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
+    if (!candidateBlock) continue;
+    element = candidate;
+    block = candidateBlock;
+    pointX = px;
+    break;
+  }
+  if (!sawElement) return miss("no_element");
   if (!block) return miss("outside_content");
+  const cellSnapped = pointX !== x;
 
   let caretNode = null;
   let caretOffset = null;
@@ -269,8 +316,11 @@ export function hitTestInPage(input) {
   const wantPosition = input.strategy === "auto" || input.strategy === "caret-position";
   const wantRange = input.strategy === "auto" || input.strategy === "caret-range";
 
+  // Resolved at the point the content was actually found at, not the cell's
+  // centre: a caret taken from a centre that landed in the page padding would
+  // contradict the block just resolved a few pixels to its right.
   if (wantPosition && typeof document.caretPositionFromPoint === "function") {
-    const position = document.caretPositionFromPoint(x, y);
+    const position = document.caretPositionFromPoint(pointX, y);
     if (position && position.offsetNode) {
       caretNode = position.offsetNode;
       caretOffset = position.offset;
@@ -278,7 +328,7 @@ export function hitTestInPage(input) {
     }
   }
   if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
-    const range = document.caretRangeFromPoint(x, y);
+    const range = document.caretRangeFromPoint(pointX, y);
     if (range && range.startContainer) {
       caretNode = range.startContainer;
       caretOffset = range.startOffset;
@@ -345,6 +395,10 @@ export function hitTestInPage(input) {
     ok: true,
     reason: "hit",
     strategy,
+    // True when the cell's centre missed and the answer came from elsewhere
+    // inside the same cell. Diagnostic only, but it is the difference between
+    // "the pointer was over this" and "the pointer's cell overlapped this".
+    cellSnapped,
     block: {
       sourceStart: Number(block.getAttribute("data-source-start")),
       sourceEnd: Number(block.getAttribute("data-source-end")),
@@ -389,6 +443,7 @@ export function normalizeHit(raw, sourceMap) {
     precision: sourcePosition.precision,
     strategy: raw.strategy,
     reason: raw.reason,
+    cellSnapped: raw.cellSnapped === true,
     element: raw.element,
     link: raw.link ? classifyLink(raw.link.href) : null,
     blockStartLine: raw.block ? raw.block.sourceStart + 1 : null,

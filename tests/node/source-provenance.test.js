@@ -513,6 +513,7 @@ test("clicking a known character in a real browser yields its exact source colum
     const result = await renderer.interact({
       documentId: "provenance", contentRevision: "1:0", action: "hit_test",
       coordinates: { x: located.x, y: located.absoluteY - scrollY },
+      cellWidthPx: located.cellWidthPx ?? 0, cellHeightPx: 0,
       modifiers: {}, clickCount: 1, strategy, scrollY,
       viewportWidthPx: 900, viewportHeightPx: 700, capture: false, captureScale: "css",
       actionSpec: { mutatesVisibleState: false, requiresCoordinates: true },
@@ -589,6 +590,49 @@ test("clicking a known character in a real browser yields its exact source colum
     assert.ok(located.consumed > 0, "the target text node was not preceded by other nodes");
     assert.deepEqual(await interactAt(located, "auto"),
       { line: 45, byteColumn: line(45).indexOf("print"), precision: "exact" });
+  });
+
+  await t.test("a click on the cell holding a line's first character resolves it", async () => {
+    // The reported bug: a terminal reports a cell, not a position inside it, so
+    // the cell containing the first character of a line also contains the
+    // page's left padding. Resolving only that cell's centre lands on the
+    // article, reports "none", and the click does nothing -- "I cannot select
+    // the first character of a line".
+    const located = await renderer.page.evaluate(() => {
+      const span = [...document.querySelectorAll("span[data-md-source-id]")]
+        .find((node) => node.textContent === "Repeated: apple banana apple banana apple");
+      const box = span.getBoundingClientRect();
+      const article = document.querySelector(".markdown-body").getBoundingClientRect();
+      return {
+        textLeft: box.left,
+        paddingLeft: box.left - article.left,
+        absoluteY: box.top + box.height / 2 + window.scrollY,
+      };
+    });
+    assert.ok(located.paddingLeft > 4, "the fixture has no left padding to straddle; the test proves nothing");
+
+    // A cell wide enough to span the padding *and* the first character, centred
+    // in the padding -- exactly the geometry that used to resolve to nothing.
+    const cellWidthPx = located.paddingLeft * 1.6;
+    const centre = located.textLeft - cellWidthPx * 0.35;
+
+    const withoutCell = await interactAt({ x: centre, absoluteY: located.absoluteY }, "auto");
+    assert.deepEqual(withoutCell, { line: null, byteColumn: null, precision: "none" },
+      "resolving the centre alone still misses, which is what the cell extent is for");
+
+    const withCell = await interactAt(
+      { x: centre, absoluteY: located.absoluteY, cellWidthPx }, "auto");
+    assert.deepEqual(withCell, { line: 7, byteColumn: 0, precision: "exact" },
+      "the same click, told how wide the cell is, lands on the line's first character");
+
+    // Still bounded: a cell entirely inside the padding finds nothing across
+    // its whole width and is still reported honestly rather than snapped to the
+    // nearest text. This is the property that keeps it from being the blanket
+    // clamping Part 3 refused.
+    const deepInPadding = await interactAt(
+      { x: Math.max(1, located.textLeft - located.paddingLeft * 3), absoluteY: located.absoluteY, cellWidthPx: 2 },
+      "auto");
+    assert.equal(deepInPadding.precision, "none", "a cell that is entirely padding still resolves to nothing");
   });
 
   await t.test("element-only resolution reports the run's line without inventing a column", async () => {

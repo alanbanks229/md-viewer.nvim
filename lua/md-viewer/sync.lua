@@ -61,23 +61,39 @@ function M.suppress_echo(session, win)
   session.sync_echo = ok and { line = cursor[1], col = cursor[2] } or nil
 end
 
----Consume any pending echo record, returning true when the cursor is exactly
----where we last put it -- i.e. this `CursorMoved` is ours.
+---True while the cursor is still exactly where we last put it, i.e. while the
+---events arriving are echoes of our own move.
 ---
----The record is dropped either way. A cursor somewhere else means the record is
----stale, and a stale record left in place would swallow a real cursor move
----later, which is the opposite failure and just as confusing.
+---The record deliberately survives being checked, because **one cursor move
+---produces more than one event**. Moving the cursor to a line that is off
+---screen in the source window scrolls that window, so `CursorMoved` is followed
+---by `WinScrolled`, and the controller routes both here. Consuming the record
+---on the first check left the second event unguarded, which is why clicking a
+---preview line that was not already visible in the editor still scrolled the
+---preview.
+---
+---It is dropped as soon as the cursor is anywhere else, so it cannot swallow a
+---move the user made -- that is the opposite failure and just as confusing.
 local function is_echo(session)
   local echo = session.sync_echo
   if not echo then return false end
-  session.sync_echo = nil
   local ok, cursor = pcall(vim.api.nvim_win_get_cursor, session.source_win)
-  return ok and cursor[1] == echo.line and cursor[2] == echo.col
+  if ok and cursor[1] == echo.line and cursor[2] == echo.col then return true end
+  session.sync_echo = nil
+  return false
 end
 
 function M.source_cursor(session, refresh, tolerance)
   if session.sync_guard or not vim.api.nvim_win_is_valid(session.source_win) then return end
-  if is_echo(session) then return end
+  if is_echo(session) then
+    -- Adopt the block the cursor now sits in without scrolling to it. Leaving
+    -- `last_source_block` pointing at wherever the cursor used to be would make
+    -- the *next* keyboard move -- even one within the block just clicked --
+    -- look like a block change and scroll the preview after all.
+    local _, index = M.block_for_line(session.latest_blocks, vim.api.nvim_win_get_cursor(session.source_win)[1])
+    if index then session.last_source_block = index end
+    return
+  end
   if (session.manual_scroll_until or 0) > vim.uv.now() then return end
   local line = vim.api.nvim_win_get_cursor(session.source_win)[1]
   local block, index = M.block_for_line(session.latest_blocks, line)

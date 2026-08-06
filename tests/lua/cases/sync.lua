@@ -56,11 +56,27 @@ return function(t)
     t.eq(nil, refreshed, "a cursor move we made ourselves does not scroll the preview")
     t.eq(0, session.scroll_y, "...and leaves the preview scroll position alone")
 
-    -- The record is consumed, so the *next* real move still syncs.
+    -- One cursor move produces more than one event: moving to a line that is
+    -- off screen in the source window scrolls it, so CursorMoved is followed by
+    -- WinScrolled and the controller routes both here. The record has to
+    -- survive being checked, or the second event scrolls the preview -- which
+    -- is exactly what the operator saw when clicking a preview line that was
+    -- not already visible in the editor.
+    t.ok(session.sync_echo ~= nil, "the record survives being checked, because one move produces several events")
+    refreshed = nil
+    sync.source_cursor(session, refresh, 0.10)
+    t.eq(nil, refreshed, "a second event from the same move is still recognised as an echo")
+    sync.source_cursor(session, refresh, 0.10)
+    t.eq(nil, refreshed, "...and a third")
+    t.eq(2, session.last_source_block, "the block under the cursor is adopted without scrolling to it")
+
+    -- The record is dropped the moment the cursor is somewhere else, so the
+    -- next real move still syncs.
     vim.api.nvim_win_set_cursor(source_win, { 1, 0 })
     refreshed = nil
     sync.source_cursor(session, refresh, 0.10)
     t.eq(session, refreshed, "a real cursor move after an echo still syncs the preview")
+    t.eq(nil, session.sync_echo, "the echo record is dropped once the cursor moves for real")
 
     -- A stale record -- the cursor ended up somewhere other than where we put
     -- it -- must be discarded rather than swallow a genuine move.

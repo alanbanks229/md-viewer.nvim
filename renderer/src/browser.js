@@ -353,6 +353,8 @@ export class BrowserRenderer {
       token: this.active.token,
       x: envelope.coordinates.x,
       y: envelope.coordinates.y,
+      cellWidthPx: envelope.cellWidthPx,
+      cellHeightPx: envelope.cellHeightPx,
       strategy: envelope.strategy,
       previewLimit: TEXT_PREVIEW_LIMIT,
     });

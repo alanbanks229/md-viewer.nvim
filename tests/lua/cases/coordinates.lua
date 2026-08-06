@@ -158,6 +158,14 @@ return function(t)
   t.near(10, origin.x, 0.01, "first cell's CSS x sits at half a cell width (+0.5 centring)")
   t.near(10, origin.y, 0.01, "first cell's CSS y sits at half a cell height (+0.5 centring)")
 
+  -- The centre is only a representative point. The cell's real extent goes with
+  -- it, because the renderer needs the box -- not the point -- to resolve a
+  -- click on a cell that straddles the edge of the text. Without it the cell
+  -- holding the first character of a line resolves to the page padding and the
+  -- click does nothing.
+  t.near(20, origin.cellWidthPx, 0.01, "the cell's CSS width travels with the point")
+  t.near(20, origin.cellHeightPx, 0.01, "the cell's CSS height travels with the point")
+
   -- The last addressable cell (row=24,col=49 0-based) also centres, and never
   -- reaches the far edge of the viewport.
   local last_cell = coords.cell_to_css({ screenrow = 25, screencol = 50 }, placement, view)

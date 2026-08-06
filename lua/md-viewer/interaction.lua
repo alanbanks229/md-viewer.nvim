@@ -204,6 +204,13 @@ function M.request_hit(session, point, modifiers, click_count, callback)
     contentRevision = session.renderer_revision,
     action = "activate_at",
     coordinates = { x = point.x, y = point.y },
+    -- The terminal reports a cell, not a position inside it, so the click
+    -- genuinely covers this much of the image. Without it the renderer can only
+    -- resolve the cell's centre, and the cell holding the first character of a
+    -- line also holds the page's left padding -- so its centre lands on nothing
+    -- and clicking the first character of a line does nothing at all.
+    cellWidthPx = point.cellWidthPx,
+    cellHeightPx = point.cellHeightPx,
     viewportWidthPx = session.viewport_width_px,
     viewportHeightPx = session.viewport_height_render_px,
     scrollY = session.applied_scroll_y or 0,
