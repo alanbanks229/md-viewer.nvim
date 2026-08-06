@@ -15,6 +15,7 @@ M.defaults = {
     local_images = true,
     max_local_image_bytes = 10 * 1024 * 1024,
     device_scale_factor = 2,
+    font_size_px = 16,
     cell_aspect_ratio = 0.5,
     estimated_cell_width_px = 10,
     max_width_px = 1920,
@@ -92,6 +93,10 @@ local function validate(cfg)
   assert(
     type(cfg.render.estimated_cell_width_px) == "number" and cfg.render.estimated_cell_width_px > 0,
     "md-viewer: render.estimated_cell_width_px must be positive"
+  )
+  assert(
+    type(cfg.render.font_size_px) == "number" and cfg.render.font_size_px > 0,
+    "md-viewer: render.font_size_px must be positive"
   )
   assert(
     cfg.image.raw_zindex == nil

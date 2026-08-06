@@ -116,6 +116,24 @@ local function source_title(source_buf)
   return filename:gsub("%%", "%%%%")
 end
 
+---When `image.backend = "auto"` picked the text-cell fallback because no
+---graphical backend was available (e.g. macOS Terminal.app, or any terminal
+---with no Kitty-graphics evidence), surface that in the preview title instead
+---of silently rendering degraded output that looks like a bug. Explicitly
+---requesting `image.backend = "cells"` is not a fallback, so it stays quiet.
+local function fallback_notice(session)
+  if not session.backend or session.backend.name ~= "cells" then return nil end
+  if config.get().image.backend ~= "auto" then return nil end
+  return "%#WarningMsg#⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)%*"
+end
+
+local function title_text(session)
+  local text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  local notice = fallback_notice(session)
+  if notice then text = text .. "  " .. notice end
+  return text
+end
+
 function M.update_title(session)
   if
     not config.get().preview.winbar
@@ -124,10 +142,10 @@ function M.update_title(session)
   then
     return
   end
-  vim.wo[session.preview_win].winbar = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  vim.wo[session.preview_win].winbar = title_text(session)
 end
 
-function M.open(position, source_buf)
+function M.open(position, session)
   local cfg = config.get()
   position = position or cfg.split.position
   vim.cmd(split_commands[position])
@@ -152,7 +170,7 @@ function M.open(position, source_buf)
   vim.wo[win].cursorline = false
   vim.wo[win].spell = false
 
-  if cfg.preview.winbar then vim.wo[win].winbar = "  %#Title#  " .. source_title(source_buf) .. "%*" end
+  if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
 
   if position == "right" or position == "left" then
     vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))

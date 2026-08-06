@@ -271,7 +271,7 @@ function M.open(position)
   end
   local session = state.create(source_buf, source_win)
   session.backend, session.backend_reason = backend, reason
-  session.preview_buf, session.preview_win = preview.open(position, source_buf)
+  session.preview_buf, session.preview_win = preview.open(position, session)
   if backend.name ~= "cells" then
     preview.start_loading(session)
     navigation.attach(session, M.navigate)

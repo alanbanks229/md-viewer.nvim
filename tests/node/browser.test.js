@@ -43,7 +43,7 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   assert.equal(devicePng.readUInt32BE(16), 1280);
   assert.equal(devicePng.readUInt32BE(20), 960);
   assert.equal(renderer.deviceScaleFactor, 2);
-  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "15px");
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "17px");
   assert.ok(result.documentHeightPx - result.blocks.at(-1).bottomPx > 400);
   assert.equal(result.layoutReused, false);
   const scrolled = await renderer.render({ ...params, scrollY: 20, captureScale: "css" }, html, 43);
@@ -55,9 +55,19 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   assert.ok(scrolled.pngBytes < result.pngBytes);
   const narrow = await renderer.render({ ...params, viewport: { ...params.viewport, widthPx: 600 } }, html, 45);
   assert.equal(narrow.layoutReused, false);
-  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "16px");
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "18px");
   const changed = await renderer.render({ ...params, contentRevision: 2 }, html, 44);
   assert.equal(changed.layoutReused, false);
+  // A viewport wide enough (>720px) to avoid the responsive breakpoints, so
+  // the computed font-size reflects the configured value with no override.
+  const widePx = { ...params.viewport, widthPx: 900 };
+  await renderer.render({ ...params, viewport: widePx, fontSizePx: 20 }, html, 46);
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "20px");
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).lineHeight), "31px");
+  await renderer.render({ ...params, viewport: widePx, fontSizePx: 999 }, html, 47);
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "28px");
+  await renderer.render({ ...params, viewport: widePx, fontSizePx: 1 }, html, 48);
+  assert.equal(await renderer.page.evaluate(() => getComputedStyle(document.body).fontSize), "10px");
   const tempDir = renderer.tempDir;
   await renderer.close();
   assert.equal(fs.existsSync(tempDir), false);

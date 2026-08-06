@@ -45,6 +45,7 @@ function M.request(session, markdown, options, callback)
     viewport = viewport,
     scrollY = session.scroll_y or 0,
     captureScale = options.capture_scale or "device",
+    fontSizePx = cfg.render.font_size_px,
     scrollPastEnd = cfg.render.scroll_past_end,
     scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,
     theme = cfg.render.theme == "auto" and (vim.o.background == "dark" and "dark" or "light") or cfg.render.theme,
