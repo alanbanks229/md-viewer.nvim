@@ -157,8 +157,10 @@ render.estimated_cell_width_px = 7.5           -- calibration should derive this
 ```
 
 **Deleting all four and having the preview still render correctly is the real
-acceptance test for Parts 1 and 2.** Automated tests cannot prove it; only you
-can, in a real terminal — Part 2's implementation removed all four from
-`~/.config/nvim/lua/plugins/md-viewer.lua` so this can actually be tried, but
-nobody has yet opened a real terminal and looked. See
-`docs/cross-platform-implementation-status.md` for what remains unvalidated.
+acceptance test for Parts 1 and 2.** Automated tests cannot prove it; only a
+real terminal can — and this has now been done: the operator confirmed the
+preview renders correctly on both iTerm2 and WezTerm with all four lines
+removed, and that macOS Terminal.app (which has no Kitty graphics protocol)
+correctly falls back to text-only rendering. Kitty, Ghostty, Warp, and Linux
+terminals remain untested. See `docs/cross-platform-implementation-status.md`
+("Operator graphical validation") for the full results.

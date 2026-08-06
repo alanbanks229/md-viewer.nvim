@@ -624,14 +624,20 @@ just once by hand) confirmed the new per-session `placement` and
 
 ## Known limitations and unresolved risks (current)
 
+**Update, post-commit:** the operator performed the real acceptance test
+described below on real hardware. See "Operator graphical validation" after
+this list for the actual results — this bullet is left in place, unedited,
+as the honest state of the world *as this part's own commit landed*; treat
+the update note as authoritative for current status.
+
 Carried forward from Part 1, still true:
 
-- **No graphical validation was performed for any real terminal** — not
-  iTerm2, not Kitty, not WezTerm, not Ghostty, not Warp. This development
-  environment has no attached graphical terminal; every check in this part
-  was headless (`nvim --headless`, no TUI, no real Kitty graphics protocol
-  round-trip). Per policy §4, none of this part's work is claimed as visually
-  validated.
+- **No graphical validation was performed for any real terminal, as of this
+  part's own commit** — not iTerm2, not Kitty, not WezTerm, not Ghostty, not
+  Warp. This development environment has no attached graphical terminal;
+  every check in this part was headless (`nvim --headless`, no TUI, no real
+  Kitty graphics protocol round-trip). Per policy §4, none of this part's own
+  work was claimed as visually validated at commit time.
 - The CI matrix's Ubuntu leg is unvalidated.
 - The pre-existing `config.setup()` reassign-before-validate quirk is
   unfixed (unrelated to this part; still only cosmetic today).
@@ -646,29 +652,55 @@ Carried forward from Part 1, still true:
 
 New in this part:
 
-- **The operator's real terminal config has not been re-tested against this
-  part's changes.** `~/.config/nvim/lua/plugins/md-viewer.lua` had its four
-  hand-tuned lines (`image.backend = "kitty_raw"`, `browser.executable_path`,
-  `render.cell_aspect_ratio`, `render.estimated_cell_width_px`) removed as
-  part of closing this part, so the operator can run the real acceptance
-  test described in `prompts/README.md`'s Dogfooding section and
-  `prompts/@OperatorGuide.md`'s Part 2 section. **This has not yet been done
-  by anyone** — I have no terminal to open and look at, and per policy §4 I
-  am not claiming the preview renders correctly on iTerm2 with these lines
-  removed, only that the code path now exists and the config has been
-  updated so the operator can try it. If it fails, the two most likely
-  culprits are (a) the `estimated` calibration tier's default aspect ratio
-  being visually worse than the operator's hand-tuned `0.42` for their
-  specific iTerm2 profile/font, fixable by setting
-  `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (the `env` tier), or
-  (b) `terminal.detect()` resolving to a profile/graphics confidence that
-  doesn't match iTerm2's real behavior, diagnosable via `:MdViewerHealth`.
 - **A "measured" cell-pixel calibration tier does not exist and, as far as
   this session could determine, cannot exist against documented Neovim
   0.12.x APIs for a real terminal TUI session.** See "What Part 2 actually
   built" above for the full investigation. If a future Neovim version adds a
   way to read XTWINOPS-style responses (or any other real pixel-geometry
   signal), `coordinates.calibration_tier()` is the single place to add it.
+
+---
+
+## Operator graphical validation (post-commit, real hardware)
+
+The real acceptance test — deleting the four hand-tuned lines from
+`~/.config/nvim/lua/plugins/md-viewer.lua` and confirming the preview still
+renders — **has now actually been performed by the operator**, superseding
+every "not yet tested" caveat above and in Part 2's original closing report:
+
+- **iTerm2: confirmed working.** Preview renders correctly with no hand-tuned
+  `render.cell_aspect_ratio`/`estimated_cell_width_px` and no
+  `browser.executable_path`.
+- **WezTerm: confirmed working.** Same config, no WezTerm-specific
+  adjustment needed — `terminal.lua`'s `wezterm` profile inference and the
+  `estimated` calibration tier's defaults hold up on real hardware, not just
+  in headless unit tests.
+- **macOS Terminal.app: correctly falls back to text-only rendering.** This
+  is expected, honest behavior, not a failure — Terminal.app does not
+  implement the Kitty graphics protocol, `terminal.detect()` has no profile
+  for it, and `image.backend = "auto"` degrades to the `cells` backend
+  exactly as designed. The operator found this via a real screenshot rather
+  than a health-report reading, which surfaced a genuine gap: **the
+  degraded preview gave no visible indication it was a fallback** rather
+  than a rendering bug. Fixed in a same-day follow-up commit (`0be91a6`, not
+  one of the seven part commits — see below): the preview winbar now shows
+  `⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)`
+  whenever `image.backend = "auto"` lands on `cells` (any terminal with no
+  Kitty-graphics evidence, not just Terminal.app), while an explicit
+  `image.backend = "cells"` stays quiet since that isn't a fallback.
+- **Font size:** also reported too small on real iTerm2/WezTerm rendering.
+  Same follow-up commit raised the default `render.font_size_px` from an
+  implicit 14px to a configurable 16px default (see `config.lua`), with the
+  responsive breakpoints now scaling relative to that base.
+- **Not tested:** Kitty terminal itself, Ghostty, Warp, and any Linux
+  terminal. Still genuinely unvalidated — do not treat WezTerm/iTerm2
+  working as evidence for the other three profile-compatible terminals.
+
+**This confirms Parts 1 and 2 achieved their stated goal on at least two of
+five modeled Kitty-compatible terminals**, with the third real terminal
+tried (Terminal.app) correctly and legibly degrading rather than silently
+failing. `v0.2.0` can reasonably be tagged on this branch; the operator has
+not yet done so as of this writing.
 
 ---
 
@@ -728,12 +760,15 @@ neither has been pushed.
 **This is a genuinely shippable `v0.2.0`** in the sense the part prompt
 intended (automated portability work complete, generic encoder, real
 resolution/reporting for z-index and double-buffering, an honest two-tier
-calibration chain) but **the operator has not yet performed the real
-acceptance test**: opening a real terminal, removing the four hand-tuned
-config lines (already done in `~/.config/nvim/lua/plugins/md-viewer.lua`),
-and confirming the preview still renders correctly. Per policy §4 this
-report does not claim that outcome — only that the code and config are ready
-for it. Do this before tagging `v0.2.0`.
+calibration chain), **and unlike the state at the moment this part's own
+commit landed, the real acceptance test has now actually been performed** —
+see "Operator graphical validation" above. iTerm2 and WezTerm both render
+correctly with the four hand-tuned config lines removed; macOS Terminal.app
+correctly and now legibly falls back to text-only rendering. A same-day,
+out-of-band follow-up commit (`0be91a6` — not one of the seven part commits;
+it responds to this real-world feedback, not to a part prompt) raised the
+default preview font size and added the fallback-notice UI described above.
+`v0.2.0` can reasonably be tagged; it has not been tagged yet.
 
 **First next action for Part 3:** read `prompts/part-3-interaction-transport.md`
 fresh (`/clear` first per `prompts/README.md`; that prompt recommends
