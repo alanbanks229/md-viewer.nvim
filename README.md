@@ -1,6 +1,8 @@
 # md-viewer.nvim
 
-Browser-quality Markdown previews inside terminal Neovim.
+## Browser-quality Markdown previews inside terminal Neovim.
+
+<img width="1470" height="892" alt="v0.1.0-beta" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
 
 > [!IMPORTANT]
 > The preview is browser-rendered and rasterized. Preview text is not
