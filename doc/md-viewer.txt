@@ -1,0 +1,126 @@
+*md-viewer.txt*              Browser-rendered Markdown preview
+
+=============================================================================
+CONTENTS                                                   *md-viewer-contents*
+
+1. Introduction ........................................... |md-viewer|
+2. Requirements ............................................ |md-viewer-requirements|
+3. Setup ................................................... |md-viewer-setup|
+4. Commands ................................................ |md-viewer-commands|
+5. Preview navigation ...................................... |md-viewer-navigation|
+6. Security ................................................ |md-viewer-security|
+7. Health .................................................. |md-viewer-health|
+
+=============================================================================
+INTRODUCTION                                                     *md-viewer*
+
+md-viewer.nvim renders unsaved Markdown source in a persistent headless
+Chrome or Chromium page, captures the visible viewport as a PNG, and places
+that raster image over a read-only Neovim preview split.
+
+Preview text is not selectable. Source text remains editable and selectable.
+The renderer opens no external browser window, starts no HTTP server, and
+listens on no localhost port. Runtime browser network requests are blocked by
+default.
+
+=============================================================================
+REQUIREMENTS                                         *md-viewer-requirements*
+
+- macOS
+- iTerm2 3.5+ with Kitty graphics enabled, used without tmux
+- Neovim 0.12+
+- Node.js 22.12+
+- an existing Chrome or Chromium installation
+- locked renderer dependencies installed with npm ci
+
+Playwright browser downloads are intentionally disabled. See README.md for
+plugin-manager installation and the required renderer build hook.
+
+=============================================================================
+SETUP                                                       *md-viewer-setup*
+
+Minimal supported iTerm2 configuration: >lua
+
+    require("md-viewer").setup({
+      image = { backend = "kitty_raw" },
+    })
+<
+The complete defaults are documented in README.md and
+lua/md-viewer/config.lua. Important option groups are:
+
+    split       Preview position and size
+    preview     Pinning, winbar, and loading indicator
+    render      Markdown, scale, quality, and scroll behavior
+    browser     Existing browser executable and launch timeout
+    image       Graphical or cell backend and placement behavior
+    sync        Source-following and preview navigation
+    security    Runtime network policy and local document root
+
+Optional exact terminal cell sizes use MD_VIEWER_CELL_WIDTH_PX and
+MD_VIEWER_CELL_HEIGHT_PX.
+
+=============================================================================
+COMMANDS                                                 *md-viewer-commands*
+
+                                                            *:MdViewerOpen*
+:MdViewerOpen [position]
+        Open a preview. Position can be right, left, below, or above.
+
+                                                           *:MdViewerClose*
+:MdViewerClose
+        Close the active preview and remove its owned image.
+
+                                                          *:MdViewerToggle*
+:MdViewerToggle [position]
+        Open or close the active preview.
+
+                                                         *:MdViewerRefresh*
+:MdViewerRefresh
+        Force a fresh render of the active preview.
+
+                                                          *:MdViewerHealth*
+:MdViewerHealth
+        Open detailed environment, backend, renderer, and security status.
+
+                                                           *:MdViewerDebug*
+:MdViewerDebug
+        Open session, renderer, timing, and placement diagnostics.
+
+=============================================================================
+PREVIEW NAVIGATION                                   *md-viewer-navigation*
+
+The graphical preview maps these Normal-mode keys:
+
+    j, k, Down, Up           One rendered line
+    CTRL-E, CTRL-Y           One rendered line
+    CTRL-D, CTRL-U           Half a viewport
+    CTRL-F, CTRL-B           Approximately one viewport
+    PageDown, PageUp         Approximately one viewport
+    gg, G                    Document top or bottom
+
+Mouse-wheel events scroll the preview only when the pointer is over its split.
+
+=============================================================================
+SECURITY                                                 *md-viewer-security*
+
+The default renderer blocks runtime browser networking, disables browser
+JavaScript, rejects remote images, disables raw Markdown HTML, and confines
+local images to a canonical document root. Initial npm ci installation may
+contact the configured npm registry.
+
+See docs/security.md and SECURITY.md before enabling security.network or
+render.raw_html.
+
+=============================================================================
+HEALTH                                                     *md-viewer-health*
+
+Run: >vim
+
+    :checkhealth md-viewer
+    :MdViewerHealth
+    :MdViewerDebug
+<
+Graphical pixel correctness requires direct interactive iTerm2 testing; a
+headless health check cannot validate terminal rendering or flicker.
+
+vim:tw=78:ts=8:noet:ft=help:norl:
