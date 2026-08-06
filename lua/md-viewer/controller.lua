@@ -15,23 +15,24 @@ local group
 local start_ui_poll
 
 local function valid(session)
-  return session and not session.closed and type(session.source_buf) == "number"
-    and type(session.preview_buf) == "number" and type(session.preview_win) == "number"
+  return session
+    and not session.closed
+    and type(session.source_buf) == "number"
+    and type(session.preview_buf) == "number"
+    and type(session.preview_win) == "number"
     and vim.api.nvim_buf_is_valid(session.source_buf)
-    and vim.api.nvim_buf_is_valid(session.preview_buf) and vim.api.nvim_win_is_valid(session.preview_win)
+    and vim.api.nvim_buf_is_valid(session.preview_buf)
+    and vim.api.nvim_win_is_valid(session.preview_win)
 end
 
-local function markdown(session)
-  return table.concat(vim.api.nvim_buf_get_lines(session.source_buf, 0, -1, false), "\n")
-end
+local function markdown(session) return table.concat(vim.api.nvim_buf_get_lines(session.source_buf, 0, -1, false), "\n") end
 
-local function notify_error(message)
-  vim.notify("md-viewer: " .. tostring(message), vim.log.levels.ERROR)
-end
+local function notify_error(message) vim.notify("md-viewer: " .. tostring(message), vim.log.levels.ERROR) end
 
 local function current_session(buf)
   buf = buf or vim.api.nvim_get_current_buf()
-  return state.get(buf) or state.from_preview(buf)
+  return state.get(buf)
+    or state.from_preview(buf)
     or state.from_source_win(vim.api.nvim_get_current_win())
     or state.visible_in_tab()
 end
@@ -52,7 +53,10 @@ end
 
 local function show_cached(session)
   if not valid(session) or session.backend.name == "cells" or not session.last_image_bytes then return false end
-  if update_occlusion(session) then clear_image(session); return false end
+  if update_occlusion(session) then
+    clear_image(session)
+    return false
+  end
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -87,8 +91,14 @@ function M.refresh(session, render_options)
     local function finish()
       if render_options and render_options.on_complete then render_options.on_complete(stale, err) end
     end
-    if not valid(session) then finish(); return end
-    if stale then finish(); return end
+    if not valid(session) then
+      finish()
+      return
+    end
+    if stale then
+      finish()
+      return
+    end
     if err then
       session.render_failed = true
       preview.stop_loading(session)
@@ -97,8 +107,7 @@ function M.refresh(session, render_options)
       return
     end
     local meta = result.metadata
-    local newer_scroll_pending = render_options and render_options.scroll_frame
-      and session.scroll_render_pending
+    local newer_scroll_pending = render_options and render_options.scroll_frame and session.scroll_render_pending
     session.latest_blocks = meta.blocks
     session.document_height_px = meta.documentHeightPx
     session.viewport_height_px = meta.viewportHeightPx
@@ -115,9 +124,13 @@ function M.refresh(session, render_options)
     session.last_capture_ms = meta.captureMs
     session.viewport_width_px = result.viewport.widthPx
     session.viewport_height_render_px = result.viewport.heightPx
-    session.viewport_calibrated = result.viewport.calibrated
+    session.viewport_calibration_tier = result.viewport.tier
     session.last_image_bytes = result.image
-    if update_occlusion(session) then clear_image(session); finish(); return end
+    if update_occlusion(session) then
+      clear_image(session)
+      finish()
+      return
+    end
     preview.stop_loading(session)
     preview.reset_surface(session)
     local placement = preview.placement(session.preview_win, session.backend.name)
@@ -125,9 +138,7 @@ function M.refresh(session, render_options)
     session.preview_height_cells = placement.height
     local image_started = vim.uv.hrtime()
     local ok, image_id, image_err = pcall(function()
-      if session.image_id then
-        return session.backend.update(session.image_id, result.image, placement)
-      end
+      if session.image_id then return session.backend.update(session.image_id, result.image, placement) end
       return session.backend.show(result.image, placement)
     end)
     if not ok or not image_id then
@@ -205,7 +216,11 @@ local function close_session(session)
   session.closed = true
   session.request_serial = session.request_serial + 1
   for _, name in ipairs({
-    "render_timer", "resize_timer", "scroll_settle_timer", "cursor_scroll_timer", "ui_poll_timer",
+    "render_timer",
+    "resize_timer",
+    "scroll_settle_timer",
+    "cursor_scroll_timer",
+    "ui_poll_timer",
   }) do
     debounce.close(session, name)
   end
@@ -227,9 +242,15 @@ end
 
 function M.close_all()
   local copy = {}
-  for _, session in pairs(state.all()) do copy[#copy + 1] = session end
-  for _, session in ipairs(copy) do close_session(session) end
-  for _, name in ipairs({ "nvim_img", "kitty_raw" }) do backends.get(name).clear_all() end
+  for _, session in pairs(state.all()) do
+    copy[#copy + 1] = session
+  end
+  for _, session in ipairs(copy) do
+    close_session(session)
+  end
+  for _, name in ipairs({ "nvim_img", "kitty_raw" }) do
+    backends.get(name).clear_all()
+  end
   process.stop()
 end
 
@@ -240,13 +261,17 @@ function M.open(position)
   local pinned = state.from_source_win(source_win)
   if pinned and valid(pinned) then return pinned end
   if vim.bo[source_buf].buftype ~= "" then
-    notify_error("open a normal Markdown buffer first"); return
+    notify_error("open a normal Markdown buffer first")
+    return
   end
   local backend, reason = backends.select()
-  if not backend then notify_error(reason); return end
+  if not backend then
+    notify_error(reason)
+    return
+  end
   local session = state.create(source_buf, source_win)
   session.backend, session.backend_reason = backend, reason
-  session.preview_buf, session.preview_win = preview.open(position, source_buf)
+  session.preview_buf, session.preview_win = preview.open(position, session)
   if backend.name ~= "cells" then
     preview.start_loading(session)
     navigation.attach(session, M.navigate)
@@ -260,7 +285,11 @@ end
 
 function M.toggle(position)
   local session = current_session()
-  if session then close_session(session) else M.open(position) end
+  if session then
+    close_session(session)
+  else
+    M.open(position)
+  end
 end
 
 function M.navigate(session, action)
@@ -294,7 +323,9 @@ function M.navigate(session, action)
 end
 
 local function each_session(fn)
-  for _, session in pairs(state.all()) do if valid(session) then fn(session) end end
+  for _, session in pairs(state.all()) do
+    if valid(session) then fn(session) end
+  end
 end
 
 local function clear_raw_sessions()
@@ -311,13 +342,19 @@ local function refresh_raw_sessions()
   end)
 end
 
-local function reconcile_placement(session)
+local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
-  if coordinates.same(session.last_placement, placement) then return end
+  if not force and coordinates.same(session.last_placement, placement) then return end
   local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
-  if not ok then notify_error(moved); return end
-  if not moved then notify_error(err or "failed to update image placement"); return end
+  if not ok then
+    notify_error(moved)
+    return
+  end
+  if not moved then
+    notify_error(err or "failed to update image placement")
+    return
+  end
   session.last_placement = placement
 end
 
@@ -341,109 +378,161 @@ start_ui_poll = function(session)
   if interval == 0 or session.ui_poll_timer then return end
   local timer = vim.uv.new_timer()
   session.ui_poll_timer = timer
-  timer:start(interval, interval, vim.schedule_wrap(function()
-    if valid(session) then
-      if update_occlusion(session) then
-        clear_image(session)
-      elseif not session.image_id and not session.ui_suppressed
-          and not session.loading and not session.render_failed then
-        if not show_cached(session) then M.schedule(session, 0) end
+  timer:start(
+    interval,
+    interval,
+    vim.schedule_wrap(function()
+      if valid(session) then
+        if update_occlusion(session) then
+          clear_image(session)
+        elseif
+          not session.image_id
+          and not session.ui_suppressed
+          and not session.loading
+          and not session.render_failed
+        then
+          if not show_cached(session) then M.schedule(session, 0) end
+        else
+          reconcile_placement(session)
+        end
       else
-        reconcile_placement(session)
+        debounce.close(session, "ui_poll_timer")
       end
-    else
-      debounce.close(session, "ui_poll_timer")
-    end
-  end))
+    end)
+  )
 end
 
 function M.setup_autocmds()
   group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
-    group = group, callback = function(args)
-      local session = state.get(args.buf); if session then M.schedule(session) end
+    group = group,
+    callback = function(args)
+      local session = state.get(args.buf)
+      if session then M.schedule(session) end
     end,
   })
   vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       local session = state.get(args.buf)
       if session and config.get().sync.source_to_preview and config.get().sync.cursor_follow then
         local cfg = config.get().sync
-        sync.source_cursor(session, function(value)
-          schedule_source_scroll(value, cfg.cursor_debounce_ms)
-        end, cfg.alignment_tolerance)
+        sync.source_cursor(
+          session,
+          function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
+          cfg.alignment_tolerance
+        )
       end
     end,
   })
   vim.api.nvim_create_autocmd("WinScrolled", {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       local scrolled_win = tonumber(args.match)
       each_session(function(session)
         if scrolled_win == session.source_win and config.get().sync.source_to_preview then
           local cfg = config.get().sync
-          sync.source_cursor(session, function(value)
-            schedule_source_scroll(value, cfg.cursor_debounce_ms)
-          end, cfg.alignment_tolerance)
+          sync.source_cursor(
+            session,
+            function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
+            cfg.alignment_tolerance
+          )
         end
       end)
     end,
   })
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
-    group = group, callback = function()
+    group = group,
+    callback = function()
       each_session(function(session)
         if not update_occlusion(session) then M.schedule(session, 80, "resize_timer") end
       end)
       vim.schedule(reconcile_occlusion)
     end,
   })
-  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume" }, {
-    group = group, callback = function(args)
+  -- FocusGained covers the terminal-side transitions Neovim has no direct
+  -- event for (alternate-screen returns, multiplexer pane/window switches):
+  -- any of them can silently drop a raw Kitty placement, so treat regained
+  -- focus the same as VimResume and recreate it from the cached PNG.
+  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume", "FocusGained" }, {
+    group = group,
+    callback = function(args)
       local source_session = state.get(args.buf)
       if source_session and vim.api.nvim_get_current_buf() == args.buf then
         source_session.source_win = vim.api.nvim_get_current_win()
       end
       each_session(function(session)
-        if not session.image_id and not session.ui_suppressed and not update_occlusion(session)
-          and vim.api.nvim_win_get_tabpage(session.preview_win) == vim.api.nvim_get_current_tabpage() then
+        if
+          not session.image_id
+          and not session.ui_suppressed
+          and not update_occlusion(session)
+          and vim.api.nvim_win_get_tabpage(session.preview_win) == vim.api.nvim_get_current_tabpage()
+        then
           if not show_cached(session) then M.schedule(session, 0) end
         end
       end)
     end,
   })
   vim.api.nvim_create_autocmd("BufFilePost", {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       local session = state.get(args.buf)
       if session then preview.update_title(session) end
     end,
   })
   vim.api.nvim_create_autocmd("WinLeave", {
-    group = group, callback = function()
+    group = group,
+    callback = function()
       -- Placement is screen-relative and must not depend on the active cursor.
       -- Intentionally retain normal split images across focus changes.
     end,
   })
-  vim.api.nvim_create_autocmd({ "CmdlineEnter", "CompleteChanged" }, {
-    group = group, callback = function()
+  vim.api.nvim_create_autocmd({ "CompleteChanged" }, {
+    group = group,
+    callback = function()
       each_session(function(session)
         if session.backend.name == "kitty_raw" then session.ui_suppressed = true end
       end)
       clear_raw_sessions()
     end,
   })
-  vim.api.nvim_create_autocmd({ "CmdlineLeave", "CompleteDone", "WinClosed" }, {
-    group = group, callback = function(args)
+  vim.api.nvim_create_autocmd({ "CompleteDone", "WinClosed" }, {
+    group = group,
+    callback = function(args)
       if args.event ~= "WinClosed" then
         each_session(function(session)
           if session.backend.name == "kitty_raw" then session.ui_suppressed = false end
         end)
       end
       vim.schedule(function()
-        if args.event == "WinClosed" then reconcile_occlusion() else refresh_raw_sessions() end
+        if args.event == "WinClosed" then
+          reconcile_occlusion()
+        else
+          refresh_raw_sessions()
+        end
       end)
     end,
   })
+  -- The command-line reserves its own screen row(s) below every window, so
+  -- unlike a real floating window it can never geometrically overlap the
+  -- preview under normal Neovim layout. The one exception is `cmdheight = 0`,
+  -- which temporarily shrinks the window above the command line for as long
+  -- as it's open. Rather than hide the image for the whole time (blanking it
+  -- on every `:`, `/`, or `?`), just re-place it at the placement's current
+  -- geometry -- a no-op send when nothing changed, and a same-tick resize
+  -- when it did, so the image stays visible and confined instead of
+  -- disappearing. `force = true` bypasses the usual same-placement skip so a
+  -- terminal that erases graphics on its own cmdline redraw gets them
+  -- redrawn immediately rather than waiting for the next unrelated event.
+  vim.api.nvim_create_autocmd({ "CmdlineEnter", "CmdlineLeave" }, {
+    group = group,
+    callback = function()
+      each_session(function(session) reconcile_placement(session, true) end)
+    end,
+  })
   vim.api.nvim_create_autocmd("WinNew", {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       vim.schedule(function()
         local win = tonumber(args.match)
         if win and vim.api.nvim_win_is_valid(win) then
@@ -454,29 +543,41 @@ function M.setup_autocmds()
     end,
   })
   vim.api.nvim_create_autocmd({ "ColorScheme" }, {
-    group = group, callback = function() each_session(function(session) M.schedule(session, 0) end) end,
+    group = group,
+    callback = function()
+      each_session(function(session) M.schedule(session, 0) end)
+    end,
   })
   vim.api.nvim_create_autocmd("OptionSet", {
-    group = group, pattern = "background",
-    callback = function() each_session(function(session) M.schedule(session, 0) end) end,
+    group = group,
+    pattern = "background",
+    callback = function()
+      each_session(function(session) M.schedule(session, 0) end)
+    end,
   })
   vim.api.nvim_create_autocmd("BufHidden", {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       local session = state.from_preview(args.buf)
       if not session and not config.get().preview.pinned then session = state.get(args.buf) end
       if session then close_session(session) end
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
-    group = group, callback = function(args)
+    group = group,
+    callback = function(args)
       local session = state.get(args.buf) or state.from_preview(args.buf)
       if session then close_session(session) end
     end,
   })
   vim.api.nvim_create_autocmd({ "TabLeave", "VimSuspend" }, {
-    group = group, callback = function()
+    group = group,
+    callback = function()
       each_session(function(session)
-        if session.image_id then session.backend.clear(session.image_id); session.image_id = nil end
+        if session.image_id then
+          session.backend.clear(session.image_id)
+          session.image_id = nil
+        end
       end)
     end,
   })

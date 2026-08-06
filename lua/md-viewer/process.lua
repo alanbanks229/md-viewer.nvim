@@ -31,7 +31,11 @@ local function consume(proc, data)
       proc.callbacks[response.id] = nil
       if callback then
         vim.schedule(function()
-          if response.ok then callback(response.result, nil) else callback(nil, response.error or "renderer error") end
+          if response.ok then
+            callback(response.result, nil)
+          else
+            callback(nil, response.error or "renderer error")
+          end
         end)
       end
     end
@@ -41,29 +45,48 @@ end
 function M.start()
   if instance and instance.running then return instance end
   local stdin, stdout, stderr = vim.uv.new_pipe(false), vim.uv.new_pipe(false), vim.uv.new_pipe(false)
-  local proc = { running = false, callbacks = {}, stdout_buffer = "", stderr = {}, next_id = 0,
-    stdin = stdin, stdout = stdout, stderr_pipe = stderr }
+  local proc = {
+    running = false,
+    callbacks = {},
+    stdout_buffer = "",
+    stderr = {},
+    next_id = 0,
+    stdin = stdin,
+    stdout = stdout,
+    stderr_pipe = stderr,
+  }
   local executable = vim.fn.exepath("node")
   if executable == "" then return nil, "Node.js executable not found" end
   local main = plugin_root() .. "/renderer/src/main.js"
   local handle, pid_or_err = vim.uv.spawn(executable, {
-    args = { main }, stdio = { stdin, stdout, stderr }, cwd = plugin_root() .. "/renderer",
+    args = { main },
+    stdio = { stdin, stdout, stderr },
+    cwd = plugin_root() .. "/renderer",
   }, function(code, signal)
     proc.running = false
     proc.exit_code, proc.exit_signal = code, signal
     deliver_error(proc, ("renderer exited (code=%s signal=%s)"):format(code, signal))
     for _, pipe in ipairs({ proc.stdin, proc.stdout, proc.stderr_pipe }) do
-      if pipe and not pipe:is_closing() then pcall(pipe.read_stop, pipe); pipe:close() end
+      if pipe and not pipe:is_closing() then
+        pcall(pipe.read_stop, pipe)
+        pipe:close()
+      end
     end
     if proc.handle and not proc.handle:is_closing() then proc.handle:close() end
   end)
   if not handle then
-    stdin:close(); stdout:close(); stderr:close()
+    stdin:close()
+    stdout:close()
+    stderr:close()
     return nil, "failed to start renderer: " .. tostring(pid_or_err)
   end
   proc.handle, proc.pid, proc.running = handle, pid_or_err, true
   stdout:read_start(function(err, data)
-    if err then proc.last_error = err else consume(proc, data) end
+    if err then
+      proc.last_error = err
+    else
+      consume(proc, data)
+    end
   end)
   stderr:read_start(function(_, data)
     if data then
@@ -77,13 +100,17 @@ end
 
 function M.request(method, params, callback)
   local proc, err = M.start()
-  if not proc then callback(nil, err); return nil end
+  if not proc then
+    callback(nil, err)
+    return nil
+  end
   proc.next_id = proc.next_id + 1
   local id = proc.next_id
   proc.callbacks[id] = callback
   proc.stdin:write(protocol.encode({ id = id, method = method, params = params }), function(write_err)
     if write_err and proc.callbacks[id] then
-      local cb = proc.callbacks[id]; proc.callbacks[id] = nil
+      local cb = proc.callbacks[id]
+      proc.callbacks[id] = nil
       vim.schedule(function() cb(nil, "renderer stdin: " .. tostring(write_err)) end)
     end
   end)
@@ -92,8 +119,13 @@ end
 
 function M.status()
   if not instance then return { running = false } end
-  return { running = instance.running, pid = instance.pid, last_error = instance.last_error,
-    exit_code = instance.exit_code, stderr = table.concat(instance.stderr, "") }
+  return {
+    running = instance.running,
+    pid = instance.pid,
+    last_error = instance.last_error,
+    exit_code = instance.exit_code,
+    stderr = table.concat(instance.stderr, ""),
+  }
 end
 
 function M.stop()
@@ -107,7 +139,8 @@ function M.stop()
   if proc.handle and not proc.handle:is_closing() then
     local timer = vim.uv.new_timer()
     timer:start(1000, 0, function()
-      timer:stop(); timer:close()
+      timer:stop()
+      timer:close()
       if proc.running and proc.handle and not proc.handle:is_closing() then proc.handle:kill("sigterm") end
     end)
   end

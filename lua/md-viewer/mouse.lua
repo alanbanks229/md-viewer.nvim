@@ -43,7 +43,9 @@ function M.attach(navigate)
   if installed or not config.get().sync.mouse_scroll then return end
   installed = true
   for _, mode in ipairs(modes) do
-    for _, wheel in ipairs(wheels) do install(mode, wheel) end
+    for _, wheel in ipairs(wheels) do
+      install(mode, wheel)
+    end
   end
 end
 
@@ -59,8 +61,6 @@ function M.detach_if_unused()
   installed, callback, saved = false, nil, {}
 end
 
-function M.is_attached()
-  return installed
-end
+function M.is_attached() return installed end
 
 return M

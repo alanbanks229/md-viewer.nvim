@@ -13,21 +13,15 @@ local images = {
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
 }
 
-local function bytes(index)
-  return vim.base64.decode(images[index])
-end
+local function bytes(index) return vim.base64.decode(images[index]) end
 
 local function clear_id(id)
-  if id and vim.ui and vim.ui.img and vim.ui.img.del then
-    pcall(vim.ui.img.del, id)
-  end
+  if id and vim.ui and vim.ui.img and vim.ui.img.del then pcall(vim.ui.img.del, id) end
   owned[id] = nil
 end
 
 local function draw()
-  if not (preview_win and vim.api.nvim_win_is_valid(preview_win)) then
-    return
-  end
+  if not (preview_win and vim.api.nvim_win_is_valid(preview_win)) then return end
   local img = vim.ui and vim.ui.img
   if type(img) ~= "table" or type(img.set) ~= "function" then
     vim.notify("md-viewer spike: vim.ui.img is unavailable in this Neovim build", vim.log.levels.ERROR)
@@ -45,9 +39,7 @@ local function draw()
   -- Create first, then delete old: the spike deliberately exercises the
   -- least-gap replacement strategy. Only IDs created here are deleted.
   for id in pairs(owned) do
-    if id ~= new_id then
-      clear_id(id)
-    end
+    if id ~= new_id then clear_id(id) end
   end
 end
 
@@ -87,8 +79,13 @@ function M.start()
   vim.bo[preview_buf].modifiable = false
   vim.bo[preview_buf].readonly = true
   for name, value in pairs({
-    number = false, relativenumber = false, signcolumn = "no",
-    foldcolumn = "0", wrap = false, cursorline = false, spell = false,
+    number = false,
+    relativenumber = false,
+    signcolumn = "no",
+    foldcolumn = "0",
+    wrap = false,
+    cursorline = false,
+    spell = false,
   }) do
     vim.wo[preview_win][name] = value
   end
@@ -105,9 +102,7 @@ end
 
 function M.stop()
   M.clear()
-  if preview_win and vim.api.nvim_win_is_valid(preview_win) then
-    vim.api.nvim_win_close(preview_win, true)
-  end
+  if preview_win and vim.api.nvim_win_is_valid(preview_win) then vim.api.nvim_win_close(preview_win, true) end
 end
 
 vim.api.nvim_create_user_command("MdViewerSpikeStart", M.start, {})

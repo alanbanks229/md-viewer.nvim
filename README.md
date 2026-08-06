@@ -288,6 +288,8 @@ npm test --prefix renderer
 
 Contributor workflow, architecture notes, and release checks are in
 [docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
+How this project versions and cuts releases, in plain language with worked
+examples, is in [VERSIONING.md](VERSIONING.md).
 
 ## License
 

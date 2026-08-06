@@ -52,14 +52,20 @@ function M.clear(image_id)
 end
 
 function M.clear_all()
-  for id in pairs(owned) do M.clear(id) end
+  for id in pairs(owned) do
+    M.clear(id)
+  end
 end
 
 function M.health()
   local ok, reason = M.detect()
-  return { available = ok, reason = reason, owned_images = vim.tbl_count(owned),
+  return {
+    available = ok,
+    reason = reason,
+    owned_images = vim.tbl_count(owned),
     render_succeeded = last_render_succeeded,
-    strategy = config.get().image.double_buffer and "create-then-delete" or "delete-then-create" }
+    strategy = config.get().image.double_buffer and "create-then-delete" or "delete-then-create",
+  }
 end
 
 return M
