@@ -14,8 +14,9 @@ repository right now, not what was planned.
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 | 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
 | 4 | Mouse layer, click-to-source, safe links | `e3139e8` |
+| 5 | Exact source provenance — inline mapping, byte-accurate columns | see the Part 5 section below |
 
-Parts 1–2 were merged to `main` via PR #1. Parts 3–4 are on the branch
+Parts 1–2 were merged to `main` via PR #1. Parts 3–5 are on the branch
 `feat/interaction-transport`, cut from `main`, and have not been pushed.
 
 ---
@@ -1504,3 +1505,384 @@ contracts from Part 4:
   `captured`/`is_captured` capture model are the state machine Part 6 extends;
   Part 5 should not need to touch `interaction.lua`'s gesture handling at all,
   only the source-position precision it consumes.
+
+---
+
+## What Part 5 actually built
+
+Exact source provenance: a click now reports the Markdown **line and UTF-8 byte
+column** it came from, wherever markdown-it's own parse state can establish one,
+and degrades to `line` / `block` / `none` where it cannot.
+
+Two new renderer modules, four changed, one Lua file changed (two real bug fixes,
+both described below — neither was part of the plan).
+
+### The approach, and why this one
+
+markdown-it publishes `token.map` for block tokens and **nothing** for inline
+ones. Three approaches were considered:
+
+1. **Instrument markdown-it's inline parser in place** — chosen.
+2. A second position-aware pass aligned against the token stream — rejected.
+   Re-scanning a line for a token's rendered text collides the moment a block
+   contains the same word twice (`apple banana apple`), and collides *silently*.
+3. A third-party markdown-it plugin exposing inline positions — none found that
+   is both maintained and small enough to audit.
+
+Swapping parsers was forbidden and was not considered.
+
+The instrumentation is three layers, each testable on its own:
+
+**Layer 1 — span capture (parse time).** `renderer/src/provenance.js` wraps every
+rule in `md.inline.ruler`. Each token records `[start, end)` **within its own
+inline token's `content` string**, taken from the parser's cursor rather than by
+searching. Two facts from `rules_inline/state_inline.mjs` and
+`parser_inline.mjs` make it work:
+
+- `StateInline.push()` flushes `pending` *before* creating its token, so a text
+  run's span is `[pendingStart, state.pos)` — the run being closed and the token
+  being opened share one `pos`, which is what keeps the spans from overlapping.
+- `pendingStart` is captured on rule entry whenever `state.pending === ""`. The
+  `text` rule is tried first on every tokenize iteration, so this fires before
+  any character can accumulate — including through `tokenize`'s own
+  `state.pending += state.src[state.pos++]` fallback, which appends outside any
+  rule and would otherwise be unobservable.
+- Tokens a rule pushes directly get `start` at push time and `end` when that rule
+  returns true. A token a nested rule already closed keeps its own tighter end.
+
+Silent (validation-mode) rule calls are passed straight through and record
+nothing — they move `state.pos` speculatively.
+
+Recorded spans are deliberately allowed to be *wider* than the token's content:
+the `newline` rule trims trailing spaces off `pending` before pushing a break,
+and `link` moves `pos` onto the label before flushing the text in front of `[`.
+Both leave the content as a prefix of the slice, which layer 3 accepts.
+
+**Layer 2 — line alignment (core rule).** An inline token's `content` is
+*derived* from its source lines: block rules strip a prefix (indent, `>`, `-`,
+`1.`, `#`) and the enclosing `.trim()` strips the ends. `alignLine()` anchors the
+derived line against the end of its source line first — the only test that stays
+correct when the derived text occurs twice on one line — then falls back to a
+**unique** `indexOf` (which is what makes `## Heading ##` work), then gives up.
+The search window moves forward only, inside `[map[0], map[1])`, which absorbs
+lines that vanished before inline parsing: `alertPlugin` strips a whole `[!NOTE]`
+line off a blockquote's content, so its content line 0 belongs to source line
+`map[0] + 1`.
+
+**Layer 3 — reconciliation (render time).** The renderer rules compare each
+token's *final* content against its recorded source slice and accept one of three
+alignments — `startsWith`, `endsWith`, or a unique interior `indexOf` — all of
+which guarantee `slice.slice(base, base + rendered.length) === rendered`, so the
+offset mapping is a plain identity. Anything else emits **no region at all**.
+
+Doing this at render time rather than at parse time is what makes plugin
+mutations self-correcting: `markdown-it-task-lists` slices four characters off a
+list item's text long after layer 1 ran, and the `endsWith` branch shifts the
+base instead of reporting a column four positions to the left.
+
+### The two markdown-it rules that had to be replaced
+
+`fragments_join` (inline ruler2) and `text_join` (core) both **merge adjacent
+text tokens**, which would leave the survivor carrying only the last fragment's
+span. Both are replaced with span-aware copies via `Ruler.at()`, which throws
+`Parser rule not found` if either name ever moves — so a markdown-it upgrade
+fails loudly at construction rather than silently reporting stale columns. A test
+also renders a stock parser and the same parser with provenance installed and
+asserts the HTML is **identical** once the added attributes and wrappers are
+stripped.
+
+`text_join` has one deliberate behavioural difference: it does **not** merge
+across an entity or escape. `&amp;` is five source characters rendering as one
+and `\*` is two rendering as one; merging either into the surrounding prose would
+make the whole merged run's offsets non-linear and the run would have to be
+discarded. Keeping them separate costs one extra `<span>` and keeps exact
+provenance for the prose *and* for the entity.
+
+### What the DOM carries, and what it does not
+
+Every rendered text run becomes `<span data-md-source-id="sN">`; `code_inline`,
+`img`, and every block element get the attribute directly. The id is **opaque**
+— a test asserts every id in the markup matches `^s\d+$`. The mapping lives in
+`markdownCache` in Node memory, written and evicted with the markup it describes
+so the two can never disagree about which render they belong to.
+
+Inline spans do not affect layout or whitespace collapsing, and this was verified
+rather than assumed: `collectBlockGeometry()` for `kitchen-sink.md` produces the
+**same 30 blocks and the same 1953px document height** before and after.
+`data-source-start`/`data-source-end` are untouched.
+
+`data-md-source-id` is allowlisted on `"*"`, alongside the block attributes,
+because provenance lands on essentially every tag. A `rawHtml: true` document can
+forge one, and the bounded consequence is that it sends its own click somewhere
+else *within itself* — the same exposure `data-source-start` already had. Ids are
+validated by lookup, so a forged key that does not exist resolves to nothing.
+
+### Source map shape
+
+```js
+{ version: 1,
+  lines: [...],            // markdown-it-normalized source lines, 0-based
+  regions: {
+    s7:  { kind: "inline", mapping: "identity", line, startCol16, len16 },
+    s8:  { kind: "point",  mapping: "point",    line, startCol16 },
+    s12: { kind: "code",   mapping: "lines",    startLine, columns, lengths },
+    s3:  { kind: "block",  mapping: "block",    line, endLine },
+  } }
+```
+
+Lines are **0-based throughout the source map**, on purpose: the single 0→1
+conversion stays in `interact.js:resolveSourcePosition()` where Part 3 put it, so
+there is exactly one `+ 1` in the whole chain. `byteColumn` is a 0-based byte
+offset, matching `nvim_win_set_cursor()`.
+
+Regions store columns, not text; the normalized source lines are stored once per
+document and every byte column is computed against them.
+
+### UTF-16 → UTF-8
+
+`renderer/src/utf.js` is separate, pure, and has no markdown-it or DOM
+dependency, so a provenance failure can be localised to a layer.
+`utf16ToByteOffset()` clamps, snaps a caret that split a surrogate pair **back**
+onto the character (snapping forward would skip a character the user clicked
+directly on), then sums per-code-point widths. `byteToUtf16Offset()` is the
+inverse and exists so the tests can check round-trips rather than spot values;
+every case is cross-checked against `Buffer.byteLength`.
+
+### Precision policy
+
+| Situation | Result |
+|---|---|
+| identity region, caret offset present | `exact`, mapped offset |
+| point region (an image) | `exact` at the construct's first character |
+| code-block region, caret offset present | `exact`, line and column inside the fence |
+| any region, **no** caret offset | `line` at that region's own line |
+| no region, block spans one source line | `line` (unchanged from Part 3) |
+| no region, block spans several lines | `block` (unchanged) |
+| no block | `none` (unchanged) |
+
+The distinction in row 4 caught a real bug during development: `Number(null)` is
+`0`, so an element-only hit — which carries no caret — briefly claimed `exact` at
+column 0. The offset is now required to be strictly a number.
+
+### Fenced and indented code blocks
+
+Included at the operator's decision. A fence's `token.content` is the source
+verbatim apart from the block's own indent, so each rendered line maps straight
+back — but only if **every** line matches, which is checked line by line at build
+time rather than assumed. `getLines()` re-expands a deeper indent as *spaces*, so
+a tab-indented line inside a fence fails the check and the whole block degrades
+to `block`, honestly. The in-page offset walk sums text nodes across highlight.js's
+syntax spans, so a click lands correctly several nodes in — there is a browser
+test that specifically asserts the target text node was preceded by others.
+
+### Table cells
+
+markdown-it gives a table cell's inline token **no map at all** (only the table,
+thead, tbody and tr tokens get one — `rules_block/table.mjs`). An inline token
+with no map of its own now borrows the innermost enclosing block's. That widens
+the search window; it does not weaken the check, because the alignment must still
+match a real source line unambiguously — a row with two identical cells degrades
+rather than guessing. This was not in the plan; it was found by dumping the
+fixture's regions and noticing the table produced none.
+
+---
+
+## Two latent bugs from Part 4, found by Part 5's verification
+
+Both were invisible while every byte column was 0. Both are user-facing. Neither
+was found by the automated suites — they were found by running the real thing.
+
+### 1. Every unmodified click was silently refused
+
+`vim.json.encode({})` produces `[]`, not `{}`. `validateEnvelope` rejects an
+array for `modifiers` with `INVALID_INTERACTION`, and `interaction.lua`'s
+callback does `if err or not result then return end`. So from Part 4 until now,
+**every plain left-click sent `modifiers: []`, was refused by the renderer, and
+did nothing at all.** Ctrl/Cmd-click worked, because it passes a populated table
+that encodes as an object.
+
+Three things hid it: the Lua table looked correct, the Lua tests stub
+`process.request` and so never encode anything, and the failure path is a silent
+`return`. `interaction.request_hit()` now states all four modifiers explicitly so
+the table can only encode as an object, and the test asserts the **encoded wire
+form**, not the Lua table.
+
+### 2. `move_source_cursor` read a field name that never arrives
+
+It read `position.byte_column`; the renderer sends `byteColumn`. The cursor
+therefore always went to column 0 — which was the correct answer for every
+column Part 4 could produce, so nothing failed. It reads `byteColumn` now, with
+`byte_column` kept as an alias so Part 4's own tests still pass.
+
+Both bugs are the same lesson this project already learned once with
+`:MdViewerHealth` in Part 1: a library function passing its unit tests is not the
+same claim as the real path working.
+
+---
+
+## Tests run and results (Part 5)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+  -> added 30 packages, 0 vulnerabilities
+
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+  -> md-viewer Lua tests: 360 assertions passed (348 at the end of Part 4)
+
+npm test --prefix renderer   (node --test ../tests/node/*.test.js)
+  -> tests 96, pass 96, fail 0   (61 before this part)
+
+stylua --check lua/ plugin/ tests/lua/
+  -> clean (no diff)
+```
+
+The 35 new Node tests split into 7 for the UTF converter in isolation and 28 for
+provenance, of which 27 need no browser at all — they call `renderMarkdown()` and
+`resolveRegionPosition()` directly, so a failure names the layer that broke. The
+browser-backed one drives real Chromium and `t.skip`s with a named reason if no
+executable is discoverable, matching the pattern from Part 1.
+
+Test material is in `tests/fixtures/provenance.md` (new).
+**`tests/fixtures/kitchen-sink.md` was deliberately not edited** —
+`tests/node/interact.test.js` hardcodes its block line ranges.
+
+Per policy §5, `:MdViewerDebug` was invoked as the actual command in a headless
+session and renders `interaction_last_precision = "exact"` across 84 lines with
+no embedded newlines (the Part 1 crash class).
+
+**Beyond the policy §5 minimum**, a headless script drove a real click through
+the real transport — Lua → NDJSON → Node subprocess → Chromium → back → cursor —
+sweeping x across the rendered `Some **bold text** and a [link label](...) here.`
+paragraph. The resolved source columns advance monotonically with x (…24, 26, 28,
+30, 32, 33, 34, 36) and then **jump from 36 to 59**, correctly stepping over the
+`](https://example.com)` that renders as nothing. The source cursor landed on
+exactly the reported byte. This is the script that found both Part 4 bugs above;
+the plugin's own controller could not be used, because headless auto-selection
+lands on the `cells` backend, which never invokes the browser.
+
+---
+
+## Known limitations and unresolved risks (Part 5)
+
+- **No graphical validation was performed.** This environment has no attached
+  graphical terminal (`TERM_PROGRAM=vscode`, unchanged from every prior part).
+  The end-to-end check above proves the conversion, transport, and cursor
+  movement against a real browser; it does **not** prove that a click a human
+  makes with a mouse in a real Kitty/iTerm2/WezTerm session lands where their eye
+  expects, because no code path here can synthesize a real terminal mouse report.
+  Per policy §4 this is stated as unvalidated. The manual steps are in
+  `prompts/part-5-source-provenance.md` under "Operator verification" and are the
+  highest-value open item in this part.
+- **Auto-linkified bare URLs degrade to line/block precision.** markdown-it's
+  core `linkify` rule replaces the text token containing the URL with tokens it
+  builds itself, which carry no recorded span. Per the operator's decision the
+  rule is **not** replaced; the degradation is narrowly scoped (the prose on
+  either side of the URL in the same paragraph stays exact) and is covered by a
+  dedicated test. `deriveSpan()` in `provenance.js` is the documented, tested
+  seam for changing this later: a span-aware linkify replacement calls it to give
+  its rewritten tokens real spans. Explicit `[label](url)` links are unaffected
+  and exact.
+- **Task-list item text has no provenance.** `markdown-it-task-lists` with
+  `labelAfter` discards the item's text token and rebuilds the text inside a raw
+  `html_inline` `<label>`, so no text token survives to carry a span. Reported as
+  `block` honestly. Fixing it would mean forking or replacing the plugin.
+- **Multi-line inline code degrades.** markdown-it rewrites the newline in
+  `` `a\nb` `` to a space, so the rendered run matches no single source line.
+  Rejected rather than approximated; tested.
+- **A NUL byte in the source shifts every byte column after it on that line.**
+  markdown-it's `normalize` rule replaces `\0` with U+FFFD (1 byte becomes 3) and
+  `token.map` indexes the normalized text, so the columns are measured against
+  it. Pathological and untested against a real buffer. CRLF is a non-issue —
+  `controller.lua` builds the markdown from `nvim_buf_get_lines`, which never
+  includes `\r`.
+- **The normalized source lines are cached per document**, up to the existing
+  LRU of 64. That is roughly one extra copy of each document in the renderer
+  process, alongside the HTML already cached there. Regions themselves store
+  columns, not text.
+- **`__rules__` is a markdown-it internal.** Enumerating the inline rule names
+  needs it; there is no public enumeration. Guarded by an explicit named throw if
+  the shape ever changes, by `Ruler.at()`'s own "Parser rule not found", and by
+  the identical-output test. markdown-it is pinned at 14.3.0.
+- Carried forward and unchanged: the CI matrix's Ubuntu leg is still untriggered;
+  the `config.setup()` reassign-before-validate quirk is still unfixed;
+  `terminal.probe = "safe"` is still unimplemented; Windows discovery remains
+  unadvertised; Kitty, Ghostty, Warp, and all Linux terminals remain graphically
+  unvalidated for the whole project.
+
+---
+
+## Decisions that changed assumptions in the original specification (Part 5)
+
+- **The parser is instrumented, not reimplemented.** The part prompt's first
+  candidate approach ("hook the inline token stream and track `state.pos`") is
+  what shipped, but the obvious mechanism — copying `ParserInline.tokenize` so
+  the loop can be observed — turned out to be unnecessary. Wrapping the ruler's
+  rules gives the same two observation points (`pendingStart` on entry, `end` on
+  success) without duplicating any parser logic, because the `text` rule runs
+  first on every iteration.
+- **Two markdown-it rules are replaced, and that was not anticipated by the
+  prompt.** `fragments_join` and `text_join` merge text tokens; without
+  span-aware copies every merged run would report its last fragment's position.
+  This is the single largest source of upgrade risk in the part and is guarded
+  three ways (see above).
+- **Fenced-code and table-cell provenance were added.** Fences on the operator's
+  explicit decision; table cells because the fixture dump showed markdown-it
+  gives cell inline tokens no map, and borrowing the enclosing row's map makes
+  them exact for the price of four lines. Neither was named in the prompt.
+- **Entities and escapes are kept as separate rendered runs**, a deliberate
+  divergence from markdown-it's `text_join`. See above for why.
+- **`data-md-source-id` is allowlisted on `"*"`, not per tag.** The plan called
+  for a tighter per-tag list, matching Part 4's heading-`id` posture. It was
+  written and then reverted: block regions put the attribute on essentially every
+  rendered tag, so the "tight" list was the whole allowlist with extra steps and
+  the same exposure the existing `data-source-*` entries already have.
+- **Part 4's precision assertions were updated, not deleted**, as the prompt
+  required. The pure `resolveSourcePosition(block)` sweep stays — block-only
+  resolution still cannot be exact, and that is the point. The interaction sweep
+  is now the inverse claim: every label is one of the four honest ones, a claimed
+  column is inside the line it names, and at least half the fixture's blocks
+  resolve exactly.
+- **One Lua file changed** (`interaction.lua`), which the prompt predicted would
+  not be necessary ("the Lua side should need no change beyond accepting real
+  byte columns"). It was necessary for two reasons neither of which is about
+  accepting columns — see "Two latent bugs from Part 4" above.
+
+`prompts/part-6-selection-and-search.md` was edited: its "Verified repository
+facts" now records the empty-table-encodes-as-array trap (Part 6 adds more
+envelope fields and will hit it), that Part 5 has run so search match positions
+can be exact, and that `move_source_cursor` reads `byteColumn`. No part boundary
+moved. `prompts/part-7-hardening-and-docs.md` needed no edit — its compatibility
+matrix already lists "exact source columns" as a row to fill in.
+
+---
+
+## Safe stopping point and first next action
+
+The tree is green: all four policy §5 commands pass (360/360 Lua assertions,
+96/96 Node tests, stylua clean), `:MdViewerDebug` has been invoked as a real
+command in a headless session, and a real click has been resolved end to end
+through the real renderer subprocess and real Chromium.
+
+**The one thing that has not been done is the manual check, and for this part it
+matters more than for any other.** A wrong byte column does not crash; it puts
+the cursor in the wrong place, in exactly the cases nobody tests by hand. Run
+"Operator verification" in `prompts/part-5-source-provenance.md` in a real
+graphical terminal before building on top of this — the multibyte cases (`日本語`
+and `🎉`) are the ones that matter, because being a few columns off there means
+the UTF-16→UTF-8 conversion is wrong.
+
+**First next action for Part 6:** read `prompts/part-6-selection-and-search.md`
+fresh (`/clear` first per `prompts/README.md`). Settled contracts it can rely on:
+
+- `result.sourcePosition` is `{ line (1-based), byteColumn (0-based bytes),
+  precision }` where precision is `exact`, `line`, `block`, or `none`, and
+  `result.hit.sourceId` is the opaque key of the region that was hit.
+- `resolveRegionPosition(sourceMap, sourceId, offset)` in
+  `renderer/src/provenance.js` is the only resolver; it returns a **0-based**
+  line, and the single conversion to Neovim's 1-based lines is in
+  `interact.js:resolveSourcePosition()`.
+- `hitTestInPage` returns `inline: { sourceId, offset, textLength }`, where
+  `offset` is the caret's position within the whole region — summed across text
+  nodes, which is what makes highlighted code blocks resolvable.
+- Any optional map in an envelope must always carry a key or use
+  `vim.empty_dict()`, and its test must assert the encoded wire form.

@@ -82,6 +82,25 @@ return function(t)
     t.eq("line", session.last_interaction_precision, "the resolved precision is recorded on the session")
     t.eq("source", session.last_interaction_kind, "the resolved kind is recorded on the session")
 
+    -- An unmodified click carries no modifiers, and `vim.json.encode({})` emits
+    -- `[]` -- which validateEnvelope refuses ("modifiers must be an object of
+    -- booleans"). The refusal was swallowed by the error branch in M.click, so
+    -- every plain click silently did nothing. Assert the encoded wire form, not
+    -- the Lua table, because the Lua table looked correct the whole time.
+    local encoded = require("md-viewer.protocol").encode(requests[1].params)
+    t.eq(
+      true,
+      encoded:find('"modifiers":{', 1, true) ~= nil,
+      "modifiers must encode as a JSON object, never as an empty array"
+    )
+    t.eq(false, encoded:find('"modifiers":[]', 1, true) ~= nil, "the empty-array encoding is what the renderer rejects")
+    local decoded = vim.json.decode(encoded).modifiers
+    t.eq(
+      { ctrl = false, shift = false, alt = false, meta = false },
+      decoded,
+      "all four modifiers are stated explicitly"
+    )
+
     -- A drag never issues a request at all.
     local drag_requests = {}
     process.request = function(...) drag_requests[#drag_requests + 1] = true end
@@ -152,6 +171,91 @@ return function(t)
     local cursor_before = vim.api.nvim_win_get_cursor(source_win)
     interaction.move_source_cursor(session, { line = nil, byte_column = nil, precision = "none" })
     t.eq(cursor_before, vim.api.nvim_win_get_cursor(source_win), "an unresolved source position never moves the cursor")
+
+    vim.api.nvim_win_close(source_win, true)
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Part 5: a real, non-zero byte column arriving with precision "exact".
+  --
+  -- Part 4 built the clamping and the UTF-8 boundary walk this relies on, but
+  -- every column it ever saw was 0. The renderer's UTF-16 -> UTF-8 conversion
+  -- is tested on its own in tests/node/utf.test.js; what is checked here is
+  -- the other half of the claim -- that a column derived from multibyte text
+  -- survives this function unchanged instead of being clamped or shifted.
+  -- ---------------------------------------------------------------------
+  do
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    local prefix = "Unicode line: caf\xc3\xa9 "
+    local cjk = "\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e"
+    local emoji = "\xf0\x9f\x8e\x89"
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { prefix .. cjk .. " " .. emoji .. " done." })
+    vim.cmd("botright new")
+    local source_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(source_win, source_buf)
+    local session = { source_buf = source_buf, source_win = source_win, sync_guard = false }
+    config.setup({ interaction = { focus_source_on_click = false } })
+
+    -- The columns the renderer reports for a click on each run: 20 bytes of
+    -- "Unicode line: café " (19 characters -- the é is two bytes), then 10 more
+    -- for the three 3-byte CJK characters plus a space.
+    local cjk_column = #prefix
+    local emoji_column = cjk_column + #cjk + 1
+    t.eq(20, cjk_column, "the CJK run starts 20 bytes in, where a column count would say 19")
+    t.eq(30, emoji_column, "the emoji starts 30 bytes in, where a column count would say 23")
+
+    -- `byteColumn`, not `byte_column`: this is the renderer's own wire field,
+    -- which is what result.sourcePosition actually carries. Part 4's tests used
+    -- the snake_case name only, which is why the field-name mismatch in
+    -- move_source_cursor survived until a non-zero column existed to expose it.
+    interaction.move_source_cursor(session, { line = 1, byteColumn = cjk_column, precision = "exact" })
+    t.eq({ 1, cjk_column }, vim.api.nvim_win_get_cursor(source_win), "an exact column onto CJK is used verbatim")
+
+    interaction.move_source_cursor(session, { line = 1, byteColumn = emoji_column, precision = "exact" })
+    t.eq({ 1, emoji_column }, vim.api.nvim_win_get_cursor(source_win), "an exact column onto an emoji is used verbatim")
+
+    -- The boundary walk still protects against a column inside a character,
+    -- which is what a broken conversion upstream would produce.
+    interaction.move_source_cursor(session, { line = 1, byteColumn = emoji_column + 2, precision = "exact" })
+    t.eq(
+      { 1, emoji_column },
+      vim.api.nvim_win_get_cursor(source_win),
+      "a column inside the emoji clamps back to its start"
+    )
+
+    -- The snake_case alias still works, so nothing Part 4 wrote regressed.
+    interaction.move_source_cursor(session, { line = 1, byte_column = cjk_column, precision = "exact" })
+    t.eq({ 1, cjk_column }, vim.api.nvim_win_get_cursor(source_win), "the snake_case alias is still honoured")
+
+    vim.api.nvim_win_close(source_win, true)
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Part 5: an exact hit round-trips through the click path and is recorded
+  -- for :MdViewerDebug, which is the only place a user ever sees the label.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(source_buf, 0, -1, false, { "Some **bold text** here." })
+    vim.cmd("botright new")
+    local source_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(source_win, source_buf)
+    session.source_buf, session.source_win = source_buf, source_win
+
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      callback({ kind = "source", sourcePosition = { line = 1, byteColumn = 12, precision = "exact" } }, nil)
+    end
+    config.setup({ interaction = { focus_source_on_click = false } })
+    interaction.click(session, { x = 1, y = 1 }, 1)
+    process.request = original_request
+
+    t.eq("exact", session.last_interaction_precision, "an exact precision is recorded on the session")
+    t.eq({ 1, 12 }, vim.api.nvim_win_get_cursor(source_win), "the click lands on 'text', past the '**'")
+    local entry = debug.snapshot().sessions[tostring(session.source_buf)]
+      or { interaction_last_precision = session.last_interaction_precision }
+    t.eq("exact", entry.interaction_last_precision, "the debug snapshot reports the exact label")
 
     vim.api.nvim_win_close(source_win, true)
   end

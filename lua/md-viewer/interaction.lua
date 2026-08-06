@@ -82,10 +82,17 @@ function M.on_drag(session, mouse)
 end
 
 ---Move the source cursor to `position` (a hit-test source position: `line`,
----`byte_column`, `precision`), clamped to the buffer and to a valid UTF-8
+---`byteColumn`, `precision`), clamped to the buffer and to a valid UTF-8
 ---byte boundary, going through the same sync-guard technique
 ---`sync.update_source_from_scroll` uses so this cannot feed back into a
 ---preview scroll.
+---
+---`byteColumn` is the renderer's own wire field, which is what
+---`result.sourcePosition` actually carries. `byte_column` is accepted as an
+---alias: Part 4 read only the snake_case name, and because every column the
+---renderer produced back then was 0 the mismatch was invisible -- the cursor
+---landed at column 0, which was also the correct answer. Part 5 is the first
+---part that sends a column worth getting wrong.
 function M.move_source_cursor(session, position)
   if not (position and position.line ~= nil) then return end
   local win = session.source_win
@@ -94,7 +101,8 @@ function M.move_source_cursor(session, position)
   local line_count = vim.api.nvim_buf_line_count(buf)
   local line = math.max(1, math.min(line_count, math.floor(position.line)))
   local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-  local byte_col = math.max(0, math.min(math.floor(position.byte_column or 0), #text))
+  local requested = position.byteColumn or position.byte_column or 0
+  local byte_col = math.max(0, math.min(math.floor(requested), #text))
   while byte_col > 0 and byte_col < #text do
     local byte = text:byte(byte_col + 1)
     if not (byte and (byte & 0xC0) == 0x80) then break end
@@ -170,6 +178,14 @@ function M.request_hit(session, point, modifiers, click_count, callback)
   -- of what the visible image actually shows; `applied_scroll_y` is what the
   -- last completed render/capture put there, i.e. what the user is looking
   -- at and clicking on.
+  --
+  -- Every modifier is stated explicitly, and that is load-bearing rather than
+  -- tidy: `vim.json.encode({})` emits `[]`, not `{}`, and validateEnvelope
+  -- rejects an array for `modifiers`. An unmodified click -- which passes no
+  -- modifiers at all -- therefore used to be refused with INVALID_INTERACTION
+  -- and swallowed by the error branch below, so click-to-source did nothing.
+  -- A table that always has four keys can only ever encode as an object.
+  modifiers = modifiers or {}
   process.request("interact", {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
@@ -178,7 +194,12 @@ function M.request_hit(session, point, modifiers, click_count, callback)
     viewportWidthPx = session.viewport_width_px,
     viewportHeightPx = session.viewport_height_render_px,
     scrollY = session.applied_scroll_y or 0,
-    modifiers = modifiers or {},
+    modifiers = {
+      ctrl = modifiers.ctrl == true,
+      shift = modifiers.shift == true,
+      alt = modifiers.alt == true,
+      meta = modifiers.meta == true,
+    },
     clickCount = click_count or 1,
   }, callback)
 end

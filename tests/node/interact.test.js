@@ -166,10 +166,18 @@ test("source positions convert 0-based exclusive markdown-it maps to 1-based Neo
   }
 });
 
-test("no pure source resolution can report exact precision in this part", () => {
+test("block-only resolution can never report exact precision", () => {
+  // Still true after Part 5, and still the point: a block carries no column, so
+  // resolution that has only a block to work from must not manufacture one. What
+  // changed is that a hit can now *also* carry an inline region -- see
+  // tests/node/source-provenance.test.js for what that resolves to.
   for (let start = 0; start < 40; start += 1) {
     for (let span = 1; span < 12; span += 1) {
       assert.notEqual(resolveSourcePosition({ sourceStart: start, sourceEnd: start + span }).precision, "exact");
+      assert.notEqual(
+        resolveSourcePosition({ sourceStart: start, sourceEnd: start + span }, null, null).precision,
+        "exact"
+      );
     }
   }
 });
@@ -289,7 +297,12 @@ test("an interaction for document A never resolves against document B's DOM", as
   assert.equal(hit.result.rehydrated, true, "document A should have been rehydrated");
   assert.equal(hit.result.documentId, "doc-a");
   assert.equal(hit.result.sourcePosition.line, 1);
-  assert.equal(hit.result.sourcePosition.precision, "line");
+  // Part 5: the caret lands inside the heading's own text run, so the column is
+  // resolved against document A's source map -- which is the isolation claim
+  // this test exists for, now made at column precision rather than line.
+  assert.equal(hit.result.sourcePosition.precision, "exact");
+  assert.ok(hit.result.sourcePosition.byteColumn >= "# ".length,
+    "the column resolved past the heading marker, into A's own text");
   assert.match(hit.result.hit.element.textPreview, /ALPHA-ONLY/);
   // The strongest form of the claim: nothing from B appears anywhere in the
   // response, not in the text preview, the link, or any diagnostic field.
@@ -498,14 +511,19 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
   await t.test("headings, paragraphs, and inline formatting resolve to their own block", async () => {
     const heading = await hit(blockAt(0, 1));
     assert.equal(heading.sourcePosition.line, 1);
-    assert.equal(heading.sourcePosition.precision, "line");
+    // Part 5: the caret is inside "Kitchen Sink", so the column is real. Before
+    // it, this reported the block's line with column 0.
+    assert.equal(heading.sourcePosition.precision, "exact");
+    assert.ok(heading.sourcePosition.byteColumn >= 2, "resolved past the '# ' marker");
     assert.match(heading.hit.element.textPreview, /Kitchen Sink/);
 
-    // The paragraph spans source lines 3-4 (0-based [2,4]), so "block" is the
-    // honest label and the reported line is the block's first.
+    // The paragraph spans source lines 3-4 (0-based [2,4]). Block resolution
+    // could only ever say "line 3, somewhere"; inline provenance names the line
+    // the clicked text is actually on and where on it.
     const paragraph = await hit(blockAt(2, 4));
-    assert.equal(paragraph.sourcePosition.line, 3);
-    assert.equal(paragraph.sourcePosition.precision, "block");
+    assert.equal(paragraph.sourcePosition.precision, "exact");
+    assert.ok([3, 4].includes(paragraph.sourcePosition.line),
+      `the paragraph's rendered text comes from lines 3-4, not ${paragraph.sourcePosition.line}`);
   });
 
   await t.test("every listed content type resolves inside its own source range", async () => {
@@ -525,17 +543,36 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
       table: blockAt(46, 50),
       "table body row": blockAt(48, 49),
     };
+    // Part 5 upgraded the claim here. Every hit still has to land inside its own
+    // source range -- that is the containment property this test has always been
+    // for -- but a hit that lands on real text now also carries a real column,
+    // and the two content types that cannot carry one say so rather than
+    // guessing.
+    const cannotBeExact = new Set([
+      // markdown-it-task-lists re-emits the item text as raw html_inline, so no
+      // text token survives to carry a position.
+      "task list item",
+      // A thematic break has no text at all.
+      "thematic break (an empty block)",
+    ]);
     for (const [label, block] of Object.entries(targets)) {
       assert.ok(block, `fixture block for ${label} was not rendered with geometry`);
       const result = await hit(block);
-      const line = result.sourcePosition.line;
-      assert.notEqual(result.sourcePosition.precision, "none", `${label} resolved to nothing`);
-      assert.notEqual(result.sourcePosition.precision, "exact", `${label} claimed exact precision`);
+      const { line, precision, byteColumn } = result.sourcePosition;
+      assert.notEqual(precision, "none", `${label} resolved to nothing`);
       // The innermost block wins, so assert containment rather than equality:
       // hitting a list resolves to the list item, not the list.
       assert.ok(line >= block.sourceStart + 1 && line <= block.sourceEnd,
         `${label} resolved to line ${line}, outside its source range ${block.sourceStart + 1}-${block.sourceEnd}`);
-      assert.equal(result.sourcePosition.byteColumn, 0, `${label} invented a byte column`);
+      if (cannotBeExact.has(label)) {
+        assert.notEqual(precision, "exact", `${label} claimed a precision it cannot support`);
+        assert.equal(byteColumn, 0, `${label} invented a byte column`);
+      } else {
+        assert.equal(precision, "exact", `${label} lost the column Part 5 should give it`);
+        const text = fixture.split("\n")[line - 1];
+        assert.ok(byteColumn >= 0 && byteColumn <= Buffer.byteLength(text, "utf8"),
+          `${label} resolved to byte column ${byteColumn}, off the end of line ${line}`);
+      }
     }
   });
 
@@ -560,8 +597,15 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     assert.equal(found.link.type, "https");
     assert.equal(found.link.href, "https://example.invalid");
     // activate_at still carries a source position, so an unmodified click can
-    // navigate to source without a second round trip.
-    assert.equal(found.sourcePosition.line, 3);
+    // navigate to source without a second round trip. Part 5 made that position
+    // the link *label's* -- which lives on source line 4, `[safe link](...)`,
+    // not on line 3 where the paragraph starts.
+    assert.equal(found.sourcePosition.line, 4);
+    assert.equal(found.sourcePosition.precision, "exact");
+    const label = fixture.split("\n")[3];
+    assert.ok(found.sourcePosition.byteColumn >= label.indexOf("safe")
+      && found.sourcePosition.byteColumn < label.indexOf("]"),
+    `the resolved column ${found.sourcePosition.byteColumn} is not inside the link label`);
     // ...and non-link text in the same paragraph reports source, not a link,
     // so `kind` genuinely discriminates rather than always saying "link".
     assert.ok(sawPlainText, "activate_at never reported plain source inside the linked paragraph");
@@ -640,8 +684,10 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     const response = await renderer.send("interact", renderer.interactParams("image-doc", "1:0",
       { x: 400, y: (paragraph.topPx + paragraph.bottomPx) / 2 }));
     assert.equal(response.ok, true, response.error);
-    assert.equal(response.result.sourcePosition.line, 3);
-    assert.equal(response.result.sourcePosition.precision, "line");
+    // An image renders no text, so there is no caret offset to map -- but its
+    // position is still exact, because `![` is where the whole construct starts
+    // and it cannot be subdivided further.
+    assert.deepEqual(response.result.sourcePosition, { line: 3, byteColumn: 0, precision: "exact" });
     assert.equal(response.result.hit.element.isImage, true, "the hit did not land on the image");
     assert.equal(response.result.hit.element.tagName, "IMG");
   });
@@ -752,13 +798,31 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     assert.equal(badLane.code, "INVALID_REQUEST");
   });
 
-  await t.test("no interaction in this part reports exact precision", async () => {
+  await t.test("exact precision is reported where the parser supports it, and only there", async () => {
+    // This assertion is the inverse of the one Parts 3 and 4 shipped ("no
+    // interaction reports exact precision"), and it is deliberately still a
+    // sweep over every block the fixture renders: the risk Part 5 introduces is
+    // a *confidently wrong* column, so the check is that every label is one of
+    // the four honest ones, that a claimed column is inside the line it names,
+    // and that most of the document really did gain one.
+    const sourceLines = fixture.split("\n");
+    let exact = 0;
     for (const block of blocks) {
-      const result = await hit(block);
-      assert.notEqual(result.sourcePosition.precision, "exact",
-        `block at source line ${block.sourceStart + 1} claimed exact precision`);
-      assert.ok(["line", "block", "none"].includes(result.sourcePosition.precision));
+      const { line, byteColumn, precision } = (await hit(block)).sourcePosition;
+      assert.ok(["exact", "line", "block", "none"].includes(precision),
+        `block at source line ${block.sourceStart + 1} reported precision ${precision}`);
+      if (precision === "none") {
+        assert.equal(line, null);
+        continue;
+      }
+      assert.ok(line >= 1 && line <= sourceLines.length, `line ${line} is outside the document`);
+      assert.ok(byteColumn >= 0 && byteColumn <= Buffer.byteLength(sourceLines[line - 1], "utf8"),
+        `byte column ${byteColumn} is off the end of line ${line}`);
+      if (precision === "exact") exact += 1;
+      else assert.equal(byteColumn, 0, "a non-exact position must not carry a column");
     }
+    assert.ok(exact >= blocks.length / 2,
+      `only ${exact} of ${blocks.length} blocks resolved exactly; provenance is not reaching most content`);
   });
 
   await renderer.send("shutdown", {});

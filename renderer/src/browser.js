@@ -369,7 +369,10 @@ export class BrowserRenderer {
       );
     }
 
-    const hit = normalizeHit(raw);
+    // The source map never leaves this process: the page returned an opaque
+    // region key, and the mapping that turns it into a line and byte column is
+    // the cached one for exactly this document.
+    const hit = normalizeHit(raw, cached?.sourceMap);
     const result = buildActionResult(envelope.action, hit);
     result.documentId = envelope.documentId;
     result.contentRevision = envelope.contentRevision;

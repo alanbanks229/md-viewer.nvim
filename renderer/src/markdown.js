@@ -4,6 +4,13 @@ import hljs from "highlight.js";
 import sanitizeHtml from "sanitize-html";
 import { attachSourceMaps } from "./source-map.js";
 import { localImageDataUri } from "./security.js";
+import {
+  SOURCE_MAP_BUILDER,
+  createSourceMapBuilder,
+  provenancePlugin,
+  registerPointRegion,
+  registerTextRegion,
+} from "./provenance.js";
 
 function alertPlugin(md) {
   md.core.ruler.after("block", "md-viewer_alerts", (state) => {
@@ -56,10 +63,38 @@ function createMarkdown(options) {
   md.use(taskLists, { enabled: false, label: true, labelAfter: true });
   md.use(alertPlugin);
   md.use(headingAnchorPlugin);
+  // Registered last on purpose: `Ruler.after()` inserts at index+1, so the
+  // last-registered `after("inline")` rule runs first. Provenance has to read
+  // inline content before markdown-it-task-lists rewrites it.
+  md.use(provenancePlugin);
+
+  // Every rendered text run becomes `<span data-md-source-id="sN">`. An inline
+  // span with no styling changes neither layout nor whitespace collapsing, and
+  // the attribute is an opaque key -- no Markdown source ever goes into the DOM.
+  // A run whose position could not be established honestly renders exactly as
+  // markdown-it would render it, with no span and therefore no claim.
+  md.renderer.rules.text = (tokens, index, ruleOptions, env) => {
+    const token = tokens[index];
+    const escaped = md.utils.escapeHtml(token.content);
+    const id = registerTextRegion(env, token, token.content);
+    return id === null ? escaped : `<span data-md-source-id="${id}">${escaped}</span>`;
+  };
+
+  const defaultCodeInline = md.renderer.rules.code_inline;
+  md.renderer.rules.code_inline = (tokens, index, ruleOptions, env, self) => {
+    const token = tokens[index];
+    const id = registerTextRegion(env, token, token.content);
+    if (id) token.attrSet("data-md-source-id", id);
+    return defaultCodeInline(tokens, index, ruleOptions, env, self);
+  };
 
   const defaultImage = md.renderer.rules.image;
   md.renderer.rules.image = (tokens, index, ruleOptions, env, self) => {
     const token = tokens[index];
+    // An image renders no text of its own, so there is no caret offset to map;
+    // its position is the `!` that opens it, which is exact and indivisible.
+    const id = registerPointRegion(env, token);
+    if (id) token.attrSet("data-md-source-id", id);
     const source = token.attrGet("src") ?? "";
     const resolved = localImageDataUri(source, options);
     if (!resolved) {
@@ -91,20 +126,28 @@ const allowedTags = [
   "th", "td", "a", "img", "input", "label", "br", "span", "div",
 ];
 
-/// Returns `{ html, sourceMap }`. `sourceMap` is `null` today: markdown-it
-/// carries block positions only (`token.map` is null for inline tokens), so
-/// there is no inline provenance to report yet. Part 5 fills this in; the shape
-/// exists now so that is a fill-in rather than a refactor of every call site
-/// and every cache entry.
+/// Returns `{ html, sourceMap }`.
+///
+/// `sourceMap` is the full provenance record for this render: the normalized
+/// source lines plus one entry per opaque `data-md-source-id`. It stays in
+/// trusted Node memory (`markdownCache` in `main.js` holds it beside the HTML)
+/// and is never sent to the page -- the DOM carries keys only.
 export function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);
-  const env = {};
-  const tokens = attachSourceMaps(md.parse(markdown, env));
+  const builder = createSourceMapBuilder(markdown);
+  const env = { [SOURCE_MAP_BUILDER]: builder };
+  const tokens = attachSourceMaps(md.parse(markdown, env), env, builder.lines);
   let html = md.renderer.render(tokens, md.options, env);
   html = sanitizeHtml(html, {
     allowedTags,
     allowedAttributes: {
-      "*": ["class", "data-source-start", "data-source-end", "data-alert-title"],
+      // `data-md-source-id` sits alongside the block attributes rather than in a
+      // per-tag list because provenance lands on essentially every rendered tag:
+      // spans, code, images, and every block element. It is an opaque key that
+      // only resolves against this document's own map, so the worst a `rawHtml`
+      // document can do by forging one is send its own click somewhere else in
+      // itself -- the same bounded exposure `data-source-start` already has.
+      "*": ["class", "data-source-start", "data-source-end", "data-alert-title", "data-md-source-id"],
       a: ["href", "title"], img: ["src", "alt", "title", "class"],
       input: ["type", "checked", "disabled"], label: ["class"], th: ["style"], td: ["style"],
       h1: ["id"], h2: ["id"], h3: ["id"], h4: ["id"], h5: ["id"], h6: ["id"],
@@ -114,5 +157,5 @@ export function renderMarkdown(markdown, options) {
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });
-  return { html, sourceMap: null };
+  return { html, sourceMap: builder.build() };
 }

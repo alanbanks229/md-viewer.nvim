@@ -6,6 +6,8 @@
 // browser.js's job, and only after ensureDocumentActive() has established which
 // document is loaded.
 
+import { resolveRegionPosition } from "./provenance.js";
+
 export const CARET_STRATEGIES = Object.freeze(["auto", "caret-position", "caret-range", "element-only"]);
 
 // Implemented now. `mutatesVisibleState` drives §3.4: an action that changes
@@ -73,21 +75,32 @@ export function classifyLink(href) {
   }
 }
 
-/// Convert a block's `data-source-*` attributes into a Neovim source position.
+/// Convert a hit into a Neovim source position, preferring inline provenance
+/// and falling back to the block's `data-source-*` attributes.
 ///
 /// markdown-it `token.map` is `[startLine, endLine)` with **0-based** lines and
-/// an **exclusive** end. Neovim lines are 1-based inclusive. This conversion
-/// lives in exactly one place because Part 5 inherits it.
+/// an **exclusive** end, and `provenance.js` reports 0-based lines for the same
+/// reason. Neovim lines are 1-based inclusive. Both conversions live here, in
+/// one place, because there is exactly one `+ 1` in the whole chain.
 ///
 /// Precision is honest, never optimistic:
+///   - a region the parser placed, hit with a real caret offset, is `exact`;
+///   - a region hit without a caret offset (element-only resolution) reports
+///     that region's `line`, never a guessed column;
 ///   - a block spanning exactly one source line means we genuinely know the
 ///     line, so `line`;
 ///   - a multi-line block means we know the block only, so `block`, and `line`
 ///     reports the block's first line;
 ///   - no block at all means `none`, with no position guessed.
-/// `exact` requires inline provenance, which does not exist until Part 5, so
-/// this function can never return it.
-export function resolveSourcePosition(block) {
+///
+/// `inline` and `sourceMap` are optional: called with a block alone -- which is
+/// what a document rendered before Part 5, or one whose markup was supplied
+/// directly, produces -- this behaves exactly as it did in Parts 3 and 4.
+export function resolveSourcePosition(block, inline, sourceMap) {
+  const region = resolveRegionPosition(sourceMap, inline?.sourceId, inline?.offset);
+  if (region) {
+    return { line: region.line + 1, byteColumn: region.byteColumn, precision: region.precision };
+  }
   const start = Number(block?.sourceStart);
   const end = Number(block?.sourceEnd);
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) {
@@ -281,6 +294,47 @@ export function hitTestInPage(input) {
     strategy = "element-only";
   }
 
+  // The innermost provenance region under the point. Both routes to it are
+  // wrong on their own: elementFromPoint can land on a container while the caret
+  // sits in a specific run inside it, and a caret snaps to an *ancestor* when
+  // there is no text to land in (an image's paragraph has none), which would
+  // throw away the image elementFromPoint had already found. So take whichever
+  // is deeper.
+  let runElement = null;
+  if (caretNode !== null) {
+    const caretElement = caretNode.nodeType === 3 ? caretNode.parentElement : caretNode;
+    runElement = caretElement === null ? null : caretElement.closest("[data-md-source-id]");
+  }
+  const elementRun = element.closest("[data-md-source-id]");
+  if (elementRun !== null && (runElement === null || runElement.contains(elementRun))) {
+    runElement = elementRun;
+  }
+  // A region outside the block we actually hit would relocate the answer into a
+  // neighbouring block, exactly as a stray caret would. Discard it.
+  if (runElement !== null && !block.contains(runElement)) runElement = null;
+
+  // Offset of the caret within the whole region, not within one text node: a
+  // highlighted code block splits its text across many nodes, and a region that
+  // reported a per-node offset would resolve to the wrong column inside it.
+  let runOffset = null;
+  let runLength = null;
+  if (runElement !== null) {
+    runLength = (runElement.textContent || "").length;
+    if (caretNode !== null && caretNode.nodeType === 3 && runElement.contains(caretNode)) {
+      const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+      let consumed = 0;
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node === caretNode) {
+          runOffset = consumed + caretOffset;
+          break;
+        }
+        consumed += node.nodeValue.length;
+        node = walker.nextNode();
+      }
+    }
+  }
+
   const anchor = element.closest("a[href]");
   const image = element.closest("img");
   // Always bounded: a hit descriptor must never carry an unbounded slab of
@@ -294,9 +348,16 @@ export function hitTestInPage(input) {
     block: {
       sourceStart: Number(block.getAttribute("data-source-start")),
       sourceEnd: Number(block.getAttribute("data-source-end")),
-      // Part 5 adds data-md-source-id; null until then.
       sourceId: block.getAttribute("data-md-source-id"),
       tagName: block.tagName,
+    },
+    // The provenance key and the caret's position inside it. Opaque: the mapping
+    // itself lives in Node memory, so nothing derived from the Markdown source
+    // ever travels back out of the page.
+    inline: runElement === null ? null : {
+      sourceId: runElement.getAttribute("data-md-source-id"),
+      offset: runOffset,
+      textLength: runLength,
     },
     // DOM node identity never crosses the process boundary. This descriptor is
     // for diagnostics and tests; Part 6 hit-tests both selection endpoints
@@ -313,13 +374,17 @@ export function hitTestInPage(input) {
   };
 }
 
-/// Turn the raw in-page result into the normalized §3.5 hit shape.
-export function normalizeHit(raw) {
-  const sourcePosition = resolveSourcePosition(raw.block);
+/// Turn the raw in-page result into the normalized §3.5 hit shape. `sourceMap`
+/// is the provenance record for this document, held in Node memory; without it
+/// resolution falls back to block precision.
+export function normalizeHit(raw, sourceMap) {
+  const sourcePosition = resolveSourcePosition(raw.block, raw.inline, sourceMap);
   return {
     node: raw.node,
     offset: raw.offset,
-    sourceId: raw.block?.sourceId ?? null,
+    // The most specific region the hit landed in, which is the inline run when
+    // there is one and the enclosing block otherwise.
+    sourceId: raw.inline?.sourceId ?? raw.block?.sourceId ?? null,
     sourcePosition,
     precision: sourcePosition.precision,
     strategy: raw.strategy,

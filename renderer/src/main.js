@@ -11,7 +11,10 @@ const directory = path.dirname(fileURLToPath(import.meta.url));
 const browser = new BrowserRenderer({ assetsDir: path.resolve(directory, "../assets") });
 
 const MAX_CACHED_DOCUMENTS = 64;
-// documentId -> { key, html, sourceMap }. `sourceMap` is null until Part 5.
+// documentId -> { key, html, sourceMap }. The source map is the trusted-memory
+// half of source provenance: the page holds opaque region keys, this holds what
+// they mean. It is written and evicted with the markup it describes, so the two
+// can never disagree about which render they belong to.
 const markdownCache = new Map();
 // documentId -> per-document interaction state, held in trusted Node memory
 // rather than on the page. setContent destroys page state on every document

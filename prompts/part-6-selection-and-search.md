@@ -22,6 +22,9 @@ browser paint, recapture through the coalesced pipeline.
 5 has not run, search reports match positions at block precision; that is fine
 and honest.
 
+> **Part 5 has run** (commit recorded in `prompts/README.md`), so match positions
+> can be exact. See the provenance entry under "Verified repository facts".
+
 ---
 
 ## Verified repository facts
@@ -69,6 +72,29 @@ of `nvim_create_user_command` calls. Preview-local mappings go through
 `lua/md-viewer/navigation.lua`, which uses `nvim_buf_call(session.preview_buf, ...)`.
 
 **`javaScriptEnabled: false`** — see policy §3. `page.evaluate()` works.
+
+**An empty Lua table encodes as a JSON array, and the renderer refuses it.**
+`vim.json.encode({})` produces `[]`, not `{}`. `validateEnvelope` rejects an
+array for `modifiers` with `INVALID_INTERACTION`, and `interaction.lua` swallows
+the error — so from Part 4 until Part 5 found it, **every unmodified click was
+silently refused and click-to-source did nothing at all**. It was invisible
+because the Lua table looked right, the unit tests stubbed `process.request`, and
+the failure path is a silent `return`. `interaction.request_hit()` now states all
+four modifiers explicitly so the table can only encode as an object.
+
+Every new envelope field this part adds has the same trap: any optional map
+(selection options, find options) that can be empty must either always carry a
+key or use `vim.empty_dict()`. Assert the **encoded** wire form in the test, not
+the Lua table — see the modifier assertions in `tests/lua/cases/interaction.lua`.
+
+**Part 5 shipped exact source provenance.** `result.sourcePosition` can now be
+`{ line, byteColumn, precision: "exact" }` with a real, non-zero byte column, and
+`hit.sourceId` carries the opaque region key of whatever region was hit. Search
+match positions can therefore report exact columns rather than block precision
+(the caveat in "Objective" below no longer applies) by resolving the region a
+match lands in through `resolveRegionPosition()` in `renderer/src/provenance.js`.
+Note also that `move_source_cursor()` reads the renderer's own `byteColumn`
+field; Part 4's `byte_column` spelling survives only as an alias.
 
 ---
 

@@ -11,14 +11,22 @@ const fixture = fs.readFileSync(path.join(here, "../fixtures/kitchen-sink.md"), 
 test("renders all version-one Markdown structures with source maps", () => {
   const { html, sourceMap } = renderMarkdown(fixture, { rawHtml: false, localImages: false,
     maxLocalImageBytes: 1024, baseDir: here, documentRoot: here });
-  // Part 5 fills this in; the field exists now so the plumbing is already there.
-  assert.equal(sourceMap, null);
   for (const fragment of ["<h1", "<strong>", "<s>", "task-list-item", "<blockquote", "<pre", "<table", "markdown-alert-note"]) {
     assert.match(html, new RegExp(fragment));
   }
   assert.match(html, /data-source-start="0"/);
   assert.doesNotMatch(html, /<script/);
   assert.doesNotMatch(html, /https:\/\/example\.invalid\/tracker\.png/);
+
+  // Part 5 filled `sourceMap` in. It is the provenance record for this render:
+  // the normalized source lines plus one entry per opaque id in the markup, and
+  // it never leaves Node. See tests/node/source-provenance.test.js for what the
+  // entries actually claim.
+  assert.equal(sourceMap.version, 1);
+  assert.deepEqual(sourceMap.lines, fixture.split("\n"));
+  const ids = new Set([...html.matchAll(/data-md-source-id="([^"]+)"/g)].map((match) => match[1]));
+  assert.ok(ids.size > 0, "no provenance ids reached the markup");
+  for (const id of ids) assert.ok(sourceMap.regions[id], `markup carries id ${id} with no region behind it`);
 });
 
 test("sanitizes raw HTML even when the override is enabled", () => {
