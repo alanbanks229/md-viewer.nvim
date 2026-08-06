@@ -11,6 +11,7 @@ repository right now, not what was planned.
 | # | Part | Commit |
 |---|------|--------|
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
+| 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `PENDING` |
 
 ---
 
@@ -267,7 +268,7 @@ clean.
 
 ---
 
-## Tests run and results
+## Tests run and results (Part 1)
 
 ```
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
@@ -298,7 +299,7 @@ expected result for this terminal, not a bug.
 
 ---
 
-## Known limitations and unresolved risks
+## Known limitations and unresolved risks (Part 1)
 
 - **No graphical validation was performed for any real terminal** — not
   iTerm2, not Kitty, not WezTerm, not Ghostty, not Warp. Only the synthetic-
@@ -329,7 +330,7 @@ expected result for this terminal, not a bug.
 
 ---
 
-## Decisions that changed assumptions in the original specification
+## Decisions that changed assumptions in the original specification (Part 1)
 
 - **Explicitly forcing `image.backend = "kitty_raw"` can now fail.** The
   original behavior (any explicit `kitty_raw` request always "succeeded" via
@@ -366,7 +367,7 @@ profile-driven placement/geometry work.
 
 ---
 
-## Safe stopping point and first next action
+## Safe stopping point after Part 1 (historical)
 
 The tree is green: all four policy §5 commands pass (128/128 Lua assertions,
 24/24 Node tests, stylua clean), and `:MdViewerHealth` has now actually been
@@ -382,9 +383,360 @@ run." Before reporting a part done, run every new or changed `:MdViewer*`
 command interactively in a real headless session (or ask the operator to),
 not just its underlying library function.
 
-**First next action for Part 2:** read `prompts/part-2-portable-rendering.md`
-fresh (do not carry this session's context forward — `/clear` first per
-`prompts/README.md`). Part 2 should consume `terminal.lua`'s capability
-report (in particular `profile.placement`, `default_raw_zindex`, and
-`multiplexer`) when de-iTerm2-ing the Kitty backend's placement and geometry
-assumptions, rather than re-deriving terminal identity itself.
+---
+
+## What Part 2 actually built
+
+### Profile-driven z-index and double-buffer resolution
+
+`lua/md-viewer/backends/kitty_raw.lua` no longer reads `image.raw_zindex`
+directly as a value that's always a number. `config.lua`'s defaults for
+`image.raw_zindex` and `image.double_buffer` changed from hardcoded values
+(`-1`, `true`) to `nil` — a sentinel meaning "the terminal profile decides."
+Two new local functions, `resolve_zindex()` and `resolve_double_buffer()`,
+implement the resolution order the part asked for: an explicit, non-nil
+`image.raw_zindex`/`image.double_buffer` in user config always wins; otherwise
+the active profile's `default_raw_zindex`/`default_double_buffer` (from
+`terminal.lua`, consulted via `terminal.detect()`) supplies the value. Both
+functions return the resolved value **and** a human-readable source string
+(`"explicit override (image.raw_zindex)"` or `"profile default (kitty)"`),
+and both are exercised end-to-end (not just at the config layer) by
+`tests/lua/cases/backend_kitty.lua`, which asserts the literal `z=<value>`
+encoded into the placement escape sequence for negative, zero, and positive
+explicit overrides, plus profile-default and override-beats-profile cases.
+
+`terminal.lua`'s `M.profiles` table gained `default_double_buffer = true` on
+every profile (including `unknown`, though it's unreachable there since
+`unknown`'s `placement.deletion = "unsupported"` already fails `M.detect()`
+before any image is shown). This value is uniform across every profile today
+— see "Decisions" below for why no profile was given a different default.
+
+`kitty_raw.lua`'s `M.health()` now reports `zindex`, `zindex_source`,
+`double_buffer`, `double_buffer_source` (in addition to the existing
+`owned_images`/`owned_placements`/`profile`/`evidence`/etc.), and its
+`advertised` field no longer hardcodes `vim.env.TERM_PROGRAM == "iTerm.app"`
+(the last iTerm2-specific check named in the part prompt) — it's now
+`capability.graphics ~= "unavailable"`, true for any profile with graphics
+support, not just iTerm2's own advertisement string.
+
+### Cell-metric calibration: two real tiers, not three
+
+`lua/md-viewer/coordinates.lua` gained `M.calibration_tier()`, a pure
+function with no window argument, returning `"env"` when both
+`MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` are set to positive
+numbers, else `"estimated"`. `M.viewport()` now reports this as a `tier`
+string field instead of the old `calibrated` boolean, propagated unchanged
+through `renderer.request()`'s round-trip (`params.viewport` is echoed back
+verbatim as `result.viewport` — the Node renderer only reads `widthPx`/
+`heightPx`/`deviceScaleFactor` from it, never `tier`/`calibrated`, so no
+Node-side change was needed) into `session.viewport_calibration_tier`
+(`controller.lua`), `debug.lua`'s per-session snapshot, and
+`health.lua`'s `viewport_calibration_tier` (computed directly via
+`coordinates.calibration_tier()` rather than health.lua's own copy of the
+env-var check it had before).
+
+**A third "measured" tier — deriving real cell-pixel dimensions from the
+terminal itself, with zero configuration — was investigated and is not
+implemented, because it is not currently possible.** This is the most
+important finding of this part and is worth stating precisely: Neovim's
+`TermResponse` autocmd (confirmed via `$VIMRUNTIME/doc/autocmd.txt` in this
+session's Neovim 0.12.4) fires **only** for DA1, OSC, DCS, or APC terminal
+responses. The escape sequences that would answer "how many pixels is one
+cell" — XTWINOPS `CSI 14 t` (text area size in pixels) and `CSI 18 t` (text
+area size in characters) — are plain CSI responses, a category `TermResponse`
+does not expose, confirmed by reading Neovim's own documented event scope
+rather than by trial and error against a live terminal. `nvim_list_uis()`
+was also checked (via `:help nvim_list_uis()`) and returns only `height`/
+`width` in **cells**, `rgb`, and `ext_...` flags — no pixel geometry, for any
+UI type. There is no `vim.g.*` or `vim.o.*` value that carries a
+GUI-independent real cell-pixel size either. Per policy §4 ("do not invent a
+measurement that is not real"), this part implements exactly the two tiers
+that are honestly reachable — `env` (user-supplied, exact) and `estimated`
+(configured aspect ratio and width guess) — and documents this investigation
+directly in `coordinates.lua`'s `M.calibration_tier()` doc comment so a
+future Neovim version that exposes real pixel geometry has a named place to
+add `"measured"` ahead of `"env"`. This does not move any part boundary:
+Part 4's mouse-coordinate inversion (cell → CSS pixels → back to cells) works
+identically regardless of which of the two tiers supplied the original
+conversion.
+
+One practical consequence, reasoned through rather than reduced to a code
+change: because Kitty placements specify width/height in **cells** (`c=`/`r=`
+in `kitty_raw.lua`'s `place_regions()`), the terminal always stretches the
+rendered PNG to exactly fill the placement regardless of the PNG's actual
+pixel dimensions. `estimated_cell_width_px` therefore only affects overall
+render resolution (a bigger number is a crisper, slower capture), not
+correctness; only `cell_aspect_ratio` affects visual correctness, by
+controlling whether rendered content is horizontally squished or vertically
+stretched relative to the terminal's real cell shape. This is why the
+"estimated" tier's *default* values (not hand-tuned per terminal) are a
+reasonable universal fallback rather than a guess that only happens to work
+on one profile — the operator's hand-tuned `0.42` and the shipped default
+`0.5` are close enough that the visual difference should be minor, though
+this has not been graphically confirmed (see Known limitations).
+
+### Alt-screen and focus-regain placement recreation
+
+`controller.lua`'s `WinEnter`/`BufEnter`/`TabEnter`/`VimResume` autocmd
+(already responsible for recreating a cleared raw-Kitty placement from the
+cached PNG via `show_cached()`) now also fires on `FocusGained`. Neovim has
+no direct event for "the outer terminal returned from an alternate screen"
+or "a multiplexer pane/window regained focus" — both can silently drop a
+Kitty placement depending on the terminal — so `FocusGained` is the closest
+generic, real Neovim event that correlates with those transitions, and it
+reuses the exact same reconciliation path already covered by
+`tests/lua/cases/controller.lua`'s float-occlusion-restore assertions.
+Resize-triggered redraw, tab-switch recreation, and font-size-change handling
+(all listed in the part prompt's placement-lifecycle checklist) required no
+new code: `WinResized`/`VimResized` already schedules a full re-render and
+`reconcile_placement()` always does a full delete-then-place via
+`kitty_raw.M.move()` (there is no incremental placement patch in the Kitty
+protocol as used here), so any geometry change — including a font-size
+change, which changes `vim.o.columns`/`vim.o.lines` and fires `VimResized`
+— already produces a correct, complete replacement. This was not new
+behavior to add, only to verify and document; see `M.move()`/`place_regions()`
+in `kitty_raw.lua`, unchanged from Part 1.
+
+The part prompt also asked about "whether deleting an image implicitly
+removes its placements" and "how to behave when a focusable float overlaps
+the image" as profile-data candidates. Both remain uniform, generic behavior
+rather than new per-profile fields: the Kitty graphics protocol guarantees
+`a=d,d=I` deletes an image and all its placements for any compliant
+implementation (every profile here claims protocol compatibility), and full
+suppression of focusable-float overlaps is an architectural choice already
+implemented generically in `preview.lua`'s `M.occlusion()` /
+`controller.lua`'s `reconcile_occlusion()`, not something any of the six
+profiles has a documented, verified reason to do differently. Adding
+profile-specific booleans for either would have been unverified
+differentiation with no evidence behind it — see "Decisions" below.
+
+### Health, debug, and test coverage
+
+`health.lua` gained `raw_graphics_zindex_source`, `raw_graphics_double_buffer`,
+`raw_graphics_double_buffer_source`, `raw_graphics_owned_images`,
+`raw_graphics_owned_placements`, and replaced its own env-var-based
+`viewport_calibration` string with `viewport_calibration_tier` sourced from
+`coordinates.calibration_tier()`. `debug.lua`'s per-session snapshot gained a
+`placement` field (the full last-applied placement rectangle, including
+`exclusions`) and renamed `viewport_calibrated` to
+`viewport_calibration_tier`.
+
+**`:MdViewerDebug` had zero automated test coverage before this part** — the
+same class of gap Part 1 found and fixed for `:MdViewerHealth`. This was
+checked for directly (not assumed) by grepping the test suite for
+`md-viewer.debug`/`MdViewerDebug` before touching the file, since a
+crash-only-in-a-real-session bug in a widely-used report command was exactly
+Part 1's lesson. `tests/lua/cases/debug.lua` is new: it opens a real
+`controller.open()` session, manually sets `session.last_placement` and
+`session.viewport_calibration_tier` (since headless tests have no attached
+TUI to drive a real raw-Kitty render), invokes the actual `:MdViewerDebug`
+command, and asserts the new fields render without error — this would have
+caught a crash the same way `tests/lua/cases/health.lua` caught Part 1's.
+
+`tests/lua/cases/backend_kitty.lua` is new, per the part prompt's explicit
+request for a dedicated file: it absorbed the raw-Kitty-specific assertions
+that used to live inline in `tests/lua/cases/backends.lua` (which now only
+covers backend *selection*) and adds z-index encoding across explicit
+negative/zero/positive overrides, profile-default selection, override-beats-
+profile-default, double-buffer ordering in both directions (verified by
+locating the byte offsets of the delete and upload escape sequences within
+the captured output and asserting their relative order), base64 chunking at
+the exact 4096-byte boundary (an upload whose encoded form is exactly two
+full chunks) and one byte past it (two full chunks plus a four-character
+remainder chunk, verified by counting `,m=1` vs `q=2,m=0` occurrences), and
+invalid-PNG rejection.
+
+`tests/lua/cases/coordinates.lua` expanded substantially: every split
+position (right/left/below/above) via real `vim.cmd()` splits, winbar
+presence shifting the reported row by exactly one screen cell, all four
+`laststatus` values (0/1/2/3, including the single-window edge case where
+`laststatus=1` shows no statusline), a forced tabline shifting every window's
+row down by one, live resize changing reported cell width, calibration-tier
+behavior (env/estimated, including a zero env value correctly not counting
+as calibrated), viewport clamping at both configured bounds, and guard-cell
+reservation via `preview.placement()` (kitty_raw only, non-raw backends
+unaffected).
+
+`tests/lua/cases/config.lua`'s default-value assertions for
+`image.raw_zindex` and `image.double_buffer` were updated from `-1`/`true` to
+`nil`, since the config layer itself no longer owns those defaults — the
+active terminal profile does.
+
+---
+
+## Tests run and results (Part 2)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+  -> added 30 packages, 0 vulnerabilities
+
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+  -> md-viewer Lua tests: 195 assertions passed (128 at the end of Part 1; the
+     net +67 comes from the new backend_kitty.lua and debug.lua files and the
+     expanded coordinates.lua, minus the handful of raw-Kitty assertions moved
+     out of backends.lua into backend_kitty.lua)
+
+npm test --prefix renderer   (node --test ../tests/node/*.test.js)
+  -> tests 24, pass 24, fail 0 (unchanged; this part touched no renderer/ code)
+
+stylua --check lua/ plugin/ tests/lua/
+  -> clean (no diff)
+```
+
+All four commands were run on this development machine (macOS, Apple
+Silicon, Neovim 0.12.4, Node 24, Google Chrome installed at the standard
+`/Applications` path). The Ubuntu leg of CI remains untriggered (unchanged
+from Part 1's status).
+
+Per policy §5, both `:MdViewerHealth` and `:MdViewerDebug` — the two
+commands this part actually changed the output of — were invoked directly
+(not just their library functions) in headless sessions:
+
+```
+nvim --headless -u NONE -i NONE -c "set runtimepath+=." \
+  -c "lua require('md-viewer').setup({})" -c "MdViewerHealth" \
+  -c "lua vim.wait(8000, function() return vim.bo.filetype=='md-viewer-health' end, 50)" ...
+```
+
+rendered every new field (`raw graphics zindex source`, `raw graphics double
+buffer[_source]`, `raw graphics owned images/placements`, `viewport
+calibration tier`) without error, with `terminal_profile = unknown` on this
+development machine (`TERM_PROGRAM=vscode`, not one of the seven modeled
+profiles — the same honest result Part 1 observed, unchanged by this part).
+
+```
+nvim --headless -u NONE -i NONE -c "set runtimepath+=." \
+  -c "lua require('md-viewer').setup({ terminal = { profile = 'kitty', kitty_graphics = 'on' }, image = { backend = 'kitty_raw' } })" \
+  -c "edit <file>.md" -c "MdViewerOpen" -c "MdViewerDebug" ...
+```
+
+confirmed `:MdViewerOpen` honestly refuses to force `kitty_raw` in a headless
+session (`"requested backend kitty_raw unavailable: no attached TUI"` — a
+hard structural requirement, not a profile-inference question) and that
+`:MdViewerDebug`'s snapshot, including the new `backends.kitty_raw` health
+fields, renders correctly with no session open. A **separate** run with the
+`cells` backend and a real `controller.open()` session (captured instead as
+the new `tests/lua/cases/debug.lua`, since it needed to run every time, not
+just once by hand) confirmed the new per-session `placement` and
+`viewport_calibration_tier` fields also render without error.
+
+---
+
+## Known limitations and unresolved risks (current)
+
+Carried forward from Part 1, still true:
+
+- **No graphical validation was performed for any real terminal** — not
+  iTerm2, not Kitty, not WezTerm, not Ghostty, not Warp. This development
+  environment has no attached graphical terminal; every check in this part
+  was headless (`nvim --headless`, no TUI, no real Kitty graphics protocol
+  round-trip). Per policy §4, none of this part's work is claimed as visually
+  validated.
+- The CI matrix's Ubuntu leg is unvalidated.
+- The pre-existing `config.setup()` reassign-before-validate quirk is
+  unfixed (unrelated to this part; still only cosmetic today).
+- `terminal.probe = "safe"` is still unimplemented. This part's calibration
+  investigation (see above) is additional, concrete evidence for *why*: the
+  one measurement a safe probe could plausibly add — cell pixel size via
+  XTWINOPS — turns out not to be readable through any documented Neovim
+  mechanism, which removes the strongest reason to implement it. It may still
+  be worth removing this config surface in a later part if nothing ever ends
+  up branching on it.
+- Windows discovery remains implemented and unit-tested but unadvertised.
+
+New in this part:
+
+- **The operator's real terminal config has not been re-tested against this
+  part's changes.** `~/.config/nvim/lua/plugins/md-viewer.lua` had its four
+  hand-tuned lines (`image.backend = "kitty_raw"`, `browser.executable_path`,
+  `render.cell_aspect_ratio`, `render.estimated_cell_width_px`) removed as
+  part of closing this part, so the operator can run the real acceptance
+  test described in `prompts/README.md`'s Dogfooding section and
+  `prompts/@OperatorGuide.md`'s Part 2 section. **This has not yet been done
+  by anyone** — I have no terminal to open and look at, and per policy §4 I
+  am not claiming the preview renders correctly on iTerm2 with these lines
+  removed, only that the code path now exists and the config has been
+  updated so the operator can try it. If it fails, the two most likely
+  culprits are (a) the `estimated` calibration tier's default aspect ratio
+  being visually worse than the operator's hand-tuned `0.42` for their
+  specific iTerm2 profile/font, fixable by setting
+  `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (the `env` tier), or
+  (b) `terminal.detect()` resolving to a profile/graphics confidence that
+  doesn't match iTerm2's real behavior, diagnosable via `:MdViewerHealth`.
+- **A "measured" cell-pixel calibration tier does not exist and, as far as
+  this session could determine, cannot exist against documented Neovim
+  0.12.x APIs for a real terminal TUI session.** See "What Part 2 actually
+  built" above for the full investigation. If a future Neovim version adds a
+  way to read XTWINOPS-style responses (or any other real pixel-geometry
+  signal), `coordinates.calibration_tier()` is the single place to add it.
+
+---
+
+## Decisions that changed assumptions in the original specification (Part 2)
+
+- **Three of the part prompt's five "terminal-specific behaviors to move into
+  profile data" (§2.1) turned out to already be uniform, protocol-guaranteed,
+  or architecturally generic rather than real per-terminal differences: image
+  deletion implicitly removing placements, redraw-after-resize, and
+  focusable-float suppression.** Only z-index and the double-buffer
+  replacement order got new profile-sourced fields
+  (`default_raw_zindex`, `default_double_buffer`) with real resolution logic.
+  The other three are documented in "What Part 2 actually built" above as
+  generic behavior already covered by existing code (Kitty protocol
+  semantics, `kitty_raw.M.move()`'s always-full delete-then-place, and
+  `preview.lua`'s occlusion suppression), not turned into profile booleans,
+  because no profile in this codebase has a verified reason to differ and
+  inventing unverified per-profile differentiation would itself have
+  violated policy §4's honesty requirement. If a real terminal is later found
+  to need different behavior here, add the field to `terminal.lua` then —
+  don't speculate ahead of evidence.
+- **The part prompt's assumption that "Neovim can report grid pixel
+  dimensions on some UIs" does not hold for terminal-attached Neovim as of
+  0.12.4.** This was investigated directly against Neovim's own
+  documentation (`TermResponse`'s scope, `nvim_list_uis()`'s return shape)
+  rather than assumed either way. The calibration chain therefore has two
+  real tiers (`env`, `estimated`), not three. This does not move Part 2's own
+  boundary (the part is still complete: the chain is real, tested, and
+  honestly reported) and does not invalidate any later part — Part 4's
+  coordinate inversion consumes whichever tier produced the viewport, not the
+  tier name itself.
+- **`tests/lua/cases/backends.lua` lost its raw-Kitty-specific assertions**
+  to the new `tests/lua/cases/backend_kitty.lua`, per the part prompt's
+  explicit request for a dedicated file. `backends.lua` now only covers
+  backend *selection* (`M.select`), which is what its name suggests it
+  should have covered all along.
+
+No part boundaries moved. No downstream prompt (`part-3` through `part-7`)
+needed edits — Part 4's stated approach (inverting cell → CSS pixel
+conversion) is unaffected by which calibration tier supplied the forward
+conversion, and nothing else discovered here touches interaction, transport,
+provenance, selection, or hardening scope.
+
+---
+
+## Safe stopping point and first next action
+
+The tree is green: all four policy §5 commands pass (195/195 Lua assertions,
+24/24 Node tests, stylua clean), and both `:MdViewerHealth` and
+`:MdViewerDebug` — the two commands this part changed — have been invoked
+directly in headless sessions per policy §5, not just through their
+underlying library functions. This part is a single commit on
+`feat/cross-platform-markdown-preview`; it has not been pushed.
+
+**This is a genuinely shippable `v0.2.0`** in the sense the part prompt
+intended (automated portability work complete, generic encoder, real
+resolution/reporting for z-index and double-buffering, an honest two-tier
+calibration chain) but **the operator has not yet performed the real
+acceptance test**: opening a real terminal, removing the four hand-tuned
+config lines (already done in `~/.config/nvim/lua/plugins/md-viewer.lua`),
+and confirming the preview still renders correctly. Per policy §4 this
+report does not claim that outcome — only that the code and config are ready
+for it. Do this before tagging `v0.2.0`.
+
+**First next action for Part 3:** read `prompts/part-3-interaction-transport.md`
+fresh (`/clear` first per `prompts/README.md`; that prompt recommends
+planning with Opus 5 before implementing with Sonnet 5). Part 3 can rely on
+`coordinates.viewport()`'s `tier` field and `kitty_raw.lua`'s
+`resolve_zindex()`/`resolve_double_buffer()` pattern (explicit override,
+named source string, else profile default) as stable, tested contracts —
+neither is expected to change shape again before Part 7.
