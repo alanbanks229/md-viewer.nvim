@@ -2,9 +2,7 @@ local M = { version = "0.1.0-beta" }
 local initialized = false
 
 function M.setup(opts)
-  if vim.fn.has("nvim-0.12") ~= 1 then
-    error("md-viewer.nvim requires Neovim 0.12+")
-  end
+  if vim.fn.has("nvim-0.12") ~= 1 then error("md-viewer.nvim requires Neovim 0.12+") end
   require("md-viewer.config").setup(opts or {})
   if not initialized then
     initialized = true

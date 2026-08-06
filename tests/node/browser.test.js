@@ -4,14 +4,30 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { BrowserRenderer } from "../../renderer/src/browser.js";
+import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assetsDir = path.resolve(here, "../../renderer/assets");
 
+// This test launches a real browser, so it uses whatever Chrome, Chromium, or
+// Edge discovery finds on the current platform/CI runner rather than a
+// hardcoded macOS path. Never runs `playwright install` or downloads one.
+function findRealChromium() {
+  try {
+    return discoverChromium(process.platform, process.env, fs.existsSync, {}).executable;
+  } catch {
+    return null;
+  }
+}
+
 test("uses approved Chromium, captures one viewport, and cleans temporary files", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
   const renderer = new BrowserRenderer({ assetsDir });
   t.after(() => renderer.close());
-  const executable = renderer.resolveExecutable({ executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" });
   const health = await renderer.health({ executable_path: executable, launch_timeout_ms: 10000 });
   assert.equal(health.chromiumLaunch, "succeeded");
   assert.equal(renderer.deviceScaleFactor, 1);
