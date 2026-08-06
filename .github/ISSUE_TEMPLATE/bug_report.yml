@@ -1,0 +1,27 @@
+name: Bug report
+description: Report a reproducible md-viewer.nvim problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Environment
+      description: Include macOS, iTerm2, Neovim, Node.js, browser, backend, and tmux status.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Minimal reproduction
+      description: Include minimal Lua configuration, Markdown, commands, and health output.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Diagnostics
+      description: Paste relevant :MdViewerHealth and :MdViewerDebug output after removing sensitive paths.

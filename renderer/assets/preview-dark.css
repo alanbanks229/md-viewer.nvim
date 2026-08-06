@@ -1,0 +1,23 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --fg: #d4d4d4;
+  --heading: #f0f0f0;
+  --muted: #a9a9a9;
+  --border: #3b3b3b;
+  --border-subtle: #343434;
+  --accent: #58a6ff;
+  --link: #65a9e8;
+  --quote: #666f7a;
+  --alert: #58a6ff;
+  --code-bg: #2b2b2b;
+  --code-inline: #3a3d41;
+  --table-head: #292929;
+  --table-stripe: #232323;
+  --syntax-comment: #7f8c8d;
+  --syntax-keyword: #c586c0;
+  --syntax-string: #ce9178;
+  --syntax-number: #b5cea8;
+  --syntax-type: #4ec9b0;
+  --syntax-function: #dcdcaa;
+}
