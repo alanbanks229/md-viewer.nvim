@@ -252,10 +252,20 @@ git push origin feat/cross-platform-markdown-preview
 gh pr create --title "Cross-platform preview: v0.2.0" --body "Parts 1-2 of the cross-platform plan, plus two real-terminal fixes. See CHANGELOG.md."
 # after merging the PR on GitHub:
 git checkout main && git pull origin main
-git tag -a v0.2.0 -m "v0.2.0: portable Kitty backend, honest capability reporting"
+git tag -a v0.2.0 -m "v0.2.0: portable Kitty backend, honest capability reporting, larger default font, command-line visibility fix"
 git push origin v0.2.0
 gh release create v0.2.0 --title "v0.2.0" --notes-file <(sed -n '/## \[0.2.0\]/,/## \[/p' CHANGELOG.md | sed '$d')
 ```
+
+> gh release create does something different: it wraps that existing tag in a GitHub Release — a separate, GitHub-specific object layered on top of the tag.
+> Concretely, it:
+
+> - Publishes a page on the repo's "Releases" tab with your formatted notes (rendered from the --notes-file content), rather than requiring people to dig through CHANGELOG.md or git log themselves.
+> - Generates the source .zip/.tar.gz download links people expect on that page.
+> - Sends a notification to anyone "Watching" the repo — a plain tag push does not trigger that notification, only a Release does.
+> - Makes the .../releases/tag/v0.2.0 URL — the exact link format your CHANGELOG.md already uses in its [0.2.0]: https://... reference — actually show something meaningful. Without running this command, that link points at a tag with no Release attached.
+
+> So it's purely about human discoverability/communication, not distribution mechanics. If you don't care about the Releases tab or notifying watchers, you can skip it — the plugin still works identically for everyone via the tag alone. Given you already wrote real changelog notes for this, I'd still run it (low cost, and it makes those changelog links actually resolve to something), but it's optional, not required.
 
 ### B. A quick patch release later
 

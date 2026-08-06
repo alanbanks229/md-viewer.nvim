@@ -13,7 +13,7 @@ repository right now, not what was planned.
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 | 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
-| 4 | Mouse layer, click-to-source, safe links | `PART4_COMMIT_HASH` |
+| 4 | Mouse layer, click-to-source, safe links | `e3139e8` |
 
 Parts 1–2 were merged to `main` via PR #1. Parts 3–4 are on the branch
 `feat/interaction-transport`, cut from `main`, and have not been pushed.
@@ -1473,7 +1473,7 @@ The tree is green: all four policy §5 commands pass (348/348 Lua assertions,
 61/61 Node tests, stylua clean), and `:MdViewerDebug` plus the actual installed
 `<LeftMouse>`/`<LeftRelease>` keymap callbacks have been invoked directly in
 headless sessions per policy §5 — not just the library functions underneath
-them. Part 4 is commit `PART4_COMMIT_HASH` on `feat/interaction-transport`, a
+them. Part 4 is commit `e3139e8` on `feat/interaction-transport`, a
 branch cut from `main` (where Parts 1–2 landed via PR #1). Neither the branch
 nor this doc commit has been pushed, and no PR has been opened.
 
