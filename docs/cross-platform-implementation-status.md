@@ -1468,6 +1468,78 @@ supported as written by what this part actually built.
 
 ---
 
+## Two bugs the operator found after Part 5 landed
+
+Both were reported against a real terminal, and both were unmasked by Part 5
+rather than introduced by it: until the `modifiers` fix above, no click ever
+received a successful response, so neither of these code paths had ever run.
+Fixed in a follow-up commit on the same branch.
+
+### 1. Clicking outside the text crashed
+
+```
+interaction.lua:102: bad argument #1 to 'floor' (number expected, got userdata)
+```
+
+A click on the page padding, or on empty space between blocks, resolves to
+precision `none`, and the renderer honestly sends `line: null`. **`vim.json.decode`
+maps JSON `null` to `vim.NIL`** — a userdata sentinel that is *truthy* and
+compares `~= nil`. So `move_source_cursor`'s guard (`position.line ~= nil`) let
+it through and `math.floor` threw on the sentinel.
+
+This is not confined to one field: `if not result.link` and every similar guard
+in this codebase reads a null field as *present*. Fixed at the transport, where
+the class ends: `protocol.decode` now passes `luanil = { object = true }`, so a
+null object value arrives absent. Only `object` — `luanil.array` would leave
+holes in arrays like `blocks`, which the scroll sync walks with `ipairs`.
+`move_source_cursor` additionally type-checks rather than nil-checks, so the
+function that moves a user's cursor cannot be made to crash by a position it
+should simply decline to act on.
+
+### 2. Clicking text made the preview scroll itself
+
+Clicking a word moved the source cursor, the resulting `CursorMoved` reached the
+source-to-preview sync, and the sync re-anchored the preview on the block
+containing that line — which reads as the preview jumping to centre whatever was
+just clicked.
+
+`sync_guard` was supposed to prevent exactly this, and could not: **Neovim
+dispatches `CursorMoved` when it next returns to its main loop, and
+`vim.schedule` callbacks run on that same loop**, so the guard is usually
+released before the echo arrives. No amount of rescheduling fixes a race between
+two main-loop callbacks.
+
+The fix records the cursor position we set (`sync.suppress_echo`) and drops the
+next `CursorMoved` that matches it (`is_echo`). A position is not a race: the
+cursor either is where we put it or it is not. The record is consumed on the
+first check either way, so a stale record cannot swallow a real move later, and
+the position is read *back* from the window rather than taken from the caller
+because Neovim's normal-mode clamping can land the cursor short of the requested
+column. `update_source_from_scroll` had the same latent flaw — masked there by
+the `manual_scroll_until` and block-index checks — and now uses the same
+mechanism.
+
+Both fixes have regression tests that were confirmed to **fail against the old
+code** before being accepted: `tests/lua/cases/protocol.lua` (null decoding, and
+that arrays keep their length), `tests/lua/cases/interaction.lua` (a decoded
+precision-`none` position and a raw `vim.NIL` one are both declined, not
+crashed), and `tests/lua/cases/sync.lua` (three echo cases, each draining the
+scheduler first so it reproduces the losing ordering rather than the convenient
+one). A headless end-to-end script also confirmed both against the real renderer:
+a click at x=2 (the left page padding) reports `none` with an absent line and
+moves nothing, and a click on text resolves exactly, moves the cursor, and leaves
+`session.scroll_y` untouched while a genuine cursor move still syncs.
+
+Suite totals after the fixes: **375 Lua assertions** (360 at Part 5's commit),
+96 Node tests unchanged, stylua clean.
+
+**Still unconfirmed in a real terminal.** The scroll fix is verified against the
+code path the autocmd calls, not against a human clicking in iTerm2 — the
+operator should confirm the preview now stays put.
+
+
+---
+
 ## Safe stopping point and first next action
 
 The tree is green: all four policy §5 commands pass (348/348 Lua assertions,

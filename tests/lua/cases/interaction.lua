@@ -172,6 +172,25 @@ return function(t)
     interaction.move_source_cursor(session, { line = nil, byte_column = nil, precision = "none" })
     t.eq(cursor_before, vim.api.nvim_win_get_cursor(source_win), "an unresolved source position never moves the cursor")
 
+    -- ...including when "no position" arrives the way the renderer actually
+    -- sends it. A click on empty space resolves to precision "none" with
+    -- `line: null`, and `vim.NIL` is truthy userdata that compares `~= nil`, so
+    -- a nil-check alone lets it through and the first arithmetic on it throws.
+    -- protocol.lua now decodes null as absent; this asserts the function is
+    -- also safe against the raw sentinel, whatever the transport did.
+    local decoded = require("md-viewer.protocol").decode(
+      '{"id":1,"ok":true,"result":{"kind":"source","sourcePosition":{"line":null,"byteColumn":null,"precision":"none"}}}'
+    )
+    local position = decoded.result.sourcePosition
+    t.eq("nil", type(position.line), "the transport decodes a null line as absent, not as vim.NIL")
+    t.eq("nil", type(position.byteColumn), "the transport decodes a null byteColumn as absent")
+    local ok_decoded = pcall(interaction.move_source_cursor, session, position)
+    t.eq(true, ok_decoded, "a decoded precision-none position is a no-op, not an error")
+    local ok_sentinel =
+      pcall(interaction.move_source_cursor, session, { line = vim.NIL, byteColumn = vim.NIL, precision = "none" })
+    t.eq(true, ok_sentinel, "even a raw vim.NIL position is declined rather than crashing")
+    t.eq(cursor_before, vim.api.nvim_win_get_cursor(source_win), "neither form moved the cursor")
+
     vim.api.nvim_win_close(source_win, true)
   end
 

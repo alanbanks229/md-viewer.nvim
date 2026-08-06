@@ -2,6 +2,7 @@ local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
+local sync = require("md-viewer.sync")
 
 local M = {}
 
@@ -94,14 +95,21 @@ end
 ---landed at column 0, which was also the correct answer. Part 5 is the first
 ---part that sends a column worth getting wrong.
 function M.move_source_cursor(session, position)
-  if not (position and position.line ~= nil) then return end
+  -- Typed, not merely non-nil. A click on empty space resolves to precision
+  -- "none" and the renderer honestly sends `line: null` -- which arrives as a
+  -- number only if protocol.lua decoded it as absent. Checking the type here
+  -- too means this function cannot be made to crash by a position it should
+  -- simply decline to act on, whatever the transport did.
+  if type(position) ~= "table" or type(position.line) ~= "number" then return end
   local win = session.source_win
   if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then return end
   local buf = session.source_buf
   local line_count = vim.api.nvim_buf_line_count(buf)
   local line = math.max(1, math.min(line_count, math.floor(position.line)))
   local text = vim.api.nvim_buf_get_lines(buf, line - 1, line, false)[1] or ""
-  local requested = position.byteColumn or position.byte_column or 0
+  local requested = position.byteColumn
+  if type(requested) ~= "number" then requested = position.byte_column end
+  if type(requested) ~= "number" then requested = 0 end
   local byte_col = math.max(0, math.min(math.floor(requested), #text))
   while byte_col > 0 and byte_col < #text do
     local byte = text:byte(byte_col + 1)
@@ -112,6 +120,11 @@ function M.move_source_cursor(session, position)
   session.sync_guard = true
   if config.get().interaction.focus_source_on_click then pcall(vim.api.nvim_set_current_win, win) end
   pcall(vim.api.nvim_win_set_cursor, win, { line, byte_col })
+  -- Neovim's own normal-mode clamping can land the cursor short of the column
+  -- we asked for, so the echo is recorded from where the cursor actually is.
+  -- Recording the requested position instead would fail to match and the
+  -- preview would scroll itself to re-anchor the line the user just clicked.
+  sync.suppress_echo(session, win)
   vim.schedule(function() session.sync_guard = false end)
 end
 
