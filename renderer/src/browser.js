@@ -7,11 +7,25 @@ import { collectBlockGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
 import {
+  MAX_FIND_MATCHES_REPORTED,
   TEXT_PREVIEW_LIMIT,
   buildActionResult,
+  buildFindClearResult,
+  buildFindResult,
+  buildFindStepResult,
+  buildSelectionClearResult,
+  buildSelectionResult,
+  buildSelectionTextResult,
+  clearFindInPage,
+  clearSelectionInPage,
   createInteractError,
   hitTestInPage,
   normalizeHit,
+  readSelectionTextInPage,
+  resolveSelectionInPage,
+  setFindInPage,
+  stepFindInPage,
+  wordSelectInPage,
 } from "./interact.js";
 
 const MAX_DOCUMENT_FRAMES = 64;
@@ -343,21 +357,74 @@ export class BrowserRenderer {
     return { found: true, scrollY };
   }
 
+  /// Evaluate the in-page function for `action`. One dispatch point so the
+  /// document-isolation guard, the ensureDocumentActive() call, and the
+  /// same-queued-operation capture below apply uniformly to every action --
+  /// hit-testing and all nine of Part 6's actions alike -- rather than each
+  /// action reimplementing that plumbing.
+  async evaluateAction(action, envelope, cached) {
+    const token = this.active.token;
+    if (action === "selection_preview" || action === "selection_commit") {
+      return this.page.evaluate(resolveSelectionInPage, {
+        token, anchor: envelope.anchorCoordinates, focus: envelope.coordinates,
+        cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
+      });
+    }
+    if (action === "selection_clear") return this.page.evaluate(clearSelectionInPage, { token });
+    if (action === "selection_text") return this.page.evaluate(readSelectionTextInPage, { token });
+    if (action === "word_select") {
+      return this.page.evaluate(wordSelectInPage, {
+        token, x: envelope.coordinates.x, y: envelope.coordinates.y,
+        cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
+      });
+    }
+    if (action === "find_set") {
+      return this.page.evaluate(setFindInPage, { token, query: envelope.query, maxReported: MAX_FIND_MATCHES_REPORTED });
+    }
+    if (action === "find_next" || action === "find_previous") {
+      return this.page.evaluate(stepFindInPage, {
+        token,
+        direction: action === "find_next" ? "next" : "previous",
+        // Not owned by browser.js -- forwarded through `cached.findState` from
+        // main.js's interactionState, since only find_set recomputes the match
+        // set; stepping only moves which one is active.
+        activeIndex: cached?.findState?.activeIndex ?? 0,
+        matchCount: cached?.findState?.matchCount ?? 0,
+      });
+    }
+    if (action === "find_clear") return this.page.evaluate(clearFindInPage, { token });
+    return this.page.evaluate(hitTestInPage, {
+      token, x: envelope.coordinates.x, y: envelope.coordinates.y,
+      cellWidthPx: envelope.cellWidthPx, cellHeightPx: envelope.cellHeightPx,
+      strategy: envelope.strategy, previewLimit: TEXT_PREVIEW_LIMIT,
+    });
+  }
+
+  /// Shape the raw in-page result for `action` into the response Lua consumes.
+  buildResult(action, raw, cached, envelope) {
+    if (action === "hit_test" || action === "activate_at") {
+      const hit = normalizeHit(raw, cached?.sourceMap);
+      return { result: buildActionResult(action, hit), hit };
+    }
+    if (action === "selection_preview" || action === "selection_commit" || action === "word_select") {
+      return { result: buildSelectionResult(raw, cached?.sourceMap), hit: null };
+    }
+    if (action === "selection_text") return { result: buildSelectionTextResult(raw), hit: null };
+    if (action === "selection_clear") return { result: buildSelectionClearResult(), hit: null };
+    if (action === "find_set") return { result: buildFindResult(raw, cached?.sourceMap, envelope.query), hit: null };
+    if (action === "find_next" || action === "find_previous") {
+      return { result: buildFindStepResult(raw, cached?.findState), hit: null };
+    }
+    return { result: buildFindClearResult(), hit: null };
+  }
+
   async interact(envelope, cached, requestId) {
     const started = performance.now();
     const rehydrateStarted = performance.now();
     const { rehydrated, record, scrollY, documentHeight } = await this.ensureDocumentActive(envelope, cached);
     const rehydrateMs = round(performance.now() - rehydrateStarted);
 
-    const raw = await this.page.evaluate(hitTestInPage, {
-      token: this.active.token,
-      x: envelope.coordinates.x,
-      y: envelope.coordinates.y,
-      cellWidthPx: envelope.cellWidthPx,
-      cellHeightPx: envelope.cellHeightPx,
-      strategy: envelope.strategy,
-      previewLimit: TEXT_PREVIEW_LIMIT,
-    });
+    const raw = await this.evaluateAction(envelope.action, envelope, cached);
     if (raw?.error === "DOCUMENT_MISMATCH") {
       // Layer 3 fired: the page is not the document we believe it is. Refuse
       // rather than return a plausible answer from the wrong document, and drop
@@ -374,8 +441,7 @@ export class BrowserRenderer {
     // The source map never leaves this process: the page returned an opaque
     // region key, and the mapping that turns it into a line and byte column is
     // the cached one for exactly this document.
-    const hit = normalizeHit(raw, cached?.sourceMap);
-    const result = buildActionResult(envelope.action, hit);
+    const { result, hit } = this.buildResult(envelope.action, raw, cached, envelope);
     result.documentId = envelope.documentId;
     result.contentRevision = envelope.contentRevision;
     result.action = envelope.action;
@@ -389,10 +455,19 @@ export class BrowserRenderer {
     // activate_at already classified the link, so resolve the anchor and
     // report where the page ended up. A miss (no matching id) is reported
     // honestly rather than left unscrolled and unexplained.
-    if (envelope.action === "activate_at" && hit.link && hit.link.type === "fragment") {
+    if (envelope.action === "activate_at" && hit && hit.link && hit.link.type === "fragment") {
       const fragment = await this.scrollToFragment(hit.link.href);
       result.fragmentResolved = fragment.found;
       if (fragment.found) result.scrollY = fragment.scrollY;
+    }
+
+    // find_set/find_next/find_previous scroll the active match into view
+    // in-page (scrollIntoView), after `scrollY` above was already computed
+    // from the pre-mutation applied scroll -- so it must be overwritten with
+    // where the page actually ended up, the same way fragment scrolling is.
+    if (typeof raw?.scrollY === "number") {
+      result.scrollY = raw.scrollY;
+      if (this.active) this.active.scrollY = raw.scrollY;
     }
 
     if (envelope.capture) {

@@ -52,6 +52,70 @@ local function update_occlusion(session)
   return blocked or session.ui_suppressed
 end
 
+---Deliver an image to the backend and record the placement/diagnostic
+---bookkeeping that goes with it. The single choke point both `M.refresh`'s
+---render/capture path and `display_interact_result`'s interact path funnel
+---through, so there is exactly one place that knows how to show/update a
+---backend image.
+local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms)
+  preview.stop_loading(session)
+  preview.reset_surface(session)
+  local placement = preview.placement(session.preview_win, session.backend.name)
+  session.preview_width_cells = placement.width
+  session.preview_height_cells = placement.height
+  local image_started = vim.uv.hrtime()
+  local ok, image_id, image_err = pcall(function()
+    if session.image_id then return session.backend.update(session.image_id, image_bytes, placement) end
+    return session.backend.show(image_bytes, placement)
+  end)
+  if not ok or not image_id then
+    session.render_failed = true
+    notify_error(ok and (image_err or "failed to display rendered image") or image_id)
+    return false
+  end
+  session.last_image_update_ms = (vim.uv.hrtime() - image_started) / 1000000
+  if png_bytes then session.last_png_bytes = png_bytes end
+  if capture_ms then session.last_capture_ms = capture_ms end
+  if capture_scale then session.last_capture_scale = capture_scale end
+  if capture_scale == "css" then
+    session.fast_png_bytes = session.last_png_bytes
+    session.fast_capture_ms = session.last_capture_ms
+    session.fast_image_update_ms = session.last_image_update_ms
+  elseif capture_scale == "device" then
+    session.retina_png_bytes = session.last_png_bytes
+    session.retina_capture_ms = session.last_capture_ms
+    session.retina_image_update_ms = session.last_image_update_ms
+  end
+  session.image_id = image_id
+  session.last_placement = placement
+  return true
+end
+
+---Display the PNG an interact response captured (every mutating selection/find
+---action always captures one, in the same queued operation the mutation
+---itself ran in -- see renderer/src/interact.js's `mutatesVisibleState`).
+---Interact requests bypass `renderer.lua`'s request/response envelope
+---entirely (`interaction.lua` calls `process.request("interact", ...)`
+---directly, exactly as `request_hit` already did before this part), so this
+---is the fetch half `M.refresh`'s render/capture path gets from
+---`renderer.lua`; the display half is `apply_image`, shared verbatim.
+function M.display_interact_result(session, result)
+  if not valid(session) or session.backend.name == "cells" then return end
+  if type(result) ~= "table" or type(result.pngPath) ~= "string" then return end
+  local cfg = config.get().render
+  local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
+  vim.uv.fs_unlink(result.pngPath)
+  if not image then
+    notify_error(read_err)
+    return
+  end
+  if update_occlusion(session) then
+    clear_image(session)
+    return
+  end
+  apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs)
+end
+
 local function show_cached(session)
   if not valid(session) or session.backend.name == "cells" or not session.last_image_bytes then return false end
   if update_occlusion(session) then
@@ -108,6 +172,13 @@ function M.refresh(session, render_options)
       return
     end
     local meta = result.metadata
+    -- A selection captured against older content must never be displayed or
+    -- reused against newer content -- that would be silent corruption in a
+    -- copy operation. renderer.lua has already updated session.renderer_revision
+    -- by this point, so this is the first tick new content can be observed on.
+    if session.selection_content_revision and session.selection_content_revision ~= session.renderer_revision then
+      interaction.forget_selection(session)
+    end
     local newer_scroll_pending = render_options and render_options.scroll_frame and session.scroll_render_pending
     session.latest_blocks = meta.blocks
     session.document_height_px = meta.documentHeightPx
@@ -132,34 +203,10 @@ function M.refresh(session, render_options)
       finish()
       return
     end
-    preview.stop_loading(session)
-    preview.reset_surface(session)
-    local placement = preview.placement(session.preview_win, session.backend.name)
-    session.preview_width_cells = placement.width
-    session.preview_height_cells = placement.height
-    local image_started = vim.uv.hrtime()
-    local ok, image_id, image_err = pcall(function()
-      if session.image_id then return session.backend.update(session.image_id, result.image, placement) end
-      return session.backend.show(result.image, placement)
-    end)
-    if not ok or not image_id then
-      session.render_failed = true
-      notify_error(ok and (image_err or "failed to display rendered image") or image_id)
+    if not apply_image(session, result.image, meta.captureScale, session.last_png_bytes, session.last_capture_ms) then
       finish()
       return
     end
-    session.last_image_update_ms = (vim.uv.hrtime() - image_started) / 1000000
-    if meta.captureScale == "css" then
-      session.fast_png_bytes = session.last_png_bytes
-      session.fast_capture_ms = session.last_capture_ms
-      session.fast_image_update_ms = session.last_image_update_ms
-    else
-      session.retina_png_bytes = session.last_png_bytes
-      session.retina_capture_ms = session.last_capture_ms
-      session.retina_image_update_ms = session.last_image_update_ms
-    end
-    session.image_id = image_id
-    session.last_placement = placement
     finish()
   end)
 end
@@ -222,6 +269,8 @@ local function close_session(session)
     "scroll_settle_timer",
     "cursor_scroll_timer",
     "ui_poll_timer",
+    "selection_debounce_timer",
+    "selection_settle_timer",
   }) do
     debounce.close(session, name)
   end
@@ -234,6 +283,7 @@ local function close_session(session)
   end
   if not next(state.all()) then process.stop() end
   interaction.forget(session)
+  interaction.forget_selection(session)
   mouse.detach_if_unused()
 end
 
@@ -404,7 +454,73 @@ start_ui_poll = function(session)
   )
 end
 
+---Copy the current preview selection to the unnamed register (and `+` when
+---available). No-ops with a clean notification, never an error, when no
+---preview is open or nothing is selected -- see interaction.copy_selection for
+---the latter case.
+function M.copy()
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.copy_selection(session, false)
+end
+
+function M.clear_selection()
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.clear_selection(session)
+end
+
+function M.find(query)
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.find_set(session, query)
+end
+
+function M.find_next()
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.find_next(session)
+end
+
+function M.find_previous()
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.find_previous(session)
+end
+
+function M.find_clear()
+  local session = current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  interaction.find_clear(session)
+end
+
 function M.setup_autocmds()
+  -- Session-level selection/find display state is not tied to any specific
+  -- in-flight request (unlike process.lua's own deliver_error, which already
+  -- handles those correctly), so it needs its own hook: the renderer's
+  -- in-memory interactionState does not survive a restart, and without this
+  -- the cached Lua-side flags describing it would go stale silently.
+  process.on_exit(function()
+    each_session(function(session) interaction.forget_selection(session) end)
+  end)
   group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
     group = group,

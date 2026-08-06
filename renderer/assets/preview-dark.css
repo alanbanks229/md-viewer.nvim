@@ -20,4 +20,6 @@
   --syntax-number: #b5cea8;
   --syntax-type: #4ec9b0;
   --syntax-function: #dcdcaa;
+  --find-mark-bg: rgba(255, 213, 79, 0.35);
+  --find-mark-active-bg: rgba(255, 152, 0, 0.65);
 }

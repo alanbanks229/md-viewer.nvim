@@ -41,6 +41,21 @@ function M.create(source_buf, source_win)
     loading_frame = 0,
     render_failed = false,
     obsolete_files = {},
+    -- Selection/find display state, distinct from the button-scoped
+    -- `session.pointer` gesture state: it must survive focus changes (a
+    -- pointer press does not), so it is never touched by the
+    -- TabLeave/VimSuspend autocmd that clears `pointer` via
+    -- interaction.forget().
+    selection_active = false,
+    selection_content_revision = nil,
+    selection_render_in_flight = false,
+    selection_render_pending = false,
+    selection_debounce_timer = nil,
+    selection_settle_timer = nil,
+    find_active = false,
+    find_query = nil,
+    find_match_count = 0,
+    find_active_index = nil,
   }
   sessions[source_buf] = session
   return session

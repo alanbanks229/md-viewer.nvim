@@ -414,11 +414,61 @@ return function(t)
       { interaction = { double_click = "true" } },
       { interaction = { drag_threshold_cells = -1 } },
       { interaction = { drag_threshold_cells = "1" } },
+      { interaction = { selection = "yes" } },
+      { interaction = { drag_debounce_ms = -1 } },
+      { interaction = { drag_debounce_ms = "40" } },
+      { interaction = { settle_ms = -1 } },
+      { interaction = { settle_ms = "120" } },
+      { interaction = { copy = 1 } },
+      { interaction = { copy_on_select = "no" } },
+      { interaction = { word_select = 0 } },
+      { interaction = { find = "true" } },
     }) do
       local ok, err = pcall(config.setup, case)
       t.eq(false, ok, ("invalid interaction config is rejected: %s"):format(vim.inspect(case)))
       t.ok(tostring(err):match("interaction"), "the validation error names the interaction option")
     end
+    config.reset()
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Part 6's new optional envelope fields (anchorCoordinates, query) follow
+  -- the same wire-encoding discipline the modifiers table above does: assert
+  -- the *encoded* JSON shape, not the Lua table, since a Lua table can look
+  -- correct and still encode wrong.
+  -- ---------------------------------------------------------------------
+  do
+    config.reset()
+    config.setup({})
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = params
+      callback({ kind = "selection", ok = true, text = "x", collapsed = false }, nil)
+    end
+
+    interaction.request_selection(
+      session,
+      { x = 1, y = 2, cellWidthPx = 10, cellHeightPx = 20 },
+      { x = 3, y = 4, cellWidthPx = 10, cellHeightPx = 20 },
+      "css",
+      false,
+      function() end
+    )
+    local encoded = require("md-viewer.protocol").encode(requests[1])
+    t.eq(true, encoded:find('"anchorCoordinates":{', 1, true) ~= nil, "anchorCoordinates must encode as a JSON object")
+    local decoded = vim.json.decode(encoded)
+    t.eq({ x = 1, y = 2 }, decoded.anchorCoordinates)
+    t.eq({ x = 3, y = 4 }, decoded.coordinates)
+
+    requests = {}
+    interaction.find_set(session, [[a query with "quotes" and \backslashes\]])
+    local encoded_query = require("md-viewer.protocol").encode(requests[1])
+    local decoded_query = vim.json.decode(encoded_query)
+    t.eq([[a query with "quotes" and \backslashes\]], decoded_query.query, "a query round-trips through JSON unchanged")
+
+    process.request = original_request
     config.reset()
   end
 

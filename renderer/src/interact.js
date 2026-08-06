@@ -10,31 +10,42 @@ import { resolveRegionPosition } from "./provenance.js";
 
 export const CARET_STRATEGIES = Object.freeze(["auto", "caret-position", "caret-range", "element-only"]);
 
-// Implemented now. `mutatesVisibleState` drives §3.4: an action that changes
-// what the user sees must produce its screenshot inside the same queued
-// operation, so Lua never has to issue a follow-up capture. Neither action here
-// mutates anything -- both are read-only hit tests -- but the flag is the seam
-// Part 6's selection actions flip.
+// `mutatesVisibleState` drives §3.4: an action that changes what the user sees
+// must produce its screenshot inside the same queued operation, so Lua never
+// has to issue a follow-up capture. `requiresAnchor` marks the two selection
+// actions that need a second point (the drag's fixed start) alongside
+// `coordinates`, which is the focus/moving point for those two. `requiresQuery`
+// marks the one action that needs literal search text.
 export const INTERACT_ACTIONS = Object.freeze({
   hit_test: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: true }),
   activate_at: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: true }),
+  selection_preview: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true }),
+  selection_commit: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true }),
+  selection_clear: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
+  // Read-only: it re-queries the live DOM selection rather than mutating it, so
+  // a copy can never itself "commit" a selection that was only ever previewed.
+  selection_text: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: false }),
+  word_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
+  find_set: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true }),
+  find_next: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
+  find_previous: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
+  find_clear: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
 });
 
-// Named so that adding them is additive and so a caller that arrives early gets
-// an honest answer instead of "unknown method". Part 6 implements these.
-export const RESERVED_ACTIONS = Object.freeze([
-  "selection_preview",
-  "selection_commit",
-  "selection_clear",
-  "selection_text",
-  "word_select",
-  "find_set",
-  "find_next",
-  "find_previous",
-  "find_clear",
-]);
+// Kept empty rather than removed: it is what keeps validateEnvelope's
+// reserved-vs-unknown branch structurally meaningful for whatever a later part
+// reserves next, and a caller mid-upgrade against an old build still gets an
+// honest "not implemented yet" instead of "unknown method".
+export const RESERVED_ACTIONS = Object.freeze([]);
 
 export const TEXT_PREVIEW_LIMIT = 120;
+
+// A find_set response over NDJSON must stay bounded: DOM highlighting marks
+// every match regardless (that is a correctness requirement), but a document
+// with thousands of hits for a common word must not serialize thousands of
+// per-match source positions on every keystroke of a search. `matchCount`
+// always reports the true total even when `matches` is capped.
+export const MAX_FIND_MATCHES_REPORTED = 500;
 
 export function createInteractError(code, message, detail) {
   const error = new Error(message);
@@ -173,6 +184,30 @@ export function validateEnvelope(params) {
     };
   }
 
+  // The drag's fixed start point, alongside `coordinates` as the moving/focus
+  // point. Sent explicitly on every request rather than remembered server-side,
+  // so a selection request is fully self-describing and replayable on its own.
+  let anchorCoordinates = null;
+  if (action.requiresAnchor) {
+    const point = envelope.anchorCoordinates;
+    if (!point || typeof point !== "object") {
+      throw createInteractError("INVALID_INTERACTION", `interact action ${envelope.action} requires anchorCoordinates {x, y}`);
+    }
+    anchorCoordinates = {
+      x: requireFiniteNumber(point.x, "anchorCoordinates.x"),
+      y: requireFiniteNumber(point.y, "anchorCoordinates.y"),
+    };
+  }
+
+  // Matched literally, never as a regular expression -- see setFindInPage.
+  let query = null;
+  if (action.requiresQuery) {
+    if (typeof envelope.query !== "string" || envelope.query.trim() === "") {
+      throw createInteractError("INVALID_INTERACTION", `interact action ${envelope.action} requires a non-empty query`);
+    }
+    query = envelope.query.trim();
+  }
+
   const strategy = envelope.strategy ?? "auto";
   if (!CARET_STRATEGIES.includes(strategy)) {
     throw createInteractError(
@@ -213,6 +248,8 @@ export function validateEnvelope(params) {
     action: envelope.action,
     actionSpec: action,
     coordinates,
+    anchorCoordinates,
+    query,
     modifiers: {
       ctrl: modifiers.ctrl === true,
       shift: modifiers.shift === true,
@@ -460,4 +497,714 @@ export function buildActionResult(action, hit) {
     return { kind: "link", link: hit.link, sourcePosition: hit.sourcePosition, hit };
   }
   return { kind: "source", sourcePosition: hit.sourcePosition, hit };
+}
+
+// ---------------------------------------------------------------------------
+// Part 6 -- selection and search.
+//
+// Each `*InPage` function below is a second, independent `page.evaluate` body,
+// self-contained for the same reason `hitTestInPage` is: `page.evaluate`
+// serializes `fn.toString()` and runs it standalone in the page, with no access
+// to sibling module-scope functions. The cell-probe/caret-resolution routine
+// `hitTestInPage` already has is therefore duplicated here rather than shared --
+// the least-risk option, and it leaves hitTestInPage itself untouched.
+// ---------------------------------------------------------------------------
+
+/// `selection_preview` / `selection_commit`. Resolves both endpoints and
+/// applies a real Chromium Selection; the browser paints the highlight itself.
+///
+/// `resolveSelectionPoint`/`applySelectionRange` are declared *inside* this
+/// function (and duplicated again inside `wordSelectInPage` below) rather than
+/// as siblings: `page.evaluate(fn, arg)` serializes only `fn.toString()` and
+/// runs it standalone in the page, with no access to sibling module-scope
+/// functions -- a top-level helper here would be a ReferenceError at
+/// evaluation time, not a lint warning.
+export function resolveSelectionInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  // Resolve one point to the deepest addressable position: a block, an
+  // optional inline provenance run, and a DOM (node, offset) pair usable as a
+  // Range boundary. Unlike hitTestInPage's miss cases, a selection endpoint
+  // must always resolve to *something* -- a selection with only one
+  // resolvable endpoint is not a selection -- so a point with no usable caret
+  // falls back to an element text boundary (start or end, picked by which
+  // side of the element's horizontal midpoint the point fell on) rather than
+  // reporting a miss. Returns null only when the point is outside the
+  // viewport or lands on no addressable block at all.
+  function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
+    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
+    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
+    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
+
+    let element = null;
+    let block = null;
+    let pointX = x;
+    for (const dx of offsets) {
+      const px = x + dx;
+      if (!(px >= 0 && px < window.innerWidth)) continue;
+      const candidate = document.elementFromPoint(px, y);
+      if (!candidate) continue;
+      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
+      if (!candidateBlock) continue;
+      element = candidate;
+      block = candidateBlock;
+      pointX = px;
+      break;
+    }
+    if (!block) return null;
+
+    let caretNode = null;
+    let caretOffset = null;
+    const wantPosition = strategy === "auto" || strategy === "caret-position";
+    const wantRange = strategy === "auto" || strategy === "caret-range";
+    if (wantPosition && typeof document.caretPositionFromPoint === "function") {
+      const position = document.caretPositionFromPoint(pointX, y);
+      if (position && position.offsetNode) {
+        caretNode = position.offsetNode;
+        caretOffset = position.offset;
+      }
+    }
+    if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
+      const range = document.caretRangeFromPoint(pointX, y);
+      if (range && range.startContainer) {
+        caretNode = range.startContainer;
+        caretOffset = range.startOffset;
+      }
+    }
+    if (caretNode !== null && !block.contains(caretNode)) {
+      caretNode = null;
+      caretOffset = null;
+    }
+
+    if (caretNode === null) {
+      const rect = element.getBoundingClientRect();
+      const preferEnd = pointX >= rect.left + rect.width / 2;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let first = null;
+      let last = null;
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node.nodeValue.length > 0) {
+          if (first === null) first = node;
+          last = node;
+        }
+        node = walker.nextNode();
+      }
+      if (preferEnd && last !== null) {
+        caretNode = last;
+        caretOffset = last.nodeValue.length;
+      } else if (first !== null) {
+        caretNode = first;
+        caretOffset = 0;
+      } else {
+        // No text at all in this block (e.g. a lone image): the block element
+        // itself is still a valid Range boundary.
+        caretNode = block;
+        caretOffset = 0;
+      }
+    }
+
+    let runElement = null;
+    const caretElement = caretNode.nodeType === 3 ? caretNode.parentElement : caretNode;
+    runElement = caretElement === null ? null : caretElement.closest("[data-md-source-id]");
+    const elementRun = element.closest("[data-md-source-id]");
+    if (elementRun !== null && (runElement === null || runElement.contains(elementRun))) runElement = elementRun;
+    if (runElement !== null && !block.contains(runElement)) runElement = null;
+
+    let runOffset = null;
+    let runLength = null;
+    if (runElement !== null) {
+      runLength = (runElement.textContent || "").length;
+      if (caretNode.nodeType === 3 && runElement.contains(caretNode)) {
+        const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+        let consumed = 0;
+        let node = walker.nextNode();
+        while (node !== null) {
+          if (node === caretNode) {
+            runOffset = consumed + caretOffset;
+            break;
+          }
+          consumed += node.nodeValue.length;
+          node = walker.nextNode();
+        }
+      }
+    }
+
+    return {
+      node: caretNode,
+      offset: caretOffset,
+      block: {
+        sourceStart: Number(block.getAttribute("data-source-start")),
+        sourceEnd: Number(block.getAttribute("data-source-end")),
+        sourceId: block.getAttribute("data-md-source-id"),
+        tagName: block.tagName,
+      },
+      inline: runElement === null ? null : {
+        sourceId: runElement.getAttribute("data-md-source-id"),
+        offset: runOffset,
+        textLength: runLength,
+      },
+    };
+  }
+
+  // Apply `selection` to `[anchorNode, anchorOffset]` -> `[focusNode,
+  // focusOffset]`, preferring the direction-aware primitive.
+  //
+  // `setBaseAndExtent` tracks anchor/focus direction natively -- Chromium
+  // paints a reverse (right-to-left or bottom-to-top) drag correctly
+  // regardless of which endpoint is passed first, which is what makes reverse
+  // dragging work without any extra logic here. The Range fallback is
+  // realistically unreachable against the bundled Chromium (setBaseAndExtent
+  // has shipped since Chrome 27); it exists only so a future engine swap
+  // fails safely instead of throwing.
+  function applySelectionRange(selection, anchorNode, anchorOffset, focusNode, focusOffset) {
+    if (typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+      return;
+    }
+    let focusFirst = false;
+    if (anchorNode === focusNode) {
+      focusFirst = focusOffset < anchorOffset;
+    } else {
+      const relation = anchorNode.compareDocumentPosition(focusNode);
+      // FOLLOWING: focus comes after anchor in the document, so anchor is
+      // first. PRECEDING: focus comes before anchor, so focus is first.
+      focusFirst = (relation & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+    }
+    const range = document.createRange();
+    if (focusFirst) {
+      range.setStart(focusNode, focusOffset);
+      range.setEnd(anchorNode, anchorOffset);
+    } else {
+      range.setStart(anchorNode, anchorOffset);
+      range.setEnd(focusNode, focusOffset);
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const anchor = resolveSelectionPoint(input.anchor.x, input.anchor.y, input.cellWidthPx, input.strategy);
+  if (!anchor) return { ok: false, reason: "anchor_miss" };
+  const focus = resolveSelectionPoint(input.focus.x, input.focus.y, input.cellWidthPx, input.strategy);
+  if (!focus) return { ok: false, reason: "focus_miss" };
+
+  const selection = window.getSelection();
+  applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
+
+  return {
+    ok: true,
+    text: selection.toString(),
+    collapsed: selection.isCollapsed,
+    anchor: { block: anchor.block, inline: anchor.inline },
+    focus: { block: focus.block, inline: focus.inline },
+  };
+}
+
+/// `selection_text`. Always re-reads the live DOM Selection rather than
+/// trusting a cached string -- the DOM selection is the single source of truth
+/// Chromium paints, and a cached string could drift after a scroll-only
+/// capture. No mutation, so this action never triggers a screenshot.
+export function readSelectionTextInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+  const selection = window.getSelection();
+  return { ok: true, text: selection.toString(), collapsed: selection.isCollapsed };
+}
+
+/// `selection_clear`.
+export function clearSelectionInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+  window.getSelection().removeAllRanges();
+  return { ok: true };
+}
+
+/// `word_select`. Resolves one caret point, then expands to word boundaries via
+/// `Intl.Segmenter` (word granularity) over the containing text node, falling
+/// back to a Unicode word-character scan if `Intl.Segmenter` is unavailable in
+/// the bundled Chromium.
+export function wordSelectInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  // Duplicated from resolveSelectionInPage's own nested copy -- see that
+  // function's comment for why this cannot be a shared top-level helper.
+  function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
+    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
+    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
+    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
+
+    let element = null;
+    let block = null;
+    let pointX = x;
+    for (const dx of offsets) {
+      const px = x + dx;
+      if (!(px >= 0 && px < window.innerWidth)) continue;
+      const candidate = document.elementFromPoint(px, y);
+      if (!candidate) continue;
+      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
+      if (!candidateBlock) continue;
+      element = candidate;
+      block = candidateBlock;
+      pointX = px;
+      break;
+    }
+    if (!block) return null;
+
+    let caretNode = null;
+    let caretOffset = null;
+    const wantPosition = strategy === "auto" || strategy === "caret-position";
+    const wantRange = strategy === "auto" || strategy === "caret-range";
+    if (wantPosition && typeof document.caretPositionFromPoint === "function") {
+      const position = document.caretPositionFromPoint(pointX, y);
+      if (position && position.offsetNode) {
+        caretNode = position.offsetNode;
+        caretOffset = position.offset;
+      }
+    }
+    if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
+      const range = document.caretRangeFromPoint(pointX, y);
+      if (range && range.startContainer) {
+        caretNode = range.startContainer;
+        caretOffset = range.startOffset;
+      }
+    }
+    if (caretNode !== null && !block.contains(caretNode)) {
+      caretNode = null;
+      caretOffset = null;
+    }
+
+    if (caretNode === null) {
+      const rect = element.getBoundingClientRect();
+      const preferEnd = pointX >= rect.left + rect.width / 2;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let first = null;
+      let last = null;
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node.nodeValue.length > 0) {
+          if (first === null) first = node;
+          last = node;
+        }
+        node = walker.nextNode();
+      }
+      if (preferEnd && last !== null) {
+        caretNode = last;
+        caretOffset = last.nodeValue.length;
+      } else if (first !== null) {
+        caretNode = first;
+        caretOffset = 0;
+      } else {
+        caretNode = block;
+        caretOffset = 0;
+      }
+    }
+
+    let runElement = null;
+    const caretElement = caretNode.nodeType === 3 ? caretNode.parentElement : caretNode;
+    runElement = caretElement === null ? null : caretElement.closest("[data-md-source-id]");
+    const elementRun = element.closest("[data-md-source-id]");
+    if (elementRun !== null && (runElement === null || runElement.contains(elementRun))) runElement = elementRun;
+    if (runElement !== null && !block.contains(runElement)) runElement = null;
+
+    let runOffset = null;
+    let runLength = null;
+    if (runElement !== null) {
+      runLength = (runElement.textContent || "").length;
+      if (caretNode.nodeType === 3 && runElement.contains(caretNode)) {
+        const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+        let consumed = 0;
+        let node = walker.nextNode();
+        while (node !== null) {
+          if (node === caretNode) {
+            runOffset = consumed + caretOffset;
+            break;
+          }
+          consumed += node.nodeValue.length;
+          node = walker.nextNode();
+        }
+      }
+    }
+
+    return {
+      node: caretNode,
+      offset: caretOffset,
+      block: {
+        sourceStart: Number(block.getAttribute("data-source-start")),
+        sourceEnd: Number(block.getAttribute("data-source-end")),
+        sourceId: block.getAttribute("data-md-source-id"),
+        tagName: block.tagName,
+      },
+      inline: runElement === null ? null : {
+        sourceId: runElement.getAttribute("data-md-source-id"),
+        offset: runOffset,
+        textLength: runLength,
+      },
+    };
+  }
+
+  // Duplicated from resolveSelectionInPage's own nested copy.
+  function applySelectionRange(selection, anchorNode, anchorOffset, focusNode, focusOffset) {
+    if (typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+      return;
+    }
+    let focusFirst = false;
+    if (anchorNode === focusNode) {
+      focusFirst = focusOffset < anchorOffset;
+    } else {
+      const relation = anchorNode.compareDocumentPosition(focusNode);
+      focusFirst = (relation & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+    }
+    const range = document.createRange();
+    if (focusFirst) {
+      range.setStart(focusNode, focusOffset);
+      range.setEnd(anchorNode, anchorOffset);
+    } else {
+      range.setStart(anchorNode, anchorOffset);
+      range.setEnd(focusNode, focusOffset);
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  const point = resolveSelectionPoint(input.x, input.y, input.cellWidthPx, input.strategy);
+  if (!point || point.node.nodeType !== 3) return { ok: false, reason: "no_word" };
+
+  const caretNode = point.node;
+  const text = caretNode.nodeValue;
+  const caretOffset = Math.max(0, Math.min(point.offset, text.length));
+  let start = caretOffset;
+  let end = caretOffset;
+
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+    for (const segment of segmenter.segment(text)) {
+      const segStart = segment.index;
+      const segEnd = segStart + segment.segment.length;
+      const inside = caretOffset >= segStart && caretOffset < segEnd;
+      const atEnd = caretOffset === segEnd && segEnd === text.length;
+      if ((inside || atEnd) && segment.isWordLike) {
+        start = segStart;
+        end = segEnd;
+        break;
+      }
+      if (inside || atEnd) break; // landed on non-word text (whitespace, punctuation): no word here
+    }
+  } else {
+    const isWordChar = (ch) => typeof ch === "string" && /[\p{L}\p{N}_]/u.test(ch);
+    if (isWordChar(text[caretOffset])) {
+      start = caretOffset;
+      while (start > 0 && isWordChar(text[start - 1])) start -= 1;
+      end = caretOffset;
+      while (end < text.length && isWordChar(text[end])) end += 1;
+    } else if (caretOffset > 0 && isWordChar(text[caretOffset - 1])) {
+      end = caretOffset;
+      start = end;
+      while (start > 0 && isWordChar(text[start - 1])) start -= 1;
+    }
+  }
+  if (start === end) return { ok: false, reason: "no_word" };
+
+  const selection = window.getSelection();
+  applySelectionRange(selection, caretNode, start, caretNode, end);
+
+  let inline = null;
+  // caretNode was already validated as inside the resolved block by
+  // resolveSelectionPoint, so any data-md-source-id ancestor between it and the
+  // block boundary is inside the block too -- no further containment check
+  // needed here.
+  const runElement = caretNode.parentElement === null ? null : caretNode.parentElement.closest("[data-md-source-id]");
+  if (runElement !== null) {
+    const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    let base = null;
+    let node = walker.nextNode();
+    while (node !== null) {
+      if (node === caretNode) {
+        base = consumed;
+        break;
+      }
+      consumed += node.nodeValue.length;
+      node = walker.nextNode();
+    }
+    if (base !== null) {
+      inline = {
+        sourceId: runElement.getAttribute("data-md-source-id"),
+        anchorOffset: base + start,
+        focusOffset: base + end,
+        textLength: (runElement.textContent || "").length,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    text: selection.toString(),
+    collapsed: selection.isCollapsed,
+    anchor: {
+      block: point.block,
+      inline: inline ? { sourceId: inline.sourceId, offset: inline.anchorOffset, textLength: inline.textLength } : null,
+    },
+    focus: {
+      block: point.block,
+      inline: inline ? { sourceId: inline.sourceId, offset: inline.focusOffset, textLength: inline.textLength } : null,
+    },
+  };
+}
+
+/// `find_set`. Matches `input.query` literally (never as a regular expression,
+/// so HTML and regex metacharacters are inert by construction) and wraps each
+/// match in a programmatically created `<span data-md-viewer-find-mark>` via
+/// `Text.splitText` -- never `innerHTML`, which both would be an injection
+/// vector and would destroy the source IDs Part 5's provenance depends on.
+///
+/// `unwrapFindMarksInPage` is declared inside this function and duplicated
+/// again inside `clearFindInPage` below -- see resolveSelectionInPage's
+/// comment for why a shared top-level helper cannot work here.
+export function setFindInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  function unwrapFindMarksInPage(article) {
+    const previous = article.querySelectorAll("[data-md-viewer-find-mark]");
+    for (const mark of previous) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+    }
+    article.normalize();
+  }
+
+  const article = document.querySelector(".markdown-body") || document.body;
+  unwrapFindMarksInPage(article);
+
+  const query = typeof input.query === "string" ? input.query : "";
+  const needle = query.toLowerCase();
+  const maxReported = input.maxReported > 0 ? input.maxReported : 500;
+  if (needle === "") return { ok: true, matchCount: 0, activeIndex: null, matches: [] };
+
+  // Snapshotted up front: mutating the DOM (splitText/wrap) while a TreeWalker
+  // is mid-traversal would invalidate the walker's own position.
+  const walker = document.createTreeWalker(article, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  let walked = walker.nextNode();
+  while (walked !== null) {
+    textNodes.push(walked);
+    walked = walker.nextNode();
+  }
+
+  const marks = [];
+  for (const textNode of textNodes) {
+    const value = textNode.nodeValue;
+    if (!value) continue;
+    const lower = value.toLowerCase();
+    let cursor = textNode;
+    let consumedInOriginal = 0;
+    let searchFrom = 0;
+    while (true) {
+      const at = lower.indexOf(needle, searchFrom);
+      if (at < 0) break;
+      const localAt = at - consumedInOriginal;
+      const matchStart = cursor.splitText(localAt);
+      const remainder = matchStart.splitText(needle.length);
+      const wrapper = document.createElement("span");
+      wrapper.setAttribute("data-md-viewer-find-mark", "");
+      matchStart.parentNode.insertBefore(wrapper, matchStart);
+      wrapper.appendChild(matchStart);
+      marks.push(wrapper);
+      cursor = remainder;
+      consumedInOriginal = at + needle.length;
+      searchFrom = at + needle.length;
+    }
+  }
+
+  const matches = [];
+  for (let index = 0; index < marks.length; index += 1) {
+    if (index >= maxReported) {
+      matches.push(null);
+      continue;
+    }
+    const wrapper = marks[index];
+    const runElement = wrapper.closest("[data-md-source-id]");
+    let inline = null;
+    if (runElement !== null) {
+      const runWalker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+      let consumed = 0;
+      let found = null;
+      let node = runWalker.nextNode();
+      while (node !== null) {
+        if (wrapper.contains(node)) {
+          found = consumed;
+          break;
+        }
+        consumed += node.nodeValue.length;
+        node = runWalker.nextNode();
+      }
+      if (found !== null) {
+        inline = { sourceId: runElement.getAttribute("data-md-source-id"), offset: found, textLength: (runElement.textContent || "").length };
+      }
+    }
+    matches.push(inline);
+  }
+
+  if (marks.length > 0) {
+    marks[0].setAttribute("data-active", "");
+    marks[0].scrollIntoView({ block: "center" });
+  }
+
+  // scrollIntoView mutates the page's own scroll position; report it back so
+  // the caller's stale pre-scroll value (from ensureDocumentActive, computed
+  // before this function ran) is not what gets returned to Lua.
+  return { ok: true, matchCount: marks.length, activeIndex: marks.length > 0 ? 0 : null, matches, scrollY: window.scrollY };
+}
+
+/// `find_next` / `find_previous`. Moves the `data-active` marker with
+/// wraparound; the match set itself was already built by `find_set` and is not
+/// recomputed here.
+export function stepFindInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+  const matchCount = Number(input.matchCount) || 0;
+  if (matchCount <= 0) return { ok: true, activeIndex: null };
+  const article = document.querySelector(".markdown-body") || document.body;
+  const marks = article.querySelectorAll("[data-md-viewer-find-mark]");
+  const current = article.querySelector("[data-md-viewer-find-mark][data-active]");
+  if (current) current.removeAttribute("data-active");
+  const activeIndex = typeof input.activeIndex === "number" ? input.activeIndex : 0;
+  const delta = input.direction === "previous" ? -1 : 1;
+  const nextIndex = ((activeIndex + delta) % matchCount + matchCount) % matchCount;
+  const next = marks[nextIndex];
+  if (next) {
+    next.setAttribute("data-active", "");
+    next.scrollIntoView({ block: "center" });
+  }
+  return { ok: true, activeIndex: nextIndex, scrollY: window.scrollY };
+}
+
+/// `find_clear`.
+export function clearFindInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  function unwrapFindMarksInPage(article) {
+    const previous = article.querySelectorAll("[data-md-viewer-find-mark]");
+    for (const mark of previous) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+    }
+    article.normalize();
+  }
+
+  const article = document.querySelector(".markdown-body") || document.body;
+  unwrapFindMarksInPage(article);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
+// Result shaping for the actions above. Each mirrors buildActionResult's role
+// for hit_test/activate_at: turn a raw in-page result into the shape Lua
+// consumes, resolving source positions the same way hit-testing already does.
+// ---------------------------------------------------------------------------
+
+function resolveEndpoint(endpoint, sourceMap) {
+  if (!endpoint) return { line: null, byteColumn: null, precision: "none" };
+  return resolveSourcePosition(endpoint.block, endpoint.inline, sourceMap);
+}
+
+/// `selection_preview` / `selection_commit` / `word_select`.
+export function buildSelectionResult(raw, sourceMap) {
+  if (raw.ok === false) {
+    return { kind: "selection", ok: false, reason: raw.reason, text: "", collapsed: true };
+  }
+  return {
+    kind: "selection",
+    ok: true,
+    text: raw.text,
+    collapsed: raw.collapsed,
+    anchorSourcePosition: resolveEndpoint(raw.anchor, sourceMap),
+    focusSourcePosition: resolveEndpoint(raw.focus, sourceMap),
+    hit: { anchor: raw.anchor ?? null, focus: raw.focus ?? null },
+  };
+}
+
+/// `selection_text`.
+export function buildSelectionTextResult(raw) {
+  return { kind: "selection_text", text: raw.text, collapsed: raw.collapsed };
+}
+
+/// `selection_clear`.
+export function buildSelectionClearResult() {
+  return { kind: "selection", cleared: true };
+}
+
+/// `find_set`. Each match's `{sourceId, offset}` resolves through
+/// `resolveRegionPosition` -- the same function `resolveSourcePosition` already
+/// calls for hit-testing -- so search-match resolution reuses exact provenance
+/// rather than duplicating it.
+export function buildFindResult(raw, sourceMap, query) {
+  const matches = Array.isArray(raw.matches)
+    ? raw.matches.map((inline) => (inline ? resolveRegionPosition(sourceMap, inline.sourceId, inline.offset) : null))
+    : [];
+  const activeIndex = raw.activeIndex ?? null;
+  const activeSourcePosition = activeIndex !== null && matches[activeIndex] ? matches[activeIndex] : null;
+  return {
+    kind: "find",
+    query,
+    matchCount: raw.matchCount ?? 0,
+    activeIndex,
+    activeSourcePosition,
+    // Internal only: main.js reads this to populate per-document find state for
+    // find_next/find_previous, then strips it before the result reaches Lua --
+    // a document with thousands of matches must not serialize thousands of
+    // source positions to Lua on every keystroke of a search.
+    matches,
+  };
+}
+
+/// `find_next` / `find_previous`. The match set was already resolved by
+/// `find_set` and is cached in `findState.matches`; only the active index
+/// moved.
+export function buildFindStepResult(raw, findState) {
+  const matches = Array.isArray(findState?.matches) ? findState.matches : [];
+  const activeIndex = raw.activeIndex ?? null;
+  const activeSourcePosition = activeIndex !== null && matches[activeIndex] ? matches[activeIndex] : null;
+  return {
+    kind: "find",
+    query: findState?.query ?? null,
+    matchCount: findState?.matchCount ?? 0,
+    activeIndex,
+    activeSourcePosition,
+    matches,
+  };
+}
+
+/// `find_clear`.
+export function buildFindClearResult() {
+  return { kind: "find", cleared: true };
 }

@@ -88,6 +88,11 @@ th { background: var(--table-head); color: var(--heading); font-weight: 650; }
 tr:nth-child(even) td { background: var(--table-stripe); }
 img { display: block; max-width: 100%; height: auto; margin: 1em auto; }
 .md-viewer-image-blocked { display: none; }
+/* The real DOM Selection is painted natively by Chromium and needs no CSS at
+   all -- these wrapper spans exist only for find matches, which are not a
+   Selection and therefore need a visible marker of their own. */
+[data-md-viewer-find-mark] { background: var(--find-mark-bg); border-radius: 2px; }
+[data-md-viewer-find-mark][data-active] { background: var(--find-mark-active-bg); }
 .hljs-comment, .hljs-quote { color: var(--syntax-comment); }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--syntax-keyword); }
 .hljs-string, .hljs-title, .hljs-section { color: var(--syntax-string); }

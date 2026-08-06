@@ -6,7 +6,11 @@ local M = {}
 
 function M.is_stale(session, serial) return session.closed or serial ~= session.request_serial end
 
-local function read_bytes(path, limit)
+---Read a PNG produced by the renderer, enforcing the configured size limit.
+---Exported (not a private `read_bytes` local) so `controller.lua`'s
+---`display_interact_result` can fetch an interact response's PNG the same way
+---`M.request`'s own render/capture path does, without a second copy of this.
+function M.read_png(path, limit)
   local stat, err = vim.uv.fs_stat(path)
   if not stat then return nil, "PNG missing: " .. tostring(err) end
   if stat.size > limit then return nil, "PNG exceeds configured size limit" end
@@ -75,7 +79,7 @@ function M.request(session, markdown, options, callback)
       callback(nil, "invalid render result", false)
       return
     end
-    local image, read_err = read_bytes(result.pngPath, cfg.render.max_png_bytes)
+    local image, read_err = M.read_png(result.pngPath, cfg.render.max_png_bytes)
     vim.uv.fs_unlink(result.pngPath)
     if not image then
       callback(nil, read_err, false)

@@ -61,6 +61,16 @@ M.defaults = {
     -- word-select off that same binding; this lets it be turned off without
     -- inventing new plumbing.
     double_click = true,
+    selection = true,
+    drag_debounce_ms = 40,
+    settle_ms = 120,
+    copy = true,
+    -- Disabled by default: neither VS Code nor a browser copies on every
+    -- drag, and silently overwriting the user's clipboard on each selection
+    -- would be hostile.
+    copy_on_select = false,
+    word_select = true,
+    find = true,
   },
   terminal = {
     profile = "auto",
@@ -154,6 +164,19 @@ local function validate(cfg)
     type(cfg.interaction.drag_threshold_cells) == "number" and cfg.interaction.drag_threshold_cells >= 0,
     "md-viewer: interaction.drag_threshold_cells must be non-negative"
   )
+  assert(type(cfg.interaction.selection) == "boolean", "md-viewer: interaction.selection must be boolean")
+  assert(
+    type(cfg.interaction.drag_debounce_ms) == "number" and cfg.interaction.drag_debounce_ms >= 0,
+    "md-viewer: interaction.drag_debounce_ms must be non-negative"
+  )
+  assert(
+    type(cfg.interaction.settle_ms) == "number" and cfg.interaction.settle_ms >= 0,
+    "md-viewer: interaction.settle_ms must be non-negative"
+  )
+  assert(type(cfg.interaction.copy) == "boolean", "md-viewer: interaction.copy must be boolean")
+  assert(type(cfg.interaction.copy_on_select) == "boolean", "md-viewer: interaction.copy_on_select must be boolean")
+  assert(type(cfg.interaction.word_select) == "boolean", "md-viewer: interaction.word_select must be boolean")
+  assert(type(cfg.interaction.find) == "boolean", "md-viewer: interaction.find must be boolean")
 end
 
 function M.setup(opts)

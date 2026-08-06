@@ -79,6 +79,16 @@ function interactionStateFor(documentId, contentRevision) {
   return fresh;
 }
 
+// Non-mutating counterpart of interactionStateFor(), for read-only lookups
+// (forwarding find_next/find_previous's match set into browser.js) that must
+// not fabricate an entry for a document whose interaction is about to fail --
+// e.g. one that has never been rendered. Only a *successful* interact may
+// create or touch an entry; see dispatchInteract below.
+function peekInteractionState(documentId, contentRevision) {
+  const existing = interactionState.get(documentId);
+  return existing && existing.contentRevision === contentRevision ? existing : null;
+}
+
 function unlinkQuietly(pngPath) {
   if (typeof pngPath !== "string") return;
   try { fs.unlinkSync(pngPath); } catch {}
@@ -195,15 +205,53 @@ function dispatchInteract(request) {
   const task = async () => {
     const before = lanes.isStale(ticket);
     if (before) throw lanes.staleError(ticket, before);
-    const cached = markdownCache.get(envelope.documentId);
+    const markdown = markdownCache.get(envelope.documentId);
+    // Read-only: a request that is about to fail (a never-rendered document, a
+    // revision mismatch) must not fabricate or disturb interaction state for
+    // it. find_next/find_previous need the match set find_set already
+    // resolved -- browser.js does not own interactionState, so it is
+    // forwarded through `cached` alongside the markup and source map it
+    // already carries.
+    const priorState = peekInteractionState(envelope.documentId, String(envelope.contentRevision));
+    const cached = markdown ? { ...markdown, findState: priorState?.find } : markdown;
     const result = await browser.interact(envelope, cached, request.id);
     const after = lanes.isStale(ticket);
     if (after) {
       unlinkQuietly(result.pngPath);
       throw lanes.staleError(ticket, after);
     }
+    // Only a successful interact may create or touch interaction state.
     const state = interactionStateFor(envelope.documentId, String(envelope.contentRevision));
     state.lastHit = result.hit ?? null;
+    // selection_text is read-only (mutatesVisibleState: false) and must never
+    // write state.selection -- a stray write here would let a copy operation
+    // silently "commit" a selection that was never actually dragged. A failed
+    // resolution (anchor/focus miss) must not overwrite a prior valid
+    // selection with an empty one either.
+    if (result.kind === "selection" && envelope.action !== "selection_text" && result.ok !== false) {
+      state.selection = result.cleared
+        ? null
+        : {
+          text: result.text,
+          collapsed: result.collapsed,
+          anchorSourcePosition: result.anchorSourcePosition,
+          focusSourcePosition: result.focusSourcePosition,
+        };
+    }
+    if (result.kind === "find") {
+      state.find = result.cleared
+        ? null
+        : {
+          query: result.query,
+          matchCount: result.matchCount,
+          activeIndex: result.activeIndex,
+          activeSourcePosition: result.activeSourcePosition,
+          matches: result.matches ?? [],
+        };
+      // Internal only -- see buildFindResult's comment in interact.js. Lua only
+      // ever needs the active match's position, not the whole capped array.
+      delete result.matches;
+    }
     return result;
   };
 

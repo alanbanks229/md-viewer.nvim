@@ -2,6 +2,13 @@ local protocol = require("md-viewer.protocol")
 
 local M = {}
 local instance
+-- Process-lifetime, registered once at plugin setup, like an augroup: nothing
+-- ever needs to unregister one. In-flight requests already error correctly
+-- through deliver_error() below; these listeners exist for session-level Lua
+-- state (Part 6's cached selection/find display flags) that is not tied to any
+-- specific in-flight request and would otherwise go stale silently across a
+-- renderer restart.
+local exit_listeners = {}
 
 local function plugin_root()
   local source = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
@@ -66,6 +73,9 @@ function M.start()
     proc.running = false
     proc.exit_code, proc.exit_signal = code, signal
     deliver_error(proc, ("renderer exited (code=%s signal=%s)"):format(code, signal))
+    for _, listener in ipairs(exit_listeners) do
+      vim.schedule(listener)
+    end
     for _, pipe in ipairs({ proc.stdin, proc.stdout, proc.stderr_pipe }) do
       if pipe and not pipe:is_closing() then
         pcall(pipe.read_stop, pipe)
@@ -97,6 +107,12 @@ function M.start()
   instance = proc
   return proc
 end
+
+---Register `callback` to run whenever the renderer subprocess exits, for
+---whatever reason (crash, `M.stop()`, or `:MdViewerHealth`'s own restart). No
+---removal API: callers register once, at plugin setup, for the lifetime of the
+---Neovim session.
+function M.on_exit(callback) exit_listeners[#exit_listeners + 1] = callback end
 
 function M.request(method, params, callback)
   local proc, err = M.start()

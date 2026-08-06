@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 import { BrowserRenderer } from "../../renderer/src/browser.js";
 import {
+  INTERACT_ACTIONS,
   RESERVED_ACTIONS,
   classifyLink,
   hitTestInPage,
@@ -99,25 +100,80 @@ test("envelope validation rejects malformed interactions before they reach the q
   }
 });
 
-test("reserved actions are rejected distinctly from unknown ones", () => {
+test("no actions remain reserved after Part 6", () => {
+  // RESERVED_ACTIONS is kept as an empty array rather than removed: it is what
+  // keeps validateEnvelope's reserved-vs-unknown branch structurally
+  // meaningful for whatever a later part reserves next.
+  assert.deepEqual(RESERVED_ACTIONS, []);
+  const unknown = "definitely-not-a-real-action";
+  assert.throws(() => validateEnvelope({
+    documentId: "buffer-1", contentRevision: "1:0", action: unknown,
+    viewportWidthPx: 800, viewportHeightPx: 600,
+  }), (error) => {
+    assert.equal(error.code, "UNKNOWN_ACTION");
+    assert.equal(error.detail.reserved, undefined);
+    return true;
+  });
+});
+
+test("Part 6's nine actions are all registered with the correct flags", () => {
+  const expected = {
+    selection_preview: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
+    selection_commit: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
+    selection_clear: { mutatesVisibleState: true, requiresCoordinates: false },
+    selection_text: { mutatesVisibleState: false, requiresCoordinates: false },
+    word_select: { mutatesVisibleState: true, requiresCoordinates: true },
+    find_set: { mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true },
+    find_next: { mutatesVisibleState: true, requiresCoordinates: false },
+    find_previous: { mutatesVisibleState: true, requiresCoordinates: false },
+    find_clear: { mutatesVisibleState: true, requiresCoordinates: false },
+  };
+  for (const [action, flags] of Object.entries(expected)) {
+    assert.ok(INTERACT_ACTIONS[action], `${action} is not registered in INTERACT_ACTIONS`);
+    for (const [flag, value] of Object.entries(flags)) {
+      assert.equal(INTERACT_ACTIONS[action][flag], value, `${action}.${flag}`);
+    }
+  }
+  assert.deepEqual([...Object.keys(INTERACT_ACTIONS)].sort(), [
+    "activate_at", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
+    "selection_clear", "selection_commit", "selection_preview", "selection_text", "word_select",
+  ]);
+});
+
+test("selection and find actions validate their required fields", () => {
   const base = {
     documentId: "buffer-1", contentRevision: "1:0",
-    viewportWidthPx: 800, viewportHeightPx: 600, coordinates: { x: 10, y: 10 },
+    viewportWidthPx: 800, viewportHeightPx: 600,
   };
-  // Part 6 implements these; until then a caller gets an honest answer rather
-  // than being told the action does not exist.
-  for (const action of RESERVED_ACTIONS) {
-    assert.throws(() => validateEnvelope({ ...base, action }), (error) => {
-      assert.equal(error.code, "UNSUPPORTED_ACTION");
-      assert.equal(error.detail.reserved, true);
-      return true;
-    }, `${action} should be reserved-but-unimplemented`);
+  for (const action of ["selection_preview", "selection_commit"]) {
+    assert.throws(
+      () => validateEnvelope({ ...base, action, coordinates: { x: 1, y: 1 } }),
+      (error) => { assert.equal(error.code, "INVALID_INTERACTION"); assert.match(error.message, /anchorCoordinates/); return true; },
+      `${action} without anchorCoordinates`
+    );
+    assert.doesNotThrow(() => validateEnvelope({
+      ...base, action, coordinates: { x: 1, y: 1 }, anchorCoordinates: { x: 0, y: 0 },
+    }));
   }
-  assert.deepEqual([...RESERVED_ACTIONS].sort(), [
-    "find_clear", "find_next", "find_previous", "find_set",
-    "selection_clear", "selection_commit", "selection_preview", "selection_text",
-    "word_select",
-  ]);
+  assert.throws(
+    () => validateEnvelope({ ...base, action: "find_set" }),
+    (error) => { assert.equal(error.code, "INVALID_INTERACTION"); assert.match(error.message, /query/); return true; },
+    "find_set without a query"
+  );
+  assert.throws(
+    () => validateEnvelope({ ...base, action: "find_set", query: "   " }),
+    (error) => { assert.equal(error.code, "INVALID_INTERACTION"); return true; },
+    "find_set with a whitespace-only query"
+  );
+  const withQuery = validateEnvelope({ ...base, action: "find_set", query: "  hello  " });
+  assert.equal(withQuery.query, "hello", "the query is trimmed");
+
+  // Mutating actions always capture, matching every other mutatesVisibleState
+  // action -- this is the seam that lets Lua never issue a follow-up capture.
+  const cleared = validateEnvelope({ ...base, action: "selection_clear" });
+  assert.equal(cleared.capture, true);
+  const text = validateEnvelope({ ...base, action: "selection_text" });
+  assert.equal(text.capture, false, "selection_text is read-only and must not capture");
 });
 
 test("envelope defaults are conservative", () => {
@@ -771,10 +827,13 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     assert.equal(unknown.ok, false);
     assert.equal(unknown.code, "UNKNOWN_ACTION");
 
-    const reserved = await renderer.send("interact", renderer.interactParams("sink", "1:0", { x: 1, y: 1 },
+    // Part 6 implemented every previously-reserved action; an incomplete
+    // envelope for one of them is now a validation error, not "not built yet".
+    const incomplete = await renderer.send("interact", renderer.interactParams("sink", "1:0", { x: 1, y: 1 },
       { action: "selection_preview" }));
-    assert.equal(reserved.ok, false);
-    assert.equal(reserved.code, "UNSUPPORTED_ACTION");
+    assert.equal(incomplete.ok, false);
+    assert.equal(incomplete.code, "INVALID_INTERACTION");
+    assert.match(incomplete.error, /anchorCoordinates/);
 
     // An interaction must not be able to buy its way into the content lane,
     // which is where the power to cancel renders lives.
