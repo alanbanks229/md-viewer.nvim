@@ -213,6 +213,15 @@ Test it.
 interaction = { find = true }
 ```
 
+This part adds six new commands (`:MdViewerCopy`, `:MdViewerClearSelection`,
+`:MdViewerFind`, `:MdViewerFindNext`, `:MdViewerFindPrevious`,
+`:MdViewerFindClear`). Before reporting the part done, invoke every one of
+them directly in a headless session (policy §5) — including `:MdViewerCopy`
+and `:MdViewerFindNext`/`:MdViewerFindClear` with **no active
+selection/search**, which is the state most likely to be under-tested and the
+one a real user hits constantly. Confirm each notifies or no-ops cleanly
+rather than erroring.
+
 ---
 
 ## Do not do in this part

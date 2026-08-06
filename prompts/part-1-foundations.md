@@ -235,6 +235,14 @@ and validation status.
 The user must be able to read health output and understand exactly how the
 plugin reached its conclusion.
 
+**Verify by invoking `:MdViewerHealth` and `:MdViewerDebug` themselves** in a
+headless session (policy §5), not just `health.check()`/`health.collect()`.
+This exact gap shipped a real crash the first time this part was implemented —
+`health.show()`'s buffer path called `vim.inspect()` on a table (the caveats
+list), which emits multi-line output, and `nvim_buf_set_lines` rejects any
+line containing `\n`. `tests/lua/cases/health.lua` now regression-tests this;
+keep it passing and extend it if you add more table-valued report fields.
+
 ---
 
 ## Do not do in this part

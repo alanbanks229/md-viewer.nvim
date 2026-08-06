@@ -150,6 +150,11 @@ Report: effective z-index and its source, placement rectangle, preview size in
 cells, Chromium viewport in CSS pixels, calibration tier, owned image and
 placement counts, active exclusions, and any profile caveats that apply.
 
+Before reporting this part done, invoke `:MdViewerHealth` and `:MdViewerDebug`
+directly in a headless session (policy §5) — every new field above must
+actually render, not merely exist in the returned table. Part 1 shipped a
+crash from exactly this gap.
+
 ---
 
 ## Do not do in this part

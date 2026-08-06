@@ -130,6 +130,15 @@ document is currently loaded in Chromium.
 
 **Never print selected private text in diagnostics.** Lengths and counts only.
 
+This is the largest diagnostics field set added anywhere in the project.
+Invoke `:MdViewerHealth`, `:MdViewerDebug`, and `:checkhealth md-viewer`
+directly in a headless session (policy §5) with a preview actually open and
+with an active selection/search present, and confirm every field above
+renders without error — do not rely solely on `health.check()`/
+`debug.snapshot()` return values. Any table-shaped field (lists, nested
+status objects) needs the same scrutiny that broke `:MdViewerHealth` in Part 1
+(`nvim_buf_set_lines` rejects embedded newlines).
+
 ### 7.5 Manual compatibility matrix
 
 Rewrite `docs/manual-testing.md` as a repeatable procedure for iTerm2, Kitty,

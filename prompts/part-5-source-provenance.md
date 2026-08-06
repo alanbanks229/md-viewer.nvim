@@ -216,6 +216,11 @@ exactly this.
 Verify the Part 4 assertion that "precision is never exact" is now updated rather
 than deleted: it should assert `exact` *is* returned for cases that support it.
 
+The precision label surfaces in `:MdViewerDebug`. Invoke it directly in a
+headless session (policy §5) and confirm the field renders — automated tests
+prove the conversion math is right, not that the command displaying it
+doesn't crash.
+
 ### 5.6 Preserve block-level behaviour
 
 `collectBlockGeometry()` and source-to-preview scroll sync must keep working
@@ -281,6 +286,40 @@ stripped.
 - [ ] The chosen approach and its failure modes are recorded in the status doc.
 - [ ] All Lua and Node tests pass.
 - [ ] Status document updated per policy §6.
+
+## Operator verification (manual — cannot be automated)
+
+**This part's entire point is silent-failure-prone byte-column precision, and
+no automated test can prove a specific real click landed in the right place in
+a real terminal.** This is the highest-value manual check in the whole
+project — do not skip it or wave it through with only the Node suite.
+
+Make a scratch Markdown file with content chosen to break naive approaches:
+
+```markdown
+Some **bold text** and a [link label](https://example.com) here.
+
+Unicode line: café 日本語 🎉 done.
+
+Repeated: apple banana apple banana apple
+```
+
+Open the preview and click precisely on:
+
+- the word `text` inside the bold → cursor should land on `text` in the
+  source, **after** the `**`
+- the word `label` inside the link → cursor lands on `label`, not the URL
+- the `日本語` characters → cursor lands there, not offset by a few columns
+- the emoji → cursor lands there, not two columns off
+- the **second** `apple` → cursor lands on the second one, not the first
+
+Then run `:MdViewerDebug` and check the last navigation precision. It should
+say `exact` for every case above.
+
+**The multibyte cases are what matter.** If clicking `日本語` or `🎉` puts the
+cursor a few columns off, the UTF-16→UTF-8 conversion is wrong. Record the
+exact result — including failures — in the status document before moving on;
+this bug class gets much harder to find once later parts build on top of it.
 
 ---
 
