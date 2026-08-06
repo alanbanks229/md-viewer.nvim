@@ -35,7 +35,7 @@ stopping point is coherent.
 | # | Prompt | Objective | Plan / implement model | Status | Commit |
 |---|--------|-----------|------------------------|--------|--------|
 | 1 | [Foundations](part-1-foundations.md) | Terminal capability layer, cross-platform Chromium discovery, CI matrix, test harness | Sonnet 5 / Sonnet 5 | done | c638674 |
-| 2 | [Portable rendering](part-2-portable-rendering.md) | De-iTerm2 the Kitty backend; profile-driven placement and geometry | Sonnet 5 / Sonnet 5 | done | PENDING |
+| 2 | [Portable rendering](part-2-portable-rendering.md) | De-iTerm2 the Kitty backend; profile-driven placement and geometry | Sonnet 5 / Sonnet 5 | done | 03f2381 |
 | 3 | [Interaction transport](part-3-interaction-transport.md) | `interact` NDJSON method, document isolation, stale lanes, DOM hit-testing | **Opus 5** / Sonnet 5 | not-started | — |
 | 4 | [Mouse and navigation](part-4-mouse-and-navigation.md) | Gesture model, cell→CSS coordinates, click-to-source, safe links | Sonnet 5 / Sonnet 5 | not-started | — |
 | 5 | [Source provenance](part-5-source-provenance.md) | Exact Markdown columns, UTF-16→UTF-8 byte conversion | **Opus 5** / **Opus 5** | not-started | — |

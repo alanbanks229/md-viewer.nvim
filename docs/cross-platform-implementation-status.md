@@ -11,7 +11,7 @@ repository right now, not what was planned.
 | # | Part | Commit |
 |---|------|--------|
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
-| 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `PENDING` |
+| 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 
 ---
 
@@ -720,8 +720,10 @@ The tree is green: all four policy §5 commands pass (195/195 Lua assertions,
 24/24 Node tests, stylua clean), and both `:MdViewerHealth` and
 `:MdViewerDebug` — the two commands this part changed — have been invoked
 directly in headless sessions per policy §5, not just through their
-underlying library functions. This part is a single commit on
-`feat/cross-platform-markdown-preview`; it has not been pushed.
+underlying library functions. This part is commit `03f2381` (plus this
+follow-up doc-only commit recording that hash, matching Part 1's
+`0d62c1f`/`777b4a9` pattern) on `feat/cross-platform-markdown-preview`;
+neither has been pushed.
 
 **This is a genuinely shippable `v0.2.0`** in the sense the part prompt
 intended (automated portability work complete, generic encoder, real
