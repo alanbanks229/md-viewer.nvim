@@ -40,8 +40,9 @@ function M.for_window(win)
 end
 
 function M.same(a, b)
-  if not (a and b and a.row == b.row and a.col == b.col
-      and a.width == b.width and a.height == b.height) then return false end
+  if not (a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height) then
+    return false
+  end
   local left, right = a.exclusions or {}, b.exclusions or {}
   if #left ~= #right then return false end
   for index, rect in ipairs(left) do
@@ -52,8 +53,7 @@ end
 
 function M.intersects(a, b)
   if not a or not b then return false end
-  return a.row < b.row + b.height and b.row < a.row + a.height
-    and a.col < b.col + b.width and b.col < a.col + a.width
+  return a.row < b.row + b.height and b.row < a.row + a.height and a.col < b.col + b.width and b.col < a.col + a.width
 end
 
 local function border_cell(border, index)
@@ -70,7 +70,8 @@ function M.float_rect(win)
   local right = border_cell(cfg.border, 4) and 1 or 0
   local bottom = border_cell(cfg.border, 6) and 1 or 0
   return {
-    row = pos[1], col = pos[2],
+    row = pos[1],
+    col = pos[2],
     width = left + content.width + right,
     height = top + content.height + bottom,
   }
@@ -78,17 +79,13 @@ end
 
 local function floating_windows(rect, ignored_win, focusable)
   local result = {}
-  local tab = ignored_win and vim.api.nvim_win_get_tabpage(ignored_win)
-    or vim.api.nvim_get_current_tabpage()
+  local tab = ignored_win and vim.api.nvim_win_get_tabpage(ignored_win) or vim.api.nvim_get_current_tabpage()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
     if win ~= ignored_win and vim.api.nvim_win_is_valid(win) then
       local cfg = vim.api.nvim_win_get_config(win)
-      if cfg.relative ~= "" and (cfg.focusable ~= false) == focusable
-          and not cfg.hide and not cfg.external then
+      if cfg.relative ~= "" and (cfg.focusable ~= false) == focusable and not cfg.hide and not cfg.external then
         local ok, float_rect = pcall(M.float_rect, win)
-        if ok and M.intersects(rect, float_rect) then
-          result[#result + 1] = { win = win, rect = float_rect }
-        end
+        if ok and M.intersects(rect, float_rect) then result[#result + 1] = { win = win, rect = float_rect } end
       end
     end
   end
@@ -119,15 +116,35 @@ function M.passive_overlays(rect, ignored_win)
   return result
 end
 
+---Which calibration tier cell-metric conversion currently uses:
+---"env" when MD_VIEWER_CELL_WIDTH_PX/MD_VIEWER_CELL_HEIGHT_PX are both set to
+---positive numbers, otherwise "estimated" (the configured aspect ratio and
+---width guess).
+---
+---A "measured" tier (deriving real cell-pixel dimensions from the terminal
+---itself, with no configuration at all) was investigated for this and is not
+---currently possible: Neovim's `TermResponse` autocmd only fires for DA1,
+---OSC, DCS, and APC terminal responses, and `nvim_list_uis()` reports grid
+---size in cells, not pixels. The XTWINOPS pixel-geometry reports
+---(`CSI 14 t` / `CSI 18 t`) most terminals answer are plain CSI responses,
+---which Neovim does not expose a way to read. If a future Neovim version
+---exposes real pixel geometry, add "measured" ahead of "env" here.
+function M.calibration_tier()
+  local cell_w = tonumber(vim.env.MD_VIEWER_CELL_WIDTH_PX)
+  local cell_h = tonumber(vim.env.MD_VIEWER_CELL_HEIGHT_PX)
+  if cell_w and cell_h and cell_w > 0 and cell_h > 0 then return "env" end
+  return "estimated"
+end
+
 ---Map cells to a bounded browser viewport. Exact cell pixels can be supplied
 ---through MD_VIEWER_CELL_WIDTH_PX/MD_VIEWER_CELL_HEIGHT_PX. Otherwise this preserves
 ---the configured cell aspect ratio and lets the terminal scale the PNG.
 function M.viewport(rect, render)
+  local tier = M.calibration_tier()
   local cell_w = tonumber(vim.env.MD_VIEWER_CELL_WIDTH_PX)
   local cell_h = tonumber(vim.env.MD_VIEWER_CELL_HEIGHT_PX)
-  local calibrated = cell_w and cell_h and cell_w > 0 and cell_h > 0
   local width, height
-  if calibrated then
+  if tier == "env" then
     width, height = rect.width * cell_w, rect.height * cell_h
   else
     width = math.max(320, rect.width * (render.estimated_cell_width_px or 10))
@@ -138,7 +155,7 @@ function M.viewport(rect, render)
     widthPx = math.max(1, math.floor(width * scale + 0.5)),
     heightPx = math.max(1, math.floor(height * scale + 0.5)),
     deviceScaleFactor = render.device_scale_factor,
-    calibrated = not not calibrated,
+    tier = tier,
     cellWidthPx = cell_w,
     cellHeightPx = cell_h,
   }

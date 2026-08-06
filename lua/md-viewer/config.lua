@@ -9,20 +9,33 @@ M.defaults = {
     loading_interval_ms = 80,
   },
   render = {
-    debounce_ms = 200, theme = "auto", raw_html = false,
-    local_images = true, max_local_image_bytes = 10 * 1024 * 1024,
-    device_scale_factor = 2, cell_aspect_ratio = 0.5,
+    debounce_ms = 200,
+    theme = "auto",
+    raw_html = false,
+    local_images = true,
+    max_local_image_bytes = 10 * 1024 * 1024,
+    device_scale_factor = 2,
+    font_size_px = 16,
+    cell_aspect_ratio = 0.5,
     estimated_cell_width_px = 10,
-    max_width_px = 1920, max_height_px = 1440,
+    max_width_px = 1920,
+    max_height_px = 1440,
     max_png_bytes = 32 * 1024 * 1024,
-    scroll_past_end = true, scroll_past_end_offset_px = 22,
-    fast_scroll = true, scroll_settle_ms = 160,
+    scroll_past_end = true,
+    scroll_past_end_offset_px = 22,
+    fast_scroll = true,
+    scroll_settle_ms = 160,
   },
   browser = { channel = "chrome", executable_path = nil, launch_timeout_ms = 10000 },
   image = {
-    backend = "auto", zindex = 20, double_buffer = true,
+    backend = "auto",
+    zindex = 20,
+    -- nil defers to the terminal profile's default (see md-viewer.terminal);
+    -- set explicitly to override every profile.
+    double_buffer = nil,
     -- Raw Kitty layers use terminal semantics, not Neovim float z-indices.
-    raw_zindex = -1,
+    -- nil defers to the terminal profile's default_raw_zindex.
+    raw_zindex = nil,
     raw_statusline_guard_cells = 1,
     ui_poll_ms = 50,
   },
@@ -38,7 +51,25 @@ M.defaults = {
     alignment_tolerance = 0.10,
   },
   security = { network = false, document_root = nil },
+  terminal = {
+    profile = "auto",
+    kitty_graphics = "auto",
+    probe = "off",
+  },
 }
+
+local terminal_profiles = {
+  auto = true,
+  iterm2 = true,
+  kitty = true,
+  wezterm = true,
+  ghostty = true,
+  warp = true,
+  generic_kitty = true,
+  unknown = true,
+}
+local tri_state = { auto = true, on = true, off = true }
+local probe_modes = { off = true, safe = true }
 
 local current = vim.deepcopy(M.defaults)
 
@@ -46,26 +77,60 @@ local function validate(cfg)
   local positions = { right = true, left = true, below = true, above = true }
   local backends = { auto = true, nvim_img = true, kitty_raw = true, cells = true }
   assert(positions[cfg.split.position], "md-viewer: invalid split.position")
-  assert(type(cfg.split.width) == "number" and cfg.split.width > 0 and cfg.split.width < 1,
-    "md-viewer: split.width must be between 0 and 1")
+  assert(
+    type(cfg.split.width) == "number" and cfg.split.width > 0 and cfg.split.width < 1,
+    "md-viewer: split.width must be between 0 and 1"
+  )
   assert(backends[cfg.image.backend], "md-viewer: invalid image.backend")
-  assert(cfg.render.theme == "auto" or cfg.render.theme == "light" or cfg.render.theme == "dark",
-    "md-viewer: render.theme must be auto, light, or dark")
-  assert(type(cfg.render.debounce_ms) == "number" and cfg.render.debounce_ms >= 0,
-    "md-viewer: render.debounce_ms must be non-negative")
-  assert(type(cfg.render.estimated_cell_width_px) == "number" and cfg.render.estimated_cell_width_px > 0,
-    "md-viewer: render.estimated_cell_width_px must be positive")
-  assert(type(cfg.image.raw_zindex) == "number"
-      and cfg.image.raw_zindex >= -2147483648 and cfg.image.raw_zindex <= 2147483647,
-    "md-viewer: image.raw_zindex must be a signed 32-bit integer")
-  assert(type(cfg.image.raw_statusline_guard_cells) == "number"
-      and cfg.image.raw_statusline_guard_cells >= 0,
-    "md-viewer: image.raw_statusline_guard_cells must be non-negative")
-  assert(type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
-    "md-viewer: image.ui_poll_ms must be non-negative")
+  assert(
+    cfg.render.theme == "auto" or cfg.render.theme == "light" or cfg.render.theme == "dark",
+    "md-viewer: render.theme must be auto, light, or dark"
+  )
+  assert(
+    type(cfg.render.debounce_ms) == "number" and cfg.render.debounce_ms >= 0,
+    "md-viewer: render.debounce_ms must be non-negative"
+  )
+  assert(
+    type(cfg.render.estimated_cell_width_px) == "number" and cfg.render.estimated_cell_width_px > 0,
+    "md-viewer: render.estimated_cell_width_px must be positive"
+  )
+  assert(
+    type(cfg.render.font_size_px) == "number" and cfg.render.font_size_px > 0,
+    "md-viewer: render.font_size_px must be positive"
+  )
+  assert(
+    cfg.image.raw_zindex == nil
+      or (
+        type(cfg.image.raw_zindex) == "number"
+        and cfg.image.raw_zindex >= -2147483648
+        and cfg.image.raw_zindex <= 2147483647
+      ),
+    "md-viewer: image.raw_zindex must be a signed 32-bit integer, or nil to use the terminal profile default"
+  )
+  assert(
+    cfg.image.double_buffer == nil or type(cfg.image.double_buffer) == "boolean",
+    "md-viewer: image.double_buffer must be a boolean, or nil to use the terminal profile default"
+  )
+  assert(
+    type(cfg.image.raw_statusline_guard_cells) == "number" and cfg.image.raw_statusline_guard_cells >= 0,
+    "md-viewer: image.raw_statusline_guard_cells must be non-negative"
+  )
+  assert(
+    type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
+    "md-viewer: image.ui_poll_ms must be non-negative"
+  )
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")
-  assert(type(cfg.preview.loading_interval_ms) == "number" and cfg.preview.loading_interval_ms > 0,
-    "md-viewer: preview.loading_interval_ms must be positive")
+  assert(
+    type(cfg.preview.loading_interval_ms) == "number" and cfg.preview.loading_interval_ms > 0,
+    "md-viewer: preview.loading_interval_ms must be positive"
+  )
+  assert(
+    terminal_profiles[cfg.terminal.profile],
+    "md-viewer: terminal.profile must be one of auto, iterm2, kitty, wezterm, ghostty, warp, "
+      .. "generic_kitty, unknown"
+  )
+  assert(tri_state[cfg.terminal.kitty_graphics], "md-viewer: terminal.kitty_graphics must be auto, on, or off")
+  assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
 end
 
 function M.setup(opts)
@@ -75,12 +140,8 @@ function M.setup(opts)
   return current
 end
 
-function M.get()
-  return current
-end
+function M.get() return current end
 
-function M.reset()
-  current = vim.deepcopy(M.defaults)
-end
+function M.reset() current = vim.deepcopy(M.defaults) end
 
 return M

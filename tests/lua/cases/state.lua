@@ -1,0 +1,10 @@
+return function(t)
+  local state = require("md-viewer.state")
+  local first = state.create(101, 201)
+  local second = state.create(102, 202)
+  t.eq(first, state.get(101), "first buffer state")
+  t.eq(second, state.get(102), "second buffer state")
+  state.remove(101)
+  state.remove(102)
+  t.eq(nil, state.get(101), "buffer state cleanup")
+end

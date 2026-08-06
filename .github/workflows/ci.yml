@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   test:
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -19,14 +23,31 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: renderer/package-lock.json
-      - name: Install Neovim
-        run: brew install neovim
+      - name: Install Neovim (macOS)
+        if: runner.os == 'macOS'
+        run: brew install neovim stylua
+      - name: Install Neovim (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y ppa:neovim-ppa/unstable
+          sudo apt-get update
+          sudo apt-get install -y neovim
+      - name: Install stylua (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o stylua.zip \
+            https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-x86_64.zip
+          unzip -o stylua.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/stylua
+          rm stylua.zip
       - name: Install locked renderer dependencies
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts --prefix renderer
       - name: Check Neovim version
         run: nvim --version
+      - name: Check Lua formatting
+        run: stylua --check lua/ plugin/ tests/lua/
       - name: Run Lua tests
         run: NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
       - name: Run Node.js tests

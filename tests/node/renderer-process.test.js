@@ -5,11 +5,28 @@ import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const main = path.resolve(here, "../../renderer/src/main.js");
 
+// This test spawns the real renderer subprocess and asks it to launch a real
+// browser, so it uses whatever discovery finds on the current platform/CI
+// runner rather than a hardcoded macOS path.
+function findRealChromium() {
+  try {
+    return discoverChromium(process.platform, process.env, fs.existsSync, {}).executable;
+  } catch {
+    return null;
+  }
+}
+
 test("supersedes stale requests and shuts the renderer down", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
   const child = spawn(process.execPath, [main], { stdio: ["pipe", "pipe", "pipe"] });
   t.after(() => { if (child.exitCode === null) child.kill("SIGTERM"); });
   const reader = readline.createInterface({ input: child.stdout });
@@ -23,7 +40,7 @@ test("supersedes stale requests and shuts the renderer down", async (t) => {
       viewport: { widthPx: 400, heightPx: 300, deviceScaleFactor: 1 }, scrollY: 0,
       theme: "dark", rawHtml: false, localImages: false, maxLocalImageBytes: 1024,
       network: false,
-      browser: { executable_path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", launch_timeout_ms: 10000 },
+      browser: { executable_path: executable, launch_timeout_ms: 10000 },
     },
   };
   child.stdin.write(`${JSON.stringify({ ...base, id: 1 })}\n`);

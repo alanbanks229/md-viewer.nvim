@@ -69,8 +69,11 @@ end
 function M.visible_in_tab(tab)
   tab = tab or vim.api.nvim_get_current_tabpage()
   for _, session in pairs(sessions) do
-    if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)
-      and vim.api.nvim_win_get_tabpage(session.preview_win) == tab then
+    if
+      session.preview_win
+      and vim.api.nvim_win_is_valid(session.preview_win)
+      and vim.api.nvim_win_get_tabpage(session.preview_win) == tab
+    then
       return session
     end
   end

@@ -1,8 +1,6 @@
 local M = {}
 
-function M.encode(value)
-  return vim.json.encode(value) .. "\n"
-end
+function M.encode(value) return vim.json.encode(value) .. "\n" end
 
 function M.decode(line)
   if type(line) ~= "string" or line == "" then return nil, "empty renderer response" end

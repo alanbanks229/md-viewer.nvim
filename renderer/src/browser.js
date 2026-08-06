@@ -5,12 +5,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 import { collectBlockGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
-
-const knownChromium = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-];
+import { discoverChromium } from "./browser-discovery.js";
 
 export class BrowserRenderer {
   constructor({ assetsDir }) {
@@ -24,21 +19,19 @@ export class BrowserRenderer {
     this.files = new Set();
     this.layout = null;
     this.viewport = null;
+    this.discoveryReason = null;
   }
 
   resolveExecutable(options = {}) {
-    if (options.executable_path) {
-      if (!fs.existsSync(options.executable_path)) throw new Error(`configured Chromium does not exist: ${options.executable_path}`);
-      return options.executable_path;
-    }
-    return knownChromium.find((candidate) => fs.existsSync(candidate)) ?? null;
+    const { executable, reason } = discoverChromium(process.platform, process.env, fs.existsSync, options);
+    this.discoveryReason = reason;
+    return executable;
   }
 
   async ensure(options = {}, deviceScaleFactor = 2, network = false) {
     const scale = Math.max(1, Math.min(3, Number(deviceScaleFactor) || 2));
     if (!this.browser) {
       const executablePath = this.resolveExecutable(options);
-      if (!executablePath) throw new Error("no approved Chrome or Chromium executable found");
       this.browser = await chromium.launch({
         executablePath, headless: true, timeout: options.launch_timeout_ms ?? 10000,
         args: ["--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check"],
@@ -79,14 +72,18 @@ export class BrowserRenderer {
     const scrollPastEnd = params.scrollPastEnd !== false;
     const parsedOffset = Number(params.scrollPastEndOffsetPx);
     const scrollPastEndOffsetPx = Math.max(0, Math.min(240, Number.isFinite(parsedOffset) ? parsedOffset : 22));
+    const parsedFontSize = Number(params.fontSizePx);
+    const fontSizePx = Math.max(10, Math.min(28, Number.isFinite(parsedFontSize) ? parsedFontSize : 16));
+    const lineHeightPx = Math.round(fontSizePx * (22 / 14));
     const layoutKey = JSON.stringify([
-      params.documentId, fingerprint, width, params.theme, scrollPastEnd, scrollPastEndOffsetPx,
+      params.documentId, fingerprint, width, params.theme, scrollPastEnd, scrollPastEndOffsetPx, fontSizePx,
     ]);
     const layoutReused = this.layout?.key === layoutKey;
     const layoutStarted = performance.now();
     if (!layoutReused) {
       const bottomPadding = scrollPastEnd ? `calc(100vh - ${scrollPastEndOffsetPx}px)` : "48px";
-      const documentHtml = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>:root{--md-viewer-bottom-padding:${bottomPadding}}${this.styles(params.theme)}</style></head><body><article class="markdown-body">${html}</article></body></html>`;
+      const rootVars = `--md-viewer-bottom-padding:${bottomPadding};--md-viewer-font-size:${fontSizePx}px;--md-viewer-line-height:${lineHeightPx}px`;
+      const documentHtml = `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>:root{${rootVars}}${this.styles(params.theme)}</style></head><body><article class="markdown-body">${html}</article></body></html>`;
       await this.page.setContent(documentHtml, { waitUntil: "domcontentloaded" });
       const dimensions = await this.page.evaluate(() => ({ height: document.documentElement.scrollHeight }));
       const blocks = await collectBlockGeometry(this.page);
@@ -131,7 +128,10 @@ export class BrowserRenderer {
   async health(options) {
     const executable = this.resolveExecutable(options);
     await this.ensure(options, 1, false);
-    return { chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page) };
+    return {
+      chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page),
+      discoveryReason: this.discoveryReason,
+    };
   }
 
   async close() {
