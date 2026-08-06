@@ -2567,3 +2567,118 @@ settled contracts from Part 6:
 - `process.on_exit(callback)` exists now for exactly this kind of
   renderer-lifetime hook; a future part needing to react to a renderer
   restart should use it rather than polling `process.status()`.
+
+---
+
+## Post-Part-6 follow-up: click-to-source removed, click-to-deselect added
+
+Commit `4cde042` on `feat/interaction-transport`.
+
+Out-of-band UX change, not one of the seven parts, prompted by early-user
+feedback (a click on the preview relocating the source cursor fought the new
+drag-to-select gesture from Part 6 — dismissing a highlight by clicking
+elsewhere also jumped the editor, which is not how VS Code's own Markdown
+preview behaves: drag to select, click anywhere to deselect, no navigation
+side effect).
+
+**What changed**, after three explicit operator decisions:
+
+1. **No click gesture moves the source cursor anymore, at all** — this
+   includes ctrl/cmd-click's previous fallback (jump to source when the
+   point wasn't over a link), not only the plain click. Ctrl/cmd-click still
+   activates links; over non-link text it now does nothing.
+2. **`interaction.click_to_source` and `interaction.focus_source_on_click`
+   are removed outright** — not deprecated or kept-but-ignored. A config
+   naming either now fails `config.setup()`'s validation with a message
+   naming the removed option, the same way any other unknown/invalid
+   `interaction.*` field already does.
+3. **Copy stays manual** (`y` / `:MdViewerCopy`), unchanged from Part 6 — no
+   auto-copy-on-select. Part 6 already writes to both `"` (unnamed/yank) and
+   `+` (system clipboard, gated on `vim.fn.has("clipboard")`) on every
+   explicit copy; nothing about copy itself needed to change.
+
+**A plain click now**: with an active selection, clears it (`M.clear_selection`,
+issuing a real `selection_clear` interact request); with nothing selected,
+does nothing — no interact request at all, not even `activate_at`. Dragging
+is completely unaffected (still creates and commits a real Chromium
+selection, per Part 6).
+
+### Code removed
+
+`lua/md-viewer/interaction.lua`: `M.move_source_cursor` (the entire
+UTF-8-boundary-clamping cursor-placement function) and `M.click` are deleted
+in full — both are now unreachable, since their only callers
+(`M.on_release`'s plain-click path and `M.activate`'s non-link fallback) were
+themselves rewritten to no longer call them. `M.activate` now only ever calls
+`record_result` + `M.activate_link` when the hit is a real link; a non-link
+ctrl/cmd-click hit does nothing. `M.on_release`'s plain-click branch is
+`if session.selection_active then M.clear_selection(session) end` — no
+coordinate resolution needed, since VS Code-style deselection doesn't depend
+on where the click landed. `sync.suppress_echo`/`sync_guard` are untouched;
+`sync.lua`'s own `update_source_from_scroll` (the scroll-follow direction,
+unrelated to clicking) still uses them independently.
+
+`lua/md-viewer/config.lua`: `click_to_source`/`focus_source_on_click`
+defaults and their two `assert(...)` validation lines are gone.
+
+The renderer (`renderer/src/*.js`) is entirely untouched — `activate_at`'s
+result shape is unchanged; ctrl/cmd-click for link detection still needs it,
+so no protocol change was needed, only a Lua-side decision about which half
+of the answer to act on.
+
+### Tests
+
+`tests/lua/cases/interaction.lua` lost ~190 lines: the "cursor movement"
+block (UTF-8 byte-boundary clamping, `focus_source_on_click`) and the
+"exact hit round-trips through the click path" block both existed solely to
+test `move_source_cursor`/`M.click`, which no longer exist. The renderer-side
+UTF-16→UTF-8 conversion this coverage depended on remains fully tested
+independently in `tests/node/utf.test.js` — only the now-deleted Lua-side
+*consumer* of that data lost coverage, which is the correct, unavoidable
+consequence of deleting dead code, not a coverage regression to be concerned
+about. The click test itself was rewritten to assert the new behavior (no
+request when nothing is selected; `selection_clear` when something is), and
+the wire-form modifiers-encoding assertion moved onto the ctrl/cmd-click path
+— the only remaining caller of `request_hit`'s `modifiers` field.
+
+Two Part 6 tests needed updating for the same reason, found by simply running
+the suite rather than by inspection: `tests/lua/cases/selection.lua`'s
+"`word_select = false` falls through to click-to-source" test asserted a
+fallback that no longer exists (rewritten to assert no request at all — there
+is nothing left to fall through to); a new end-to-end test was added
+alongside it, driving a real drag→commit→click→clear sequence rather than
+only unit-testing `on_release`'s branch in isolation.
+
+`README.md`'s "Known beta limitations" section had one sentence fixed (it
+still said preview text "cannot be selected, searched, copied, or interacted
+with", which was already false as of Part 6 and doubly so now) — a targeted,
+one-sentence correction, not the full documentation pass
+`prompts/part-7-hardening-and-docs.md` explicitly owns.
+
+### Verification
+
+All four policy §5 commands pass (460/460 Lua assertions — down from 479 by
+the expected net of deletions/additions above; 125/125 Node tests, unchanged
+since the renderer was untouched; stylua clean). Per policy §5's standing
+requirement to drive the actual installed command/gesture rather than trust
+only the library function underneath it — precisely the class of change that
+has bitten this project before (Part 4's silently-refused plain click, found
+only by invoking the real `<LeftMouse>`/`<LeftRelease>` keymap callbacks
+headlessly) — this change was verified the same way: a real graphical session
+via `controller.open()` with a stubbed backend, the actual
+`vim.fn.maparg(lhs, mode, false, true).callback` for `<LeftMouse>`,
+`<LeftRelease>`, and `<C-LeftMouse>` invoked directly with stubbed
+`vim.fn.getmousepos()`/`process.request`. Confirmed: a plain click with
+nothing selected sends no interact request and never moves the cursor; a
+plain click with an active selection sends `selection_clear` and still never
+moves the cursor; ctrl-click over non-link text sends `activate_at` (needed
+to determine there's no link) but does not move the cursor; ctrl-click over a
+link still calls `vim.ui.open` with the correct URL.
+
+**No graphical validation was performed** — this development environment has
+no attached graphical terminal, unchanged from every part before it. The
+headless verification proves the dispatch logic is wired correctly; it does
+not prove that a real drag-then-click in a real terminal feels right to a
+human, which is exactly the kind of thing this change exists to improve.
+Operator confirmation on real hardware is the natural next step, the same as
+every prior part's own "Operator verification" caveat.
