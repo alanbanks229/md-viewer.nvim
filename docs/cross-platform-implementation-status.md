@@ -1533,9 +1533,8 @@ moves nothing, and a click on text resolves exactly, moves the cursor, and leave
 Suite totals after the fixes: **375 Lua assertions** (360 at Part 5's commit),
 96 Node tests unchanged, stylua clean.
 
-**Still unconfirmed in a real terminal.** The scroll fix is verified against the
-code path the autocmd calls, not against a human clicking in iTerm2 — the
-operator should confirm the preview now stays put.
+**Confirmed on real hardware by the operator** (see "Operator confirmation"
+below), superseding this section's original "unconfirmed" caveat.
 
 
 ---
@@ -1621,9 +1620,39 @@ a cursor move the user makes still does.
 
 Suite totals: **382 Lua assertions**, **97 Node tests**, stylua clean.
 
-**Still unconfirmed in a real terminal.** Both fixes are verified against the
-code paths the autocmds and the mouse layer call, with real cell geometry — not
-against a human clicking in iTerm2.
+**Confirmed on real hardware by the operator** — see "Operator confirmation"
+immediately below, which supersedes this section's original caveat.
+
+---
+
+## Operator confirmation of the four post-Part-5 fixes
+
+The operator reported all four findings against a real terminal and has
+confirmed all four are fixed there:
+
+1. Clicking outside the rendered text no longer throws.
+2. Clicking text no longer scrolls or re-renders the preview.
+3. The first character of a line is now selectable.
+4. The `CursorMoved` + `WinScrolled` pair from a click no longer moves the
+   preview.
+
+This is the first **real-terminal** validation of Part 5's click path: a human
+clicked, and the cursor landed where they expected. It supersedes the
+"unconfirmed" caveats in the two sections above.
+
+**What this does *not* cover.** The operator confirmed the four reported bugs,
+not the full "Operator verification" checklist in
+`prompts/part-5-source-provenance.md`. Specifically, **the multibyte cases
+(`日本語`, `🎉`) remain unconfirmed by eye.** That is still the highest-value
+open item in Part 5: those are the cases where a wrong UTF-16→UTF-8 conversion
+would put the cursor a few columns off without anything crashing, and no
+automated test in this repository can prove where a real click lands on real
+hardware. The conversion is covered by `tests/node/utf.test.js` and by
+browser-backed provenance tests, so the risk is bounded — but it is not zero,
+and it is not the same claim.
+
+Also unchanged: Kitty, Ghostty, Warp, and every Linux terminal remain
+graphically unvalidated for the whole project.
 
 
 ---
