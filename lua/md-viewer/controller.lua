@@ -342,10 +342,10 @@ local function refresh_raw_sessions()
   end)
 end
 
-local function reconcile_placement(session)
+local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
-  if coordinates.same(session.last_placement, placement) then return end
+  if not force and coordinates.same(session.last_placement, placement) then return end
   local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
   if not ok then
     notify_error(moved)
@@ -487,7 +487,7 @@ function M.setup_autocmds()
       -- Intentionally retain normal split images across focus changes.
     end,
   })
-  vim.api.nvim_create_autocmd({ "CmdlineEnter", "CompleteChanged" }, {
+  vim.api.nvim_create_autocmd({ "CompleteChanged" }, {
     group = group,
     callback = function()
       each_session(function(session)
@@ -496,7 +496,7 @@ function M.setup_autocmds()
       clear_raw_sessions()
     end,
   })
-  vim.api.nvim_create_autocmd({ "CmdlineLeave", "CompleteDone", "WinClosed" }, {
+  vim.api.nvim_create_autocmd({ "CompleteDone", "WinClosed" }, {
     group = group,
     callback = function(args)
       if args.event ~= "WinClosed" then
@@ -511,6 +511,23 @@ function M.setup_autocmds()
           refresh_raw_sessions()
         end
       end)
+    end,
+  })
+  -- The command-line reserves its own screen row(s) below every window, so
+  -- unlike a real floating window it can never geometrically overlap the
+  -- preview under normal Neovim layout. The one exception is `cmdheight = 0`,
+  -- which temporarily shrinks the window above the command line for as long
+  -- as it's open. Rather than hide the image for the whole time (blanking it
+  -- on every `:`, `/`, or `?`), just re-place it at the placement's current
+  -- geometry -- a no-op send when nothing changed, and a same-tick resize
+  -- when it did, so the image stays visible and confined instead of
+  -- disappearing. `force = true` bypasses the usual same-placement skip so a
+  -- terminal that erases graphics on its own cmdline redraw gets them
+  -- redrawn immediately rather than waiting for the next unrelated event.
+  vim.api.nvim_create_autocmd({ "CmdlineEnter", "CmdlineLeave" }, {
+    group = group,
+    callback = function()
+      each_session(function(session) reconcile_placement(session, true) end)
     end,
   })
   vim.api.nvim_create_autocmd("WinNew", {
