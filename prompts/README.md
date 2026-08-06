@@ -36,7 +36,7 @@ stopping point is coherent.
 |---|--------|-----------|------------------------|--------|--------|
 | 1 | [Foundations](part-1-foundations.md) | Terminal capability layer, cross-platform Chromium discovery, CI matrix, test harness | Sonnet 5 / Sonnet 5 | done | c638674 |
 | 2 | [Portable rendering](part-2-portable-rendering.md) | De-iTerm2 the Kitty backend; profile-driven placement and geometry | Sonnet 5 / Sonnet 5 | done | 03f2381 |
-| 3 | [Interaction transport](part-3-interaction-transport.md) | `interact` NDJSON method, document isolation, stale lanes, DOM hit-testing | **Opus 5** / Sonnet 5 | not-started | — |
+| 3 | [Interaction transport](part-3-interaction-transport.md) | `interact` NDJSON method, document isolation, stale lanes, DOM hit-testing | **Opus 5** / **Opus 5** | done | dbd151f |
 | 4 | [Mouse and navigation](part-4-mouse-and-navigation.md) | Gesture model, cell→CSS coordinates, click-to-source, safe links | Sonnet 5 / Sonnet 5 | not-started | — |
 | 5 | [Source provenance](part-5-source-provenance.md) | Exact Markdown columns, UTF-16→UTF-8 byte conversion | **Opus 5** / **Opus 5** | not-started | — |
 | 6 | [Selection and search](part-6-selection-and-search.md) | DOM selection, copy, rendered-text find | Sonnet 5 / Sonnet 5 | not-started | — |
@@ -92,7 +92,7 @@ by every part. It is the handoff record.
 |------|----------------|-----------|
 | 1 | Sonnet 5 | Mechanical and unambiguous. Detection tables, path lists, a CI file. |
 | 2 | Sonnet 5 | Bounded. The geometry math is error-prone, so the prompt demands tests before behavior changes. |
-| 3 | Plan with Opus 5, implement with Sonnet 5 | Concurrency, staleness lanes, and cross-document isolation are where subtle bugs hide. Get the design settled in plan mode with Opus, approve it, then let Sonnet write against a settled design. |
+| 3 | Plan with Opus 5, implement with Opus 5 or Sonnet 5 | Concurrency, staleness lanes, and cross-document isolation are where subtle bugs hide. Get the design settled in plan mode with Opus, approve it, then write against a settled design. Run as Opus/Opus. |
 | 4 | Sonnet 5 | Plumbing against a protocol that Part 3 already fixed. |
 | 5 | Opus 5 throughout | Inline Markdown provenance plus UTF-16↔UTF-8 byte conversion is the hardest correctness surface in the project, and the failure mode is silent wrong cursor positions. Do not economize here. |
 | 6 | Sonnet 5 | Large but patterned — it reuses Part 3's queue and the existing fast-scroll backpressure model. |

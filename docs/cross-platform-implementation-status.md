@@ -12,6 +12,10 @@ repository right now, not what was planned.
 |---|------|--------|
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
+| 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
+
+Parts 1–2 were merged to `main` via PR #1. Part 3 is on the branch
+`feat/interaction-transport`, cut from `main`, and has not been pushed.
 
 ---
 
@@ -746,7 +750,354 @@ provenance, selection, or hardening scope.
 
 ---
 
-## Safe stopping point and first next action
+## What Part 3 actually built
+
+Renderer-side only. **No Lua file was modified**, and nothing user-visible
+changed — that is the point of the part. Four Node modules changed, two are new.
+
+### Staleness lanes (`renderer/src/lanes.js`, new)
+
+`main.js` used to hold one `latestByDocument: documentId → requestId` map that
+both `render` and `capture` wrote, so any newer request for a document cancelled
+any older one. Once Part 4 starts emitting pointer updates at drag frequency
+that becomes fatal: the drag stream would starve legitimate renders.
+
+The map is replaced by a per-document record of a `contentEpoch` plus four lane
+serials (`content`, `capture`, `interact`, `settle`). Every admitted request is
+stamped with a ticket carrying `{ lane, serial, contentEpoch, contentRevision }`,
+and staleness is one predicate checked at task start and again after the
+expensive work:
+
+```
+stale(t) := lanes[t.lane] !== t.serial      // superseded within its lane
+         || contentEpoch  !== t.contentEpoch // superseded by newer content
+```
+
+Only a `content` admission bumps `contentEpoch`. Every other lane writes its own
+serial and nothing else:
+
+```
+bump content   -> invalidates content, capture, interact, settle
+bump capture   -> invalidates capture only
+bump interact  -> invalidates interact only
+bump settle    -> invalidates settle only
+```
+
+**An interaction therefore has no way to express supersession of a render.** The
+content lane's predicate reads `lanes.content` and `contentEpoch`; there is no
+code path from an interact admission to either. This is structural, not a
+convention — `tests/node/lanes.test.js` fires 200 interactions and asserts the
+other three lanes' serial *values* are unchanged, not merely that the tickets
+still happen to be valid, and `tests/node/interact.test.js` reproduces it over
+the real subprocess with a render and a capture queued behind a 40-point drag
+burst.
+
+The module is deliberately pure — no browser, no filesystem, no timers — so the
+highest-risk logic in the part is verifiable on any machine regardless of whether
+Chromium is installed. Fifteen of the part's tests need no browser at all.
+
+`content`, `capture`, and `settle` keep the historical `STALE_RENDER` code so
+existing Lua is untouched; `interact` uses the new `STALE_INTERACTION`. Both now
+carry a `detail` object (`lane`, `documentId`, `reason`) through
+`protocol.js`, where `reason` is one of `superseded`, `content_changed`,
+`revision_mismatch`, `viewport_mismatch`, `overflow`, or `forgotten`. Part 4 can
+drop a `superseded` pointer update silently but must re-render on a
+`revision_mismatch`.
+
+Head-of-line blocking is handled by the lanes rather than by a second queue.
+There is still exactly one serial promise chain, and the existing
+`renderQueue.then(task, task)` idiom is preserved verbatim — a second parallel
+queue over one shared page would be a real data race (an `interact` evaluating
+while a `render` is mid-`setContent`). When a slow render sits ahead of twenty
+queued drag updates, all twenty run their staleness check first, nineteen return
+in O(1) without touching the page, and only the newest does work. That is the
+coalescing.
+
+Two smaller guards: a per-lane overflow cap (64 outstanding) rejects at
+admission rather than queueing without bound, and `ALLOWED_LANES` in `main.js`
+prevents lane laundering — a `capture` may be promoted to the `settle` lane
+(which is how Part 6 will request its settled device-scale frame), but an
+`interact` may **not** enter the `content` lane, because that is where the power
+to cancel renders lives.
+
+### Document isolation (`renderer/src/browser.js`)
+
+There is one shared page and the prompt forbids a page per document, so
+isolation cannot be structural. It is three layers, arranged so a bug in one
+fails loudly rather than producing a plausible answer from the wrong document:
+
+1. **`this.active`** — the single authoritative record of which document is
+   loaded, mutated by exactly one code path (`loadDocument()`). It is nulled
+   *before* `setContent` and repopulated only after geometry has been
+   recollected, so there is no window in which a caller can read a half-loaded
+   document and believe it. It is also nulled in `ensure()` when the context is
+   recreated, in `forgetDocument()`, and in `close()`. Previously `layoutKey` was
+   only ever string-compared; which document is on screen was never a readable
+   fact.
+2. **`ensureDocumentActive()`** — the only door into the DOM for an interaction.
+   It confirms `active` already matches, or rehydrates, or throws
+   `INTERACT_CACHE_MISS`. It never falls back to whatever happens to be loaded.
+   Because callers run it inside the single serial queue, nothing can swap the
+   page between this check and the caller's `page.evaluate`. **That co-location
+   is the actual guarantee**; the other two layers exist to catch bugs in it.
+3. **An in-DOM stamp** — every `setContent` writes an opaque monotonic token
+   (`d1`, `d2`, …) onto `<html data-md-viewer-doc>`, and `hitTestInPage` refuses
+   to answer if it does not match, *before* querying the DOM at all. It catches a
+   `setContent` that silently failed, a context recreation racing in, and any
+   future refactor that adds a second queue. The token sits on `<html>`, which
+   the sanitizer never processes (it only sees the markdown-derived body
+   fragment), so no allowlist change was needed — worth recording, since Part 5's
+   prompt warns that unlisted `data-*` attributes vanish.
+
+Rehydration needs the layout inputs, and the `interact` envelope carries no
+theme, font size, or padding. `this.documents` holds a **frame record** per
+document (layout key, theme, font size, padding, viewport, device scale,
+network, browser options, scroll, document height, blocks, token), written on
+every successful render and LRU-capped at 64. Without it, rehydration would have
+to guess, and a guessed theme is a page that does not match the screenshot the
+user is looking at.
+
+`buildDocumentHtml()` is now the single document template used by **both** the
+render path and the rehydration path. Two copies of that string is precisely how
+document A would get rehydrated into a page that does not match what was
+screenshotted.
+
+Per-document interaction state (`interactionState` in `main.js`, keyed by
+`documentId`) lives in trusted Node memory rather than on the page, because
+`setContent` destroys page state on every document switch. It is dropped
+whenever a document's content changes — applying a selection captured against
+older content to newer content would be silent corruption in a copy operation —
+and evicted alongside the caches. Part 3 only records the last hit; Part 6 fills
+in selection and find. Its lifecycle is observable via a new
+`interactionDocuments` count on the `health` result and is tested in both
+directions.
+
+**Adversarial coverage.** `tests/node/interact.test.js` renders document A
+containing `ALPHA-ONLY` and document B containing `BRAVO-ONLY`, leaves B loaded,
+then hit-tests document A at a coordinate that in B's layout sits over B's
+heading. It asserts the result resolves to A's source line, that `rehydrated` is
+true, and — the strongest form — that the string `BRAVO` appears **nowhere** in
+the serialized response, not in the text preview, the link, or any diagnostic
+field. A separate test corrupts `active.token` after a successful render to
+simulate every Node-side check having been fooled, and asserts
+`DOCUMENT_MISMATCH` is thrown, that the disproved `active`/`layout` pair is
+dropped, and that the next interaction rebuilds and succeeds. Interacting with a
+never-rendered document yields `INTERACT_CACHE_MISS`, never a guess.
+
+A viewport that disagrees with the rendered layout is **refused**
+(`viewport_mismatch`) rather than silently resized, because resizing would
+invalidate the very coordinates the request carries.
+
+### DOM hit-testing (`renderer/src/interact.js`, new)
+
+The precedence rule is the subtle part and is worth stating plainly:
+**`elementFromPoint` is authoritative for "is there content here"; the caret APIs
+only refine a hit that already landed on content.** Caret APIs snap to the
+nearest text node, so consulting them first would turn a click in the
+scroll-past-end padding into a confident hit on the last paragraph.
+
+`.markdown-body` carries `padding: 22px 26px var(--md-viewer-bottom-padding)`
+(`preview.css:18`), so side padding, top padding, the gaps between blocks, and
+the whole scroll-past-end region all resolve to the `article` element — which has
+no `data-source-*` attributes of its own. One rule covers all of them, and all of
+them honestly report `precision: "none"` rather than a guess.
+
+Caret resolution prefers `document.caretPositionFromPoint`, falls back to
+`document.caretRangeFromPoint`, then to element-only. A `strategy` parameter
+(`auto` | `caret-position` | `caret-range` | `element-only`) forces each path so
+both branches are genuinely exercised rather than whichever one this Chromium
+build happens to take; a test asserts all three agree on the same paragraph. A
+caret that snaps *outside* the block `elementFromPoint` landed on is discarded
+rather than allowed to relocate the answer into a neighbouring block.
+
+Source resolution walks up to the nearest `[data-source-start][data-source-end]`
+ancestor. markdown-it maps are 0-based with an exclusive end; Neovim lines are
+1-based. That conversion now lives in exactly one place
+(`resolveSourcePosition`), because Part 5 inherits it.
+
+**Precision labelling** — a block spanning exactly one source line means we
+genuinely know the line, so it reports `line`; a multi-line block reports `block`
+with the block's first line; no block reports `none`. `exact` requires inline
+provenance and cannot be produced by any code path in this part. Two tests
+enforce that: an exhaustive sweep over 40×12 synthetic block spans, and a sweep
+over every block the kitchen-sink fixture actually renders.
+
+`activate_at` returns link metadata when the point is over an anchor and falls
+back to source semantics otherwise, so Part 4's "an unmodified click on a link
+still navigates to source" needs no second round trip. `classifyLink` labels
+`fragment` / `http` / `https` / `mailto` / `local_file` / `unsafe`; `file:` is
+`local_file` because only Part 4 knows the document root, while protocol-relative
+`//host/path` is `unsafe` (it is a network fetch wearing a relative path's
+clothes). The renderer never follows a link.
+
+DOM node identity never crosses the process boundary — the hit descriptor
+carries `{ nodeType, nodeName }` and a bounded (≤120 char) text preview. Part 6
+hit-tests both selection endpoints inside a single `evaluate`, so it never needs
+to round-trip a node.
+
+### Atomic interaction results
+
+`captureViewport()` is now shared by `render()` and by interactions. An action
+declaring `mutatesVisibleState` always captures; any action may opt in via a
+`capture: true` envelope flag. Both produce the semantic result and the PNG from
+the **same queued operation**, so Lua never has to issue a follow-up capture.
+PNGs go to the same temp dir, are tracked in `this.files`, and are unlinked by
+the renderer if the result turns out stale after capture — mirroring the existing
+post-render behaviour.
+
+Neither action implemented in this part mutates anything, so the flag is
+currently only exercised through `capture: true`. See "Known limitations".
+
+### Markdown cache widened
+
+`renderMarkdown()` now returns `{ html, sourceMap }` and `markdownCache` entries
+are `{ key, html, sourceMap }`, with `sourceMap: null`. Part 5 is a fill-in
+rather than a refactor of every call site.
+
+---
+
+## Tests run and results (Part 3)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+  -> added 30 packages, 0 vulnerabilities
+
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+  -> md-viewer Lua tests: 210 assertions passed (unchanged; this part touches
+     no Lua)
+
+npm test --prefix renderer   (node --test ../tests/node/*.test.js)
+  -> tests 59, pass 59, fail 0   (24 before this part)
+
+stylua --check lua/ plugin/ tests/lua/
+  -> clean (no diff)
+```
+
+**A correction to this document's own record:** Part 2's section above reports
+195 Lua assertions. The actual count at the branch point for Part 3 is 210 — the
+extra 15 come from the two post-Part-2 follow-up commits (`0be91a6`, `8ad0623`),
+which this document never recorded. Verified by stashing Part 3's changes and
+re-running the suite on the branch point. 210 is the number to compare against
+going forward.
+
+The 35 new Node tests split into 15 that need no browser (the whole lane
+registry, envelope validation, link classification, source conversion, and the
+in-page document guard against a stubbed DOM) and 20 that drive a real Chromium
+through a real renderer subprocess over real NDJSON. The browser-backed ones
+`t.skip` with a named reason if no Chrome/Chromium/Edge is discoverable, matching
+the pattern established in Part 1.
+
+Per policy §5, both `:MdViewerHealth` and `:MdViewerDebug` were invoked directly
+in headless sessions. **Neither command's output changed in this part** —
+`health.lua` maps renderer fields explicitly rather than passing them through, so
+the new `activeDocument`, `cachedDocumentFrames`, `cachedDocuments`,
+`laneDocuments`, and `interactionDocuments` fields on the renderer's `health`
+result are ignored by it. This was run as a regression check, not as validation
+of new surface: `:MdViewerHealth` produced 38 lines with `chromium launch:
+succeeded` and a live renderer subprocess, and `:MdViewerDebug` produced 59 lines
+with no embedded newlines (the Part 1 crash class).
+
+**No graphical validation was performed and none is applicable.** Nothing
+user-visible changes in this part; there is nothing to look at. Part 4 is the
+first part that can be validated in a real terminal.
+
+---
+
+## Known limitations and unresolved risks (Part 3)
+
+- **Rapid alternation between two documents costs a full `setContent` plus a
+  geometry recollect per switch.** The common case — one preview focused — is
+  free, because `active` already matches. The interact result reports
+  `rehydrated` and `rehydrateMs` so Part 4 can surface thrash in
+  `:MdViewerDebug` rather than hiding it. Opening a second page per document was
+  explicitly rejected: it multiplies memory and defeats the persistent-page
+  benefit.
+- **No action in this part mutates visible DOM state**, so the
+  `mutatesVisibleState` branch has no product caller until Part 6. The
+  same-queued-operation capture path is exercised through the `capture: true`
+  envelope flag, which proves the semantic result and the PNG are produced
+  together in one queued task at both `css` and `device` scale. What is *not*
+  proven end to end is mutate-then-capture ordering, because there is nothing to
+  mutate yet. Part 6 is the first real caller.
+- **`interactionState` is currently write-only.** Part 3 records `lastHit`;
+  nothing reads it. Its isolation and revision-drop behaviour are tested through
+  the `interactionDocuments` health count, but the `selection` and `find` fields
+  are Part 6 scaffolding and are untested because they are unpopulated.
+- **Rehydration recollects geometry rather than reusing the stored blocks.** The
+  layout key pins everything that affects geometry, so these should be identical,
+  and a test asserts the rehydrated `documentHeightPx` equals the render's. The
+  cost is one extra `evaluate` on an already-expensive switch; the benefit is
+  that a divergence becomes visible instead of silent.
+- **Blocked images have no geometry at all.** `.md-viewer-image-blocked` is
+  `display: none`, so a paragraph containing only a blocked image is zero-height
+  and `collectBlockGeometry` filters it out — a click there resolves to the
+  article, and honestly reports `none`. This is pre-existing behaviour, not
+  introduced here, but it was discovered while writing the image hit-test and is
+  worth knowing. The image test therefore renders a real, allowed local PNG
+  (generated in the test) rather than pretending the fixture's blocked images
+  were a meaningful target.
+- Carried forward and unchanged: the CI matrix's Ubuntu leg is still untriggered;
+  the `config.setup()` reassign-before-validate quirk is still unfixed;
+  `terminal.probe = "safe"` is still unimplemented; Windows discovery remains
+  unadvertised; Kitty, Ghostty, Warp, and all Linux terminals remain
+  graphically unvalidated.
+
+---
+
+## Decisions that changed assumptions in the original specification (Part 3)
+
+- **A capture no longer cancels a queued render.** This is a real behaviour
+  change from Parts 1–2, where both wrote one shared map. The part prompt's rules
+  ("a capture must never be cancelled by an interaction") imply an asymmetric
+  model, and the operator confirmed the direction: content invalidates downstream
+  only. In practice the old symmetry rarely bit, because `renderer.lua` only
+  issues a capture when `session.renderer_revision == content_revision`, but the
+  race was real. Anything depending on a capture cancelling a render would now
+  behave differently; nothing in the tree does.
+- **The per-lane `contentRevision` check fires at admission, not in the staleness
+  predicate.** The prompt asks that every lane verify `contentRevision`
+  independently. Implementing it *both* at admission and inside `isStale()` would
+  have made the second check unreachable — `contentEpoch` only ever changes when
+  a content admission changes `revision`, so the epoch check subsumes it. Rather
+  than ship a redundant branch that can never fire and can never be tested, the
+  verification lives at admission where it genuinely rejects a caller working
+  from replaced content, before it occupies a queue slot. It is tested for all
+  three non-content lanes.
+- **`precision: "line"` is reported for single-line blocks**, not a uniform
+  `block` for everything. For a block spanning exactly one source line, block and
+  line are the same fact, so `line` is both more useful to Part 4 and strictly
+  honest. Multi-line blocks report `block` with the block's first line. This was
+  an explicit operator decision.
+- **markdown-it's map for a nested list item is `[9,11)`, not `[9,10)`** in the
+  kitchen-sink fixture — the nested list closes the outer item. Two test
+  assertions were written against the wrong assumption and corrected against the
+  geometry the renderer actually produces. Noted because Part 5 will be reasoning
+  about these maps far more intensively.
+- **`this.documents` (frame records) and `markdownCache` are two separate LRUs.**
+  They are driven by the same access patterns and both capped at 64, and eviction
+  from either cascades to the other, but they can in principle diverge. A
+  markdown entry whose frame record is gone yields `INTERACT_CACHE_MISS` with
+  reason `no_frame`, which is honest and recoverable, so unifying them was not
+  worth the coupling.
+
+No part boundaries moved. **No downstream prompt needed edits** — Parts 4, 5,
+and 6 each describe an approach this part's implementation supports as written.
+Two contracts they should rely on:
+
+- **Part 4 must send the `scrollY` it is currently displaying**
+  (`session.applied_scroll_y`), not the position it wants (`session.scroll_y`).
+  The interaction frame is defined by the request: `ensureDocumentActive`
+  restores the page to the requested `scrollY` and the result echoes the applied
+  value so clamping is detectable. Sending the wrong one would silently map
+  clicks onto a frame the user is not looking at.
+- **Part 6's actions become additive by flipping `mutatesVisibleState`** in the
+  `INTERACT_ACTIONS` registry in `renderer/src/interact.js`. All nine reserved
+  action names already validate and reject with `UNSUPPORTED_ACTION` (distinct
+  from `UNKNOWN_ACTION`), and `lane: "settle"` is already accepted on `capture`.
+
+---
+
+## Safe stopping point after Part 2 (historical)
 
 The tree is green: all four policy §5 commands pass (195/195 Lua assertions,
 24/24 Node tests, stylua clean), and both `:MdViewerHealth` and
@@ -777,3 +1128,43 @@ planning with Opus 5 before implementing with Sonnet 5). Part 3 can rely on
 `resolve_zindex()`/`resolve_double_buffer()` pattern (explicit override,
 named source string, else profile default) as stable, tested contracts —
 neither is expected to change shape again before Part 7.
+
+---
+
+## Safe stopping point and first next action
+
+The tree is green: all four policy §5 commands pass (210/210 Lua assertions,
+59/59 Node tests, stylua clean). Part 3 is commit `dbd151f` on
+`feat/interaction-transport`, a branch cut from `main` (where Parts 1–2 landed
+via PR #1). Neither the branch nor this doc commit has been pushed, and no PR
+has been opened.
+
+Part 3 changed **no Lua and nothing user-visible**, so there is nothing to look
+at in a terminal and no manual acceptance test to run. The renderer-side
+interaction transport is complete and tested: the `interact` method with typed
+actions, `STALE_INTERACTION` distinct from `STALE_RENDER`, four independent
+staleness lanes, three-layer document isolation, and block/line-honest DOM
+hit-testing.
+
+**First next action for Part 4:** read
+`prompts/part-4-mouse-and-navigation.md` fresh (`/clear` first per
+`prompts/README.md`). Part 4 is the first part whose result a human can see, and
+it can rely on these settled contracts:
+
+- The `interact` envelope: `{ documentId, contentRevision, viewportWidthPx,
+  viewportHeightPx, scrollY, action, coordinates, modifiers, clickCount,
+  captureScale, capture, strategy }`, validated purely in
+  `renderer/src/interact.js`.
+- Result shapes `{ kind: "source", sourcePosition: { line, byteColumn,
+  precision } }` and `{ kind: "link", link: { href, type }, sourcePosition }`,
+  where `precision` is `line`, `block`, or `none` — **never `exact`** until
+  Part 5.
+- Error codes to branch on: `STALE_INTERACTION` (with `detail.reason`),
+  `INTERACT_CACHE_MISS`, `DOCUMENT_MISMATCH`, `UNKNOWN_ACTION`,
+  `UNSUPPORTED_ACTION`, `INVALID_INTERACTION`, `INVALID_REQUEST`.
+- **Send `session.applied_scroll_y`, not `session.scroll_y`** — see the Part 3
+  decisions section above for why this one is easy to get wrong and silent when
+  wrong.
+- `lua/md-viewer/renderer.lua`'s existing result validation requires
+  `result.blocks` to be a table; interaction results have no `blocks`, so Part 4
+  needs its own response handler rather than reusing `M.request`'s.

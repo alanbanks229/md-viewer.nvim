@@ -1,10 +1,10 @@
 ---
 part: 3
 title: Interaction transport — interact protocol, document isolation, DOM hit-testing
-status: not-started
-model: plan with Opus 5, implement with Sonnet 5
+status: done
+model: plan with Opus 5, implement with either Opus 5 or Sonnet 5
 depends_on: parts 1-2
-commit: ""
+commit: "dbd151f"
 ---
 
 # Part 3 of 7 — Interaction Transport
