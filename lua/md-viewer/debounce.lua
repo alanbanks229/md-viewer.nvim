@@ -2,7 +2,12 @@ local M = {}
 
 function M.call(holder, key, delay, callback)
   local timer = holder[key]
-  if timer then timer:stop() else timer = vim.uv.new_timer(); holder[key] = timer end
+  if timer then
+    timer:stop()
+  else
+    timer = vim.uv.new_timer()
+    holder[key] = timer
+  end
   timer:start(delay, 0, vim.schedule_wrap(callback))
   return timer
 end

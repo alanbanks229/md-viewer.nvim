@@ -5,8 +5,10 @@ local debounce = require("md-viewer.debounce")
 local M = {}
 
 local split_commands = {
-  right = "rightbelow vsplit", left = "leftabove vsplit",
-  below = "rightbelow split", above = "leftabove split",
+  right = "rightbelow vsplit",
+  left = "leftabove vsplit",
+  below = "rightbelow split",
+  above = "leftabove split",
 }
 
 local loading_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
@@ -17,14 +19,13 @@ local function loading_label(session)
 end
 
 local function update_loading(session)
-  if not session.loading or not session.preview_win
-      or not vim.api.nvim_win_is_valid(session.preview_win) then return false end
+  if not session.loading or not session.preview_win or not vim.api.nvim_win_is_valid(session.preview_win) then
+    return false
+  end
   local label = loading_label(session)
   local available = math.max(1, vim.api.nvim_win_get_width(session.preview_win) - 2)
   local width = math.min(available, vim.fn.strdisplaywidth(label))
-  if width < vim.fn.strdisplaywidth(label) then
-    label = vim.fn.strcharpart(label, 0, width)
-  end
+  if width < vim.fn.strdisplaywidth(label) then label = vim.fn.strcharpart(label, 0, width) end
   if session.loading_buf and vim.api.nvim_buf_is_valid(session.loading_buf) then
     vim.bo[session.loading_buf].modifiable = true
     vim.api.nvim_buf_set_lines(session.loading_buf, 0, -1, false, { label })
@@ -46,8 +47,14 @@ end
 
 function M.start_loading(session)
   local cfg = config.get().preview
-  if not cfg.loading or session.loading or not session.preview_win
-      or not vim.api.nvim_win_is_valid(session.preview_win) then return end
+  if
+    not cfg.loading
+    or session.loading
+    or not session.preview_win
+    or not vim.api.nvim_win_is_valid(session.preview_win)
+  then
+    return
+  end
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
@@ -57,8 +64,8 @@ function M.start_loading(session)
   session.loading_buf = buf
   session.loading_frame = 0
   local label = loading_label(session)
-  local width = math.min(math.max(1, vim.api.nvim_win_get_width(session.preview_win) - 2),
-    vim.fn.strdisplaywidth(label))
+  local width =
+    math.min(math.max(1, vim.api.nvim_win_get_width(session.preview_win) - 2), vim.fn.strdisplaywidth(label))
   local height = vim.api.nvim_win_get_height(session.preview_win)
   session.loading_win = vim.api.nvim_open_win(buf, false, {
     relative = "win",
@@ -78,11 +85,18 @@ function M.start_loading(session)
   update_loading(session)
   local timer = vim.uv.new_timer()
   session.loading_timer = timer
-  timer:start(cfg.loading_interval_ms, cfg.loading_interval_ms, vim.schedule_wrap(function()
-    if not session.loading then debounce.close(session, "loading_timer"); return end
-    session.loading_frame = session.loading_frame + 1
-    if not update_loading(session) then M.stop_loading(session) end
-  end))
+  timer:start(
+    cfg.loading_interval_ms,
+    cfg.loading_interval_ms,
+    vim.schedule_wrap(function()
+      if not session.loading then
+        debounce.close(session, "loading_timer")
+        return
+      end
+      session.loading_frame = session.loading_frame + 1
+      if not update_loading(session) then M.stop_loading(session) end
+    end)
+  )
 end
 
 function M.stop_loading(session)
@@ -103,8 +117,13 @@ local function source_title(source_buf)
 end
 
 function M.update_title(session)
-  if not config.get().preview.winbar or not session.preview_win
-    or not vim.api.nvim_win_is_valid(session.preview_win) then return end
+  if
+    not config.get().preview.winbar
+    or not session.preview_win
+    or not vim.api.nvim_win_is_valid(session.preview_win)
+  then
+    return
+  end
   vim.wo[session.preview_win].winbar = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
 end
 
@@ -133,9 +152,7 @@ function M.open(position, source_buf)
   vim.wo[win].cursorline = false
   vim.wo[win].spell = false
 
-  if cfg.preview.winbar then
-    vim.wo[win].winbar = "  %#Title#  " .. source_title(source_buf) .. "%*"
-  end
+  if cfg.preview.winbar then vim.wo[win].winbar = "  %#Title#  " .. source_title(source_buf) .. "%*" end
 
   if position == "right" or position == "left" then
     vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))
@@ -154,15 +171,11 @@ function M.placement(win, backend_name)
     value.height = value.height - guard
     value.statusline_guard_cells = guard
   end
-  if backend_name == "kitty_raw" then
-    value.exclusions = coordinates.passive_overlays(value, win)
-  end
+  if backend_name == "kitty_raw" then value.exclusions = coordinates.passive_overlays(value, win) end
   return value
 end
 
-function M.viewport(win, backend_name)
-  return coordinates.viewport(M.placement(win, backend_name), config.get().render)
-end
+function M.viewport(win, backend_name) return coordinates.viewport(M.placement(win, backend_name), config.get().render) end
 
 function M.occlusion(win)
   local overlaps = coordinates.overlapping_floats(M.placement(win), win)

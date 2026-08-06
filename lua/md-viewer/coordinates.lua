@@ -40,8 +40,9 @@ function M.for_window(win)
 end
 
 function M.same(a, b)
-  if not (a and b and a.row == b.row and a.col == b.col
-      and a.width == b.width and a.height == b.height) then return false end
+  if not (a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height) then
+    return false
+  end
   local left, right = a.exclusions or {}, b.exclusions or {}
   if #left ~= #right then return false end
   for index, rect in ipairs(left) do
@@ -52,8 +53,7 @@ end
 
 function M.intersects(a, b)
   if not a or not b then return false end
-  return a.row < b.row + b.height and b.row < a.row + a.height
-    and a.col < b.col + b.width and b.col < a.col + a.width
+  return a.row < b.row + b.height and b.row < a.row + a.height and a.col < b.col + b.width and b.col < a.col + a.width
 end
 
 local function border_cell(border, index)
@@ -70,7 +70,8 @@ function M.float_rect(win)
   local right = border_cell(cfg.border, 4) and 1 or 0
   local bottom = border_cell(cfg.border, 6) and 1 or 0
   return {
-    row = pos[1], col = pos[2],
+    row = pos[1],
+    col = pos[2],
     width = left + content.width + right,
     height = top + content.height + bottom,
   }
@@ -78,17 +79,13 @@ end
 
 local function floating_windows(rect, ignored_win, focusable)
   local result = {}
-  local tab = ignored_win and vim.api.nvim_win_get_tabpage(ignored_win)
-    or vim.api.nvim_get_current_tabpage()
+  local tab = ignored_win and vim.api.nvim_win_get_tabpage(ignored_win) or vim.api.nvim_get_current_tabpage()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
     if win ~= ignored_win and vim.api.nvim_win_is_valid(win) then
       local cfg = vim.api.nvim_win_get_config(win)
-      if cfg.relative ~= "" and (cfg.focusable ~= false) == focusable
-          and not cfg.hide and not cfg.external then
+      if cfg.relative ~= "" and (cfg.focusable ~= false) == focusable and not cfg.hide and not cfg.external then
         local ok, float_rect = pcall(M.float_rect, win)
-        if ok and M.intersects(rect, float_rect) then
-          result[#result + 1] = { win = win, rect = float_rect }
-        end
+        if ok and M.intersects(rect, float_rect) then result[#result + 1] = { win = win, rect = float_rect } end
       end
     end
   end

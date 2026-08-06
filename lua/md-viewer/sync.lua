@@ -28,8 +28,7 @@ function M.scroll_for_block(block, viewport_height, document_height, anchor_rati
   if not block then return 0 end
   anchor_ratio = math.max(0.1, math.min(0.9, anchor_ratio or 0.2))
   local target = M.block_target(block, line or (block.sourceStart + 1))
-  return math.max(0, math.min(math.max(0, document_height - viewport_height),
-    target - viewport_height * anchor_ratio))
+  return math.max(0, math.min(math.max(0, document_height - viewport_height), target - viewport_height * anchor_ratio))
 end
 
 function M.source_anchor_ratio(session, line)
@@ -52,21 +51,27 @@ function M.source_cursor(session, refresh, tolerance)
   local target = M.block_target(block, line)
   local current_ratio = (target - (session.scroll_y or 0)) / math.max(1, session.viewport_height_px)
   if math.abs(current_ratio - anchor) <= (tolerance or 0.10) then return end
-  session.scroll_y = M.scroll_for_block(block, session.viewport_height_px,
-    session.document_height_px, anchor, line)
+  session.scroll_y = M.scroll_for_block(block, session.viewport_height_px, session.document_height_px, anchor, line)
   refresh(session)
 end
 
 function M.update_source_from_scroll(session, scroll)
   local nearest
   for _, block in ipairs(session.latest_blocks) do
-    if block.topPx <= scroll + session.viewport_height_px * 0.25 then nearest = block else break end
+    if block.topPx <= scroll + session.viewport_height_px * 0.25 then
+      nearest = block
+    else
+      break
+    end
   end
   if nearest and vim.api.nvim_win_is_valid(session.source_win) then
     session.sync_guard = true
     local line_count = vim.api.nvim_buf_line_count(session.source_buf)
-    pcall(vim.api.nvim_win_set_cursor, session.source_win,
-      { math.max(1, math.min(line_count, nearest.sourceStart + 1)), 0 })
+    pcall(
+      vim.api.nvim_win_set_cursor,
+      session.source_win,
+      { math.max(1, math.min(line_count, nearest.sourceStart + 1)), 0 }
+    )
     vim.schedule(function() session.sync_guard = false end)
   end
 end

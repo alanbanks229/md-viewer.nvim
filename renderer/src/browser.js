@@ -5,12 +5,7 @@ import path from "node:path";
 import { chromium } from "playwright";
 import { collectBlockGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
-
-const knownChromium = [
-  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-  "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-];
+import { discoverChromium } from "./browser-discovery.js";
 
 export class BrowserRenderer {
   constructor({ assetsDir }) {
@@ -24,21 +19,19 @@ export class BrowserRenderer {
     this.files = new Set();
     this.layout = null;
     this.viewport = null;
+    this.discoveryReason = null;
   }
 
   resolveExecutable(options = {}) {
-    if (options.executable_path) {
-      if (!fs.existsSync(options.executable_path)) throw new Error(`configured Chromium does not exist: ${options.executable_path}`);
-      return options.executable_path;
-    }
-    return knownChromium.find((candidate) => fs.existsSync(candidate)) ?? null;
+    const { executable, reason } = discoverChromium(process.platform, process.env, fs.existsSync, options);
+    this.discoveryReason = reason;
+    return executable;
   }
 
   async ensure(options = {}, deviceScaleFactor = 2, network = false) {
     const scale = Math.max(1, Math.min(3, Number(deviceScaleFactor) || 2));
     if (!this.browser) {
       const executablePath = this.resolveExecutable(options);
-      if (!executablePath) throw new Error("no approved Chrome or Chromium executable found");
       this.browser = await chromium.launch({
         executablePath, headless: true, timeout: options.launch_timeout_ms ?? 10000,
         args: ["--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check"],
@@ -131,7 +124,10 @@ export class BrowserRenderer {
   async health(options) {
     const executable = this.resolveExecutable(options);
     await this.ensure(options, 1, false);
-    return { chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page) };
+    return {
+      chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page),
+      discoveryReason: this.discoveryReason,
+    };
   }
 
   async close() {

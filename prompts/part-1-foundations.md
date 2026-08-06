@@ -1,10 +1,10 @@
 ---
 part: 1
 title: Foundations — capability layer, browser discovery, CI, test harness
-status: not-started
+status: done
 model: Sonnet 5
 depends_on: none
-commit: ""
+commit: "c638674"
 ---
 
 # Part 1 of 7 — Foundations
