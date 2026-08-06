@@ -60,6 +60,11 @@ const allowedTags = [
   "th", "td", "a", "img", "input", "label", "br", "span", "div",
 ];
 
+/// Returns `{ html, sourceMap }`. `sourceMap` is `null` today: markdown-it
+/// carries block positions only (`token.map` is null for inline tokens), so
+/// there is no inline provenance to report yet. Part 5 fills this in; the shape
+/// exists now so that is a fill-in rather than a refactor of every call site
+/// and every cache entry.
 export function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);
   const env = {};
@@ -77,5 +82,5 @@ export function renderMarkdown(markdown, options) {
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });
-  return html;
+  return { html, sourceMap: null };
 }

@@ -27,7 +27,13 @@ export class LineProtocol {
         const result = await this.onRequest(request);
         this.send({ id: request.id, ok: true, result });
       } catch (error) {
-        this.send({ id: request.id, ok: false, error: error.message, code: error.code ?? "RENDER_ERROR" });
+        // `detail` carries the lane and the reason a request was abandoned
+        // (superseded / content_changed / revision_mismatch / viewport_mismatch
+        // / overflow), so Lua can drop a superseded pointer update silently but
+        // react to a revision mismatch by re-rendering.
+        const response = { id: request.id, ok: false, error: error.message, code: error.code ?? "RENDER_ERROR" };
+        if (error.detail !== undefined) response.detail = error.detail;
+        this.send(response);
       }
     });
   }

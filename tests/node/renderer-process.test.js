@@ -64,6 +64,18 @@ test("supersedes stale requests and shuts the renderer down", async (t) => {
   assert.equal(third.result.layoutReused, true);
   assert.equal(third.result.captureScale, "css");
   fs.unlinkSync(third.result.pngPath);
+
+  // A capture for a document the renderer has never rendered must fail with the
+  // exact message lua/md-viewer/renderer.lua matches on to retry as a full
+  // render. Changing this string silently breaks that retry.
+  child.stdin.write(`${JSON.stringify({ id: 4, method: "capture", params: { ...captureParams, documentId: "never-rendered" } })}\n`);
+  const missDeadline = Date.now() + 15000;
+  while (responses.length < 4 && Date.now() < missDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  const fourth = responses.find((response) => response.id === 4);
+  assert.equal(fourth.ok, false);
+  assert.equal(fourth.code, "CAPTURE_CACHE_MISS");
+  assert.match(fourth.error, /capture cache missing/);
+
   child.stdin.write(`${JSON.stringify({ id: 0, method: "shutdown", params: {} })}\n`);
   const exitCode = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("renderer did not shut down")), 5000);
