@@ -145,8 +145,17 @@ local function lines(report)
   local output = { "md-viewer.nvim health", string.rep("=", 21) }
   for _, key in ipairs(order) do
     local value = report[key]
-    if type(value) == "table" then value = vim.inspect(value) end
-    output[#output + 1] = ("%-36s %s"):format(key:gsub("_", " ") .. ":", tostring(value))
+    if key == "graphics_caveats" and type(value) == "table" then
+      output[#output + 1] = ("%-36s %s"):format("graphics caveats:", #value > 0 and "" or "none")
+      for _, caveat in ipairs(value) do
+        output[#output + 1] = "  - " .. caveat
+      end
+    else
+      -- nvim_buf_set_lines rejects any item containing a newline, and
+      -- vim.inspect() emits multi-line output for any non-trivial table.
+      if type(value) == "table" then value = vim.inspect(value, { newline = " ", indent = "" }) end
+      output[#output + 1] = ("%-36s %s"):format(key:gsub("_", " ") .. ":", tostring(value))
+    end
   end
   return output
 end
