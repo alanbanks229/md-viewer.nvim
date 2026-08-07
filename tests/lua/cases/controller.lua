@@ -128,6 +128,29 @@ return function(t)
   t.eq(0, #(session.last_placement.exclusions or {}), "the exclusion is removed once the float closes")
   t.eq(0, move_calls, "closing the passive float must not trigger a visual re-place either")
 
+  -- Regression: a plain (non-floating) split opened elsewhere -- e.g. a
+  -- third-party diff/explorer plugin's own panes, opened "relative to
+  -- editor" -- can shrink or reposition the preview split as an immediate
+  -- side effect. WinNew must reconcile for *any* new window, not only
+  -- floating ones, so the raw image follows without waiting on a separate
+  -- WinResized round trip or the 50ms poll to eventually catch up.
+  move_calls = 0
+  local before_width = vim.api.nvim_win_get_width(session.preview_win)
+  local squeeze_buf = vim.api.nvim_create_buf(false, true)
+  local squeeze_win = vim.api.nvim_open_win(squeeze_buf, false, {
+    split = "left",
+    win = -1,
+    width = math.max(20, math.floor(vim.o.columns / 2)),
+  })
+  vim.wait(300, function() return vim.api.nvim_win_get_width(session.preview_win) ~= before_width end, 10)
+  t.ok(
+    vim.api.nvim_win_get_width(session.preview_win) ~= before_width,
+    "sanity: the new split actually resized the preview window"
+  )
+  vim.wait(300, function() return move_calls > 0 end, 10)
+  t.ok(move_calls > 0, "a plain split's WinNew event alone reconciles the preview's now-changed geometry")
+  vim.api.nvim_win_close(squeeze_win, true)
+
   vim.keymap.set("n", "<ScrollWheelDown>", "<Nop>", { desc = "test prior wheel mapping" })
   mouse.attach(controller.navigate)
   t.eq(true, mouse.is_attached(), "mouse wheel dispatch attaches for graphical preview")

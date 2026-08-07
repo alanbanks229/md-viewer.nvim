@@ -666,17 +666,17 @@ function M.setup_autocmds()
       each_session(function(session) reconcile_placement(session, true) end)
     end,
   })
+  -- Any new window can legitimately resize/reposition an existing preview
+  -- split -- not only a floating one. WinResized/VimResized (below) is the
+  -- other, more usual way that gets caught, but a plugin that opens several
+  -- plain splits "relative to editor" (codediff.nvim's diff/explorer panes,
+  -- for one -- see the operator report this fixed) can shrink/move the
+  -- preview window as an immediate side effect of WinNew itself, before a
+  -- separate WinResized round-trip; reconciling here too closes that gap
+  -- rather than depending on the 50ms ui_poll_timer to eventually catch up.
   vim.api.nvim_create_autocmd("WinNew", {
     group = group,
-    callback = function(args)
-      vim.schedule(function()
-        local win = tonumber(args.match)
-        if win and vim.api.nvim_win_is_valid(win) then
-          local win_config = vim.api.nvim_win_get_config(win)
-          if win_config.relative ~= "" then reconcile_occlusion() end
-        end
-      end)
-    end,
+    callback = function() vim.schedule(reconcile_occlusion) end,
   })
   vim.api.nvim_create_autocmd({ "ColorScheme" }, {
     group = group,
