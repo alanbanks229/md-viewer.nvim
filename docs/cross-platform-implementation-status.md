@@ -2682,3 +2682,127 @@ not prove that a real drag-then-click in a real terminal feels right to a
 human, which is exactly the kind of thing this change exists to improve.
 Operator confirmation on real hardware is the natural next step, the same as
 every prior part's own "Operator verification" caveat.
+
+## Post-Part-6 follow-up 2: triple-click paragraph select, sharp interact captures, and three scroll/copy bugs
+
+Commit `8cd2e8a` on `feat/interaction-transport`.
+
+A second out-of-band round of operator feedback, after real use of the
+click-to-deselect follow-up above: one missing feature (triple-click) and
+three bugs, two of which turned out to share a single root cause once traced.
+
+**1. Triple-click paragraph selection (new feature).** Mirrors word_select's
+own double-click path exactly: `lua/md-viewer/mouse.lua`'s `gestures()` now
+adds `<3-LeftMouse>` (gated behind `interaction.double_click`, since Vim's own
+click-count escalation requires `<2-LeftMouse>` to already be mapped before
+`<3-LeftMouse>` will ever fire — it rides the same install gate rather than
+inventing a second one); a new `interaction.paragraph_select` config flag
+(default `true`) gates the runtime dispatch, matching `word_select`'s own
+split between "is the mapping installed" and "does it actually fire". The
+renderer side (`renderer/src/interact.js`) adds a `paragraph_select` action
+and a `paragraphSelectInPage` page-evaluate function: it resolves the caret's
+enclosing block exactly as `wordSelectInPage` does, but instead of expanding
+to `Intl.Segmenter` word boundaries, it selects the block's full text (first
+through last non-empty text node), via the same `setBaseAndExtent`-based
+`applySelectionRange` helper. `renderer/src/browser.js` dispatches it and
+routes its result through the existing `buildSelectionResult` — no new result
+shape was needed.
+
+**2. Blur during drag-select and right after clearing a highlight.** Every
+`interact` request's capture quality was decided by `validateEnvelope`'s
+`captureScale: envelope.captureScale === "device" ? "device" : "css"` —
+defaulting to the low-res scale scroll's own fast-frame optimization was
+built for, unless a caller explicitly opted into `"device"`.
+`clear_selection`, `find_set`, `find_next`/`find_previous`, and `find_clear`
+never set `captureScale` at all, so they silently inherited scroll's cheap
+scale; the drag-preview path made it worse by *explicitly* requesting `"css"`
+on every in-flight tick. Fixed by flipping the default (`captureScale:
+envelope.captureScale === "css" ? "css" : "device"` — `"css"` is now the
+opt-in, not the fallback) and changing the drag-preview call site to request
+`"device"` outright. Scroll's own fast/settle mechanism
+(`controller.schedule_scroll`) is a fully separate dispatch path that never
+goes through `validateEnvelope`, so neither change touches its intentional
+low-res-then-settle behavior.
+
+**3. A stray content fragment after copying, and clicking to deselect near
+the bottom jumping to the top — the same bug.** `M.copy_selection`,
+`M.clear_selection`, `find_set`, `find_next`/`find_previous`, and
+`find_clear` all built their `interact` request without a `scrollY` field.
+`validateEnvelope` defaulted a missing `scrollY` to `0`, and `interact()`
+applied it *unconditionally, before the requested action even ran*, via
+`ensureDocumentActive` → `applyScroll` → a real `window.scrollTo(0, top)` on
+the shared Chromium page — for every interact call, including read-only ones
+like `selection_text` (copy) that never capture a screenshot of their own.
+So pressing `y` to copy silently snapped the live page's actual scroll
+position to the top as a side effect, even though copy's own result was
+never displayed; whatever captured next did so against a corrupted position,
+which is what produced the operator-reported artifact (a fragment from the
+top of the document appearing where the bottom should have been, right as
+the copy notification appeared). `clear_selection`'s identical omission
+explained the separately-reported bug directly, since it *does* display its
+own capture immediately.
+
+Fixed with two changes: (a) all five omitting call sites in
+`lua/md-viewer/interaction.lua` now send `scrollY = session.applied_scroll_y
+or 0`, matching the pattern `word_select`/`request_selection`/`request_hit`
+already used; (b) defense in depth in `renderer/src/browser.js` — a missing
+`scrollY` now resolves to the document's own last known position instead of
+`0` (`validateEnvelope` passes `null` through rather than defaulting, and
+`ensureDocumentActive` falls back to the cached record's `scrollY`). Getting
+(b) actually correct needed a third change beyond the plan's original scope,
+found by the new regression tests below failing against real Chromium: the
+record's own `scrollY` was only ever updated by `applyScroll`, not by the
+separate `scrollIntoView`-driven correction `find_next`/`find_previous` apply
+after `applyScroll` already ran — so the fallback could still answer with a
+stale pre-`scrollIntoView` position. A new `rememberScrollY()` method keeps
+`this.active.scrollY` and the cached record's `scrollY` in sync from every
+mechanism that can move the shared page (`applyScroll`, find's
+`scrollIntoView`, a fragment jump), not just `applyScroll` alone.
+
+**4. The copy notification's register-summary suffix.** `M.copy_selection`
+appended `' (" and +)'`/`' (" only)'` to its success notification — not
+malformed, just noise the operator found confusing. Dropped; the message is
+now length-only: `"md-viewer: copied N characters"`.
+
+### Tests
+
+Real-Chromium coverage in `tests/node/selection.test.js` and
+`tests/node/find.test.js`: a new `paragraph_select` case asserting a triple
+click selects a whole paragraph, not one word; regression tests that scroll a
+real document, then call `selection_clear`/`find_clear` with no `scrollY`
+field at all, asserting the shared page's real scroll position survives
+rather than resetting to the top; `captureScale` assertions confirming
+`selection_clear`/`find_set`/`find_clear` all now default to `"device"`.
+`tests/node/interact.test.js`'s "envelope defaults are conservative" test
+was updated for both flipped defaults (`scrollY: null`, `captureScale:
+"device"`). Lua coverage in `tests/lua/cases/selection.lua` mirrors
+word_select's own test shape for the new triple-click dispatch and its
+`paragraph_select = false` disable case, plus `scrollY`/`captureScale`
+assertions on every request table that changed.
+
+### Verification
+
+`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix
+renderer`, the Lua headless runner, `npm test --prefix renderer`, and
+`stylua --check` all pass (474/474 Lua assertions, 128/128 Node tests,
+stylua clean). Per policy §5, the underlying Lua functions weren't trusted
+alone: a real graphical session via `controller.open()` with a stubbed
+backend and `require("md-viewer.navigation").attach`/`require("md-viewer.mouse").attach`
+called by hand (`controller.open()` only attaches either when its
+auto-selected backend isn't `"cells"`, which a headless environment always
+selects), driving the actual installed `<LeftMouse>`, `<2-LeftMouse>`,
+`<3-LeftMouse>`, `<LeftRelease>`, and `y` keymap callbacks via
+`vim.fn.maparg(lhs, mode, false, true).callback`. Confirmed end to end: a
+real triple click issues a `paragraph_select` request carrying the session's
+actual `scrollY` and `captureScale: "device"`; a real drag's preview request
+also asks for `"device"`, not `"css"`; a real plain click after an active
+selection issues `selection_clear` carrying the session's real `scrollY`
+(not a hardcoded `0`); and the real `y` keymap's notification reads exactly
+`"md-viewer: copied N characters"` with no register summary.
+
+**No graphical validation was performed**, unchanged from every part and
+follow-up before it — this environment has no attached terminal. The
+headless verification proves the dispatch and capture-quality logic are
+wired correctly; it does not prove the rendered result looks sharp or feels
+right to a human in a real iTerm2 session. Operator confirmation on real
+hardware remains the natural next step.
