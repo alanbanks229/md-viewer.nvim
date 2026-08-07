@@ -189,7 +189,9 @@ function M.placement(win, backend_name)
     value.height = value.height - guard
     value.statusline_guard_cells = guard
   end
-  if backend_name == "kitty_raw" then value.exclusions = coordinates.passive_overlays(value, win) end
+  if backend_name == "kitty_raw" then
+    value.exclusions = coordinates.passive_overlays(value, win, config.get().image.raw_overlay_bleed_cells)
+  end
   return value
 end
 

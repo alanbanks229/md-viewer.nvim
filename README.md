@@ -180,6 +180,12 @@ require("md-viewer").setup({
     double_buffer = true,
     raw_zindex = -1,
     raw_statusline_guard_cells = 1,
+    -- Extra columns cut out past the trailing edge of a notification sitting
+    -- over the preview. See "Notifications over the preview" below.
+    raw_overlay_bleed_cells = 1,
+    -- Pixel offset at which the image starts inside its first cell. Cancels a
+    -- terminal that applies its window margin to text but not to graphics.
+    raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
   },
   sync = {
@@ -222,6 +228,33 @@ Measure the active terminal profile rather than copying the example values.
 - `auto`: prefers a verified `vim.ui.img` API and otherwise uses `cells`; it
   does not silently select the raw protocol.
 - `cells`: terminal-native text and extmark fallback without browser images.
+
+### Notifications over the preview
+
+With `kitty_raw`, the image is drawn by the terminal, not by Neovim, and
+`raw_zindex = -1` puts it below text glyphs but *above* cell background colours.
+A notification floating over the preview would therefore lose its own background
+and show the Markdown through it, so md-viewer cuts the notification's rectangle
+out of the image.
+
+That cut is exact in cells, but some terminals — iTerm2 among them — apply their
+horizontal window margin to text while placing graphics without it, which draws
+the image a fraction of a cell toward the origin. Two settings deal with the
+leftover:
+
+- `raw_overlay_bleed_cells` (default `1`) cuts one extra column past the
+  notification's trailing edge, so the overhang can never paint across it. The
+  cost is a thin blank gap beside the notification instead of a flush edge.
+- `raw_cell_offset_px` cancels the offset outright, if your terminal implements
+  the Kitty protocol's `X`/`Y` placement keys. Measure it once: screenshot a
+  notification over the preview and compare the x of the image's edge with the x
+  of the notification's edge. Set `x` to the difference (10 for a 20px cell on
+  iTerm2's defaults). When it works, the gap closes completely and you can drop
+  `raw_overlay_bleed_cells` to `0`. `:MdViewerHealth` reports both values.
+
+If a notification over the preview bothers you at all, positioning it elsewhere
+(for `snacks.nvim`, `Snacks.notifier`'s placement options) avoids the overlap
+entirely.
 
 ## Usage
 

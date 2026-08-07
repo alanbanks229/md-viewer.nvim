@@ -3,7 +3,7 @@ part: 7
 title: Hardening, documentation, and the compatibility matrix
 status: not-started
 model: Sonnet 5
-depends_on: parts 1-6
+depends_on: parts 1-6 and the post-Part-6 follow-ups
 commit: ""
 ships: v0.3.0
 ---
@@ -25,13 +25,46 @@ a security review, not just prose.
 
 ## Verified repository facts
 
+**Read the post-Part-6 follow-ups first.** Seven of them landed after Part 6,
+each from a real operator bug report on real iTerm2 hardware, and they are
+written up in `docs/cross-platform-implementation-status.md` under
+`## Post-Part-6 follow-up N`. Read all seven before touching anything in
+`kitty_raw.lua`, `coordinates.lua`, or `controller.lua`'s placement path. They
+are not polish — they are the difference between a working raw-image preview and
+one that smears across the screen, and several of them look exactly like the kind
+of thing §7.7's "remove dead code and stale comments" pass would happily delete.
+
+Four in particular are load-bearing and counter-intuitive:
+
+- `controller.lua`'s `reconcile_placement` compares placements with
+  `coordinates.same`, which **includes `exclusions`**. It looked redundant and was
+  once reduced to a geometry-only comparison; that shipped a bug where the image
+  composited straight through every notification's background. `raw_zindex = -1`
+  puts the image below text glyphs but *above* cell background colours, so a
+  float does not occlude it — cutting the float's rectangle out of the placement
+  is the only thing that gives it an opaque interior.
+- `kitty_raw.move` emits the new placements and the deletion of the ones they
+  supersede in **one** `nvim_ui_send` write, new first. Splitting it back into
+  delete-then-place leaves the terminal with nothing to composite in between,
+  which is visible as the image blinking and rolling by about a row.
+- `coordinates.passive_overlays` widens each overlay on its **trailing edge
+  only**, by `image.raw_overlay_bleed_cells`. The asymmetry is deliberate and
+  explained in the function's comment; making it symmetric "for consistency"
+  doubles the visible gap on the other side and fixes nothing.
+- `coordinates.window_is_displayed` exists because a window on a background
+  tabpage keeps reporting full, valid, on-screen geometry. Every path that
+  addresses the terminal checks it.
+
+Each has a regression test that will fail loudly if it is undone. If one fails,
+the fix is not to relax the test.
+
 **Documentation surface to update:**
 
 ```text
 README.md
 CHANGELOG.md
 SECURITY.md
-doc/md-viewer.txt          # 126 lines, Vim help format
+doc/md-viewer.txt          # 144 lines, Vim help format
 docs/architecture.md
 docs/security.md
 docs/manual-testing.md
@@ -120,8 +153,12 @@ pending selection captures on teardown. Temporary PNGs must be unlinked —
 Final `:MdViewerHealth`, `:MdViewerDebug`, and `:checkhealth md-viewer` output:
 
 terminal profile and detection evidence; capability confidence; selected backend
-and why; effective z-index and its source; platform; browser executable;
-multiplexer; preview placement and size in cells; Chromium viewport in CSS
+and why; effective z-index and its source; the raw placement's sub-cell offset
+and overlay bleed (`raw_graphics_cell_offset_px`,
+`raw_graphics_overlay_bleed_cells` — added by follow-up 7, and the first thing
+worth asking about when a notification over the preview looks wrong); platform;
+browser executable; multiplexer; preview placement and size in cells; the number
+of passive cutouts currently applied; Chromium viewport in CSS
 pixels; calibration tier; current content revision; interaction enabled state;
 selection state and cached selection **length**; active search query and match
 count; last source-navigation precision; interaction request counts; coalesced
@@ -151,6 +188,27 @@ double-click word selection; search; link activation; resize; font-size change;
 all four split positions; winbar; statusline; global statusline; floating
 windows; passive overlays; tab switching; suspend and resume; HiDPI and standard
 DPI; flicker; and cleanup.
+
+**Add a passive-overlay alignment row per terminal.** Follow-up 7 found that
+iTerm2 applies its horizontal window margin to text but not to graphics
+placements, so the image lands a fraction of a cell toward the origin and a
+notification's cut-out is correspondingly misaligned. Whether any other terminal
+does this is unknown, and two questions are open for all five:
+
+1. Does the terminal implement the Kitty protocol's `X`/`Y` placement keys? Set
+   `image.raw_cell_offset_px = { x = 10 }`, open a notification over the preview,
+   and see whether the image shifts. If it does, record the measured offset for
+   that terminal; if it does not, record `X`/`Y` as unimplemented there.
+2. Is the offset a constant window margin, or does it track cell width? On
+   iTerm2 it measured 10px of a 20px cell, so the two are indistinguishable.
+   Change the terminal font size once and re-measure. **If it tracks cell width,
+   `raw_cell_offset_px` is the wrong shape and should express a fraction rather
+   than pixels** — that is a real API change, so decide it here, before `v0.3.0`
+   freezes the option.
+
+The measurement is a screenshot: compare the x of the image's edge against the x
+of the notification's edge. Do not guess this from the protocol specification —
+the whole reason follow-up 7 exists is that the specification did not predict it.
 
 Record results with exactly these labels:
 
@@ -193,7 +251,14 @@ key, with tags and a table of contents. It is Vim help — keep the format valid
 Update `SECURITY.md` and `docs/security.md` for the interaction surface.
 Update `docs/troubleshooting.md` with the failure modes the new code introduces:
 wrong terminal profile, no browser found, interaction not responding, selection
-not appearing, wrong cursor position on click.
+not appearing, wrong cursor position on click, and — from the post-Part-6
+follow-ups, all of which reached the operator before they reached a test — the
+raw-image placement symptoms: Markdown visible through a notification's
+background, a gap or overhang beside a notification
+(`image.raw_overlay_bleed_cells`, `image.raw_cell_offset_px`), the image
+persisting over another plugin's windows or on the wrong tabpage, and the image
+appearing to blink or roll by a row. Each should name the setting or the
+mechanism, so the next report arrives with a diagnosis attached.
 
 Write the `CHANGELOG.md` entry for the release.
 
@@ -220,6 +285,8 @@ Write the `CHANGELOG.md` entry for the release.
 ## Acceptance criteria
 
 - [ ] Every existing and new test passes on macOS and Ubuntu CI.
+- [ ] The post-Part-6 follow-up regressions are still fixed — their tests pass
+      unmodified, and no §7.7 cleanup relaxed one to make a change fit.
 - [ ] `stylua --check` passes and is enforced in CI.
 - [ ] Security review completed with tests for each attack listed in §7.2.
 - [ ] No HTTP server, WebSocket server, or listening port — asserted by test.
@@ -227,6 +294,8 @@ Write the `CHANGELOG.md` entry for the release.
 - [ ] Every lifecycle path in §7.3 releases everything, including after failure.
 - [ ] Diagnostics report all §7.4 fields and leak no selected text.
 - [ ] `docs/manual-testing.md` is a repeatable five-terminal procedure.
+- [ ] Passive-overlay alignment recorded per terminal, and the
+      `raw_cell_offset_px` pixels-vs-fraction question decided before release.
 - [ ] Terminal statuses use the four honest labels and are not overclaimed.
 - [ ] tmux is not advertised.
 - [ ] README, CHANGELOG, SECURITY, `doc/md-viewer.txt`, and all `docs/` updated.

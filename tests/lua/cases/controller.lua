@@ -1,4 +1,5 @@
 return function(t)
+  local config = require("md-viewer.config")
   local coords = require("md-viewer.coordinates")
   local preview = require("md-viewer.preview")
   local state = require("md-viewer.state")
@@ -93,20 +94,27 @@ return function(t)
   local passive_placement = preview.placement(session.preview_win, "kitty_raw")
   t.ok(#passive_placement.exclusions > 0, "non-focusable notification creates a raw-image cutout")
   local passive_rect = passive_placement.exclusions[1]
-  t.eq(math.min(10, placement.width) + 2, passive_rect.width, "notification cutout includes both border columns")
+  t.eq(
+    math.min(10, placement.width) + 2 + config.get().image.raw_overlay_bleed_cells,
+    passive_rect.width,
+    "notification cutout includes both border columns plus the trailing bleed"
+  )
+  t.eq(placement.col, passive_rect.col, "the bleed never moves the cutout's leading edge")
   vim.api.nvim_win_close(passive_win, true)
 
-  -- Regression: a passive (non-focusable) float appearing/disappearing must
-  -- never trigger backend.move(). raw_zindex is -1 for every terminal
-  -- profile (terminal.lua), so the image is always composited beneath real
-  -- terminal content and needs no visual re-crop to stay hidden under one --
-  -- re-cropping on every such exclusion change was the actual cause of a
-  -- reported bug (the same image redisplayed shifted/rolled by ~1 row for as
-  -- long as a notification stayed open). The exclusion itself must still be
-  -- tracked, since interaction.locate's click-resolution depends on it.
-  local move_calls = 0
-  session.backend.move = function(image_id)
+  -- Regression: a passive (non-focusable) float appearing or disappearing must
+  -- re-place the image, even though its row/col/width/height never change.
+  -- raw_zindex is -1 for every terminal profile (terminal.lua), and a negative
+  -- z above INT32_MIN/2 draws the image below text glyphs but *above* cell
+  -- background colors -- so a notification does not occlude the image on its
+  -- own, and without the cutout actually reaching the terminal the Markdown
+  -- composites straight through the notification's background. The exclusion
+  -- must also stay tracked on last_placement, since interaction.locate's
+  -- click-resolution depends on it.
+  local move_calls, moved_exclusions = 0, nil
+  session.backend.move = function(image_id, moved_placement)
     move_calls = move_calls + 1
+    moved_exclusions = #(moved_placement.exclusions or {})
     return image_id
   end
   t.eq(0, #(session.last_placement.exclusions or {}), "sanity: no exclusion before the notification opens")
@@ -121,12 +129,22 @@ return function(t)
     focusable = false,
   })
   vim.wait(300, function() return #(session.last_placement.exclusions or {}) > 0 end, 10)
-  t.ok(#(session.last_placement.exclusions or {}) > 0, "the exclusion is still tracked for click-resolution")
-  t.eq(0, move_calls, "a passive float's own exclusion change must not trigger a visual re-place")
+  t.ok(#(session.last_placement.exclusions or {}) > 0, "the exclusion is tracked for click-resolution")
+  t.ok(move_calls > 0, "a passive float's exclusion change re-crops the image")
+  t.eq(1, moved_exclusions, "the re-crop carries the notification's cutout to the backend")
+  move_calls, moved_exclusions = 0, nil
   vim.api.nvim_win_close(notify_win, true)
   vim.wait(300, function() return #(session.last_placement.exclusions or {}) == 0 end, 10)
   t.eq(0, #(session.last_placement.exclusions or {}), "the exclusion is removed once the float closes")
-  t.eq(0, move_calls, "closing the passive float must not trigger a visual re-place either")
+  t.ok(move_calls > 0, "closing the passive float restores the uncropped image")
+  t.eq(0, moved_exclusions, "the restoring re-crop carries no cutout")
+
+  -- A steady state with no float open must not churn: the 50ms ui_poll and
+  -- every window event recompute the placement constantly, and an unchanged
+  -- one has to compare equal or the image would be re-placed forever.
+  move_calls = 0
+  vim.wait(200)
+  t.eq(0, move_calls, "an unchanged placement never re-places the image")
 
   -- Regression: a plain (non-floating) split opened elsewhere -- e.g. a
   -- third-party diff/explorer plugin's own panes, opened "relative to

@@ -37,6 +37,19 @@ M.defaults = {
     -- nil defers to the terminal profile's default_raw_zindex.
     raw_zindex = nil,
     raw_statusline_guard_cells = 1,
+    -- Extra columns of cut-out added to the trailing edge of a passive overlay
+    -- (a notification sitting over the preview). Some terminals apply their
+    -- horizontal window margin to text but not to graphics placements, which
+    -- draws the image a fraction of a cell toward the origin; without this the
+    -- overhang paints across the overlay's last column. Trailing edge only: the
+    -- margin is never negative, so the image can only ever be offset left/up.
+    raw_overlay_bleed_cells = 1,
+    -- Offset, in pixels, at which the image starts inside its first cell (the
+    -- Kitty graphics protocol's X/Y placement keys). Cancels the margin
+    -- described above outright, when the terminal honours it -- measure the gap
+    -- once and set x to it. Zero emits no X/Y at all, so terminals that do not
+    -- implement those keys see the exact same bytes as before.
+    raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
   },
   sync = {
@@ -134,6 +147,18 @@ local function validate(cfg)
   assert(
     type(cfg.image.raw_statusline_guard_cells) == "number" and cfg.image.raw_statusline_guard_cells >= 0,
     "md-viewer: image.raw_statusline_guard_cells must be non-negative"
+  )
+  assert(
+    type(cfg.image.raw_overlay_bleed_cells) == "number" and cfg.image.raw_overlay_bleed_cells >= 0,
+    "md-viewer: image.raw_overlay_bleed_cells must be non-negative"
+  )
+  assert(
+    type(cfg.image.raw_cell_offset_px) == "table"
+      and type(cfg.image.raw_cell_offset_px.x) == "number"
+      and type(cfg.image.raw_cell_offset_px.y) == "number"
+      and cfg.image.raw_cell_offset_px.x >= 0
+      and cfg.image.raw_cell_offset_px.y >= 0,
+    "md-viewer: image.raw_cell_offset_px must be a table of non-negative x and y pixel offsets"
   )
   assert(
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,

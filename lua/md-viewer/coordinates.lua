@@ -119,10 +119,35 @@ function M.overlapping_floats(rect, ignored_win)
 end
 
 ---Return passive overlay rectangles to cut out of a raw Kitty placement.
-function M.passive_overlays(rect, ignored_win)
+---
+---Each rectangle is widened by `image.raw_overlay_bleed_cells` columns on its
+---trailing edge, clipped to `rect`. A terminal that applies its horizontal
+---window margin to text but not to graphics placements composites the image a
+---fraction of a cell toward the origin -- measured at ~10px of a 20px cell on
+---iTerm2 -- so the cut-out, which is exact in cells, inherits that shift and the
+---image overhangs the overlay's last column. The bleed absorbs it. Trailing edge
+---only, because a window margin is never negative: the image can be offset left,
+---never right, so it can only ever intrude from that side. Widening the leading
+---edge instead would double the gap on the other side and fix nothing.
+---
+---Horizontal only for the same reason -- the vertical origin measured exact, and
+---a blank row under every notification would be more conspicuous than the
+---overhang it replaced.
+function M.passive_overlays(rect, ignored_win, bleed_cells)
+  local bleed = math.max(0, math.floor(bleed_cells or 0))
   local result = {}
   for _, item in ipairs(floating_windows(rect, ignored_win, false)) do
-    result[#result + 1] = item.rect
+    local overlay = item.rect
+    if bleed > 0 then
+      local right = math.min(overlay.col + overlay.width + bleed, rect.col + rect.width)
+      overlay = {
+        row = overlay.row,
+        col = overlay.col,
+        width = math.max(overlay.width, right - overlay.col),
+        height = overlay.height,
+      }
+    end
+    result[#result + 1] = overlay
   end
   table.sort(result, function(a, b)
     if a.row ~= b.row then return a.row < b.row end

@@ -54,11 +54,30 @@ floating-window rectangles are discovered through
 overlapping focusable float suppresses the placement and closing it restores the
 cached PNG without another browser capture. Non-focusable passive overlays are
 tracked as exclusion rectangles on the placement, which `interaction.locate`
-uses to refuse a click that lands on one. `kitty_raw.lua` can also subtract
-those rectangles as cropped source-image placements, but the controller no
-longer re-crops when only the exclusions change: doing so on every appearing or
-disappearing notification was visible as the image rolling by about a row (see
-`same_geometry` in `controller.lua`).
+uses to refuse a click that lands on one, and which `kitty_raw.lua` subtracts
+from the placement as cropped source-image placements. That subtraction is what
+gives a passive float an opaque interior: z-index `-1` is above the cell
+background, so without it the image composites straight through a
+notification's background and only the notification's glyphs and border
+characters survive. `kitty_raw.move` writes the replacement placements and the
+deletion of the ones they supersede in a single write, new first — deleting
+first left the terminal with nothing to composite in between, which was visible
+as the image blinking and rolling by about a row.
+
+That subtraction is exact in cells, but the image's own origin need not be. A
+terminal that applies its horizontal window margin to text while placing
+graphics without it composites the image a fraction of a cell toward the origin
+— measured at ~10px of a 20px cell on iTerm2, constant across columns 0, 28 and
+88, and with the vertical origin exact. The cut-out inherits that shift, so the
+image overhangs the overlay's trailing edge. `coordinates.passive_overlays`
+widens each rectangle by `image.raw_overlay_bleed_cells` columns on that edge
+only, clipped to the placement: a window margin is never negative, so the image
+can be offset left but never right, and widening the leading edge would only
+double the gap on the other side. `image.raw_cell_offset_px` addresses the cause
+instead, emitting the protocol's `X`/`Y` placement keys so the image starts that
+many pixels into its first cell; it is zero by default, which emits no `X`/`Y`
+at all, because whether a given terminal implements those keys is not
+discoverable.
 
 Because a raw placement is absolute screen coordinates the terminal keeps
 compositing on its own, it must be deleted whenever the preview window stops

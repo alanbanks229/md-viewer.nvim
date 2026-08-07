@@ -51,9 +51,9 @@ local function update_occlusion(session)
   if not valid(session) or session.backend.name == "cells" then return false end
   -- The preview window living on a *background* tabpage is one of those
   -- reasons, and nothing else here can detect it: `preview.occlusion` only
-  -- ever looks at the preview's own tabpage, and `same_geometry` compares
-  -- equal because the geometry genuinely has not changed -- a hidden window
-  -- keeps reporting its full on-screen rectangle (coordinates
+  -- ever looks at the preview's own tabpage, and `reconcile_placement` sees an
+  -- unchanged placement because the geometry genuinely has not changed -- a
+  -- hidden window keeps reporting its full on-screen rectangle (coordinates
   -- .window_is_displayed). Left unchecked, the raw image is re-shown at the
   -- hidden tabpage's coordinates on top of whatever the visible tabpage is
   -- drawing, which is what any plugin that opens its UI in its own tab
@@ -430,30 +430,24 @@ local function refresh_raw_sessions()
   end)
 end
 
----Row/col/width/height only -- deliberately ignoring `exclusions`.
+---A placement change the terminal has to be told about -- `coordinates.same`,
+---so `exclusions` count, not just row/col/width/height.
 ---
----Re-cropping and re-placing the image via `backend.move()` purely because a
----transient passive float's exclusion rectangle appeared or disappeared was
----visible on screen as the image being redrawn shifted/rolled by roughly one
----row for as long as the float stayed open -- a real, reported, and
----operator-confirmed-fixed bug. `place_regions` re-splits the placement into a
----fresh set of Kitty placement IDs on every such change, and that redundant
----delete-and-resplit cycle is what rolled.
+---Exclusions have to count because of what `raw_zindex = -1` actually means:
+---in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
+---below text glyphs but *above* cell background colors (see
+---docs/architecture.md). A passive float therefore does not occlude the image
+---on its own -- only its glyphs and border characters survive, and the image
+---keeps compositing across everything else, so a notification renders with the
+---Markdown showing through its background instead of its own. Cutting the
+---float's rectangle out of the placement is the only thing that gives it back
+---an opaque interior, and the cut has to actually reach the terminal.
 ---
----Note this skip is justified by that observed regression, *not* by the
----z-index argument this comment used to make. `raw_zindex = -1` does not put
----the image "below cell content" generally: in the Kitty graphics protocol a
----negative z above INT32_MIN/2 draws the image below text glyphs but *above*
----cell background colors (see docs/architecture.md, and the operator's own
----`raw_zindex` config comment). So a passive float does not reliably occlude
----the image on its own, and skipping the crop can let the image bleed through
----a notification's blank cells. Fixing that means making the re-crop itself
----non-rolling (atomic place-then-delete in `kitty_raw.move`), not restoring an
----unconditional `move()` here.
-local function same_geometry(a, b)
-  return a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height
-end
-
+---This comparison used to ignore `exclusions` on purpose, because re-cropping
+---on every appearing and disappearing notification was visible as the image
+---blinking and rolling by about a row. That was `kitty_raw.move` deleting the
+---old placements before sending the new ones; it now emits both in one write,
+---new first, so the re-crop is no longer visible as anything.
 local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
   -- Never address the terminal on behalf of a window that is not on screen:
@@ -463,7 +457,7 @@ local function reconcile_placement(session, force)
   -- without an occlusion check of their own.
   if not coordinates.window_is_displayed(session.preview_win) then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
-  if force or not same_geometry(session.last_placement, placement) then
+  if force or not coordinates.same(session.last_placement, placement) then
     local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
     if not ok then
       notify_error(moved)

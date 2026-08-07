@@ -59,6 +59,24 @@ lua/md-viewer/config.lua. Important option groups are:
 Optional exact terminal cell sizes use MD_VIEWER_CELL_WIDTH_PX and
 MD_VIEWER_CELL_HEIGHT_PX.
 
+                                              *md-viewer-overlay-alignment*
+With the kitty_raw backend the terminal draws the image, and a notification
+floating over the preview has its rectangle cut out of it so it keeps its own
+background. Some terminals apply their horizontal window margin to text but not
+to graphics placements, which draws the image a fraction of a cell toward the
+origin and leaves that cut slightly misaligned. Two image options handle it:
+
+    raw_overlay_bleed_cells   Extra columns cut past a notification's
+                              trailing edge so the overhang cannot paint
+                              across it. Default 1.
+    raw_cell_offset_px        Pixel offset at which the image starts inside
+                              its first cell, as the Kitty protocol's X/Y
+                              placement keys. Cancels the misalignment
+                              outright where the terminal implements them.
+                              Default { x = 0, y = 0 }.
+
+:MdViewerHealth reports both. See README.md for how to measure the offset.
+
 =============================================================================
 COMMANDS                                                 *md-viewer-commands*
 

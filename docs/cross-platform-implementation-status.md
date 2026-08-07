@@ -3106,3 +3106,223 @@ above rests on the protocol specification plus this bug's own screenshots,
 not on a fresh hardware experiment. Operator confirmation remains the
 natural next step, and the specific open question to test alongside it is
 whether the raw image bleeds through a passive notification's blank cells.
+
+## Post-Part-6 follow-up 6: the Markdown composited straight through every notification's background
+
+Operator report, with two screenshots (`2026-08-06 22:11`/`22:12`): a
+snacks.nvim notification rendered over the preview "obstructs part of the
+markdown render view", and should be "strictly just the border and the inside
+content, without it obstructing anything else". The operator located it
+precisely on a follow-up question — the cutoff runs along the preview's winbar,
+the tab that shows the source file's name, with the notification sitting at that
+same level and "the border or something above the border" occluding it.
+
+**This is the open question follow-up 5 ended on** ("whether the raw image
+bleeds through a passive notification's blank cells"), and the operator's own
+screenshots answer it: it does.
+
+**Evidence.** Both screenshots contain the same tell, readable straight off the
+pixels. A snacks notification is three cell rows tall — border, content, border
+— and in both shots the top border row lands on the preview window's winbar row,
+where there is no image behind it, while the lower two rows sit over the image.
+The notification's background colour appears *only* on the winbar row:
+
+| | winbar row (no image behind) | rows over the image |
+| --- | --- | --- |
+| error notification | `rgb(57,25,31)` — its own red `NormalFloat` | `rgb(30,30,30)` |
+| info notification | `rgb(34,34,34)` — its own `NormalFloat` | `rgb(30,30,30)` |
+
+`rgb(30,30,30)` is the rendered PNG's own background, the colour filling the
+preview everywhere outside the notification (`rgb(24,24,24)` is the terminal
+background outside the placement rectangle). So on every row where the image is
+behind it, the notification loses its background entirely and the Markdown
+composites through; only its border characters and its message glyphs survive,
+because those are real text. That is the visual the report describes.
+
+**Root cause.** Exactly the hole follow-up 3 left, and that its own corrected
+comment already suspected. `coordinates.passive_overlays` computes the
+notification's rectangle, `preview.placement` attaches it as an exclusion, and
+`kitty_raw.lua`'s `visible_regions`/`subtract` know how to cut it out — but
+`reconcile_placement` compared placements with `same_geometry`, which ignores
+`exclusions` on purpose, so the cut-out was computed, stored on
+`session.last_placement` for click-resolution, and *never sent to the terminal*.
+Follow-up 3's reasoning for that skip — "z-index `-1` means the image is always
+composited beneath normal terminal cell content, so a float's background already
+occludes it" — is wrong, and these screenshots are the hardware evidence. In the
+Kitty graphics protocol a negative z above `INT32_MIN/2` draws below text glyphs
+but *above* cell background colours, which is precisely why the operator's own
+config sets `raw_zindex = -1` with the comment that the image "must remain above
+cell backgrounds while staying below text": iTerm2 paints the preview window's
+own background, and an image under that would never be visible at all. The same
+property that makes the preview work is what makes a notification transparent.
+
+Follow-up 3's *effect* was still real — the roll it removed was real — but its
+mechanism was the delete-then-place ordering inside `move()`, not the re-crop
+itself. `M.move` deleted the old placement IDs in one `nvim_ui_send` write and
+sent the replacements in a second, leaving the terminal with nothing to
+composite for the gap in between; any redraw landing in that gap is the blink
+that read as a roll.
+
+**Fix.** Two changes, both prescribed verbatim by the corrected `same_geometry`
+comment follow-up 5 left behind ("making the re-crop itself non-rolling (atomic
+place-then-delete in `kitty_raw.move`), not restoring an unconditional `move()`
+here"):
+
+- `kitty_raw.lua`: `place_regions` is split into a pure `placement_sequences`
+  (build the commands and their fresh placement IDs, send nothing) and a
+  `deletion_sequences` helper. `M.move` now emits the replacement placements and
+  the deletion of the ones they supersede as a **single** `nvim_ui_send` write,
+  new first. Placement IDs are fresh on every call, so the two sets never
+  collide while they briefly overlap, and no redraw can land mid-recrop.
+- `controller.lua`: `same_geometry` is gone; `reconcile_placement` compares with
+  `coordinates.same` again, which is exclusion-aware, so a passive float
+  appearing or disappearing re-crops. `coordinates.same` had been left in place
+  by follow-up 3 with no callers; it has one again.
+
+The cut-out is exactly the float's outer box and nothing more, clipped to the
+image. Verified against real Neovim geometry with a snacks-shaped float
+(editor-relative, bordered, non-focusable, one content line) straddling the
+winbar row: preview text area rows 2..28 / cols 40..79, notification box rows
+1..3 / cols 46..79, one exclusion of rows 1..3 / cols 46..79, and the backend
+paints exactly two regions — rows 2..3 cols 40..45 and rows 4..27 cols 40..79.
+Every image cell except the notification's own box, and no image cell inside it.
+
+### Tests
+
+`tests/lua/cases/controller.lua`'s passive-float regression from follow-up 3 is
+inverted, since its assertion encoded the bug: opening a non-focusable float now
+asserts `move()` *is* called and that the placement handed to the backend
+carries exactly one cutout, closing it asserts the same on the way back to zero,
+and a new steady-state assertion pins that an unchanged placement still never
+re-places (the 50ms poll recomputes constantly and must compare equal). Failure
+was confirmed meaningful by restoring the geometry-only comparison and watching
+it fail, then restoring the fix.
+
+`tests/lua/cases/backend_kitty.lua` gained the ordering guarantee the anti-roll
+argument now rests on: a `move()` is one write, and the new placement command
+precedes the `a=d,d=i` deletion within it.
+
+### Verification
+
+Lua headless suite: 510/510 assertions (up from 505 by these cases).
+`npm test --prefix renderer`: 128/128, unchanged — this fix never touches the
+renderer. `stylua --check`: clean.
+
+**No graphical validation was performed**, unchanged from every part and
+follow-up before it — but the diagnosis is the first in this series to rest on
+direct hardware evidence rather than inference: the bleed-through is measured off
+the operator's screenshots, not deduced from the protocol spec. What is *not*
+proven is the other half — that the atomic single-write `move()` keeps the roll
+from follow-up 3 from returning now that re-cropping is enabled again. That is
+terminal compositing behaviour and headless tests cannot observe it; the ordering
+test proves only what bytes go out and in what order. Operator confirmation on
+real iTerm2 is the natural next step, and the specific thing to watch is whether
+a notification opening and closing over the preview still leaves the image
+perfectly still.
+
+**Out of scope, and worth stating plainly:** the notification overlapping the
+preview's winbar at all is snacks.nvim's own placement — it positions
+notifications at the top-right of the *editor*, which is where md-viewer's winbar
+happens to be, and md-viewer cannot move a float another plugin owns. This fix
+makes the notification opaque, so it reads as a clean box over the preview
+instead of a smear of Markdown; moving it off the winbar row is a
+`Snacks.notifier` configuration change on the operator's side.
+
+## Post-Part-6 follow-up 7: the image sits half a cell left of the text grid, so every cut-out is misaligned
+
+Operator report immediately after follow-up 6 landed, with a fresh screenshot and
+then a second one after `:ThemeToggle` (chosen so the image's background is
+high-contrast grey against a black editor background). Follow-up 6 is confirmed
+working — the notification now paints its own background instead of showing the
+Markdown through it — but the seam around it is still wrong: "you can clearly see
+the odd areas where the snack notification interferes with the Markdown Render
+pane."
+
+**Evidence.** Both screenshots give the same measurement, and the high-contrast
+one gives it unambiguously. The cell grid is 20px × 44px. Reading the image's
+edges against the text grid:
+
+| | image edge | text grid |
+| --- | --- | --- |
+| preview left edge | x=2 | x=11 |
+| cut-out left edge | x=560 | x=571 (notification left) |
+| cut-out right edge | x=1762 | x=1771 (notification right) |
+
+A constant ~10px at columns 0, 28 and 88 — not accumulating drift, a fixed origin
+offset — and the vertical origin exact (the image's first row starts at y=88, a
+row boundary, with the notification's own rectangle starting at y=44). Visible as
+a ~10px blank seam down the notification's left side and a ~10px strip of Markdown
+painted over its right border cell.
+
+**Root cause, and it is not ours.** md-viewer's cut-out is correct in cells; it
+inherits a shift the terminal introduces. iTerm2 applies its horizontal window
+margin to text but not to graphics placements, so every raw placement lands that
+many pixels left of the grid the text is drawn on. Nothing in the Lua math is
+wrong, and nothing about snacks.nvim is involved — a float positioned anywhere
+over the preview would show the same seam. Cursor addressing (`\27[{row};{col}H`)
+is integral by construction, so this could never have been corrected by moving the
+placement.
+
+**Fix.** Two changes, one for the cause and one as a floor under it, because
+whether a given terminal implements the protocol keys the first one needs is not
+discoverable from Neovim.
+
+- `image.raw_cell_offset_px = { x = 0, y = 0 }` — emitted as the Kitty graphics
+  protocol's `X`/`Y` placement keys, the offset in pixels at which the image
+  begins inside its first cell. Setting `x` to the measured margin cancels the
+  shift outright. Applied in `placement_sequences`, so every cropped region
+  carries it, not only the first — each region is positioned by its own cursor
+  escape and so has its own first cell. Zero emits no `X`/`Y` at all, so every
+  terminal that has not been calibrated receives byte-for-byte what it received
+  before.
+- `image.raw_overlay_bleed_cells = 1` — `coordinates.passive_overlays` widens each
+  overlay rectangle by that many columns on its **trailing edge only**, clipped to
+  the placement. Trailing-only because a window margin is never negative: the
+  image can be offset toward the origin but never away from it, so it can only
+  ever intrude on an overlay's right side, and widening the leading edge would
+  double the gap on the other side while fixing nothing. Horizontal-only because
+  the vertical origin measured exact and a blank row under every notification
+  would be more conspicuous than the overhang it replaced.
+
+With the bleed alone the result is an even ~10px gap either side of the
+notification and no Markdown on it; with calibration also honoured the gap closes
+entirely. `passive_overlays` grew a `bleed_cells` parameter rather than reading
+config directly, keeping `coordinates.lua` the dependency-free geometry module it
+has always been — `preview.placement` passes it, exactly as it already passes the
+statusline guard. Both values are reported by `:MdViewerHealth`.
+
+### Tests
+
+`tests/lua/cases/coordinates.lua`: the bleed widens the trailing edge by the
+requested columns while leaving `col`, `row` and `height` untouched, and is
+clipped at the placement's right edge for an overlay that hugs it (which would
+otherwise crop image the overlay does not cover).
+`tests/lua/cases/backend_kitty.lua`: no `X`/`Y` when the offset is zero, both keys
+present when set, and the count of `X=` keys equal to the count of placements so a
+multi-region crop cannot be calibrated only on its first region.
+`tests/lua/cases/config.lua`: defaults, and rejection of negative values for both.
+`tests/lua/cases/controller.lua`'s existing cutout-width assertion now accounts for
+the bleed and additionally pins that the leading edge never moves.
+
+Verified end to end with the headless geometry probe from follow-up 6: for an
+interior notification at cols 43..76, the cut-out comes back as cols 43..**77**
+and the painted regions as cols 40..42 and 78..79 — one column later on the
+trailing side, unchanged on the leading side.
+
+### Verification
+
+Lua headless suite: 530/530 assertions (up from 510 by these cases).
+`npm test --prefix renderer`: 128/128, unchanged. `stylua --check`: clean.
+
+**No graphical validation was performed**, unchanged from every part and follow-up
+before it. The diagnosis is measured off the operator's screenshots rather than
+inferred, and the bleed's effect is proven end to end headlessly. Two things are
+not proven and need the operator's iTerm2:
+
+1. Whether iTerm2 implements `X`/`Y` at all. If it does not, `raw_cell_offset_px`
+   is inert there and the bleed is the whole fix — which is why the bleed defaults
+   to on rather than being left for the user to discover.
+2. Whether the offset is a constant margin or tracks cell width. 10px is exactly
+   half of the 20px cell, so the two are indistinguishable from these screenshots.
+   Changing the terminal font size once and re-measuring settles it; if it tracks
+   cell width, the setting should be expressed as a fraction rather than pixels.

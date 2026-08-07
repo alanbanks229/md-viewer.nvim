@@ -147,6 +147,48 @@ return function(t)
   vim.api.nvim_win_close(guard_win, true)
   vim.api.nvim_set_current_win(original_win)
 
+  -- Overlay bleed: a passive float's cutout grows on its trailing edge only, to
+  -- absorb the sub-cell offset a terminal introduces when it applies its window
+  -- margin to text but not to graphics placements (see passive_overlays).
+  local bleed_rect = { row = 0, col = 0, width = 60, height = 20 }
+  local bleed_buf = vim.api.nvim_create_buf(false, true)
+  local bleed_win = vim.api.nvim_open_win(bleed_buf, false, {
+    relative = "editor",
+    row = 2,
+    col = 5,
+    width = 10,
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  local exact = coords.passive_overlays(bleed_rect, nil, 0)[1]
+  local bled = coords.passive_overlays(bleed_rect, nil, 2)[1]
+  t.ok(exact ~= nil and bled ~= nil, "a passive float is discovered with and without bleed")
+  t.eq(exact.col, bled.col, "the bleed leaves the leading edge exactly where it was")
+  t.eq(exact.row, bled.row, "the bleed never touches the vertical origin")
+  t.eq(exact.height, bled.height, "the bleed never touches the vertical extent")
+  t.eq(exact.width + 2, bled.width, "the bleed widens the trailing edge by the requested columns")
+
+  -- Clipping: the bleed can never push the cutout past the placement's own
+  -- right edge, which would crop image the overlay does not actually cover.
+  local edge_win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+    relative = "editor",
+    row = 4,
+    col = 50,
+    width = 10,
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.api.nvim_win_close(bleed_win, true)
+  local clipped
+  for _, rect in ipairs(coords.passive_overlays(bleed_rect, nil, 5)) do
+    if rect.row == 4 then clipped = rect end
+  end
+  t.ok(clipped ~= nil, "the edge-hugging float is discovered")
+  t.eq(60, clipped.col + clipped.width, "the bleed is clipped to the placement's right edge")
+  vim.api.nvim_win_close(edge_win, true)
+
   -- cell_to_css: Part 4's mouse-cell -> browser-CSS-pixel conversion.
   local placement = { row = 5, col = 10, width = 40, height = 20, exclusions = {} }
   local view = { widthPx = 800, heightPx = 400 }

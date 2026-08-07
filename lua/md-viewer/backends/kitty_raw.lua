@@ -112,16 +112,38 @@ local function new_placement_id()
   return next_placement_id
 end
 
-local function place_regions(item, placement)
-  local sequences = {}
-  item.placement_ids = {}
+--- Sub-cell offset at which the image starts inside its first cell, as the
+--- Kitty graphics protocol's `X`/`Y` placement keys. Returns "" when both are
+--- zero so a terminal that does not implement those keys receives exactly the
+--- bytes it received before this existed.
+---
+--- This cancels an origin offset the terminal itself introduces: iTerm2 applies
+--- its horizontal window margin to text but not to graphics placements, which
+--- lands the image ~10px of a 20px cell left of the text grid. Every cropped
+--- region gets the same offset, since each is positioned by its own cursor
+--- escape and so has its own "first cell".
+local function cell_offset()
+  local offset = config.get().image.raw_cell_offset_px or {}
+  local x = math.max(0, math.floor(tonumber(offset.x) or 0))
+  local y = math.max(0, math.floor(tonumber(offset.y) or 0))
+  if x == 0 and y == 0 then return "" end
+  return (",X=%d,Y=%d"):format(x, y)
+end
+
+---Build (but do not send) the placement commands for one cropped region set,
+---along with the fresh placement IDs they use. Kept separate from sending so
+---`M.move` can emit a replacement and the deletion it supersedes in a single
+---write -- see there for why that matters.
+local function placement_sequences(item, placement)
+  local sequences, ids = {}, {}
+  local offset = cell_offset()
   for _, region in ipairs(visible_regions(placement)) do
     local pid = new_placement_id()
     local x1 = math.floor(region.x * item.width_px / placement.width)
     local y1 = math.floor(region.y * item.height_px / placement.height)
     local x2 = math.floor((region.x + region.width) * item.width_px / placement.width)
     local y2 = math.floor((region.y + region.height) * item.height_px / placement.height)
-    local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,c=%d,r=%d,z=%d"):format(
+    local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,c=%d,r=%d,z=%d%s"):format(
       item.id,
       pid,
       x1,
@@ -130,25 +152,31 @@ local function place_regions(item, placement)
       math.max(1, y2 - y1),
       region.width,
       region.height,
-      zindex()
+      zindex(),
+      offset
     )
     sequences[#sequences + 1] = at({
       row = placement.row + region.y,
       col = placement.col + region.x,
     }, command(control))
-    item.placement_ids[#item.placement_ids + 1] = pid
+    ids[#ids + 1] = pid
   end
-  if #sequences > 0 then send(table.concat(sequences)) end
-  item.placement = vim.deepcopy(placement)
+  return table.concat(sequences), ids
 end
 
-local function delete_placements(item)
+local function deletion_sequences(image_id, placement_ids)
   local sequences = {}
-  for _, pid in ipairs(item.placement_ids or {}) do
-    sequences[#sequences + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(item.id, pid))
+  for _, pid in ipairs(placement_ids or {}) do
+    sequences[#sequences + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(image_id, pid))
   end
-  if #sequences > 0 then send(table.concat(sequences)) end
-  item.placement_ids = {}
+  return table.concat(sequences)
+end
+
+local function place_regions(item, placement)
+  local sequence, ids = placement_sequences(item, placement)
+  if sequence ~= "" then send(sequence) end
+  item.placement_ids = ids
+  item.placement = vim.deepcopy(placement)
 end
 
 function M.capability() return terminal.detect() end
@@ -194,11 +222,25 @@ function M.update(image_id, image_bytes, placement)
   return new_id
 end
 
+---Re-place an already-uploaded image, typically because its crop changed: a
+---passive float opened or closed over the preview and its rectangle has to be
+---cut out of (or restored to) the placement.
+---
+---The new placements are emitted *before* the ones they supersede are deleted,
+---and both halves go out in one `nvim_ui_send` write. Deleting first leaves the
+---terminal with nothing to composite until the replacement arrives, and that
+---gap is visible: it was reported as the image blinking and rolling by about a
+---row for as long as a notification stayed open. Placement IDs are fresh on
+---every call, so the old and new sets never collide while they briefly overlap.
 function M.move(image_id, placement)
   local item = owned[image_id]
   if not item then return nil, "image is not owned by md-viewer" end
-  delete_placements(item)
-  place_regions(item, placement)
+  local superseded = item.placement_ids or {}
+  local sequence, ids = placement_sequences(item, placement)
+  local removal = deletion_sequences(item.id, superseded)
+  if sequence ~= "" or removal ~= "" then send(sequence .. removal) end
+  item.placement_ids = ids
+  item.placement = vim.deepcopy(placement)
   return image_id
 end
 
@@ -224,7 +266,10 @@ function M.health()
   end
   local zindex_value, zindex_source = resolve_zindex()
   local double_buffer_value, double_buffer_source = resolve_double_buffer()
+  local offset = config.get().image.raw_cell_offset_px or {}
   return {
+    cell_offset_px = ("x=%d, y=%d"):format(tonumber(offset.x) or 0, tonumber(offset.y) or 0),
+    overlay_bleed_cells = config.get().image.raw_overlay_bleed_cells,
     available = ok,
     reason = reason,
     -- Whether the terminal advertises Kitty-compatible graphics at all; no

@@ -82,6 +82,35 @@ return function(t)
   raw_backend.clear(fourth_id)
   config.reset()
 
+  -- Sub-cell calibration: the Kitty X/Y placement keys cancel the origin
+  -- offset a terminal introduces by applying its window margin to text but not
+  -- to graphics. Absent by default, so a terminal that does not implement them
+  -- receives exactly the bytes it did before this existed.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  reset_sequences()
+  local plain_offset_id = raw_backend.show(fake_png(), placement)
+  t.eq(nil, output():match("X=%d+"), "no X/Y is emitted when the offset is zero")
+  raw_backend.clear(plain_offset_id)
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" }, image = { raw_cell_offset_px = { x = 10, y = 3 } } })
+  reset_sequences()
+  local offset_id = raw_backend.show(fake_png(), {
+    row = 0,
+    col = 0,
+    width = 10,
+    height = 10,
+    exclusions = { { row = 2, col = 2, width = 4, height = 4 } },
+  })
+  local offset_output = output()
+  t.eq("10", offset_output:match("X=(%d+)"), "a configured x offset reaches the placement command")
+  t.eq("3", offset_output:match("Y=(%d+)"), "a configured y offset reaches the placement command")
+  local _, offset_placements = offset_output:gsub("\27_Ga=p", "")
+  local _, offset_keys = offset_output:gsub("X=%d+", "")
+  t.eq(offset_placements, offset_keys, "every cropped region carries the offset, not only the first")
+  raw_backend.clear(offset_id)
+  config.reset()
+
   -- Placement lifecycle: upload-once, cropped placements, targeted
   -- deletion, and crop recomputation when exclusions change.
   reset_sequences()
@@ -104,6 +133,16 @@ return function(t)
   t.eq(false, moved_output:find("a=t,f=100", 1, true) ~= nil, "moving never re-uploads the already-owned image")
   local _, restored_placements = moved_output:gsub("\27_Ga=p", "")
   t.eq(1, restored_placements, "removing the overlay restores one full placement")
+
+  -- Regression: a re-crop must never leave the terminal with nothing to
+  -- composite, or the image visibly blinks and rolls for as long as the float
+  -- that triggered it stays open. The replacement placement has to be written
+  -- before the deletion it supersedes, and both in the same write.
+  t.eq(1, #sequences, "a move is a single write, so no redraw can land mid-recrop")
+  t.ok(
+    moved_output:find("\27_Ga=p", 1, true) < moved_output:find("a=d,d=i", 1, true),
+    "the new placement is sent before the placement it replaces is deleted"
+  )
   raw_backend.clear(raw_id)
 
   -- Base64 chunking at the 4096-byte boundary: an upload whose encoded form
