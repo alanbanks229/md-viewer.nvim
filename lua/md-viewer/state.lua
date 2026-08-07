@@ -32,6 +32,8 @@ function M.create(source_buf, source_win)
     last_image_bytes = nil,
     occluded = false,
     occluding_windows = {},
+    tabpage_hidden = false,
+    refresh_deferred = false,
     ui_suppressed = false,
     ui_poll_timer = nil,
     loading = false,

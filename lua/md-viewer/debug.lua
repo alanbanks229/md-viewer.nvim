@@ -45,6 +45,10 @@ function M.snapshot()
       preview_height_cells = session.preview_height_cells,
       occluded = session.occluded,
       occluding_windows = session.occluding_windows,
+      -- Why an otherwise healthy session is showing nothing: the preview
+      -- window is parked on a tabpage the terminal is not displaying.
+      tabpage_hidden = session.tabpage_hidden or false,
+      refresh_deferred = session.refresh_deferred or false,
       ui_suppressed = session.ui_suppressed,
       ui_polling = session.ui_poll_timer ~= nil,
       placement = session.last_placement,

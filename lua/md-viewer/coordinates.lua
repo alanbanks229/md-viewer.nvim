@@ -39,6 +39,23 @@ function M.for_window(win)
   }
 end
 
+---Whether `win` is on the tabpage the terminal is actually displaying.
+---
+---`M.for_window` above cannot answer this on its own, and neither can any
+---other window API: for a window sitting on a *background* tabpage,
+---nvim_win_is_valid, nvim_win_get_position, nvim_win_get_width/height and
+---vim.fn.screenpos all keep reporting full, valid, completely unchanged
+---on-screen geometry, exactly as if it were visible. That is harmless for
+---anything Neovim draws itself -- a hidden tabpage is simply not composited
+---to the grid -- but a raw Kitty placement is absolute screen coordinates the
+---*terminal* keeps compositing until it is explicitly told to stop, so a
+---caller that only asks "where is this window?" will happily paint over
+---whichever tabpage is really on screen.
+function M.window_is_displayed(win)
+  if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then return false end
+  return vim.api.nvim_win_get_tabpage(win) == vim.api.nvim_get_current_tabpage()
+end
+
 function M.same(a, b)
   if not (a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height) then
     return false

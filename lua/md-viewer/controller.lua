@@ -1,5 +1,6 @@
 local backends = require("md-viewer.backends")
 local config = require("md-viewer.config")
+local coordinates = require("md-viewer.coordinates")
 local preview = require("md-viewer.preview")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
@@ -43,8 +44,27 @@ local function clear_image(session)
   session.last_placement = nil
 end
 
+---Must the image be off screen right now? Every path that shows, restores or
+---re-places a backend image asks this first, so it is the one place that has
+---to know every reason the image may not be displayed.
 local function update_occlusion(session)
   if not valid(session) or session.backend.name == "cells" then return false end
+  -- The preview window living on a *background* tabpage is one of those
+  -- reasons, and nothing else here can detect it: `preview.occlusion` only
+  -- ever looks at the preview's own tabpage, and `same_geometry` compares
+  -- equal because the geometry genuinely has not changed -- a hidden window
+  -- keeps reporting its full on-screen rectangle (coordinates
+  -- .window_is_displayed). Left unchecked, the raw image is re-shown at the
+  -- hidden tabpage's coordinates on top of whatever the visible tabpage is
+  -- drawing, which is what any plugin that opens its UI in its own tab
+  -- (codediff.nvim's `:CodeDiff`, for one) triggers.
+  local hidden = not coordinates.window_is_displayed(session.preview_win)
+  session.tabpage_hidden = hidden
+  if hidden then
+    session.occluded = false
+    session.occluding_windows = {}
+    return true
+  end
   local blocked, windows = preview.occlusion(session.preview_win)
   session.occluded = blocked
   session.occluding_windows = windows
@@ -110,6 +130,10 @@ function M.display_interact_result(session, result)
   end
   if update_occlusion(session) then
     clear_image(session)
+    -- The interact PNG is discarded rather than displayed off screen, and
+    -- unlike a render frame it never reaches session.last_image_bytes, so the
+    -- cache cannot show this selection/find state. Re-render on restore.
+    session.refresh_deferred = true
     return
   end
   apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs)
@@ -132,6 +156,15 @@ local function show_cached(session)
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- A render that was dropped while the image could not be displayed left the
+  -- cached PNG a frame behind the source. Now that it can be displayed again,
+  -- catch up rather than leaving the restored frame stale indefinitely --
+  -- otherwise a debounced render landing just after `:CodeDiff` (or just after
+  -- a focusable float opened over the preview) is silently lost.
+  if session.refresh_deferred then
+    session.refresh_deferred = false
+    M.schedule(session, 0)
+  end
   return true
 end
 
@@ -148,6 +181,10 @@ function M.refresh(session, render_options)
   session.render_failed = false
   if update_occlusion(session) then
     clear_image(session)
+    -- Nothing was captured, so the cached PNG stays a frame behind whatever
+    -- triggered this refresh. show_cached() replays it once the image can be
+    -- displayed again.
+    session.refresh_deferred = true
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
@@ -393,24 +430,38 @@ local function refresh_raw_sessions()
   end)
 end
 
----Row/col/width/height only -- deliberately ignoring `exclusions`. Every
----raw-Kitty terminal profile places the image at `raw_zindex = -1`
----(terminal.lua), strictly below normal cell content, so a passive floating
----window (a notification, for instance) already visually occludes the image
----without any crop/exclusion at all -- exclusions exist only so
----`interaction.locate`'s click-resolution (`coordinates.cell_to_css`) can
----refuse a click that lands on one. Re-cropping and re-placing the image via
----`backend.move()` purely because a transient float's exclusion rectangle
----appeared or disappeared was visible on screen as the image being redrawn
----shifted/rolled by roughly one row for as long as the float stayed open --
----a real, reported bug, not a hypothetical -- for no visual benefit at all,
----since the float already draws on top of the unchanged image either way.
+---Row/col/width/height only -- deliberately ignoring `exclusions`.
+---
+---Re-cropping and re-placing the image via `backend.move()` purely because a
+---transient passive float's exclusion rectangle appeared or disappeared was
+---visible on screen as the image being redrawn shifted/rolled by roughly one
+---row for as long as the float stayed open -- a real, reported, and
+---operator-confirmed-fixed bug. `place_regions` re-splits the placement into a
+---fresh set of Kitty placement IDs on every such change, and that redundant
+---delete-and-resplit cycle is what rolled.
+---
+---Note this skip is justified by that observed regression, *not* by the
+---z-index argument this comment used to make. `raw_zindex = -1` does not put
+---the image "below cell content" generally: in the Kitty graphics protocol a
+---negative z above INT32_MIN/2 draws the image below text glyphs but *above*
+---cell background colors (see docs/architecture.md, and the operator's own
+---`raw_zindex` config comment). So a passive float does not reliably occlude
+---the image on its own, and skipping the crop can let the image bleed through
+---a notification's blank cells. Fixing that means making the re-crop itself
+---non-rolling (atomic place-then-delete in `kitty_raw.move`), not restoring an
+---unconditional `move()` here.
 local function same_geometry(a, b)
   return a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height
 end
 
 local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
+  -- Never address the terminal on behalf of a window that is not on screen:
+  -- its reported geometry is a hidden tabpage's, so any placement built from
+  -- it lands on top of the tabpage the user is actually looking at. The
+  -- unconditional `force` callers (CmdlineEnter/CmdlineLeave) reach here
+  -- without an occlusion check of their own.
+  if not coordinates.window_is_displayed(session.preview_win) then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
   if force or not same_geometry(session.last_placement, placement) then
     local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
@@ -710,10 +761,11 @@ function M.setup_autocmds()
     group = group,
     callback = function()
       each_session(function(session)
-        if session.image_id then
-          session.backend.clear(session.image_id)
-          session.image_id = nil
-        end
+        -- clear_image() rather than a hand-rolled clear: the placement this
+        -- drops must go with the image, since interaction.locate resolves
+        -- clicks against session.last_placement and there is no longer an
+        -- image on screen for one to land on.
+        clear_image(session)
         -- The preview survives a tab leave or suspend, but a mouse press
         -- captured against it does not: there is no guarantee the matching
         -- release ever reaches Neovim across that boundary.
