@@ -123,6 +123,7 @@ test("Part 6's nine actions are all registered with the correct flags", () => {
     selection_clear: { mutatesVisibleState: true, requiresCoordinates: false },
     selection_text: { mutatesVisibleState: false, requiresCoordinates: false },
     word_select: { mutatesVisibleState: true, requiresCoordinates: true },
+    paragraph_select: { mutatesVisibleState: true, requiresCoordinates: true },
     find_set: { mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true },
     find_next: { mutatesVisibleState: true, requiresCoordinates: false },
     find_previous: { mutatesVisibleState: true, requiresCoordinates: false },
@@ -136,7 +137,8 @@ test("Part 6's nine actions are all registered with the correct flags", () => {
   }
   assert.deepEqual([...Object.keys(INTERACT_ACTIONS)].sort(), [
     "activate_at", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
-    "selection_clear", "selection_commit", "selection_preview", "selection_text", "word_select",
+    "paragraph_select", "selection_clear", "selection_commit", "selection_preview",
+    "selection_text", "word_select",
   ]);
 });
 
@@ -183,9 +185,9 @@ test("envelope defaults are conservative", () => {
   });
   assert.equal(envelope.strategy, "auto");
   assert.equal(envelope.clickCount, 1);
-  assert.equal(envelope.scrollY, 0);
+  assert.equal(envelope.scrollY, null, "omitted scrollY preserves position instead of defaulting to the top");
   assert.equal(envelope.capture, false, "a read-only action must not capture unless asked");
-  assert.equal(envelope.captureScale, "css", "interactions default to the cheap scale");
+  assert.equal(envelope.captureScale, "device", "interactions default to the sharp scale unless css is requested");
   assert.deepEqual(envelope.modifiers, { ctrl: false, shift: false, alt: false, meta: false });
 });
 
@@ -800,20 +802,20 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     // Semantic result and frame arrive together; Lua never issues a follow-up.
     assert.equal(response.result.kind, "source");
     assert.equal(response.result.sourcePosition.line, 3);
-    assert.equal(response.result.captureScale, "css", "interactions default to the cheap scale");
+    assert.equal(response.result.captureScale, "device", "interactions default to the sharp scale");
     assert.equal(response.result.scrollY, scrollY);
     assert.ok(response.result.documentHeightPx > 0);
     assert.ok(fs.existsSync(response.result.pngPath));
     const png = fs.readFileSync(response.result.pngPath);
     assert.deepEqual(png.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
-    assert.equal(png.readUInt32BE(16), 800, "css scale should match the CSS viewport width");
+    assert.equal(png.readUInt32BE(16), 800, "device scale factor 1 should match the CSS viewport width");
     fs.unlinkSync(response.result.pngPath);
 
-    const retina = await renderer.send("interact", renderer.interactParams("sink", "1:0",
-      { x: 120, y: middle - scrollY }, { scrollY, capture: true, captureScale: "device" }));
-    assert.equal(retina.ok, true, retina.error);
-    assert.equal(retina.result.captureScale, "device");
-    fs.unlinkSync(retina.result.pngPath);
+    const cheap = await renderer.send("interact", renderer.interactParams("sink", "1:0",
+      { x: 120, y: middle - scrollY }, { scrollY, capture: true, captureScale: "css" }));
+    assert.equal(cheap.ok, true, cheap.error);
+    assert.equal(cheap.result.captureScale, "css", "css scale is opt-in only");
+    fs.unlinkSync(cheap.result.pngPath);
 
     // A read-only interaction that did not ask for a frame must not produce one.
     const readOnly = await renderer.send("interact", renderer.interactParams("sink", "1:0",

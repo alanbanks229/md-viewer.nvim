@@ -272,6 +272,20 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.ok(/^[A-Za-z]+$/.test(response.result.text), `expected a single word, got ${JSON.stringify(response.result.text)}`);
   });
 
+  await t.test("paragraph_select selects the whole paragraph from a mid-word click, not just one word", async () => {
+    const paragraph = blockAt(blocks, 2);
+    const y = Math.round((paragraph.topPx + paragraph.bottomPx) / 2);
+    const response = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
+      action: "paragraph_select", coordinates: { x: 60, y }, capture: true,
+    }));
+    if (response.ok && response.result.pngPath) fs.unlinkSync(response.result.pngPath);
+    assert.equal(response.ok, true, response.error);
+    assert.equal(response.result.kind, "selection");
+    assert.equal(response.result.collapsed, false);
+    assert.match(response.result.text, /^Alpha beta gamma delta epsilon zeta eta theta iota kappa\.$/,
+      "a triple click must select the paragraph's full text, not one word");
+  });
+
   await t.test("selection_text extracts the same text a commit already selected", async () => {
     const paragraph = blockAt(blocks, 2);
     const { left, right } = edges(paragraph);
@@ -293,6 +307,34 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(after.result.text, "");
     assert.equal(after.result.collapsed, true);
   });
+
+  await t.test(
+    "omitting scrollY on selection_clear preserves the shared page's scroll position (regression)",
+    async () => {
+      const maxScroll = Math.max(0, meta.documentHeightPx - meta.viewportHeightPx);
+      if (maxScroll <= 0) return; // the doc must be taller than the viewport for this to be meaningful
+
+      // Move the shared page to a non-zero scroll position.
+      const scrolled = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
+        action: "hit_test", coordinates: { x: 1, y: 1 }, scrollY: maxScroll, capture: true,
+      }));
+      if (scrolled.ok && scrolled.result.pngPath) fs.unlinkSync(scrolled.result.pngPath);
+      assert.equal(scrolled.ok, true, scrolled.error);
+      assert.equal(scrolled.result.scrollY, maxScroll);
+
+      // selection_clear with no scrollY field at all must preserve that
+      // position rather than resetting the shared page to the top -- the
+      // exact bug that made a click-to-deselect near the bottom of a document
+      // jump the preview to the very top.
+      const cleared = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
+        action: "selection_clear", capture: true, scrollY: undefined,
+      }));
+      if (cleared.ok && cleared.result.pngPath) fs.unlinkSync(cleared.result.pngPath);
+      assert.equal(cleared.ok, true, cleared.error);
+      assert.equal(cleared.result.scrollY, maxScroll, "an omitted scrollY must preserve position, not reset to the top");
+      assert.equal(cleared.result.captureScale, "device", "selection_clear must default to the sharp capture scale");
+    }
+  );
 
   await t.test("selection survives a scroll-only capture", async () => {
     const paragraph = blockAt(blocks, 2);

@@ -26,6 +26,7 @@ export const INTERACT_ACTIONS = Object.freeze({
   // a copy can never itself "commit" a selection that was only ever previewed.
   selection_text: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: false }),
   word_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
+  paragraph_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
   find_set: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true }),
   find_next: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
   find_previous: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
@@ -226,8 +227,12 @@ export function validateEnvelope(params) {
     throw createInteractError("INVALID_INTERACTION", "modifiers must be an object of booleans");
   }
 
-  const scrollY = envelope.scrollY === undefined ? 0 : requireFiniteNumber(envelope.scrollY, "scrollY");
-  if (scrollY < 0) throw createInteractError("INVALID_INTERACTION", "scrollY must not be negative");
+  // `null` (not 0) when omitted: browser.js's ensureDocumentActive() falls
+  // back to the document's own last known scroll position in that case,
+  // rather than snapping the shared page to the top on every action that
+  // forgets to send scrollY.
+  const scrollY = envelope.scrollY === undefined ? null : requireFiniteNumber(envelope.scrollY, "scrollY");
+  if (scrollY !== null && scrollY < 0) throw createInteractError("INVALID_INTERACTION", "scrollY must not be negative");
 
   // How much of the image one terminal cell covers, in CSS pixels. Optional:
   // absent or zero means "resolve the given point only", which is what every
@@ -267,7 +272,9 @@ export function validateEnvelope(params) {
     // opt in, which is how the same-queued-operation capture path is exercised
     // before Part 6 ships the first mutating action.
     capture: action.mutatesVisibleState || envelope.capture === true,
-    captureScale: envelope.captureScale === "device" ? "device" : "css",
+    // "css" (the cheap, slightly-soft scroll fast-frame scale) is opt-in
+    // only; anything that doesn't explicitly ask for it renders sharp.
+    captureScale: envelope.captureScale === "css" ? "css" : "device",
   };
 }
 
@@ -963,6 +970,131 @@ export function wordSelectInPage(input) {
       block: point.block,
       inline: inline ? { sourceId: inline.sourceId, offset: inline.focusOffset, textLength: inline.textLength } : null,
     },
+  };
+}
+
+/// `paragraph_select` (triple click). Resolves one caret point the same way
+/// `wordSelectInPage` does, then selects the *entire* enclosing block's text
+/// (its first through last non-empty text node) instead of expanding to word
+/// boundaries -- the browser/VS-Code "triple click selects the paragraph"
+/// behaviour.
+export function paragraphSelectInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  // Duplicated from resolveSelectionInPage's own nested copy -- see that
+  // function's comment for why this cannot be a shared top-level helper.
+  function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
+    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
+    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
+    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
+
+    let element = null;
+    let block = null;
+    let pointX = x;
+    for (const dx of offsets) {
+      const px = x + dx;
+      if (!(px >= 0 && px < window.innerWidth)) continue;
+      const candidate = document.elementFromPoint(px, y);
+      if (!candidate) continue;
+      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
+      if (!candidateBlock) continue;
+      element = candidate;
+      block = candidateBlock;
+      pointX = px;
+      break;
+    }
+    if (!block) return null;
+    return { block, element, pointX };
+  }
+
+  // Duplicated from resolveSelectionInPage's own nested copy.
+  function applySelectionRange(selection, anchorNode, anchorOffset, focusNode, focusOffset) {
+    if (typeof selection.setBaseAndExtent === "function") {
+      selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
+      return;
+    }
+    let focusFirst = false;
+    if (anchorNode === focusNode) {
+      focusFirst = focusOffset < anchorOffset;
+    } else {
+      const relation = anchorNode.compareDocumentPosition(focusNode);
+      focusFirst = (relation & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
+    }
+    const range = document.createRange();
+    if (focusFirst) {
+      range.setStart(focusNode, focusOffset);
+      range.setEnd(anchorNode, anchorOffset);
+    } else {
+      range.setStart(anchorNode, anchorOffset);
+      range.setEnd(focusNode, focusOffset);
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  // Locates the nearest `[data-md-source-id]` run ancestor for `node` and the
+  // text offset of `node`/`offset` within that run's own text content -- the
+  // same provenance lookup wordSelectInPage does for its single caret node,
+  // generalized here for both the paragraph's first and last text node.
+  function resolveInline(node, offset) {
+    const runElement = node.parentElement === null ? null : node.parentElement.closest("[data-md-source-id]");
+    if (runElement === null) return null;
+    const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+    let consumed = 0;
+    let found = false;
+    let current = walker.nextNode();
+    while (current !== null) {
+      if (current === node) {
+        found = true;
+        break;
+      }
+      consumed += current.nodeValue.length;
+      current = walker.nextNode();
+    }
+    if (!found) return null;
+    return {
+      sourceId: runElement.getAttribute("data-md-source-id"),
+      offset: consumed + offset,
+      textLength: (runElement.textContent || "").length,
+    };
+  }
+
+  const point = resolveSelectionPoint(input.x, input.y, input.cellWidthPx, input.strategy);
+  if (!point) return { ok: false, reason: "no_paragraph" };
+
+  const walker = document.createTreeWalker(point.block, NodeFilter.SHOW_TEXT);
+  let first = null;
+  let last = null;
+  let node = walker.nextNode();
+  while (node !== null) {
+    if (node.nodeValue.length > 0) {
+      if (first === null) first = node;
+      last = node;
+    }
+    node = walker.nextNode();
+  }
+  if (first === null || last === null) return { ok: false, reason: "no_paragraph" };
+
+  const selection = window.getSelection();
+  applySelectionRange(selection, first, 0, last, last.nodeValue.length);
+
+  const blockInfo = {
+    sourceStart: Number(point.block.getAttribute("data-source-start")),
+    sourceEnd: Number(point.block.getAttribute("data-source-end")),
+    sourceId: point.block.getAttribute("data-md-source-id"),
+    tagName: point.block.tagName,
+  };
+
+  return {
+    ok: true,
+    text: selection.toString(),
+    collapsed: selection.isCollapsed,
+    anchor: { block: blockInfo, inline: resolveInline(first, 0) },
+    focus: { block: blockInfo, inline: resolveInline(last, last.nodeValue.length) },
   };
 }
 

@@ -21,6 +21,7 @@ import {
   createInteractError,
   hitTestInPage,
   normalizeHit,
+  paragraphSelectInPage,
   readSelectionTextInPage,
   resolveSelectionInPage,
   setFindInPage,
@@ -129,8 +130,23 @@ export class BrowserRenderer {
   async applyScroll(documentHeight, height, requested) {
     const scrollY = Math.max(0, Math.min(Number(requested) || 0, Math.max(0, documentHeight - height)));
     await this.page.evaluate((top) => window.scrollTo(0, top), scrollY);
-    if (this.active) this.active.scrollY = scrollY;
+    this.rememberScrollY(scrollY);
     return scrollY;
+  }
+
+  /// Keep `this.active.scrollY` and the cached document record's own
+  /// `scrollY` in sync, from every mechanism that can move the shared page
+  /// (applyScroll, an in-page scrollIntoView for a find match, a fragment
+  /// jump) -- not just applyScroll. `ensureDocumentActive()` falls back to
+  /// the record's scrollY when a caller omits one, so an update recorded in
+  /// only one of the two would leave that fallback answering with a stale
+  /// position.
+  rememberScrollY(scrollY) {
+    if (this.active) {
+      this.active.scrollY = scrollY;
+      const record = this.documents.get(this.active.documentId);
+      if (record) record.scrollY = scrollY;
+    }
   }
 
   /// Screenshot the current viewport. Shared by render() and by any interaction
@@ -303,8 +319,10 @@ export class BrowserRenderer {
     }
 
     if (alreadyActive) {
-      const scrollY = await this.applyScroll(record.documentHeight, record.height, envelope.scrollY);
-      record.scrollY = scrollY;
+      // A request that omits scrollY preserves the document's current
+      // position instead of resetting to the top -- see interact.js's
+      // validateEnvelope, which passes null through rather than defaulting.
+      const scrollY = await this.applyScroll(record.documentHeight, record.height, envelope.scrollY ?? record.scrollY);
       return { rehydrated: false, record, scrollY, documentHeight: record.documentHeight };
     }
 
@@ -326,8 +344,7 @@ export class BrowserRenderer {
     record.token = loaded.token;
     record.documentHeight = loaded.documentHeight;
     record.blocks = loaded.blocks;
-    const scrollY = await this.applyScroll(loaded.documentHeight, record.height, envelope.scrollY);
-    record.scrollY = scrollY;
+    const scrollY = await this.applyScroll(loaded.documentHeight, record.height, envelope.scrollY ?? record.scrollY);
     return { rehydrated: true, record, scrollY, documentHeight: loaded.documentHeight };
   }
 
@@ -353,7 +370,7 @@ export class BrowserRenderer {
       return window.scrollY;
     }, id);
     if (typeof scrollY !== "number") return { found: false };
-    if (this.active) this.active.scrollY = scrollY;
+    this.rememberScrollY(scrollY);
     return { found: true, scrollY };
   }
 
@@ -374,6 +391,12 @@ export class BrowserRenderer {
     if (action === "selection_text") return this.page.evaluate(readSelectionTextInPage, { token });
     if (action === "word_select") {
       return this.page.evaluate(wordSelectInPage, {
+        token, x: envelope.coordinates.x, y: envelope.coordinates.y,
+        cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
+      });
+    }
+    if (action === "paragraph_select") {
+      return this.page.evaluate(paragraphSelectInPage, {
         token, x: envelope.coordinates.x, y: envelope.coordinates.y,
         cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
       });
@@ -406,7 +429,12 @@ export class BrowserRenderer {
       const hit = normalizeHit(raw, cached?.sourceMap);
       return { result: buildActionResult(action, hit), hit };
     }
-    if (action === "selection_preview" || action === "selection_commit" || action === "word_select") {
+    if (
+      action === "selection_preview"
+      || action === "selection_commit"
+      || action === "word_select"
+      || action === "paragraph_select"
+    ) {
       return { result: buildSelectionResult(raw, cached?.sourceMap), hit: null };
     }
     if (action === "selection_text") return { result: buildSelectionTextResult(raw), hit: null };
@@ -467,7 +495,7 @@ export class BrowserRenderer {
     // where the page actually ended up, the same way fragment scrolling is.
     if (typeof raw?.scrollY === "number") {
       result.scrollY = raw.scrollY;
-      if (this.active) this.active.scrollY = raw.scrollY;
+      this.rememberScrollY(raw.scrollY);
     }
 
     if (envelope.capture) {

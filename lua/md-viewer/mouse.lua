@@ -84,7 +84,13 @@ local function gestures()
     { lhs = "<C-LeftMouse>", kind = "activate", modifiers = { ctrl = true } },
     { lhs = "<D-LeftMouse>", kind = "activate", modifiers = { meta = true } },
   }
-  if cfg.double_click then list[#list + 1] = { lhs = "<2-LeftMouse>", kind = "press", click_count = 2 } end
+  if cfg.double_click then
+    list[#list + 1] = { lhs = "<2-LeftMouse>", kind = "press", click_count = 2 }
+    -- Vim's click-count escalation requires <2-LeftMouse> to already be
+    -- mapped for <3-LeftMouse> to ever fire, so triple click rides the same
+    -- install gate rather than inventing a second one.
+    list[#list + 1] = { lhs = "<3-LeftMouse>", kind = "press", click_count = 3 }
+  end
   return list
 end
 

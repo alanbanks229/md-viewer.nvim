@@ -111,6 +111,7 @@ test("find: creation, counting, wrapping, clearing, scroll-into-view", async (t)
     assert.equal(response.result.matchCount, 4);
     assert.equal(response.result.activeIndex, 0);
     assert.ok(response.result.activeSourcePosition, "the active match should carry a source position");
+    assert.equal(response.result.captureScale, "device", "find_set must default to the sharp capture scale");
   });
 
   await t.test("find_next and find_previous wrap in both directions", async () => {
@@ -156,6 +157,28 @@ test("find: creation, counting, wrapping, clearing, scroll-into-view", async (t)
     // required a real scroll to bring into view.
     assert.ok(last.result.scrollY > 0, "scrolling to the last match should have moved the viewport");
   });
+
+  await t.test(
+    "omitting scrollY on find_clear preserves the shared page's scroll position (regression)",
+    async () => {
+      // Scroll to the far-down match first, via a real find_next.
+      const set = await find(renderer, "find-doc", "1:0", "find_set", { query: "fox", capture: true });
+      let last = set;
+      for (let i = 0; i < set.result.matchCount - 1; i += 1) {
+        last = await find(renderer, "find-doc", "1:0", "find_next", { capture: true });
+      }
+      assert.ok(last.result.scrollY > 0, "the setup scroll should have moved the viewport");
+      const scrolledTo = last.result.scrollY;
+
+      // find_clear with no scrollY field at all must not reset to the top --
+      // the same bug that made clicking to deselect/clear near the bottom of
+      // a document jump the preview back to the very top.
+      const cleared = await find(renderer, "find-doc", "1:0", "find_clear", { capture: true, scrollY: undefined });
+      assert.equal(cleared.ok, true, cleared.error);
+      assert.equal(cleared.result.scrollY, scrolledTo, "an omitted scrollY must preserve position, not reset to the top");
+      assert.equal(cleared.result.captureScale, "device", "find_clear must default to the sharp capture scale");
+    }
+  );
 
   await renderer.send("shutdown", {});
 });

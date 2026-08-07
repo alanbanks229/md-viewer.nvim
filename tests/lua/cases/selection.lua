@@ -80,7 +80,11 @@ return function(t)
     t.eq(1, #requests, "the first threshold crossing issues exactly one selection_preview request")
     t.eq("interact", requests[1].method)
     t.eq("selection_preview", requests[1].params.action)
-    t.eq("css", requests[1].params.captureScale, "a drag-preview frame uses the cheap CSS scale")
+    t.eq(
+      "device",
+      requests[1].params.captureScale,
+      "a drag-preview frame stays sharp -- the fast/cheap CSS scale is scroll-only"
+    )
     t.ok(requests[1].params.anchorCoordinates ~= nil, "a selection request always carries an explicit anchor")
     t.eq(true, session.pointer.selection_request_in_flight, "the request is marked in flight")
 
@@ -185,6 +189,51 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
+  -- Triple-click paragraph selection dispatches on press, mirroring
+  -- double-click word selection exactly.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = params
+      callback({ kind = "selection", ok = true, text = "whole paragraph", collapsed = false }, nil)
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 50, y = 50 }, 3)
+    t.eq(1, #requests, "a triple-click with paragraph_select enabled issues exactly one request")
+    t.eq("paragraph_select", requests[1].action)
+    t.eq(session.applied_scroll_y, requests[1].scrollY, "the request carries the session's current scrollY")
+    t.eq(true, session.selection_active)
+
+    interaction.on_release(session, point(10, 10))
+    t.eq(1, #requests, "release after paragraph_select fired performs no additional request")
+
+    process.request = original_request
+  end
+
+  -- ---------------------------------------------------------------------
+  -- paragraph_select = false disables triple-click paragraph selection
+  -- outright, matching word_select's own disable behaviour.
+  -- ---------------------------------------------------------------------
+  do
+    setup_interaction({ paragraph_select = false })
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback) requests[#requests + 1] = params end
+
+    interaction.on_press(session, point(10, 10), { x = 50, y = 50 }, 3)
+    t.eq(0, #requests, "on_press alone issues nothing when paragraph_select is disabled")
+    interaction.on_release(session, point(10, 10))
+    t.eq(0, #requests, "a disabled paragraph_select issues no request on release either")
+
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
   -- word_select = false disables double-click word selection outright --
   -- the "keep it selectable" requirement -- rather than falling through to
   -- click-to-source, which no longer exists as a fallback for any click.
@@ -226,6 +275,11 @@ return function(t)
     end
     process.request = function(method, params, callback)
       t.eq("selection_text", params.action, "copy always re-queries the live selection, never a cached string")
+      t.eq(
+        session.applied_scroll_y,
+        params.scrollY,
+        "copy carries the session's current scrollY, so it cannot reset the shared page's scroll position"
+      )
       callback({ kind = "selection_text", text = "copied text", collapsed = false }, nil)
     end
 
@@ -235,7 +289,7 @@ return function(t)
     t.eq("copied text", vim.fn.getreg('"'), "copy writes to the unnamed register")
     t.eq("copied text", vim.fn.getreg("+"), "copy writes to + when clipboard support is available")
     t.eq(1, #notified, "a non-silent copy notifies")
-    t.ok(notified[1].message:match("%d+ character"), "the notification reports a length")
+    t.eq("md-viewer: copied 11 characters", notified[1].message, "the notification is length-only, no register summary")
     t.eq(nil, notified[1].message:match("copied text"), "the notification never includes the selected text itself")
 
     vim.fn.has = original_has
@@ -341,6 +395,11 @@ return function(t)
     t.eq(false, session.selection_active, "clear_selection immediately marks the selection inactive")
     t.eq(1, #requests)
     t.eq("selection_clear", requests[1].action)
+    t.eq(
+      session.applied_scroll_y,
+      requests[1].scrollY,
+      "clear_selection carries the session's current scrollY -- omitting it used to reset the page to the top"
+    )
     process.request = original_request
   end
 
@@ -387,6 +446,7 @@ return function(t)
     t.eq(1, #requests)
     t.eq("find_set", requests[1].action)
     t.eq("hello", requests[1].query)
+    t.eq(session.applied_scroll_y, requests[1].scrollY, "find_set carries the session's current scrollY")
     t.eq(true, session.find_active)
     t.eq("hello", session.find_query)
     t.eq(3, session.find_match_count)
@@ -399,6 +459,7 @@ return function(t)
     end
     interaction.find_next(session)
     t.eq("find_next", requests[2].action)
+    t.eq(session.applied_scroll_y, requests[2].scrollY, "find_next carries the session's current scrollY")
     t.eq(1, session.find_active_index)
 
     -- find_clear.
@@ -408,6 +469,7 @@ return function(t)
     end
     interaction.find_clear(session)
     t.eq("find_clear", requests[3].action)
+    t.eq(session.applied_scroll_y, requests[3].scrollY, "find_clear carries the session's current scrollY")
     t.eq(false, session.find_active)
     t.eq(nil, session.find_query)
 

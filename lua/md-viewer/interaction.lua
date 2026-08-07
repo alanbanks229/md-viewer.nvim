@@ -103,17 +103,21 @@ function M.on_press(session, mouse, point, click_count)
     content_revision = session.renderer_revision,
     cached_selected_text = nil,
     click_count = click_count,
-    word_select_fired = false,
+    multi_click_fired = false,
   }
   captured = session
-  -- <2-LeftMouse> is already routed through on_press with click_count = 2
-  -- (mouse.lua's gestures()); dispatching word-select here, on press, matches
-  -- how a real double-click resolves synchronously on mousedown rather than
-  -- waiting for the release that single-click-to-source uses. word_select_fired
-  -- tells on_release not to also treat this as a click-to-source release.
+  -- <2-LeftMouse>/<3-LeftMouse> are already routed through on_press with
+  -- click_count = 2/3 (mouse.lua's gestures()); dispatching word/paragraph
+  -- select here, on press, matches how a real double/triple-click resolves
+  -- synchronously on mousedown rather than waiting for the release that
+  -- single-click-to-source used to use. multi_click_fired tells on_release
+  -- not to also treat this as a plain-click release.
   if click_count == 2 and point and config.get().interaction.word_select then
-    session.pointer.word_select_fired = true
+    session.pointer.multi_click_fired = true
     M.word_select(session, point)
+  elseif click_count == 3 and point and config.get().interaction.paragraph_select then
+    session.pointer.multi_click_fired = true
+    M.paragraph_select(session, point)
   end
 end
 
@@ -150,7 +154,7 @@ function M.schedule_selection_preview(session)
     if not point or pointer.selection_request_in_flight then return end
     pointer.selection_request_in_flight = true
     local requested_point = point
-    M.request_selection(session, pointer.anchor_point, point, "css", false, function(result, err)
+    M.request_selection(session, pointer.anchor_point, point, "device", false, function(result, err)
       if session.pointer ~= pointer then return end
       pointer.selection_request_in_flight = false
       if not err and result and result.ok ~= false then
@@ -251,6 +255,33 @@ function M.word_select(session, point)
   end)
 end
 
+---`paragraph_select`, dispatched from `on_press` on a triple-click (see
+---there). Mirrors `M.word_select` exactly, except the renderer selects the
+---enclosing block's whole text instead of expanding to word boundaries.
+function M.paragraph_select(session, point)
+  if not point then return end
+  if not session.renderer_revision then return end
+  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
+  process.request("interact", {
+    documentId = session.document_id,
+    contentRevision = session.renderer_revision,
+    action = "paragraph_select",
+    coordinates = { x = point.x, y = point.y },
+    cellWidthPx = point.cellWidthPx,
+    cellHeightPx = point.cellHeightPx,
+    viewportWidthPx = session.viewport_width_px,
+    viewportHeightPx = session.viewport_height_render_px,
+    scrollY = session.applied_scroll_y or 0,
+    captureScale = "device",
+  }, function(result, err)
+    if err or not result or result.ok == false then return end
+    session.selection_active = true
+    session.selection_content_revision = session.renderer_revision
+    require("md-viewer.controller").display_interact_result(session, result)
+    if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
+  end)
+end
+
 ---Copy the current selection to the unnamed register, and to `+` when a
 ---system clipboard provider is configured. Always re-queries the live DOM
 ---selection (`selection_text`) rather than trusting cached state, so copy
@@ -268,6 +299,7 @@ function M.copy_selection(session, silent)
     action = "selection_text",
     viewportWidthPx = session.viewport_width_px or 0,
     viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
     if err or not result or type(result.text) ~= "string" or result.text == "" then
       if not silent then vim.notify("md-viewer: nothing selected", vim.log.levels.WARN) end
@@ -282,11 +314,7 @@ function M.copy_selection(session, silent)
     if not silent then
       -- Length only. Never put a large selected string into a notification.
       vim.notify(
-        ("md-viewer: copied %d character%s%s"):format(
-          #result.text,
-          #result.text == 1 and "" or "s",
-          clipboard_available and ' (" and +)' or ' (" only)'
-        ),
+        ("md-viewer: copied %d character%s"):format(#result.text, #result.text == 1 and "" or "s"),
         vim.log.levels.INFO
       )
     end
@@ -303,6 +331,7 @@ function M.clear_selection(session)
     action = "selection_clear",
     viewportWidthPx = session.viewport_width_px or 0,
     viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
     if not err and result then require("md-viewer.controller").display_interact_result(session, result) end
   end)
@@ -321,6 +350,7 @@ function M.find_set(session, query)
     query = query,
     viewportWidthPx = session.viewport_width_px or 0,
     viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
     if err or not result then
       vim.notify("md-viewer: search failed: " .. tostring(err), vim.log.levels.ERROR)
@@ -348,6 +378,7 @@ local function find_step(session, action)
     action = action,
     viewportWidthPx = session.viewport_width_px or 0,
     viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
     if err or not result then return end
     session.find_active_index = result.activeIndex
@@ -371,6 +402,7 @@ function M.find_clear(session)
     action = "find_clear",
     viewportWidthPx = session.viewport_width_px or 0,
     viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
     if not err and result then require("md-viewer.controller").display_interact_result(session, result) end
   end)
@@ -509,7 +541,7 @@ function M.on_release(session, mouse)
   pointer.latest_cell = screen_cell(mouse)
   local distance = cell_distance(pointer.press_cell, pointer.latest_cell)
   local is_drag = pointer.drag_started or distance >= config.get().interaction.drag_threshold_cells
-  local word_select_fired = pointer.word_select_fired
+  local multi_click_fired = pointer.multi_click_fired
   local last_drag_point = pointer.newest_pending_drag_point
   pointer.pressed = false
   pointer.drag_started = false
@@ -526,7 +558,7 @@ function M.on_release(session, mouse)
     end
     return
   end
-  if word_select_fired then return end -- already handled on press; not also a click.
+  if multi_click_fired then return end -- already handled on press; not also a click.
   -- VS Code-style click-to-deselect: a plain click no longer navigates to
   -- source at all (removed per operator decision -- it fought the drag-to-
   -- select gesture, since clicking to dismiss a highlight also relocated the

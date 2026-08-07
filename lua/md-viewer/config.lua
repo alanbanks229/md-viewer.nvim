@@ -68,6 +68,7 @@ M.defaults = {
     -- would be hostile.
     copy_on_select = false,
     word_select = true,
+    paragraph_select = true,
     find = true,
   },
   terminal = {
@@ -169,6 +170,7 @@ local function validate(cfg)
   assert(type(cfg.interaction.copy) == "boolean", "md-viewer: interaction.copy must be boolean")
   assert(type(cfg.interaction.copy_on_select) == "boolean", "md-viewer: interaction.copy_on_select must be boolean")
   assert(type(cfg.interaction.word_select) == "boolean", "md-viewer: interaction.word_select must be boolean")
+  assert(type(cfg.interaction.paragraph_select) == "boolean", "md-viewer: interaction.paragraph_select must be boolean")
   assert(type(cfg.interaction.find) == "boolean", "md-viewer: interaction.find must be boolean")
 end
 

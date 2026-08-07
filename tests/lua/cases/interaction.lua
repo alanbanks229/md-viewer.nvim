@@ -307,6 +307,7 @@ return function(t)
       { interaction = { copy = 1 } },
       { interaction = { copy_on_select = "no" } },
       { interaction = { word_select = 0 } },
+      { interaction = { paragraph_select = "no" } },
       { interaction = { find = "true" } },
     }) do
       local ok, err = pcall(config.setup, case)
