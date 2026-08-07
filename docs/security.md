@@ -17,6 +17,35 @@ Default policy:
   supported.
 - Local images are converted to data URIs before page content is set.
 
+The document root is the boundary for both local images and local links, and one
+implementation computes it (`lua/md-viewer/security.lua`'s `document_root`). By
+default it is the **project** enclosing the document -- the nearest ancestor
+directory holding one of `security.document_root_markers` (`.git`, `.hg`, `.svn`)
+-- falling back to the document's own directory where no marker is found, and to
+Neovim's working directory for a buffer that has never been written. Setting
+`security.document_root` explicitly always wins.
+
+The project default is wider than the per-directory default it replaced, and that
+widening is deliberate: rooting the boundary at the document's own folder made
+every ordinary repo-relative link (`../README.md` from `docs/`) unreachable. It
+widens *where* the boundary sits, not *how* it is enforced -- `../` and symlinks
+are refused exactly as before, and a repository is the unit a reader already
+trusts, since every file inside it is one the preview would render anyway.
+
+Setting `document_root = "/"` is supported and switches the containment off
+deliberately: the preview then opens whatever Neovim itself would open, which
+is the point of it. The trade is that a document you did not write can point an
+`<img>` at any image-shaped file on the machine. That remains bounded by the
+image rules below (extension and magic bytes must agree, four formats only,
+size-capped) and by `security.network = false`, so it is an "is this file an
+image" oracle rather than a way to send one anywhere. `:MdViewerHealth` reports
+the unbounded root rather than leaving it to be inferred, and warns outright if
+the network is enabled alongside it.
+
+An out-of-root path is rejected lexically, before the filesystem is consulted, so
+the distinct "does not exist" and "outside the document root" messages cannot be
+used by a hostile document to probe for the existence of files outside the root.
+
 Local-image authorization uses both lexical resolution and `realpath`. The file
 and configured root must exist, the canonical file must remain inside the
 canonical root, and symlinks cannot escape it. Only PNG, JPEG, GIF, and WebP are
@@ -57,6 +86,17 @@ same renderer process, not a new one to a different surface:
   (`lua/md-viewer/security.lua`'s `resolve_local_link`/`is_inside`); anything
   else (`javascript:`, `data:`, `vbscript:`, protocol-relative, malformed) is
   refused with a notification and never reaches `vim.ui.open` at all.
+- A `local_file` link is never passed to `vim.ui.open` when the target is
+  something the operating system would execute rather than display: macOS
+  bundles and scripts (`.app`, `.command`, `.terminal`, `.workflow`, ...),
+  Windows executables and script hosts, `.desktop`/`.AppImage`/`.jar`, disk
+  images and installers, or any regular file with an execute bit set
+  (`lua/md-viewer/security.lua`'s `is_system_executable`). Two independent
+  signals because neither suffices alone: bundles are directories, so no file
+  mode applies to them, and an ordinary executable may have no telling name.
+  This is deliberately independent of the document root, which was never a
+  defence against it -- a repository you cloned can ship `setup.command` beside
+  its README and link to it from within the root.
 - Search queries and selected/copied text are always treated as plain text:
   the in-page code that implements them (`renderer/src/interact.js`) uses
   `Text.splitText`/`Range`/`Selection` APIs, never `innerHTML` or

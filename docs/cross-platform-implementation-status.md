@@ -3714,3 +3714,451 @@ terminal or a font-size change on iTerm2 is available to measure against.
 Once that operator pass is recorded, `v0.3.0` is ready to tag exactly as it
 stands in code today — no further implementation work is expected to be
 required first.
+
+---
+
+# Post-Part-7 follow-up — clickable local links and mouse pointer shapes
+
+Reported by the operator while beginning the manual terminal pass, as two
+feature requests and one performance complaint. Fixed here in code; the
+performance complaint was deliberately not fixed here (see below).
+
+## What was actually wrong with local links
+
+Ctrl-clicking `[docs/manual-testing.md](docs/manual-testing.md)` warned
+`refused to open link outside the document root`. That message was
+misleading in two independent ways and the underlying behaviour was wrong
+in a third.
+
+**The root was too narrow.** `security.document_root` defaulted to the
+*document's own directory*. Verified by running the real resolver
+headlessly against this repository:
+
+```
+href=docs/manual-testing.md   base=<repo root>   -> /…/docs/manual-testing.md
+href=docs/manual-testing.md   base=<repo>/docs   -> nil          <-- reported failure
+href=manual-testing.md        base=<repo>/docs   -> /…/docs/manual-testing.md
+```
+
+So `README.md` at the repository root worked, and any document inside a
+subdirectory could reach neither a sibling directory nor the root. A
+document in `docs/` linking to `../README.md` was refused every time. The
+root is now the enclosing project (`vim.fs.root` with `.git`/`.hg`/`.svn`,
+configurable via `security.document_root_markers`), falling back to the
+previous behaviour where no marker is found. Containment is untouched:
+both the lexical and the symlink-resolved path are still checked.
+
+`renderer.lua` also computed its own root for local *images*
+(`cfg.security.document_root or base_dir(...)`), skipping the
+normalization the link path applied. Images and links now share one
+implementation, which closes a pre-existing divergence rather than one
+this change introduced.
+
+**Three different failures wore one message.** `is_inside` calls
+`fs_realpath` on both sides and returns false when the target does not
+exist, so a link to a file that was simply not there reported a security
+refusal. `resolve_local_link` now returns a reason
+(`outside_root`/`missing`/`malformed`). The out-of-root case is decided
+*lexically*, before the filesystem is consulted — otherwise the two
+distinct messages would let a hostile document probe for the existence of
+files outside the root by observing which one came back.
+
+**A local link opened in Finder, not Neovim.** `open_local_file` handed
+the resolved path to `vim.ui.open`. It now edits the file in the source
+window (jump list pushed first, so `<C-o>` returns) and, for Markdown,
+retargets the preview onto it via `controller.retarget` — re-keying the
+existing session and re-deriving `document_id` rather than closing and
+reopening the split. The request-serial bump is what makes that safe:
+responses in flight for the old document fail their staleness check. Files
+Neovim has no filetype for, and PDFs, still go to the system handler.
+
+## Mouse pointer shapes
+
+> **Superseded.** This feature was removed before `v0.3.0` was tagged; see
+> "Operator report: the pointer shape came out, history went in" at the end
+> of this document. The section is kept because the reasoning it records --
+> what each terminal actually does, and why none of it could be called
+> validated -- is what the removal decision rests on.
+
+The preview is a PNG, so no CSS `cursor` rule can reach it; only the
+terminal can change the pointer, through `OSC 22`. Two design decisions
+carried the feature.
+
+**Hover must not round-trip.** `<MouseMove>` fires on every cell crossing,
+so asking Chromium "is this a link?" per event was never viable. It is
+also unnecessary: link rectangles belong to the *layout*, not the frame.
+`renderer/src/hover.js` collects them once per document load in document
+coordinates, on the same path and by the same argument as
+`collectBlockGeometry` — scrolling translates them, it does not reflow
+them. Per-frame cost is zero bytes and zero work; the only per-frame input
+is `scrollY`, already reported. An earlier sketch had the map riding every
+capture response, which would have added a `page.evaluate` to the hottest
+path to recompute something that cannot change, and would have made a
+stale map possible at all.
+
+**Invalidation is a check, not six hooks.** Content, scroll, resize,
+occlusion, placement move and retarget could each stale the cell index.
+Rather than hooking all six, the index records the frame it was built for
+and `hover.matches` rebuilds when that no longer holds, so a missed hook
+means "rebuild", never "hand cursor over the wrong thing".
+
+### What the terminals actually do — and what is not known
+
+Researched by reading each terminal's source. **Nothing was launched.**
+
+- **iTerm2 implements OSC 22 but accepts only X11 cursor-font names.**
+  Sending `pointer` there falls into its unknown-name branch, which
+  *clears* the override — visually identical to no support at all. A
+  per-profile name table is therefore load-bearing, not tidiness:
+  `hand2`/`xterm`/`left_ptr` go to iTerm2, the CSS names elsewhere.
+- **WezTerm does not implement it** (upstream PR still open). Silent
+  no-op.
+- **Ghostty ignores the empty reset form**, so `pointer.clear()` emits the
+  explicit default name *and then* the empty form — two writes, both
+  needed, or some terminal is left holding a hand cursor.
+- **Ghostty also resets the shape on every mouse-reporting mode change**,
+  which enabling `'mousemoveevent'` itself causes. The shape is asserted
+  after enabling and the cache is dropped on every toggle.
+- **Warp is unknown** (closed source), so `"auto"` sends nothing there.
+
+The query form of OSC 22 is deliberately unused: reading its reply is a
+synchronous terminal probe, which `terminal.lua` forbids for the same
+reason it never probes for graphics support. Support is inferred from the
+profile and reported as inferred.
+
+**None of this is validated.** Every profile keeps
+`validation = "protocol-compatible-but-unvalidated"`, and
+`docs/manual-testing.md` gained a per-terminal pointer-shape table whose
+last column ("Actually looked at") is **No** for all five.
+
+### A cost that is real and was not designed away
+
+`'mousemoveevent'` is global, and Neovim documents that setting it *"can
+make pending mappings to be aborted when the mouse is moved"*. It is
+enabled only while a graphical preview exists and restored on close, but
+while on, a half-typed multi-key mapping can be dropped by mouse movement.
+`interaction.pointer_move_events = false` separates the two halves: the
+drag I-beam still works (it rides `<LeftDrag>`), the hand cursor cannot.
+This is stated in README, the help doc, and troubleshooting rather than
+being buried.
+
+Also worth recording: `<MouseMove>` does **not** fire while a button is
+held — Neovim reports that as `<LeftDrag>`. The I-beam is therefore driven
+from the drag path, not the hover path. The two states cannot race, which
+is what makes the requirement implementable at all.
+
+## A pre-existing bug this surfaced
+
+`controller.display_interact_result` never recorded `result.scrollY`, but
+`browser.interact()` always reports it and overwrites it with the
+post-`scrollIntoView` position for a find step or a fragment link. So
+after a search jumped the page, `applied_scroll_y` still held the
+pre-search position; the next `interact` sent that stale value and
+`ensureDocumentActive` scrolled the page back before hit-testing. A click
+after a find resolved against a different position than the image showed.
+Fixed here because the hover map reads that field on every mouse move,
+which is what made it visible. **Found by code reading; the graphical
+symptom was not reproduced.**
+
+## Tests
+
+727 Lua assertions (from 591) and 142 Node tests (from 134), stylua clean.
+`:MdViewerHealth`, `:MdViewerDebug`, and `:checkhealth md-viewer` were each
+invoked as the real command, not as the library function beneath it.
+
+Worth naming two: `tests/lua/cases/hover.lua` checks the cell index against
+a brute-force scan over every cell of a 40x20 grid for 120 generated
+rectangles, so the index cannot be subtly wrong; and
+`tests/lua/cases/pointer.lua` asserts exact escape bytes *and their
+lengths*, that a repeated shape writes nothing, and that iTerm2's profile
+sends `hand2` rather than `pointer` — the regression test for the finding
+above. The `<MouseMove>` case pins a terminal profile explicitly, because
+the CI terminal resolves to `unknown` and would otherwise assert nothing
+while appearing to pass.
+
+## Deliberately not done
+
+**Drag-highlight performance.** The operator also reported drag-to-select
+as too slow. It is not fixed here: the honest diagnosis is that the
+per-frame pipeline captures a *full-viewport screenshot at device scale*
+(`interaction.lua` hardcodes `"device"` for preview frames) where the
+scroll path already solved the same problem with a `"css"` moving frame
+plus one device-scale settle, and there is a 40 ms debounce in front of a
+pipeline that already has one-in-flight backpressure. That is a
+measurement-first task, not a patch, and bundling it here would have made
+this change unreviewable. It is written up as
+`prompts/improve_cursor_drag_highlighting.md`, which hands over the full
+per-frame trace and a ranked list of suspects while requiring the next
+session to measure before changing anything.
+
+**Checkbox and image pointer shapes.** Task-list checkboxes have no click
+action, so a hand cursor over one would advertise something the plugin
+does not do. Links only, per operator decision.
+
+## Field report: the fix landed, and the first real failure was configuration
+
+The operator reported links still refusing after the above shipped. The
+message was the *new* one, which names the root, and that is what made it
+findable: the root printed was an Obsidian vault, while the document being
+previewed was a sibling repository.
+
+Their Neovim config resolves a vault root by taking `realpath` of
+`stdpath('config')` (their `~/.config/nvim` is a symlink into the vault) and
+walking three directories up, then pinned it globally:
+
+```lua
+security = { document_root = vim.g.obsidian_vault_root }
+```
+
+An explicit `document_root` overrides project detection by design, so every
+preview -- in any repository -- was confined to the vault, and every link in
+this repository's own README was correctly refused. Not a code defect; the
+plugin did exactly what it was told.
+
+Two things came out of it worth keeping:
+
+- The old message hid the root, so this was indistinguishable from a plugin
+  bug for as long as the configuration had existed. Naming the root in the
+  refusal is what reduced it to a two-minute diagnosis, which is the argument
+  for the message change independent of the root-widening.
+- A configured root that excludes the current document is a *state*, not an
+  event, and reporting it one refusal at a time was the actual failure of
+  diagnosability. `security.summary` now computes
+  `document_root_excludes_current` and `document_root_source`, and
+  `:MdViewerHealth` warns on the former with both paths named. The fix for
+  their configuration was to drop the pin and use
+  `document_root_markers = { ".obsidian", ".git", ".hg", ".svn" }`, which roots
+  vault notes at the vault and repository docs at the repository -- i.e. the
+  feature this work added, used as intended.
+
+## Operator decision: an unbounded document root, and the guard that made it safe
+
+Asked whether the preview could simply treat the whole machine as the root --
+"Neovim can open anything regardless of where you launch it" -- the honest
+answer was that it already could (`document_root = "/"` needed no code), but
+that the setting was doing two jobs with different consent models:
+
+- **link activation** is user-initiated (you Ctrl-click), and Neovim's own
+  `gf`/`gx` have no notion of a project boundary at all;
+- **image loading** is document-initiated, happening on render whether or not
+  you asked.
+
+The operator chose an unbounded root for both. That is recorded as a
+considered choice: the residual image risk is bounded by the existing image
+rules (extension and magic bytes must agree, four formats, size cap) and by
+`security.network = false`, which together make it an "is this file an image"
+oracle rather than an exfiltration path. `:MdViewerHealth` reports the
+unbounded root rather than letting it be inferred, and says explicitly if the
+network is enabled alongside it.
+
+**The guard that changed the calculus** is independent of the root, and closes
+a hole that existed before any of this work: a `local_file` link whose target
+Neovim has no filetype for was passed to `vim.ui.open`, and on macOS
+`.command`, `.app`, `.terminal`, and `.workflow` are *executed* by the system
+handler. The document root never defended against it -- a cloned repository can
+ship `setup.command` beside its README and link to it from inside the root --
+so widening the root did not create the problem, only enlarge it.
+`security.is_system_executable` now refuses those, using two independent
+signals because neither is sufficient alone: an extension denylist (bundles are
+directories, so no file mode applies to them) and the execute bit (an ordinary
+executable may have no telling name).
+
+## A diagnostic that was describing itself
+
+Adding the "configured root excludes the current document" warning surfaced a
+pre-existing defect in `health.collect`. Both `:MdViewerHealth` (`M.show`) and
+`:checkhealth` create and *enter* their own scratch buffer before collecting,
+so `nvim_get_current_buf()` is the report, not any document -- every
+document-relative answer in the report, including the document root itself, had
+always described the report buffer.
+
+It went unnoticed because the previous root derivation happened to return
+something plausible for a nameless buffer. The new warning turned it into a
+confident, wrong claim about a file that does not exist, which is how it was
+caught.
+
+Worth recording as method: this was **not** caught by `health.collect()` in a
+test, which passes a buffer directly and so cannot reproduce it. It was caught
+by invoking `:checkhealth md-viewer` as the real command -- exactly the failure
+mode policy §5 already requires command-level invocation for, and the second
+time that rule has paid for itself. `collect` now resolves a live preview's
+source buffer, then a real file, then the buffer the report displaced.
+
+## Operator report: the pointer shape came out, history went in
+
+Three findings from the second field pass, all on an untagged `v0.3.0`.
+
+### The pointer shape was removed, not fixed
+
+The operator's verdict was that it "is not worth it, the terminal and UI seems
+a bit too buggy for that". That matches what the source readings already said
+and what §4 refused to let the feature claim: three dialects, one terminal that
+does not implement `OSC 22` at all, one that resets the shape on every
+mouse-reporting mode change (which md-viewer's own `'mousemoveevent'` toggle
+causes), and one that is closed source and unknowable. Nothing had ever been
+seen on a screen.
+
+Removed rather than defaulted off, because "off by default and unvalidated" is
+carrying the maintenance and the global-option cost of a feature nobody is
+using. Gone with it: `lua/md-viewer/pointer.lua`, `lua/md-viewer/hover.lua`,
+`renderer/src/hover.js`, the `<MouseMove>` mapping, the `'mousemoveevent'`
+lifecycle, the per-layout link geometry on the render/capture path,
+`localRow`/`localCol` on `cell_to_css`, the per-profile `pointer_support`/
+`pointer_shapes` fields, and the three `interaction.*` options. The
+`hoverMap`/`hoverRects` wire fields are gone from the renderer protocol; they
+were additive and optional, so nothing else had come to depend on them.
+
+The scroll-position bug found alongside it (`display_interact_result` never
+recorded `result.scrollY`, so `applied_scroll_y` went stale after a find or a
+fragment jump) **stays fixed**. It was pre-existing, the hover map only made it
+visible, and it is wrong independently of anything the pointer shape did.
+
+### External links: nothing was broken, everything was silent
+
+The reported symptom was that ctrl-clicking an `https` link did nothing. The
+renderer was exonerated by an existing test (`activate_at` returns
+`type: "https"` with the href for a real link in a real Chromium), the Lua
+dispatch by another (`open_external` is reached and calls `vim.ui.open`), and
+`vim.ui.open` itself by running it. What could not be exonerated was the
+reporting:
+
+- `vim.ui.open` signals "there is no handler to run" by **returning**
+  `nil, <reason>`, not by raising. `pcall` around it therefore never saw a
+  thing, and the failure produced no message at all.
+- It does not wait, so a handler that starts and *then* fails -- `open: unable
+  to find application`, an `xdg-open` with no desktop session -- reports through
+  an exit status nothing looked at.
+- `M.activate` dropped every hit-test error on the floor, so "the click did not
+  resolve" and "there was no link there" were the same non-event.
+
+All three now surface. The exit status is watched without blocking: poll
+`kill(pid, 0)` (which asks whether the process exists and sends nothing), and
+only once it is gone call `wait`, which then returns immediately. A handler
+still running after `interaction.external_open_timeout_ms` is the *successful*
+case -- a browser that stayed open -- so the watch simply stops.
+`:MdViewerDebug` records the last hand-off and its outcome.
+
+This is honest about what it is: a diagnosis, not a repair. The failure could
+not be reproduced here, and the change makes the next occurrence name itself
+instead of being invisible. A stale hit-test error is now reported except when
+it is a `STALE_INTERACTION`, which is routine and would fire on ordinary fast
+clicking.
+
+### Preview history
+
+Following a link retargets the preview, and `preview.pinned` deliberately stops
+the preview following an ordinary buffer switch. Those two facts together left
+the reader able to reach a document and unable to return to the previous one as
+anything but text -- `<C-o>` moved the source window and left the rendered view
+where it was.
+
+Each session now carries the documents it has been retargeted through and an
+index into that list. `H`/`L` in the preview window and
+`:MdViewerBack`/`:MdViewerForward` anywhere walk the index without appending (appending would make "back" oscillate between the last two entries),
+and both move the source window as well, for the same reason activating a link
+does. A `BufEnter` in the session's source window follows the preview to a
+buffer *already in the list*, which is what makes `<C-o>` work on its own
+without weakening `pinned` for anything else.
+
+Three details that are decisions rather than details:
+
+1. Entries hold a buffer **and** a path. The buffer makes returning exact and
+   cheap; the path is what lets an entry survive `:bwipeout`.
+2. Navigating from the middle truncates the forward branch, the same rule a
+   browser follows. Interleaving would make "forward" mean nothing.
+3. One document can appear at more than one position (a link back to where the
+   reader came from puts it there twice), so the `<C-o>` follow searches outward
+   from the current index and prefers backwards on a tie -- landing at the far
+   end of the list would send the *next* `<C-o>` somewhere the reader has never
+   been.
+
+Bounded by `interaction.history_limit` (32), and the bound has its own test:
+an unbounded list on a session left open for hours is a slow leak.
+
+The keys are preview-local rather than leader-prefixed because the operator's
+first attempt at a global `<leader>m[`/`<leader>m]` pair did not fire at all,
+while the commands behind them worked when typed -- a binding collision, which
+`H`/`L` cannot have: they are buffer-local to a scratch buffer md-viewer owns
+outright, and they shadow "top/bottom of screen", which addresses nothing in a
+buffer holding no text. Gated on `interaction.links`, since a link activation
+is the only thing that ever puts a second document in the history.
+
+## A link that was unclickable at the default font size
+
+Reported as: ctrl-clicking the one-word `Glow` link at the top of a document
+did nothing at iTerm2's default text size, and started working after
+`Cmd +` a couple of times.
+
+That is a strange-sounding report, and it was exactly right. `hitTestInPage`
+resolved the clicked cell by probing outward from its centre **horizontally
+only**, on the stated reasoning that "a cell is about as tall as a rendered
+line, so probing vertically could answer from the line above or below". The
+first half of that is false on the estimated calibration tier: a cell covers
+10x20 CSS px (`estimated_cell_width_px = 10`, `cell_aspect_ratio = 0.5`), a
+rendered line is 25 px (`line-height` in `preview.css`), and an inline link's
+box is about 18 px for a 16 px font. None of those divide into each other, so
+where a link sits relative to the cell-row centres depends on the phase between
+two grids that never line up.
+
+Measured against the real document, rendered at 99x56 cells:
+
+```
+anchor rect   y 91.59 .. 109.59      (18.0 px tall)
+cell rows     centres at ... 70, 90, 110, 130 ...
+clickable cells: NONE
+```
+
+Row 4's centre lands 1.6 px above the link; row 5's lands 0.4 px below it.
+There was no cell in the entire window from which that link could be
+activated. At 60x30 cells the same document put the link at y 97.8..118.8,
+row 5's centre at 110 landed inside it, and it worked -- the operator's "make
+the font bigger" was changing the phase, nothing else.
+
+The fix probes both axes, still bounded by the one cell the user clicked, with
+probes ordered nearest-first in *cell fractions* rather than pixels (in pixels,
+a cell twice as tall as it is wide makes every vertical probe lose to every
+horizontal one, and "nearest" quietly means "nearest horizontally"). Reaching
+at most half a cell vertically can only touch a line that same cell already
+covers, which is what the original comment was worried about and is the reason
+the bound matters more than the probe.
+
+A second change rides with it: within the clicked cell, **a link wins over
+prose**. The cell is the resolution limit of the entire input device -- the
+terminal cannot report where inside it the pointer was -- so a link anywhere
+under the clicked cell is what the reader was pointing at. Prose is the answer
+only when the cell holds no link. Still bounded by the one cell: two cells away
+is still prose, and that has its own test.
+
+Same geometry after the fix:
+
+```
+clickable cells: rows 4-5, cols 3-6   (8 cells)
+```
+
+`tests/node/hitbox.test.js` does not sample one alignment. It sweeps `scrollY`
+one pixel at a time across a full cell height, which is every phase the two
+grids can ever take, and at each one asserts the link is reachable from an
+overlapping cell and that the hit box is at least four cells. Reverting the
+vertical probe makes it fail, which was checked rather than assumed.
+
+Worth recording as method: the report was reproduced *before* anything was
+changed, by driving the real renderer against the operator's own document and
+printing which cells resolved the link. Every earlier hypothesis -- the iTerm2
+graphics margin, the `max-width: 980px` article cap, a `scale` clamp -- was
+wrong, and none of them would have survived contact with those two numbers.
+
+The three `resolveSelectionPoint` copies (drag-select, word select, paragraph
+select) still probe horizontally only, deliberately: they resolve through
+`caretPositionFromPoint`, which snaps vertically within the line box on its
+own, so they never depended on the cell centre landing inside a glyph. Only
+the anchor lookup did, because it comes from `elementFromPoint`.
+
+## Safe stopping point
+
+`v0.3.0` remains untagged and the operator's manual terminal pass remains
+the only gate. The matrix lost the four pointer-shape rows and the two rows
+that existed only to measure `'mousemoveevent'`'s cost, and gained four:
+an external link opening (or saying why it did not), a short inline link being
+clickable at the terminal's default font size, `:MdViewerBack`, and
+`:MdViewerForward`/`<C-o>`. Everything above is headless-verified only; per
+§4 none of it may be described as validated on any terminal.

@@ -196,10 +196,25 @@ never guessed past what the parser can actually establish:
              plausible guess.
 
 The terminal reports which *cell* was clicked, never a sub-cell position, so
-a click covers a whole cell's width -- `hitTestInPage` probes outward from
-the cell's center, bounded by that one cell, rather than collapsing to the
-center alone (which made the cell holding a line's first character,
-containing mostly left padding, permanently unclickable).
+a click covers a whole cell -- and a cell is neither as wide as a rendered
+character nor as tall as a rendered line. `hitTestInPage` therefore probes
+outward from the cell's centre in **both** axes, bounded by that one cell and
+ordered nearest-first in cell fractions (so a cell twice as tall as it is wide
+does not make every vertical probe lose to every horizontal one), rather than
+collapsing to the centre alone. Both axes have produced a reported bug:
+collapsing horizontally made the cell holding a line's first character, which
+is mostly left padding, permanently unclickable; collapsing vertically made an
+inline link permanently unclickable at some alignments, because on the
+estimated calibration tier a cell is 20 CSS px while a line is 25 and a link's
+box about 18 -- so the link can fall entirely between two cell-row centres.
+That one is measured, not reasoned, and `tests/node/hitbox.test.js` sweeps
+every alignment a full cell height can take rather than sampling one.
+
+Within that cell, a link wins over prose. The cell is the resolution limit of
+the whole input device -- there is no finer answer available -- so a link
+anywhere under the clicked cell is what the reader was pointing at, and prose
+is the answer only when the cell holds no link at all. Bounded by the same one
+cell: two cells away is still prose.
 
 **Selection, search, and copy.** Drag-to-select, double/triple-click, and
 search all produce a real Chromium `Selection`/`Range` (`setBaseAndExtent`,
@@ -215,16 +230,44 @@ the page, which `setContent` destroys on every document switch) and is
 replaced, never migrated, across a content-revision change -- applying an old
 selection to new content would be silent corruption in a copy operation.
 
+**Preview history.** Following a local link retargets the preview onto another
+document (`controller.retarget`), and `preview.pinned` deliberately stops the
+preview following an ordinary buffer switch -- so the reader could reach a
+document but not return to the one they came from as anything but text. Each
+session therefore carries the list of documents it has been retargeted through
+and an index into it. `:MdViewerBack`/`:MdViewerForward` walk the index without
+appending (appending there would make "back" oscillate between the last two
+entries), and a `BufEnter` in the session's source window follows the preview to
+a buffer *already in that list* -- which is what makes `<C-o>` work without
+weakening `pinned` for anything else. Entries hold a buffer and a path, so one
+whose buffer has been wiped still reopens its file; navigating from the middle
+truncates the forward branch, the same rule a browser follows.
+
 **Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`)
 separates `http`/`https`/`mailto`/fragment/local-file candidates from
 anything unsafe (`javascript:`, `data:`, `vbscript:`, protocol-relative, or
 malformed) before Lua ever sees a decision to make. A `local_file`
-candidate's containment inside the configured document root is re-checked
+candidate's containment inside the document root is re-checked
 independently on the Lua side (`lua/md-viewer/security.lua`'s
 `resolve_local_link`/`is_inside`), the same symlink-resolved check image
 loading already uses -- the renderer's classification is a hint, not a
 grant. Ctrl/Cmd-click is the only gesture that can activate a link; a plain
 click never does, on any hit.
+
+That root is the enclosing project, not the document's own directory. The
+narrower default refused every ordinary repo-relative link from a document in a
+subdirectory, and reported it as a security violation, which is both wrong and
+misleading -- the three distinct failures (escapes the root, does not exist,
+malformed) are now distinguished, with the out-of-root case decided lexically so
+the messages cannot be used to probe for files outside the root.
+
+An activated local Markdown link is opened in Neovim rather than handed to the
+system, and the preview follows it: `controller.retarget` re-keys the existing
+session onto the new buffer and re-derives its `document_id`, reusing the
+preview window instead of tearing the split down and rebuilding it. The serial
+bump is what makes that safe -- every render or interact response still in
+flight for the old document fails its staleness check rather than being applied
+to the new one.
 
 **Lua-side gesture dispatch.** `lua/md-viewer/mouse.lua` installs its
 mappings only once a graphical (non-`cells`) session exists, saving and

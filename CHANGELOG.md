@@ -18,10 +18,22 @@ All notable changes to this project will be documented here. The project uses
   (`:MdViewerFindNext`/`:MdViewerFindPrevious`, `n`/`N`) and clearing
   (`:MdViewerFindClear`).
 - `:MdViewerClearSelection` to clear a selection without clicking.
+- Preview history: `H`/`L` in the preview window, or
+  `:MdViewerBack`/`:MdViewerForward` from anywhere, move the preview (and the
+  source window with it) through the documents a reader has followed links
+  into, and `<C-o>` back into one of them brings the preview along on
+  its own. Without it, following a link left the document it came from
+  reachable only as text, because `preview.pinned` deliberately stops the
+  preview following an ordinary buffer switch. Bounded by
+  `interaction.history_limit`.
+- `security.document_root_markers`, and a project-aware default document
+  root.
 - Ctrl/Cmd-click link activation for `http(s)`, `mailto`, in-document-root
   local files, and same-document `#fragment` links, each independently
-  re-checked against the configured document root and an unsafe-scheme
-  denylist before anything opens.
+  re-checked against the document root and an unsafe-scheme denylist before
+  anything opens. A local Markdown link opens in Neovim, in the source
+  window, and the preview follows it; other filetypes still go to the system
+  handler.
 - Exact source-position reporting on interaction, recovered from
   markdown-it's own parse state rather than by searching rendered text,
   degrading honestly through exact/line/block/none precision levels.
@@ -40,8 +52,43 @@ All notable changes to this project will be documented here. The project uses
   interaction transport, source provenance, selection, search, and every
   raw-image placement fix below.
 
+### Fixed
+
+- A link could be impossible to click at all. `hitTestInPage` resolved the
+  clicked cell horizontally but collapsed it to a single row vertically, and on
+  the estimated calibration tier a cell covers 20 CSS px while a rendered line
+  is 25 and an inline link's box about 18 — so a link can fall entirely between
+  two cell-row centres and become unreachable from every cell in the window, at
+  any click position. Enlarging the terminal font changed nothing but the
+  alignment, and made the same link work again, which is how it was reported.
+  The cell is now probed in both axes, still bounded by that one cell, and a
+  link anywhere under the clicked cell wins over the prose beside it — the cell
+  is the resolution limit of the input device, so there is no finer answer to
+  give. `tests/node/hitbox.test.js` sweeps every alignment a full cell height
+  can take.
+
 ### Changed
 
+- Every way handing an external link to the operating system can fail is now
+  reported. `vim.ui.open` signals "no handler" by *returning* `nil` rather
+  than raising, and never waits, so a handler that failed after starting was
+  invisible too: both were discarded, which made an OS-level refusal
+  indistinguishable from md-viewer never having seen the click.
+  `:MdViewerDebug` records the last hand-off and its outcome
+  (`last_external_open`), and a ctrl/cmd-click whose hit test fails outright
+  now says so instead of going quiet (a lost race to a newer request stays
+  silent, as it should).
+
+- `security.document_root` now defaults to the **project** enclosing the
+  document (the nearest ancestor holding `.git`/`.hg`/`.svn`) rather than the
+  document's own directory, falling back to the old behaviour where no marker
+  is found. Rooting the boundary at the folder meant an ordinary
+  repo-relative link — `../README.md` from `docs/`, or a root-relative
+  `docs/other.md` — was always refused as a security violation. Containment
+  is unchanged: both the lexical and the symlink-resolved path are still
+  checked, so `../` and symlinks still cannot escape. Local images and local
+  links now also share one implementation of the root, which they previously
+  did not.
 - Clicking the preview no longer moves the source cursor under any gesture.
   A plain click now only clears an active selection (matching VS Code's own
   Markdown preview); Ctrl/Cmd-click still activates links. This replaces
@@ -72,6 +119,35 @@ All notable changes to this project will be documented here. The project uses
 
 ### Fixed
 
+- `:MdViewerHealth` now warns when a configured `security.document_root` does
+  not contain the document being previewed. That combination refuses every
+  local link and image in the document, which is correct for the setting but
+  previously surfaced only one refusal at a time and read as a broken plugin.
+  The report also names where the root came from (configured or detected).
+- A link is never handed to the system handler when the target is something
+  the OS would *run*: macOS bundles and scripts (`.app`, `.command`,
+  `.terminal`, `.workflow`), Windows executables, `.desktop`/`.AppImage`/
+  `.jar`, disk images and installers, or any ordinary file carrying an execute
+  bit. It is refused with a notification instead. The document root was never
+  a defence here -- a cloned repository can ship `setup.command` beside its
+  README and link to it from inside the root.
+- `:MdViewerHealth`/`:checkhealth` now describe the document rather than
+  themselves. Both create and enter their own scratch buffer before collecting,
+  so every document-relative answer -- including the document root -- described
+  the report buffer. The report now resolves a live preview's source buffer,
+  then a real file, then the buffer the report displaced.
+- A refused local link now says which refusal it was. A link to a file that
+  does not exist reported "refused to open link outside the document root",
+  which was untrue and sent the reader looking for a security setting; it now
+  reports that the target does not exist. A genuine escape still names the
+  root it was measured against. An out-of-root path is still rejected without
+  the filesystem being consulted at all, so the two messages cannot be used to
+  probe for files outside the root.
+- A find step or fragment jump now records where it scrolled the page to.
+  `interact` responses carry the resulting `scrollY`, but it was never stored,
+  so the next interaction sent a stale position and the shared page was
+  scrolled back before hit-testing — a click after a search resolved against a
+  different position than the image on screen showed.
 - A click outside rendered text no longer crashes
   (`vim.json.decode`'s JSON-`null` sentinel is now decoded as an absent
   Lua value at the protocol boundary, not a truthy userdata).

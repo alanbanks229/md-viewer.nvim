@@ -239,6 +239,8 @@ require("md-viewer").setup({
   security = {
     network = false,
     document_root = nil,
+    -- Identify the project enclosing the document when document_root is unset.
+    document_root_markers = { ".git", ".hg", ".svn" },
   },
   terminal = {
     profile = "auto", -- "auto", or an explicit override: "iterm2", "kitty", "wezterm", "ghostty", "warp", "generic_kitty", "unknown"
@@ -263,13 +265,26 @@ require("md-viewer").setup({
     word_select = true,
     paragraph_select = true,
     find = true,
+    -- How many documents back a preview remembers when a link retargets it.
+    history_limit = 32,
+    -- How long to watch a system handler started for an external link before
+    -- assuming it is running normally.
+    external_open_timeout_ms = 5000,
   },
 })
 ```
 
-`document_root` defaults to the Markdown file's directory. Unsaved buffers use
-Neovim's current working directory. Local image authorization checks both the
-lexical and canonical path, so symlinks cannot escape the root.
+`document_root` defaults to the **project** enclosing the Markdown file — the
+nearest ancestor directory holding one of `document_root_markers`. With no
+marker found it falls back to the file's own directory, and an unsaved buffer
+uses Neovim's current working directory. Setting `document_root` explicitly
+always wins.
+
+The project default is what makes an ordinary repo-relative link work: a
+document in `docs/` linking to `../README.md`, or to `docs/other.md` written
+relative to the repository root, resolves rather than being refused. Containment
+itself is unchanged — authorization checks both the lexical and the canonical
+path, so a symlink still cannot escape the root, and neither can `../`.
 
 Exact terminal cell dimensions can be supplied with:
 
@@ -339,7 +354,8 @@ Open a Markdown buffer, then use:
 
 When the preview has focus, `j`/`k`, arrow keys, Ctrl-e/Ctrl-y,
 Ctrl-d/Ctrl-u, Ctrl-f/Ctrl-b, PageUp/PageDown, and `gg`/`G` move the rendered
-viewport. The mouse wheel scrolls the preview only when the pointer is over
+viewport; `H`/`L` move back and forward through the documents you have followed
+links into. The mouse wheel scrolls the preview only when the pointer is over
 it.
 
 ### Mouse gestures
@@ -355,7 +371,63 @@ gesture is gated by its own `interaction.*` config flag; setting one to
 | Plain click | Clears an active selection. Never moves the source cursor, whether or not anything is selected. |
 | Double-click | Selects the word under the pointer |
 | Triple-click | Selects the enclosing paragraph/block |
-| Ctrl-click / Cmd-click | Activates a link under the pointer: opens `http(s)`/`mailto` externally via `vim.ui.open`, opens an in-document-root local file, or scrolls to a same-document `#fragment`. Refuses (with a notification) any link resolving to an unsafe scheme (`javascript:`, `data:`, etc.) or escaping the configured document root. Over non-link text, it does nothing. |
+| Ctrl-click / Cmd-click | Activates a link under the pointer: opens `http(s)`/`mailto` externally via `vim.ui.open`, opens an in-document-root local file, or scrolls to a same-document `#fragment`. Refuses (with a notification) any link resolving to an unsafe scheme (`javascript:`, `data:`, etc.) or escaping the document root. Over non-link text, it does nothing. |
+
+The mouse pointer does **not** change shape over the preview. The preview is a
+PNG, so only the terminal itself could change it (through `OSC 22`), and support
+is inconsistent enough across terminals that the result was worse than no
+feedback at all. Nothing is sent, and Neovim's global `'mousemoveevent'` is left
+alone.
+
+A link to a local file **opens in Neovim**, in the source window, and the preview
+follows it, so a documentation tree can be read by clicking through it. `<C-o>`
+returns. Files Neovim has no filetype for (a `.png`, a `.zip`) and PDFs still go
+to the system handler via `vim.ui.open`; only Markdown re-points the preview.
+
+A link is never handed to the system handler when the target is something the OS
+would *run* — `.app`, `.command`, `.terminal`, `.workflow`, Windows executables,
+`.desktop`/`.AppImage`/`.jar`, disk images, or any file with an execute bit. Those
+are refused with a notification. The document root is not a defence here: a
+repository you cloned can ship `setup.command` beside its README.
+
+To make the preview open anything Neovim could open, set
+`security.document_root = "/"`. That is supported and switches containment off
+deliberately; keep `security.network = false` alongside it, and see
+`docs/security.md` for the trade.
+
+> **macOS note.** Both Ctrl-click and Cmd-click are mapped, but a terminal may
+> claim either one before Neovim sees it — iTerm2 uses Cmd-click to open URLs
+> itself, and some terminals emulate a right-click on Ctrl-click. If neither
+> gesture activates a link, that binding is being intercepted by the terminal,
+> not by md-viewer; check the terminal's own mouse settings.
+
+#### Going back and forth between documents
+
+Following a link retargets the preview, so without a way back the document the
+reader came from is simply gone: `preview.pinned` deliberately stops the preview
+following an ordinary buffer switch, so the source window's jump list moves the
+*text* back and leaves the rendered view behind.
+
+| Key / command | Action |
+|---|---|
+| `H` (preview window) / `:MdViewerBack` | Previous document in this preview's history. Moves the source window too. |
+| `L` (preview window) / `:MdViewerForward` | Next document, after going back. |
+
+`H` and `L` are installed by md-viewer in the preview window itself, beside the
+keys it already owns there (`y`, `/`, `n`, `N`, `gg`, `G`) — nothing to add to
+your config, and no leader prefix to collide with. They shadow "top/bottom of
+screen", which addresses nothing in a scratch buffer holding no text. Both
+commands work from either window if you would rather bind them globally.
+
+`<C-o>` also works on its own: when the source window returns to a document this
+preview has already shown, the preview follows it back. That is deliberately
+narrow — only documents in this preview's own history qualify, so `pinned` still
+holds for every other buffer switch.
+
+Navigating from the middle of the history abandons the forward branch, the same
+rule a browser follows. The list is capped at `interaction.history_limit` (32)
+and holds a buffer and a path per entry, so an entry whose buffer has been wiped
+still reopens its file.
 
 Copying (`y` / `:MdViewerCopy`) is always manual — nothing is copied
 automatically on selection unless `interaction.copy_on_select = true`, which

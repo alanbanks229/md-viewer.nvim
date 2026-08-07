@@ -182,6 +182,69 @@ a bug; see docs/architecture.md for what each precision level means. No
 automated test in this repository can confirm where a real click lands on
 real hardware for multibyte content -- see `docs/manual-testing.md`.
 
+## A link to another document refuses to open
+
+Check which message it is -- they mean different things.
+
+*"link target does not exist"* means the path resolved fine and there is nothing
+there: a typo, or a file not written yet. Nothing to configure.
+
+*"refused to open link outside the document root (`<root>`)"* names the root it
+was measured against. By default that is the project enclosing the document (the
+nearest ancestor holding `.git`, `.hg`, or `.svn`). A document outside any such
+project is rooted at its own directory instead, so a link to a sibling directory
+is genuinely outside it. Either set `security.document_root` explicitly, or add
+a marker to `security.document_root_markers`.
+
+`:MdViewerHealth` shows both the resolved root and where it came from
+(`document root source`), and warns outright when a **configured**
+`security.document_root` does not contain the document being previewed --
+the case where every local link and image in that document is refused and
+nothing else says why.
+
+This is worth checking first if links fail in one project but work in another:
+a `security.document_root` set once, globally, in your Neovim config pins every
+preview to that one directory. Unset it and let `document_root_markers` root
+each document in its own project instead.
+
+## Ctrl-click or Cmd-click does not activate a link
+
+Both are mapped. On macOS the terminal itself often claims them first: iTerm2
+uses Cmd-click to open URLs, and several terminals emulate a right-click on
+Ctrl-click. If `:MdViewerDebug`'s `interaction_request_count` does not increase
+when you click, the gesture never reached Neovim and the terminal's own mouse
+settings are where to look. If it does increase but nothing opens, the link was
+classified or refused -- see above.
+
+## A ctrl-clicked external link does nothing
+
+`:MdViewerDebug` records the hand-off: `last_external_open` holds the URL, when
+it was attempted, and what came back.
+
+- `"none"` -- md-viewer never got that far. Either the click did not reach
+  Neovim (see the section above) or the point was not over a link; a ctrl-click
+  whose hit test *fails* now says so rather than going quiet.
+- `no handler: ...` -- `vim.ui.open` found nothing to run. This used to be
+  silent: it reports that failure by returning `nil`, not by raising, so the
+  `pcall` around it never saw anything wrong.
+- `exit code N`, or a message from the handler -- the OS started a handler and
+  it refused. Also reported as a notification.
+- `spawned`, with nothing after it -- the handler is still running, which is the
+  successful case for a browser that stays open.
+
+md-viewer never opens a URL itself; it asks Neovim, which asks the operating
+system (`open` on macOS, `xdg-open` on Linux, `start` on Windows). If
+`last_external_open` says the handler exited cleanly and no window appeared, run
+the same URL through your own shell -- the problem is between the OS and the
+default browser, not in the preview.
+
+## The mouse pointer never changes shape over the preview
+
+It never will: md-viewer does not change it. The preview is a PNG, so only the
+terminal itself could (through `OSC 22`), and support proved inconsistent enough
+across terminals that the feature was removed rather than left half-working.
+Neovim's global `'mousemoveevent'` is left alone as a result.
+
 ## Wrong terminal profile detected
 
 `:MdViewerHealth`'s `terminal_profile` and `terminal_profile_evidence` fields

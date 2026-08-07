@@ -136,6 +136,16 @@ COMMANDS                                                 *md-viewer-commands*
 :MdViewerFindClear
         Clear the active search and its highlighting.
 
+                                                            *:MdViewerBack*
+:MdViewerBack
+        Return the preview to the previous document in its history, moving
+        the source window with it. See |md-viewer-history|.
+
+                                                         *:MdViewerForward*
+:MdViewerForward
+        Move the preview to the next document in its history, after going
+        back.
+
                                                           *:MdViewerHealth*
 :MdViewerHealth
         Open detailed environment, backend, renderer, and security status.
@@ -161,6 +171,8 @@ The graphical preview maps these Normal-mode keys:
     CTRL-F, CTRL-B           Approximately one viewport
     PageDown, PageUp         Approximately one viewport
     gg, G                    Document top or bottom
+    H, L                     Back/forward through the preview history
+                             (|md-viewer-history|)
     y                        Copy the current selection (:MdViewerCopy)
     /                        Prompt and search (:MdViewerFind)
     n, N                     Next/previous search match
@@ -189,8 +201,53 @@ Each is gated by its own `interaction.*` config flag.
                             document-root escape, with a notification. Does
                             nothing over non-link text.
 
+A local Markdown link opens in Neovim, in the source window, and the preview
+follows it; CTRL-O returns. Files Neovim has no filetype for, and PDFs, still
+go to the system handler. On macOS the terminal itself may claim CTRL-click or
+CMD-click before Neovim sees it -- check the terminal's mouse settings if
+neither activates a link.
+
+The document root a local link is checked against defaults to the project
+enclosing the document (nearest ancestor holding `.git`, `.hg`, or `.svn`),
+falling back to the document's own directory. Set `security.document_root` to
+pin it, or `security.document_root_markers` to change what identifies a
+project.
+
 Copying is always manual (`y` / :MdViewerCopy) unless
 `interaction.copy_on_select = true` is set, which is off by default.
+
+                                                        *md-viewer-history*
+GOING BACK AND FORTH ~
+
+Following a link retargets the preview, and `preview.pinned` deliberately
+stops the preview following an ordinary buffer switch -- so without a way
+back, the document the reader came from is only recoverable as text, never as
+a rendered view.
+
+    H  / :MdViewerBack       Previous document in this preview's history
+    L  / :MdViewerForward    Next document, after going back
+
+H and L are preview-local, installed beside the keys the preview already owns
+(`y`, `/`, `n`, `N`, `gg`, `G`), and shadow "top/bottom of screen" -- which
+addresses nothing in a scratch buffer holding no text. They are gated on
+`interaction.links`, since a link activation is the only thing that ever puts
+a second document in the history. Both commands work from either window.
+
+All of them move the source window as well, for the same reason activating a
+link does. CTRL-O works on its own too: when the source window returns to a
+document this preview has already shown, the preview follows it back.
+Deliberately narrow -- only documents in this preview's own history qualify,
+so `preview.pinned` still holds for every other buffer switch.
+
+Navigating from the middle of the history abandons the forward branch, the
+same rule a browser follows. The list is capped at
+`interaction.history_limit` (default 32) and records a buffer and a path per
+entry, so an entry whose buffer has been wiped still reopens its file.
+
+The mouse pointer never changes shape over the preview. The preview is a PNG,
+so only the terminal could change it (OSC 22), and support is inconsistent
+enough across terminals that the result was worse than no feedback at all.
+Nothing is sent, and the global 'mousemoveevent' is left alone.
 
 =============================================================================
 TERMINAL SUPPORT                                        *md-viewer-terminals*

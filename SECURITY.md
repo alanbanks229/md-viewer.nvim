@@ -16,7 +16,8 @@ smallest safe reproduction you can provide.
 The runtime renderer is designed without an HTTP server, localhost listener, or
 external browser window. Browser network requests are blocked by default,
 JavaScript is disabled in the render context, and local image access is confined
-to a canonical document root. The renderer uses an existing Chrome or Chromium
+to a canonical document root (by default the project enclosing the document; see
+`docs/security.md`). The renderer uses an existing Chrome or Chromium
 installation; Playwright browser downloads are intentionally disabled.
 
 Mouse and keyboard interaction (drag-to-select, double/triple-click, search,
