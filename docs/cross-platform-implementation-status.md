@@ -2943,3 +2943,166 @@ gone in a real `codediff.nvim` session on real hardware, since headless
 tests cannot observe actual Kitty graphics compositing or interact with a
 real third-party plugin's live window-management timing. Operator
 confirmation on real hardware remains the natural next step.
+
+## Post-Part-6 follow-up 5: the preview was never being moved at all — it was stranded on a tabpage nobody could see
+
+Commit `8ec3a31` on `feat/interaction-transport`.
+
+Operator report, after follow-up 4 had already landed and been tested on
+real hardware: `<leader>gd` still left the old preview image on screen at
+its old size and position, overlapping `codediff.nvim`'s diff panes, for as
+long as the diff view stayed open. Two screenshots showed the previous
+markdown preview's headings, code block and bullet list at roughly full
+scale, *visually interleaved* with the diff text so both were legible at
+once.
+
+**Follow-up 4's root cause was wrong, and this is the correction.** That
+writeup was built on `codediff.nvim`'s `ui/lib/split.lua`, which does open
+plain `{ split = position, win = -1 }` panes. But that is not how the view
+is created. `lua/codediff/ui/view/side_by_side.lua`'s `M.create()` — the
+function `:CodeDiff` actually reaches, via the `<leader>gd` mapping in the
+operator's own `plugins/codediff.lua` — begins with `vim.cmd("tabnew")` and
+splits *inside that new tabpage*. The preview split was therefore never
+resized, never repositioned, and never overlapped by anything: it was parked
+on a tabpage the terminal had stopped displaying, while the image it owned
+stayed composited at absolute screen coordinates.
+
+**Root cause.** Nothing in the raw-image display path can detect that. This
+was verified headlessly rather than assumed: for a window sitting on a
+background tabpage, `nvim_win_is_valid`, `nvim_win_get_position`,
+`nvim_win_get_width`/`_get_height` and `vim.fn.screenpos` *all* keep
+reporting full, valid, completely unchanged on-screen geometry, exactly as
+if it were visible. That is harmless for anything Neovim draws itself, since
+a hidden tabpage simply is not composited to the grid — but a raw Kitty
+placement is absolute screen coordinates the *terminal* keeps compositing
+until explicitly told to stop. Every guard the code had was blind to it:
+
+- `preview.occlusion` → `coordinates.overlapping_floats` →
+  `floating_windows` scopes its search to `nvim_win_get_tabpage(ignored_win)`,
+  i.e. the preview's *own* tabpage. It never sees the visible tabpage's
+  windows at all, so it reported no occlusion.
+- `same_geometry` compared equal, correctly — the geometry genuinely had not
+  changed.
+- `valid(session)` passed, because the window really is still valid.
+
+`TabLeave` did delete the placement. Then four independent paths each
+re-showed it, at the hidden tabpage's coordinates, over whatever the visible
+tabpage was drawing: the `WinNew` autocmd (which `vim.cmd("tabnew")` fires,
+and which follow-up 4 had just made unconditional), `WinResized` →
+`reconcile_occlusion`, the 50ms `ui_poll_timer`, and `CompleteDone` →
+`refresh_raw_sessions`. All four call `show_cached`, which asks
+`update_occlusion` for permission and was told yes. Confirmed each one
+individually by deleting the `WinNew` autocmd at runtime and watching the
+others resurrect the image regardless — which is exactly why follow-up 4's
+change neither fixed the symptom nor visibly altered it. The one path that
+was already correct is the `WinEnter`/`BufEnter`/`TabEnter` autocmd, which
+carries a hand-written `nvim_win_get_tabpage(...) == nvim_get_current_tabpage()`
+guard; that guard existed nowhere else.
+
+This also accounts for every detail of the report that the "stale geometry"
+theory did not: the image was at its *old* size and position because the
+placement was never wrong, and it reverted the moment the diff view closed
+because returning to the preview's tabpage makes the same coordinates
+correct again.
+
+**Fix.** A new `coordinates.window_is_displayed(win)` answers the one
+question no other window API will, and it is checked in `update_occlusion` —
+the single predicate every show/restore/re-place path already funnels
+through, so all four resurrection paths close at once. `reconcile_placement`
+checks it directly as well, because the `CmdlineEnter`/`CmdlineLeave`
+callers re-place unconditionally (`force = true`, follow-up in
+`cmdline_placement.lua`) without any occlusion check of their own.
+
+Two supporting changes fall out of it:
+
+- A render that aborts because the image cannot be displayed now sets
+  `session.refresh_deferred`, and `show_cached` replays it on restore.
+  Without this the fix would trade one bug for another: a debounced render
+  landing just after `:CodeDiff` used to complete (onto the wrong tabpage,
+  but it did update `session.last_image_bytes`), and would now be silently
+  dropped, leaving a permanently stale frame on the way back. The same
+  applies to a discarded interact PNG, which never reaches
+  `last_image_bytes` at all.
+- `TabLeave` now clears through `clear_image` instead of hand-rolling it, so
+  the dropped placement goes with the image — `interaction.locate` resolves
+  clicks against `session.last_placement`, and there is no longer an image
+  on screen for one to land on.
+
+`:MdViewerDebug` reports `tabpage_hidden` and `refresh_deferred`, so "the
+preview is blank and nothing looks wrong" has a visible answer next time.
+
+### The z-index contradiction, resolved
+
+Follow-up 3 justified skipping the re-crop with: every profile sets
+`raw_zindex = -1`, therefore the image "is *always* composited strictly
+beneath normal terminal cell content", therefore a float with a background
+color already occludes it. **That reasoning is wrong**, and it contradicted
+two things already in this repo — `docs/architecture.md` ("keeps the image
+below terminal text while remaining visible above the Neovim backgrounds
+painted by iTerm2") and the operator's own `raw_zindex` config comment,
+which says the same. In the Kitty graphics protocol a negative `z` above
+`INT32_MIN/2` draws the image below text *glyphs* but **above** cell
+background colors; only `z < INT32_MIN/2` goes under backgrounds too. So a
+blank or background-only cell does not occlude a `z = -1` image.
+
+This bug's own screenshots are direct evidence on real iTerm2 hardware: the
+diff panes are a fully painted Neovim screen, and the markdown image showed
+through them legibly.
+
+Two consequences, recorded rather than acted on:
+
+- It does **not** weaken this fix. The image had to be deleted, not
+  re-cropped or repositioned, and that is what happens now.
+- It does mean follow-up 3's skip can let the image bleed through a passive
+  notification's blank cells. Follow-up 3's *effect* is still operator-
+  confirmed correct (the roll stopped), and its cause — `place_regions`
+  re-splitting into a fresh set of placement IDs on every exclusion change —
+  is real. Restoring an unconditional `move()` would just bring the roll
+  back. The real fix, if the operator confirms bleed-through under
+  notifications, is to make the re-crop itself non-rolling (an atomic
+  place-then-delete in `kitty_raw.move`, which is currently two separate
+  non-atomic `nvim_ui_send` calls). **This needs the operator's eyes before
+  anyone changes it** — it is not something headless testing can see.
+  `same_geometry`'s comment in `controller.lua` was corrected in place, and
+  the stale passive-overlay sentence in `docs/architecture.md` with it.
+
+### Tests
+
+New case, `tests/lua/cases/tabpage_placement.lua`, reproducing the real
+mechanism rather than the assumed one: `vim.cmd("tabnew")` followed by an
+explorer-style `{ split = "left", win = -1 }` sidebar and a `rightbelow
+vsplit` diff pane inside it, exactly mirroring `side_by_side.lua`'s
+`M.create()`. It asserts the geometry lie explicitly (the hidden window
+still reports its old row/col/width/height), then that no path shows or
+re-places the image while the tabpage is hidden, that a forced
+`CmdlineEnter` re-place is refused too, and that closing the diff tab
+restores the image exactly once, on the right tabpage, at the right
+coordinates.
+
+Confirmed meaningful the same way follow-up 4 was, but more carefully:
+`git stash`-ing the whole fix only made the test error on the missing
+`window_is_displayed` helper, which proves nothing about behavior. So the
+helper was left in place and only the two behavioral guards were neutered
+(`local hidden = false and ...`). The suite then failed on the assertions
+that matter — including `the image is restored on the tabpage that actually
+owns the preview / expected: 1, actual: 2`, i.e. the image drawn onto the
+diff tab, which is the reported bug reproduced as a test failure. Restoring
+the guards turned them green.
+
+### Verification
+
+Lua headless suite: 505/505 assertions (up from 481 by this one new case).
+`npm test --prefix renderer`: 128/128, unchanged — this fix never touches
+the renderer. `stylua --check`: clean. Baseline measured before any change,
+so all three numbers are attributable.
+
+**No graphical validation was performed**, unchanged from every part and
+follow-up before it. What is proven headlessly is stronger than in
+follow-up 4 — the bug itself was reproduced end to end before the fix (the
+image re-shown at tabpage 1's coordinates while tabpage 2 was current) and
+the full round trip verified after — but it is still Lua-level state, not
+real Kitty compositing in a real iTerm2 session. The z-index conclusion
+above rests on the protocol specification plus this bug's own screenshots,
+not on a fresh hardware experiment. Operator confirmation remains the
+natural next step, and the specific open question to test alongside it is
+whether the raw image bleeds through a passive notification's blank cells.

@@ -53,9 +53,17 @@ floating-window rectangles are discovered through
 `nvim_tabpage_list_wins()`, `nvim_win_get_config()`, and screen coordinates. An
 overlapping focusable float suppresses the placement and closing it restores the
 cached PNG without another browser capture. Non-focusable passive overlays are
-subtracted from the preview as cropped source-image placements. This exposes the
-overlay's actual Neovim background while leaving the rest of the Markdown image
-visible, using the already uploaded PNG rather than another browser capture.
+tracked as exclusion rectangles on the placement, which `interaction.locate`
+uses to refuse a click that lands on one. `kitty_raw.lua` can also subtract
+those rectangles as cropped source-image placements, but the controller no
+longer re-crops when only the exclusions change: doing so on every appearing or
+disappearing notification was visible as the image rolling by about a row (see
+`same_geometry` in `controller.lua`).
+
+Because a raw placement is absolute screen coordinates the terminal keeps
+compositing on its own, it must be deleted whenever the preview window stops
+being displayed — including when the preview's *tabpage* is no longer the one
+on screen, which no window API reports (`coordinates.window_is_displayed`).
 
 Raw sessions perform a small periodic geometry check in addition to Neovim
 window events. Some asynchronous UI providers create floats with
