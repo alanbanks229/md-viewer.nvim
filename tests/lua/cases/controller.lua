@@ -255,4 +255,47 @@ return function(t)
   local reopened = assert(controller.open("right"))
   t.ok(reopened.preview_buf ~= session.preview_buf, "preview close and reopen")
   controller.close(source)
+
+  -- ---------------------------------------------------------------------
+  -- Regression: splitting off an *unrelated* file must not steal
+  -- `session.source_win`. `:split other.md` fires `WinEnter` for the new
+  -- window while it still shows the window-it-split-from's buffer (the
+  -- source buffer) -- that is how `:split` works, before the trailing
+  -- `:edit other.md` swaps it out a moment later in the same command. The
+  -- old, synchronous version of this autocmd read `nvim_get_current_buf()`
+  -- at that transient instant and reassigned `source_win` to the new
+  -- window; nothing ever corrected it back, since the original window
+  -- (still legitimately showing the source buffer) was never touched
+  -- again. That silently broke `WinScrolled`-driven cursor-follow in the
+  -- window the user was actually still working in.
+  -- ---------------------------------------------------------------------
+  do
+    local original_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_buf(source)
+    local real_session = assert(controller.open("right"))
+    local true_source_win = real_session.source_win
+    t.eq(true_source_win, vim.api.nvim_get_current_win(), "sanity: source_win starts out correct")
+
+    local other_path = vim.fn.tempname() .. "-unrelated.md"
+    vim.fn.writefile({ "unrelated content" }, other_path)
+    -- The real command a user runs: split, then load a different file into
+    -- the new window, all as one compound `:split` invocation -- exactly
+    -- what triggers the transient WinEnter this regression is about.
+    vim.cmd("leftabove vsplit " .. vim.fn.fnameescape(other_path))
+    vim.wait(50)
+
+    t.eq(
+      true_source_win,
+      real_session.source_win,
+      "splitting off an unrelated file leaves source_win pointed at the real source window"
+    )
+
+    local other_buf = vim.api.nvim_get_current_buf()
+    pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+    vim.api.nvim_set_current_win(true_source_win)
+    controller.close(source)
+    pcall(vim.api.nvim_buf_delete, other_buf, { force = true })
+    pcall(vim.api.nvim_set_current_win, original_win)
+    vim.fn.delete(other_path)
+  end
 end

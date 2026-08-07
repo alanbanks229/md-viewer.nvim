@@ -264,6 +264,50 @@ return function(t)
     vim.notify = original_notify
   end
 
+  -- Local-file links: a symlink inside the document root pointing at a real
+  -- file outside it must not read as "inside" -- mirrors
+  -- tests/node/security.test.js's identical check for image loading, on the
+  -- Lua side that resolves local_file link clicks.
+  do
+    local root = vim.fn.tempname()
+    vim.fn.mkdir(root, "p")
+    root = vim.uv.fs_realpath(root)
+    local outside_dir = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir, "p")
+      return dir
+    end)())
+    local secret = outside_dir .. "/secret.md"
+    vim.fn.writefile({ "top secret" }, secret)
+    local link = root .. "/escape.md"
+    vim.uv.fs_symlink(secret, link)
+
+    t.eq(
+      nil,
+      security.resolve_local_link("escape.md", root, root),
+      "a symlink inside the document root that points outside it is rejected"
+    )
+
+    local opened = {}
+    local original_open = vim.ui.open
+    vim.ui.open = function(target)
+      opened[#opened + 1] = target
+      return { wait = function() end }
+    end
+    local notified = {}
+    local original_notify = vim.notify
+    vim.notify = function(message) notified[#notified + 1] = message end
+
+    local source_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(source_buf, root .. "/doc.md")
+    interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = "escape.md" } })
+    t.eq({}, opened, "a symlink escape is never opened")
+    t.ok(#notified > 0, "a symlink escape is reported to the user")
+
+    vim.ui.open = original_open
+    vim.notify = original_notify
+  end
+
   -- Fragment activation: reads the already-resolved scroll position from the
   -- same interact response, with no second round trip.
   do

@@ -29,6 +29,16 @@ return function(t)
   end
   t.ok(found_multiplexer_caveat, "multi-entry caveats render as separate indented lines")
 
+  -- Part 7 §7.4: interaction enabled state and which document Chromium
+  -- currently holds active must both be visible in the report -- the
+  -- renderer subprocess was actually queried above (health.show() always
+  -- round-trips through process.request("health", ...)), so this is real
+  -- reported state, not a placeholder.
+  local report_text = table.concat(buffer_lines, "\n")
+  t.ok(report_text:match("interaction enabled:%s+true"), "the report states whether interaction is enabled")
+  t.ok(report_text:match("chromium active document:"), "the report states which document Chromium currently holds")
+  t.ok(report_text:match("chromium cached document frames:"), "the report states how many document frames are cached")
+
   vim.cmd("bwipeout!")
   vim.env.TMUX = original_tmux
   require("md-viewer.process").stop()

@@ -86,7 +86,114 @@ without requiring provider-specific hooks. Passive notifications are ignored by
 full suppression; the same poll updates their cutout geometry without
 retransmitting the PNG.
 
-Stop and record the exact backend, iTerm2/Neovim versions, statusline/winbar
-configuration, and reproduction in a bug report. Use `:MdViewerSpikeStop` or
-`:MdViewerClose`; md-viewer deletes only IDs it owns. Do not use
-global image deletion because that can damage unrelated plugins.
+## A notification over the preview shows Markdown through its background
+
+This is the specific bug `image.raw_overlay_bleed_cells` and the atomic
+placement-swap fix (`kitty_raw.lua`'s `M.move`) exist for. `raw_zindex = -1`
+draws the image below terminal text glyphs but *above* cell background
+colors, so a passive (non-focusable) float does not occlude the image on its
+own -- its rectangle has to be cut out of the placement, and that cut has to
+actually reach the terminal. If you see the rendered Markdown showing through
+a notification instead of the notification's own background:
+
+- Confirm you are running a build that includes the fix (`:MdViewerHealth`
+  reports `raw_graphics_overlay_bleed_cells`; if that field is absent, the
+  build predates it).
+- Confirm `:MdViewerDebug` reports a nonzero `passive_cutouts` while the
+  notification is visible. Zero means the float wasn't recognized as a
+  passive overlay at all (check whether it is genuinely non-focusable).
+
+## A gap or overhang appears beside a notification over the preview
+
+The cutout is exact in cells, but the image's own on-screen origin need not
+be: some terminals (iTerm2 confirmed) apply their horizontal window margin to
+text but not to graphics placements, shifting the image a fraction of a cell
+toward the origin. `image.raw_overlay_bleed_cells` (default `1`) absorbs a
+small gap; `image.raw_cell_offset_px` cancels the shift outright on a
+terminal that implements the Kitty protocol's `X`/`Y` placement keys. See
+"Notifications over the preview" in README.md for how to measure the offset,
+and `docs/manual-testing.md`'s alignment matrix for what has and has not been
+measured on which terminal.
+
+## The preview image blinks, rolls, or briefly shifts by about a row
+
+A stale symptom of re-cropping the image non-atomically -- fixed by making
+`kitty_raw.lua`'s `M.move` emit the replacement placement and the deletion of
+the one it supersedes as a single write, new first. If this reappears, it
+means a placement change (typically a passive overlay appearing/disappearing)
+is once again being applied as two separate terminal writes. `:MdViewerDebug`
+cannot observe this directly -- it is terminal compositing behavior -- but
+`tests/lua/cases/backend_kitty.lua` asserts the ordering at the byte level;
+a regression there is the mechanism to look for.
+
+## The preview image persists over another plugin's windows, or on the wrong tabpage
+
+A raw Kitty placement is absolute screen coordinates the terminal keeps
+compositing until explicitly told to stop -- it does not know or care which
+Neovim window or tabpage is actually on screen. `:MdViewerDebug`'s
+`tabpage_hidden` field reports whether md-viewer believes the preview's
+tabpage is not the one currently displayed; if a stray image is visible while
+`tabpage_hidden` is `false`, the plugin whose windows the image is
+overlapping likely resized or repositioned the preview split without md-viewer
+noticing (`WinNew`/`WinResized` should catch this for any new or resized
+window, not only floating ones -- if it doesn't, that's a real regression to
+report). If the image is visible on a *different* tabpage than the preview's
+own, `refresh_deferred` should be `true` until you return to the preview's
+tabpage.
+
+## Clicking, dragging, searching, or copying does nothing
+
+Confirm `:MdViewerHealth` reports `interaction enabled: true` and that the
+relevant `interaction.*` flag (`selection`, `word_select`, `paragraph_select`,
+`find`, `copy`, `links`) is not disabled. Interaction is unavailable outright
+for the `cells` backend (`:MdViewerHealth`'s `selected_backend` must not be
+`cells`) -- there is no DOM to hit-test against without a graphical backend.
+`:MdViewerDebug`'s `interaction_request_count` and `interaction_stale_count`
+distinguish "nothing is being sent at all" (both stay at zero -- check the
+mapping/config above) from "requests are being sent but keep losing a race"
+(a nonzero, growing `interaction_stale_count` -- usually caused by editing or
+scrolling continuously enough that every interaction's content revision goes
+stale before the renderer answers it; this is a real requirement, not a bug,
+since a selection captured against superseded content must never be shown).
+
+## A selection or highlight does not appear after dragging
+
+Drag distance has to cross `interaction.drag_threshold_cells` (default `1`)
+before a drag is even recognized as one rather than a click; a very small,
+fast drag inside one cell can register as a plain click instead, which clears
+any existing selection rather than creating a new one. `:MdViewerDebug`'s
+`selection_active`/`selection_text_length` report whether anything is
+actually held selected server-side, independent of whether it is currently
+visible on screen (a selection can be correctly held while occluded, e.g.
+during a scroll-only capture).
+
+## A click lands on the wrong character, or link activation resolves the wrong content
+
+Confirm the active `viewport_calibration_tier` (`:MdViewerHealth`) is
+`explicit`, not `estimated` -- an estimated cell size is a real source of
+click-position error on a terminal/font combination the estimate doesn't
+match well. Set `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (see
+above) to remove the estimate entirely. `:MdViewerDebug`'s
+`interaction_last_precision` reports what precision the *last* interaction
+actually resolved at (`exact`, `line`, `block`, or `none`) -- a `none` where
+you expected an exact hit usually means the click landed in padding or
+whitespace the parser genuinely cannot attribute to any source position, not
+a bug; see docs/architecture.md for what each precision level means. No
+automated test in this repository can confirm where a real click lands on
+real hardware for multibyte content -- see `docs/manual-testing.md`.
+
+## Wrong terminal profile detected
+
+`:MdViewerHealth`'s `terminal_profile` and `terminal_profile_evidence` fields
+show exactly what was detected and why -- never trust `TERM_PROGRAM` alone
+(policy: detection evidence is not validation). If the profile is wrong,
+override it explicitly with `terminal.profile` rather than relying on
+`"auto"`; `terminal.kitty_graphics` and `terminal.probe` are the finer-grained
+overrides beneath it. A wrong profile most commonly affects the default
+z-index/double-buffer values and the calibration tier's defaults, not
+whether the preview renders at all.
+
+Stop and record the exact backend, terminal/Neovim versions,
+statusline/winbar configuration, and reproduction in a bug report. Use
+`:MdViewerClose`; md-viewer deletes only IDs it owns. Do not use global
+image deletion because that can damage unrelated plugins.

@@ -84,7 +84,7 @@ Concrete examples from this project's own history and roadmap:
 | Fixed the command-line making the preview disappear (`8ad0623`) | PATCH | Bugfix — the old behavior was never the intended design. |
 | Raised the default preview font size, added a text-fallback notice (`0be91a6`) | MINOR | New, visible behavior (a UI notice that didn't exist before), even though nothing breaks. |
 | De-iTerm2'd the Kitty backend; added profile-driven z-index/geometry (Part 2) | MINOR | New capability (works on more terminals) plus one real, documented behavior change (forcing `kitty_raw` can now fail honestly instead of always "succeeding"). Allowed in a MINOR bump only because we're pre-`1.0`. |
-| Added click-to-source, text selection, search (Parts 3–6, future) | MINOR each | New features, additive. |
+| Added text selection, search, link activation (Parts 3–6) | MINOR each | New features, additive. (Click-to-source was also added this way, then replaced by click-to-deselect in an out-of-band follow-up before v0.3.0 shipped — see CHANGELOG.md.) |
 | Renamed `image.raw_zindex` to something else, or changed its default meaning in a way existing configs would silently misbehave under | MINOR now / MAJOR after 1.0 | This is exactly the kind of change the pre-1.0 carve-out exists for. |
 | Removed a Neovim version we used to support | MINOR now / MAJOR after 1.0 | Same reasoning. |
 
@@ -103,8 +103,8 @@ specific version checkpoints — this isn't hypothetical, it's the plan:
 | Tag | What it means | Status |
 |---|---|---|
 | `v0.1.0-beta` | First public release: iTerm2-only raw Kitty preview. | Shipped. |
-| `v0.2.0` | Parts 1–2 done: works on any Kitty-graphics terminal without hand-tuned config, honest capability reporting. No interaction changes. | Ready to tag — see the worked example below. |
-| `v0.3.0` | Part 7 done: click-to-source, selection, search, hardened and documented, real compatibility matrix. | Not started. |
+| `v0.2.0` | Parts 1–2 done: works on any Kitty-graphics terminal without hand-tuned config, honest capability reporting. No interaction changes. | Shipped. |
+| `v0.3.0` | Part 7 done: selection, search, link activation, and click-to-deselect (click-to-source was tried and then removed — it fought drag-to-select — before this shipped), hardened and documented, real compatibility matrix. | Ready to tag — Part 7 complete. |
 | `v1.0.0` | Whenever you decide the config surface and behavior have stopped needing to change, and you're confident enough to promise that in writing. | No target date — this is a judgment call, not a checklist item. |
 
 Nothing forces `v1.0.0` to happen right after `v0.3.0`, or ever on a
@@ -293,7 +293,7 @@ you call it `v0.3.0`:
 git tag -a v0.3.0-rc.1 -m "Release candidate 1 for v0.3.0"
 git push origin v0.3.0-rc.1
 gh release create v0.3.0-rc.1 --title "v0.3.0-rc.1" --prerelease \
-  --notes "Testing selection/search/click-to-source before v0.3.0. Please report results per terminal in docs/manual-testing.md's checklist."
+  --notes "Testing selection/search/link activation before v0.3.0. Please report results per terminal in docs/manual-testing.md's checklist."
 ```
 
 If it needs another round, `v0.3.0-rc.2`. Once it's solid, tag the same

@@ -1,4 +1,4 @@
-local M = { version = "0.2.0" }
+local M = { version = "0.3.0" }
 local initialized = false
 
 function M.setup(opts)

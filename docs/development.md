@@ -40,14 +40,19 @@ PNGs, and `node_modules` before publishing.
 
 ## Interactive graphics testing
 
-Headless tests cannot inspect terminal pixels. Run Neovim directly in an iTerm2
-profile with Kitty graphics enabled and work through
-[manual-testing.md](manual-testing.md). Record all of the following with a bug
-report:
+Headless tests cannot inspect terminal pixels, click accuracy, or flicker.
+Run Neovim directly in a real terminal (iTerm2, Kitty, WezTerm, Ghostty, or
+Warp — see [manual-testing.md](manual-testing.md) for what has and has not
+actually been validated on each) with Kitty graphics enabled, without a
+multiplexer, and work through that document's scenario matrix. Record all of
+the following with a bug report:
 
-- macOS, iTerm2, Neovim, Node.js, and Chrome/Chromium versions
-- selected backend and `:MdViewerHealth` output
-- whether tmux or another terminal multiplexer was present
+- OS, terminal name and version, Neovim, Node.js, and Chrome/Chromium versions
+- selected backend and `:MdViewerHealth` output (and `:MdViewerDebug` for
+  anything involving selection, search, or placement)
+- whether tmux, screen, Zellij, or another terminal multiplexer was present
+  (none of these are supported — confirm the bug reproduces without one
+  before filing it as a graphics bug)
 - relevant statusline, winbar, split, and floating-window configuration
 - minimal Markdown and configuration needed to reproduce the behavior
 

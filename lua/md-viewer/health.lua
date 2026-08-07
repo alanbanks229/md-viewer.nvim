@@ -112,6 +112,15 @@ function M.collect(renderer_result, renderer_error)
     local_image_root = sec.document_root,
     security_overrides = sec.overrides,
     viewport_calibration_tier = coordinates.calibration_tier(),
+    interaction_enabled = cfg.interaction.enabled,
+    -- The single authoritative answer to "which document is currently loaded in
+    -- Chromium" (renderer/src/browser.js's `this.active`), only available once
+    -- the renderer subprocess has actually answered a "health" request.
+    chromium_active_document = renderer_result and (renderer_result.activeDocument or "none") or "not queried",
+    chromium_cached_document_frames = renderer_result and renderer_result.cachedDocumentFrames or "not queried",
+    chromium_cached_documents = renderer_result and renderer_result.cachedDocuments or "not queried",
+    chromium_lane_documents = renderer_result and renderer_result.laneDocuments or "not queried",
+    chromium_interaction_documents = renderer_result and renderer_result.interactionDocuments or "not queried",
   }
 end
 
@@ -153,6 +162,12 @@ local order = {
   "local_image_root",
   "security_overrides",
   "viewport_calibration_tier",
+  "interaction_enabled",
+  "chromium_active_document",
+  "chromium_cached_document_frames",
+  "chromium_cached_documents",
+  "chromium_lane_documents",
+  "chromium_interaction_documents",
 }
 
 local function lines(report)
@@ -234,6 +249,15 @@ function M.check()
   else
     vim.health.warn("Network access explicitly enabled")
   end
+  if report.interaction_enabled then
+    vim.health.ok("Interaction enabled")
+  else
+    vim.health.warn("Interaction disabled (interaction.enabled = false)")
+  end
+  -- `:checkhealth` cannot await the renderer subprocess (see M.collect's own
+  -- comment), so which document Chromium currently holds is only ever known
+  -- via `:MdViewerHealth`, which does the round trip.
+  vim.health.info("Chromium's currently active document: see :MdViewerHealth (not queried by :checkhealth)")
 end
 
 return M

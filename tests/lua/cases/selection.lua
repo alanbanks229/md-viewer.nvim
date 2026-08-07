@@ -574,6 +574,88 @@ return function(t)
     t.eq(false, session.selection_active, "the listener's forget_selection call reached the session")
   end
 
+  -- ---------------------------------------------------------------------
+  -- :MdViewerDebug diagnostics: every interact request this session sends is
+  -- counted, a STALE_INTERACTION response (identified by process.request's
+  -- third `meta` argument, not by parsing the error string) counts separately
+  -- as lost-the-race, and a successful selection records its text length
+  -- without ever caching the text itself.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    session.interaction_request_count = 0
+    session.interaction_stale_count = 0
+    local original_request = process.request
+
+    process.request = function(method, params, callback)
+      callback({ kind = "selection", ok = true, text = "seven!!", collapsed = false }, nil)
+    end
+    interaction.word_select(session, { x = 10, y = 10, cellWidthPx = 0, cellHeightPx = 0 })
+    t.eq(1, session.interaction_request_count, "word_select counts as one interact request")
+    t.eq(0, session.interaction_stale_count, "a successful request never counts as stale")
+    t.eq(7, session.selection_text_length, "the selection's text length is recorded")
+
+    process.request = function(method, params, callback)
+      callback(nil, "interact request superseded by a newer request", { code = "STALE_INTERACTION" })
+    end
+    interaction.word_select(session, { x = 10, y = 10, cellWidthPx = 0, cellHeightPx = 0 })
+    t.eq(2, session.interaction_request_count, "a failed request still counts as sent")
+    t.eq(1, session.interaction_stale_count, "a STALE_INTERACTION response counts as lost-the-race")
+
+    -- A non-stale failure (no meta.code, or a different code) must not be
+    -- miscounted as staleness.
+    process.request = function(method, params, callback) callback(nil, "renderer error") end
+    interaction.word_select(session, { x = 10, y = 10, cellWidthPx = 0, cellHeightPx = 0 })
+    t.eq(3, session.interaction_request_count)
+    t.eq(1, session.interaction_stale_count, "an ordinary failure with no stale code does not inflate the stale count")
+
+    -- clear_selection and forget_selection both drop the cached length so a
+    -- stale value can never outlive the selection it described.
+    process.request = function(method, params, callback) callback({ kind = "selection", cleared = true }, nil) end
+    interaction.clear_selection(session)
+    t.eq(nil, session.selection_text_length, "clear_selection drops the cached selection length")
+
+    session.selection_text_length = 42
+    interaction.forget_selection(session)
+    t.eq(nil, session.selection_text_length, "forget_selection drops the cached selection length")
+
+    process.request = original_request
+  end
+
+  -- ---------------------------------------------------------------------
+  -- coalesced_drag_events: an in-flight selection_preview request must not
+  -- block a drag from being tracked -- when the debounce timer fires again
+  -- while a request is still outstanding, that point is dropped and counted
+  -- rather than silently lost.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = params
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 1 end, 5)
+    t.eq(0, session.coalesced_drag_events or 0, "no drag has been coalesced yet -- only one request has ever been sent")
+
+    -- Force the debounce timer to fire again while the first request is
+    -- still in flight, by calling schedule_selection_preview directly
+    -- (on_drag alone would just reset the same timer).
+    session.pointer.newest_pending_drag_point = interaction.locate(session, point(10, 20))
+    session.pointer.drag_started = true
+    interaction.schedule_selection_preview(session)
+    vim.wait(60, function() return (session.coalesced_drag_events or 0) > 0 end, 5)
+    t.eq(1, session.coalesced_drag_events, "a debounce firing while a request is in flight counts as coalesced")
+    t.eq(1, #requests, "the coalesced point is not sent as its own request")
+
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+    process.request = original_request
+  end
+
   controller.display_interact_result = original_display
   config.reset()
 end

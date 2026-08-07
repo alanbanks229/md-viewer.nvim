@@ -35,3 +35,30 @@ test("sanitizes raw HTML even when the override is enabled", () => {
   });
   assert.doesNotMatch(html, /onerror|iframe|script|evil\.invalid/);
 });
+
+test("arbitrary data-* attributes on raw HTML are stripped -- only the four provenance keys survive", () => {
+  const { html } = renderMarkdown(
+    '<div data-foo="bar" data-onclick="evil()" data-md-source-id="forged" data-source-start="99">x</div>',
+    { rawHtml: true, localImages: false, maxLocalImageBytes: 1, baseDir: here, documentRoot: here }
+  );
+  // `data-md-source-id`/`data-source-start` are allowed *keys* by design (see
+  // markdown.js's allowedAttributes comment: the worst a rawHtml document can
+  // do by forging one is send its own click somewhere else in itself), so
+  // this only asserts that keys outside that named set never survive.
+  assert.doesNotMatch(html, /data-foo/);
+  assert.doesNotMatch(html, /data-onclick/);
+});
+
+test("javascript:, data:, and vbscript: links never survive sanitization even as raw HTML", () => {
+  const { html } = renderMarkdown(
+    '<a href="javascript:alert(1)">a</a>'
+    + '<a href="JaVaScRiPt:alert(1)">b</a>'
+    + '<a href="vbscript:msgbox(1)">c</a>'
+    + '<a href="data:text/html,<script>alert(1)</script>">d</a>'
+    + '<a href="//evil.invalid/x">e</a>',
+    { rawHtml: true, localImages: false, maxLocalImageBytes: 1, baseDir: here, documentRoot: here }
+  );
+  assert.doesNotMatch(html, /href="[^"]*(javascript|vbscript):/i);
+  assert.doesNotMatch(html, /href="data:/i);
+  assert.doesNotMatch(html, /href="\/\/evil\.invalid/i, "protocol-relative hrefs are stripped, not just blocked at fetch time");
+});

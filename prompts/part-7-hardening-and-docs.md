@@ -182,8 +182,10 @@ Rewrite `docs/manual-testing.md` as a repeatable procedure for iTerm2, Kitty,
 WezTerm, Ghostty, and Warp, covering:
 
 initial image; live and unsaved edits; source cursor following; keyboard and
-mouse-wheel scrolling; click-to-source; exact source columns; line-level
-fallback; forward, backward, and multi-paragraph selection; copying;
+mouse-wheel scrolling; click-to-deselect (click-to-source was removed by an
+out-of-band follow-up before this part began — see
+`docs/cross-platform-implementation-status.md`); exact source columns;
+line-level fallback; forward, backward, and multi-paragraph selection; copying;
 double-click word selection; search; link activation; resize; font-size change;
 all four split positions; winbar; statusline; global statusline; floating
 windows; passive overlays; tab switching; suspend and resume; HiDPI and standard

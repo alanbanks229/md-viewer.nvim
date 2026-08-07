@@ -2,6 +2,7 @@ local state = require("md-viewer.state")
 local process = require("md-viewer.process")
 local backends = require("md-viewer.backends")
 local terminal = require("md-viewer.terminal")
+local config = require("md-viewer.config")
 
 local M = { events = {} }
 
@@ -55,13 +56,29 @@ function M.snapshot()
       passive_cutouts = session.last_placement and #(session.last_placement.exclusions or {}) or 0,
       loading = session.loading,
       render_failed = session.render_failed,
+      -- Current content revision this session's cached frame/interaction state
+      -- is pinned to (renderer.lua's "changedtick:render_epoch" string) -- what
+      -- a stale-interaction error is measured against.
+      content_revision = session.renderer_revision,
       interaction_last_kind = session.last_interaction_kind,
       interaction_last_precision = session.last_interaction_precision,
       interaction_pointer_pressed = session.pointer ~= nil and session.pointer.pressed or false,
+      selection_active = session.selection_active,
+      -- Length only -- see interaction.lua's copy_selection comment. Never
+      -- surface the selected text itself in diagnostics.
+      selection_text_length = session.selection_text_length,
+      find_active = session.find_active,
+      find_query = session.find_query,
+      find_match_count = session.find_match_count,
+      find_active_index = session.find_active_index,
+      interaction_request_count = session.interaction_request_count or 0,
+      interaction_stale_count = session.interaction_stale_count or 0,
+      coalesced_drag_events = session.coalesced_drag_events or 0,
     }
   end
   return {
     sessions = sessions,
+    interaction_enabled = config.get().interaction.enabled,
     renderer = process.status(),
     backends = backends.health(),
     terminal = terminal.detect(),

@@ -50,6 +50,7 @@ function M.create(source_buf, source_win)
     -- interaction.forget().
     selection_active = false,
     selection_content_revision = nil,
+    selection_text_length = nil,
     selection_render_in_flight = false,
     selection_render_pending = false,
     selection_debounce_timer = nil,
@@ -58,6 +59,13 @@ function M.create(source_buf, source_win)
     find_query = nil,
     find_match_count = 0,
     find_active_index = nil,
+    -- Diagnostics-only counters (:MdViewerDebug): every `interact` request sent
+    -- for this session, how many of those came back STALE_INTERACTION (lost a
+    -- race against a newer request), and how many in-flight drag updates were
+    -- superseded by a newer pointer position before they were ever sent.
+    interaction_request_count = 0,
+    interaction_stale_count = 0,
+    coalesced_drag_events = 0,
   }
   sessions[source_buf] = session
   return session

@@ -1,5 +1,11 @@
 # Architecture
 
+> The preview is still a browser-rendered PNG surface. Mouse and keyboard
+> interactions are forwarded to the persistent Chromium DOM, which performs
+> hit-testing, selection, search, and link resolution before the viewport is
+> recaptured. This provides browser-like behavior but is not native terminal
+> text selection or a real embedded webview.
+
 ## Data flow
 
 The controller reads unsaved lines from each source buffer. All buffer-specific
@@ -138,6 +144,101 @@ Mouse-wheel mappings are installed only while a graphical preview exists. The
 pointer's actual Neovim window ID selects the session; events outside an md-viewer
 window fall through to the original Neovim wheel behavior. The mappings and any
 previous user mappings are restored after the last graphical preview closes.
+
+## Interaction
+
+Mouse gestures reach the renderer through a second NDJSON method, `interact`,
+alongside `render`/`capture` on the same persistent process and the same
+serial queue over the one shared Chromium page -- there is no second
+transport and no second process.
+
+**Staleness lanes.** `renderer/src/lanes.js` tracks a per-document, per-lane
+admission serial (`content`, `capture`, `interact`, `settle`) plus a
+content-epoch counter. A newer request in the same lane supersedes an older
+one; a new `content` render bumps the epoch and invalidates every downstream
+lane. Critically, an `interact` admission can never invalidate `content` or
+`capture` -- there is no code path from it to `contentEpoch` -- so a burst of
+drag updates cannot starve or cancel a legitimate render. A superseded
+request fails its own staleness check (checked at admission and again after
+the expensive work) and returns without touching the page.
+
+**Document isolation.** `renderer/src/browser.js` keeps exactly one
+authoritative record, `this.active`, of which document (and content
+revision) the single shared page currently holds, cleared before every
+`setContent()` and repopulated only after the new document's geometry has
+been recollected -- no caller can observe a half-loaded document.
+`ensureDocumentActive()` is the only door into the DOM for an interaction: it
+refuses (`INTERACT_CACHE_MISS`) a document/revision it cannot rebuild
+byte-for-byte from its own cached record, and rehydrates (replays the exact
+same HTML/theme/font/viewport that produced the original screenshot) rather
+than approximating. A fresh, opaque per-load token is stamped on the
+document root and checked by every in-page action before it touches the DOM
+(`DOCUMENT_MISMATCH` on a mismatch) -- the actual isolation guarantee is that
+nothing can swap the page between that check and the caller's own
+`page.evaluate`, since both run inside the same serial queue.
+
+**Hit-testing and source-position precision.** A click resolves through
+`elementFromPoint`, refined by caret-range APIs when the hit lands on real
+text; source position is recovered from markdown-it's own parse state
+(`token.map` for block tokens, an instrumented inline parser for inline
+runs -- see `renderer/src/provenance.js`) rather than by searching rendered
+text for a match, which would collide silently whenever a block contains the
+same word twice. Precision degrades honestly through four levels and is
+never guessed past what the parser can actually establish:
+
+    exact    A precise line and UTF-8 byte column.
+    line     A line, but not a column (e.g. a highlighted code span whose
+             internal structure the parser does not track per-character).
+    block    A containing block only (e.g. a table cell, or content the
+             renderer re-emits as raw HTML, like a task-list item).
+    none     No position at all -- padding, whitespace, or an out-of-bounds
+             point. Reported honestly rather than resolved to the nearest
+             plausible guess.
+
+The terminal reports which *cell* was clicked, never a sub-cell position, so
+a click covers a whole cell's width -- `hitTestInPage` probes outward from
+the cell's center, bounded by that one cell, rather than collapsing to the
+center alone (which made the cell holding a line's first character,
+containing mostly left padding, permanently unclickable).
+
+**Selection, search, and copy.** Drag-to-select, double/triple-click, and
+search all produce a real Chromium `Selection`/`Range` (`setBaseAndExtent`,
+`Text.splitText`) or use `window.find`-equivalent text matching -- never
+`innerHTML`, so a search query or a selection containing literal HTML is
+matched or copied character-for-character, not interpreted as markup. Every
+mutating interaction (a selection change, a search step) captures its own
+screenshot in the same queued operation that performed the mutation, so Lua
+never has to follow up with a second render just to see the result.
+Per-document interaction state (the current selection, the current search's
+match set) lives in trusted Node memory (`main.js`'s `interactionState`, not
+the page, which `setContent` destroys on every document switch) and is
+replaced, never migrated, across a content-revision change -- applying an old
+selection to new content would be silent corruption in a copy operation.
+
+**Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`)
+separates `http`/`https`/`mailto`/fragment/local-file candidates from
+anything unsafe (`javascript:`, `data:`, `vbscript:`, protocol-relative, or
+malformed) before Lua ever sees a decision to make. A `local_file`
+candidate's containment inside the configured document root is re-checked
+independently on the Lua side (`lua/md-viewer/security.lua`'s
+`resolve_local_link`/`is_inside`), the same symlink-resolved check image
+loading already uses -- the renderer's classification is a hint, not a
+grant. Ctrl/Cmd-click is the only gesture that can activate a link; a plain
+click never does, on any hit.
+
+**Lua-side gesture dispatch.** `lua/md-viewer/mouse.lua` installs its
+mappings only once a graphical (non-`cells`) session exists, saving and
+later restoring whatever was mapped there before (`vim.fn.mapset`), across
+all of normal/insert/visual mode. Mouse capture is button-scoped, not
+window-scoped (`interaction.lua`'s module-local `captured` session): once a
+press lands on preview content, the matching drag/release belongs to that
+session even if the pointer later leaves the window before the button comes
+up. A plain click (no drag) clears an active selection and never moves the
+source cursor under any gesture -- an earlier, removed behavior did move the
+cursor on click, which fought the drag-to-select gesture (dismissing a
+highlight by clicking elsewhere also relocated the editor cursor); see
+`docs/cross-platform-implementation-status.md`'s "click-to-source removed"
+follow-up.
 
 ## Lifecycle
 

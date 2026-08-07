@@ -18,7 +18,22 @@ local M = {}
 local captured = nil
 
 function M.captured_session() return captured end
-function M.is_captured(session) return captured ~= nil and captured == session end
+
+---Every `interact` request funnels through here so `:MdViewerDebug` can report
+---how many were sent and how many lost a race (STALE_INTERACTION -- a newer
+---request for the same document/lane superseded this one before the renderer
+---answered it; see renderer/src/lanes.js). `callback` keeps its ordinary
+---two-arg `(result, err)` shape; only this wrapper looks at process.request's
+---third `meta` argument.
+local function interact_request(session, params, callback)
+  session.interaction_request_count = (session.interaction_request_count or 0) + 1
+  process.request("interact", params, function(result, err, meta)
+    if err and meta and meta.code == "STALE_INTERACTION" then
+      session.interaction_stale_count = (session.interaction_stale_count or 0) + 1
+    end
+    callback(result, err)
+  end)
+end
 
 ---Drop button-scoped pointer/capture state for `session`. Called on session
 ---teardown (close, buffer wipeout, exit) and on events that hide the preview
@@ -48,6 +63,7 @@ function M.forget_selection(session)
   if not session then return end
   session.selection_active = false
   session.selection_content_revision = nil
+  session.selection_text_length = nil
   session.find_active = false
   session.find_query = nil
   session.find_match_count = 0
@@ -94,14 +110,11 @@ function M.on_press(session, mouse, point, click_count)
     -- The drag's fixed start point, set once on the first threshold crossing
     -- in on_drag and never moved again for the rest of this gesture.
     anchor_point = nil,
-    interaction_serial = ((session.pointer or {}).interaction_serial or 0) + 1,
     selection_request_in_flight = false,
     newest_pending_drag_point = nil,
     -- Set by on_release when a settle request arrives while a preview is
     -- still in flight; picked up by that preview's own completion callback.
     pending_settle = nil,
-    content_revision = session.renderer_revision,
-    cached_selected_text = nil,
     click_count = click_count,
     multi_click_fired = false,
   }
@@ -151,7 +164,15 @@ function M.schedule_selection_preview(session)
   debounce.call(session, "selection_debounce_timer", cfg.drag_debounce_ms, function()
     if session.pointer ~= pointer or not pointer.drag_started then return end
     local point = pointer.newest_pending_drag_point
-    if not point or pointer.selection_request_in_flight then return end
+    if not point then return end
+    if pointer.selection_request_in_flight then
+      -- This debounce firing found a request already in flight: the point it
+      -- would have sent is dropped, and whichever on_drag call produces the
+      -- next point is what the in-flight request's own completion callback
+      -- (the `elseif` branch below) will actually send.
+      session.coalesced_drag_events = (session.coalesced_drag_events or 0) + 1
+      return
+    end
     pointer.selection_request_in_flight = true
     local requested_point = point
     M.request_selection(session, pointer.anchor_point, point, "device", false, function(result, err)
@@ -160,6 +181,7 @@ function M.schedule_selection_preview(session)
       if not err and result and result.ok ~= false then
         session.selection_active = true
         session.selection_content_revision = session.renderer_revision
+        session.selection_text_length = type(result.text) == "string" and #result.text or nil
         require("md-viewer.controller").display_interact_result(session, result)
       end
       if pointer.pending_settle then
@@ -182,7 +204,7 @@ end
 ---`request_hit`'s `modifiers` table follows -- so nothing here can degrade
 ---into an unexpected JSON shape.
 function M.request_selection(session, anchor, focus, capture_scale, is_commit, callback)
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = is_commit and "selection_commit" or "selection_preview",
@@ -218,6 +240,7 @@ function M.settle_selection(session, pointer, anchor, point)
       if not err and result and result.ok ~= false then
         session.selection_active = true
         session.selection_content_revision = session.renderer_revision
+        session.selection_text_length = type(result.text) == "string" and #result.text or nil
         require("md-viewer.controller").display_interact_result(session, result)
         if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
       end
@@ -235,7 +258,7 @@ function M.word_select(session, point)
   if not point then return end
   if not session.renderer_revision then return end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "word_select",
@@ -250,6 +273,7 @@ function M.word_select(session, point)
     if err or not result or result.ok == false then return end
     session.selection_active = true
     session.selection_content_revision = session.renderer_revision
+    session.selection_text_length = type(result.text) == "string" and #result.text or nil
     require("md-viewer.controller").display_interact_result(session, result)
     if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
   end)
@@ -262,7 +286,7 @@ function M.paragraph_select(session, point)
   if not point then return end
   if not session.renderer_revision then return end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "paragraph_select",
@@ -277,6 +301,7 @@ function M.paragraph_select(session, point)
     if err or not result or result.ok == false then return end
     session.selection_active = true
     session.selection_content_revision = session.renderer_revision
+    session.selection_text_length = type(result.text) == "string" and #result.text or nil
     require("md-viewer.controller").display_interact_result(session, result)
     if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
   end)
@@ -293,7 +318,7 @@ function M.copy_selection(session, silent)
     if not silent then vim.notify("md-viewer: nothing selected", vim.log.levels.WARN) end
     return
   end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "selection_text",
@@ -324,8 +349,9 @@ end
 function M.clear_selection(session)
   session.selection_active = false
   session.selection_content_revision = nil
+  session.selection_text_length = nil
   if not session.renderer_revision then return end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "selection_clear",
@@ -343,7 +369,7 @@ function M.find_set(session, query)
     vim.notify("md-viewer: no rendered content to search yet", vim.log.levels.WARN)
     return
   end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "find_set",
@@ -372,7 +398,7 @@ local function find_step(session, action)
     vim.notify("md-viewer: no active search", vim.log.levels.WARN)
     return
   end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = action,
@@ -396,7 +422,7 @@ function M.find_clear(session)
   session.find_match_count = 0
   session.find_active_index = nil
   if not session.renderer_revision then return end
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "find_clear",
@@ -496,7 +522,7 @@ function M.request_hit(session, point, modifiers, click_count, callback)
   -- and swallowed by the error branch below, so click-to-source did nothing.
   -- A table that always has four keys can only ever encode as an object.
   modifiers = modifiers or {}
-  process.request("interact", {
+  interact_request(session, {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = "activate_at",

@@ -638,10 +638,27 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume", "FocusGained" }, {
     group = group,
     callback = function(args)
-      local source_session = state.get(args.buf)
-      if source_session and vim.api.nvim_get_current_buf() == args.buf then
-        source_session.source_win = vim.api.nvim_get_current_win()
-      end
+      -- Deferred rather than read synchronously off `args`: a compound
+      -- command like `:split other.md` fires `WinEnter` for the *new*
+      -- window while it still, transiently, shows the window it split
+      -- from's buffer -- the buffer swap to `other.md` (and that file's own
+      -- `BufEnter`) happens a moment later, in the same command. Reading
+      -- `nvim_get_current_buf()` synchronously here reassigns
+      -- `session.source_win` to that new window on the strength of a buffer
+      -- pairing that is already gone by the time the command finishes,
+      -- stranding cursor-follow (WinScrolled below compares against
+      -- `source_win` by identity) on a window that no longer shows the
+      -- source buffer, with nothing left to correct it since the *real*
+      -- source window was never touched. Deferring to the next tick lets
+      -- the whole command settle first, so this only ever fires once the
+      -- window/buffer pairing is the one the user actually ended up with.
+      local buf = args.buf
+      vim.schedule(function()
+        local source_session = state.get(buf)
+        if source_session and vim.api.nvim_get_current_buf() == buf then
+          source_session.source_win = vim.api.nvim_get_current_win()
+        end
+      end)
       each_session(function(session)
         if
           not session.image_id

@@ -26,4 +26,35 @@ return function(t)
   -- which the scroll sync iterates with ipairs.
   local arrays = assert(protocol.decode('{"id":4,"ok":true,"result":{"blocks":[{"a":1},{"a":2},{"a":3}]}}'))
   t.eq(3, #arrays.result.blocks, "array elements are not dropped by the null handling")
+
+  -- Malformed/malicious input at the protocol boundary: valid JSON that is
+  -- nonetheless not a valid response, wildly-typed fields, Unicode (including
+  -- unpaired surrogates and RTL text) in an otherwise well-formed response,
+  -- and an empty line -- none of these may throw past decode() into a caller
+  -- that only checked `ok, err`.
+  local missing_id = { protocol.decode('{"ok":true,"result":{}}') }
+  t.eq(nil, missing_id[1], "a response missing id is rejected, not defaulted")
+  t.ok(missing_id[2]:match("missing id/ok"), "the reason names what is missing")
+
+  local missing_ok = { protocol.decode('{"id":5,"result":{}}') }
+  t.eq(nil, missing_ok[1], "a response missing ok is rejected, not defaulted")
+
+  local wrong_types = { protocol.decode('{"id":"five","ok":"yes"}') }
+  t.eq(nil, wrong_types[1], "a response whose id/ok are the wrong JSON type is rejected, not coerced")
+
+  local not_an_object = { protocol.decode("[1,2,3]") }
+  t.eq(nil, not_an_object[1], "a top-level JSON array is rejected -- a response must be an object")
+
+  local empty = { protocol.decode("") }
+  t.eq(nil, empty[1], "an empty line is rejected rather than indexed into")
+
+  local unicode =
+    assert(protocol.decode('{"id":6,"ok":true,"result":{"text":"caf\\u00e9 \\ud83d\\ude00 \\u05d0\\u05d1\\u05d2"}}'))
+  t.eq(
+    "caf\u{00e9} \u{1F600} \u{05d0}\u{05d1}\u{05d2}",
+    unicode.result.text,
+    "escaped Unicode round-trips through decode"
+  )
+
+  t.ok(pcall(protocol.decode, '{"id":7,"ok":true,"result":{"text":"\\ud800"}}'), "a lone surrogate does not throw")
 end

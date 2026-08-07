@@ -8,8 +8,10 @@ CONTENTS                                                   *md-viewer-contents*
 3. Setup ................................................... |md-viewer-setup|
 4. Commands ................................................ |md-viewer-commands|
 5. Preview navigation ...................................... |md-viewer-navigation|
-6. Security ................................................ |md-viewer-security|
-7. Health .................................................. |md-viewer-health|
+6. Mouse interaction ....................................... |md-viewer-interaction|
+7. Terminal support ........................................ |md-viewer-terminals|
+8. Security ................................................ |md-viewer-security|
+9. Health .................................................. |md-viewer-health|
 
 =============================================================================
 INTRODUCTION                                                     *md-viewer*
@@ -18,7 +20,15 @@ md-viewer.nvim renders unsaved Markdown source in a persistent headless
 Chrome or Chromium page, captures the visible viewport as a PNG, and places
 that raster image over a read-only Neovim preview split.
 
-Preview text is not selectable. Source text remains editable and selectable.
+The preview is still a browser-rendered PNG surface, not native terminal
+text and not a real embedded webview. Mouse and keyboard interaction over
+the preview (|md-viewer-interaction|) is forwarded to the persistent
+Chromium DOM, which performs hit-testing, selection, search, and link
+resolution before the viewport is recaptured — this provides browser-like
+behavior, but it is a raster surface with synthetic interaction layered on
+top of it, not real terminal selection. Source text remains a normal,
+separately editable and selectable Neovim buffer throughout.
+
 The renderer opens no external browser window, starts no HTTP server, and
 listens on no localhost port. Runtime browser network requests are blocked by
 default.
@@ -26,11 +36,11 @@ default.
 =============================================================================
 REQUIREMENTS                                         *md-viewer-requirements*
 
-- macOS
-- iTerm2 3.5+ with Kitty graphics enabled, used without tmux
 - Neovim 0.12+
 - Node.js 22.12+
-- an existing Chrome or Chromium installation
+- an existing Chrome, Chromium, or Microsoft Edge installation
+- a terminal that advertises the Kitty graphics protocol, used without a
+  multiplexer -- see |md-viewer-terminals|
 - locked renderer dependencies installed with npm ci
 
 Playwright browser downloads are intentionally disabled. See README.md for
@@ -39,7 +49,7 @@ plugin-manager installation and the required renderer build hook.
 =============================================================================
 SETUP                                                       *md-viewer-setup*
 
-Minimal supported iTerm2 configuration: >lua
+Minimal configuration for a terminal that advertises Kitty graphics: >lua
 
     require("md-viewer").setup({
       image = { backend = "kitty_raw" },
@@ -55,6 +65,8 @@ lua/md-viewer/config.lua. Important option groups are:
     image       Graphical or cell backend and placement behavior
     sync        Source-following and preview navigation
     security    Runtime network policy and local document root
+    terminal    Terminal profile detection and capability overrides
+    interaction Mouse/keyboard interaction: selection, search, links
 
 Optional exact terminal cell sizes use MD_VIEWER_CELL_WIDTH_PX and
 MD_VIEWER_CELL_HEIGHT_PX.
@@ -75,7 +87,8 @@ origin and leaves that cut slightly misaligned. Two image options handle it:
                               outright where the terminal implements them.
                               Default { x = 0, y = 0 }.
 
-:MdViewerHealth reports both. See README.md for how to measure the offset.
+:MdViewerHealth reports both. See README.md for how to measure the offset,
+and docs/manual-testing.md for the per-terminal alignment matrix.
 
 =============================================================================
 COMMANDS                                                 *md-viewer-commands*
@@ -96,13 +109,46 @@ COMMANDS                                                 *md-viewer-commands*
 :MdViewerRefresh
         Force a fresh render of the active preview.
 
+                                                            *:MdViewerCopy*
+:MdViewerCopy
+        Copy the current preview selection to the unnamed register, and to
+        the system clipboard register when one is configured. A clean
+        notification, not an error, when nothing is selected.
+
+                                                 *:MdViewerClearSelection*
+:MdViewerClearSelection
+        Clear the current preview selection without clicking.
+
+                                                            *:MdViewerFind*
+:MdViewerFind [query]
+        Search the rendered preview for `query`. Prompts for a query via
+        |vim.ui.input()| when none is given.
+
+                                                        *:MdViewerFindNext*
+:MdViewerFindNext
+        Jump to the next search match.
+
+                                                    *:MdViewerFindPrevious*
+:MdViewerFindPrevious
+        Jump to the previous search match.
+
+                                                       *:MdViewerFindClear*
+:MdViewerFindClear
+        Clear the active search and its highlighting.
+
                                                           *:MdViewerHealth*
 :MdViewerHealth
         Open detailed environment, backend, renderer, and security status.
+        Round-trips to the renderer subprocess, so this is also the only
+        command that can report which document Chromium currently holds
+        active and how many document frames it has cached.
 
                                                            *:MdViewerDebug*
 :MdViewerDebug
-        Open session, renderer, timing, and placement diagnostics.
+        Open session, renderer, timing, selection/search, and placement
+        diagnostics. Selection and search state is reported as lengths and
+        counts only -- the selected text and search query content are
+        never printed here.
 
 =============================================================================
 PREVIEW NAVIGATION                                   *md-viewer-navigation*
@@ -115,8 +161,51 @@ The graphical preview maps these Normal-mode keys:
     CTRL-F, CTRL-B           Approximately one viewport
     PageDown, PageUp         Approximately one viewport
     gg, G                    Document top or bottom
+    y                        Copy the current selection (:MdViewerCopy)
+    /                        Prompt and search (:MdViewerFind)
+    n, N                     Next/previous search match
 
 Mouse-wheel events scroll the preview only when the pointer is over its split.
+
+=============================================================================
+MOUSE INTERACTION                                    *md-viewer-interaction*
+
+Every gesture below is dispatched through the `interact` transport to the
+live Chromium DOM -- see |md-viewer| for what that means and does not mean.
+Each is gated by its own `interaction.*` config flag.
+
+    Click and drag        Selects the dragged text (a real DOM selection)
+    Plain click            Clears an active selection; never moves the
+                            source cursor, whether or not anything was
+                            selected
+    Double-click            Selects the word under the pointer
+                            (`interaction.word_select`)
+    Triple-click             Selects the enclosing paragraph/block
+                            (`interaction.paragraph_select`)
+    CTRL-click / CMD-click  Activates a link under the pointer: opens
+                            http(s)/mailto externally, opens an in-root
+                            local file, or scrolls to a same-document
+                            fragment. Refuses an unsafe scheme or a
+                            document-root escape, with a notification. Does
+                            nothing over non-link text.
+
+Copying is always manual (`y` / :MdViewerCopy) unless
+`interaction.copy_on_select = true` is set, which is off by default.
+
+=============================================================================
+TERMINAL SUPPORT                                        *md-viewer-terminals*
+
+md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp by
+Kitty-graphics-protocol compatibility. Only iTerm2 and WezTerm have real
+historical, human-observed confirmation, and only for basic image
+rendering -- every interaction feature and every raw-image placement fix is
+graphically unvalidated on every terminal as of this writing. See
+docs/manual-testing.md for the full scenario matrix and the four honest
+status labels it uses.
+
+tmux, screen, and Zellij are not supported: no escape-sequence passthrough
+is implemented for any of them. :MdViewerHealth detects a multiplexer and
+reports it so the failure is diagnosable.
 
 =============================================================================
 SECURITY                                                 *md-viewer-security*
@@ -125,6 +214,13 @@ The default renderer blocks runtime browser networking, disables browser
 JavaScript, rejects remote images, disables raw Markdown HTML, and confines
 local images to a canonical document root. Initial npm ci installation may
 contact the configured npm registry.
+
+Mouse/keyboard interaction adds no new attack surface: every gesture
+resolves against the same already-sanitized document (nothing re-parses
+Markdown or re-touches the filesystem on a click or a drag), local-file link
+activation re-checks the document root the same way image loading does
+(symlinks included), and search/selection text is always handled as plain
+text, never interpreted as markup.
 
 See docs/security.md and SECURITY.md before enabling security.network or
 render.raw_html.
@@ -138,7 +234,8 @@ Run: >vim
     :MdViewerHealth
     :MdViewerDebug
 <
-Graphical pixel correctness requires direct interactive iTerm2 testing; a
-headless health check cannot validate terminal rendering or flicker.
+Graphical pixel correctness, click accuracy, and interaction behavior still
+require direct interactive terminal testing; a headless health check cannot
+validate terminal rendering, real mouse input, or flicker.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

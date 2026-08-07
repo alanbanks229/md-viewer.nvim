@@ -5,8 +5,12 @@
 <img width="1470" height="892" alt="v0.1.0-beta" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
 
 > [!IMPORTANT]
-> The preview is browser-rendered and rasterized. Preview text is not
-> selectable. Source text remains editable and selectable.
+> The preview is still a browser-rendered PNG surface. Mouse and keyboard
+> interactions are forwarded to the persistent Chromium DOM, which performs
+> hit-testing, selection, search, and link resolution before the viewport is
+> recaptured. This provides browser-like behavior but is **not** native
+> terminal text selection or a real embedded webview. Source text remains
+> separately, normally editable and selectable, as always.
 >
 > Rendering does not open an external browser window, start an HTTP server, or
 > listen on localhost. Runtime browser network requests are blocked by default.
@@ -19,16 +23,39 @@ source. A persistent headless Chromium page renders unsaved buffer contents to
 viewport-sized PNGs, which Neovim places in the preview split through the Kitty
 graphics protocol. The source buffer stays a normal editable Neovim buffer.
 
-The first public release is **v0.1.0-beta**. Its supported environment is:
+Requirements:
 
-- macOS
-- iTerm2 3.5+ with Kitty graphics protocol support enabled, used without tmux
 - Neovim 0.12+
 - Node.js 22.12+
 - an existing Google Chrome, Chromium, or Microsoft Edge installation
+- a terminal that advertises the Kitty graphics protocol, used without a
+  multiplexer (see "Terminal support" below)
 
-Kitty.app and the `kitty` or `kitten` executables are not required. Other
-terminals, tmux, and non-macOS hosts are not part of the initial support matrix.
+Kitty.app and the `kitty` or `kitten` executables are not required — any
+terminal that speaks the Kitty graphics protocol works, not only Kitty
+itself.
+
+### Terminal support
+
+md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp. Only
+iTerm2 and WezTerm have ever actually been launched and looked at on real
+hardware, and only for basic image rendering — every interaction feature
+(click, drag-to-select, search, copy, link activation) and every raw-image
+placement fix shipped since has **no graphical confirmation on any
+terminal**. `Protocol-compatible` is an honest, real status, not a lesser
+form of "supported" — it means the terminal advertises what md-viewer needs
+and nothing has been found broken, not that someone watched it work.
+
+The full, terminal-by-terminal scenario matrix — with the four honest labels
+this project uses (`Supported`, `Experimental`, `Protocol-compatible but
+unvalidated`, `Unsupported`) — lives in
+[docs/manual-testing.md](docs/manual-testing.md). Read it before reporting a
+graphical bug or claiming a terminal works.
+
+tmux, screen, and Zellij are **not supported and not advertised**: no
+escape-sequence passthrough is implemented for any of them.
+`:MdViewerHealth` detects a multiplexer and reports it so the failure mode is
+diagnosable, but that is the entire extent of multiplexer support.
 
 ## Features
 
@@ -39,6 +66,15 @@ terminals, tmux, and non-macOS hosts are not part of the initial support matrix.
 - Source-to-preview cursor following
 - Preview keyboard and mouse-wheel navigation
 - Low-resolution moving frames followed by a Retina frame after scrolling
+- Drag-to-select, double-click word selection, and triple-click paragraph
+  selection, with copy to the unnamed register and (when available) the
+  system clipboard
+- In-preview search with match highlighting and next/previous stepping
+- Ctrl/Cmd-click link activation: `http(s)`, `mailto`, in-root local files,
+  and same-document fragment links, each resolved through the actual
+  rendered DOM rather than the raw Markdown source
+- Exact source-position reporting where the parser supports it, degrading
+  honestly to line- or block-level precision rather than guessing
 - Pinned previews that remain visible while the source split shows another file
 - Local PNG, JPEG, GIF, and WebP images constrained to a document root
 - A text-cell fallback when a graphical backend is unavailable
@@ -61,7 +97,7 @@ installation.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.1.0-beta",
+  version = "v0.3.0",
   ft = "markdown",
   cmd = {
     "MdViewerOpen",
@@ -123,7 +159,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 vim.pack.add({
   {
     src = "https://github.com/alanbanks229/md-viewer.nvim",
-    version = "v0.1.0-beta",
+    version = "v0.3.0",
   },
 })
 
@@ -159,6 +195,7 @@ require("md-viewer").setup({
     local_images = true,
     max_local_image_bytes = 10 * 1024 * 1024,
     device_scale_factor = 2,
+    font_size_px = 16,
     cell_aspect_ratio = 0.5,
     estimated_cell_width_px = 10,
     max_width_px = 1920,
@@ -202,6 +239,30 @@ require("md-viewer").setup({
   security = {
     network = false,
     document_root = nil,
+  },
+  terminal = {
+    profile = "auto", -- "auto", or an explicit override: "iterm2", "kitty", "wezterm", "ghostty", "warp", "generic_kitty", "unknown"
+    kitty_graphics = "auto", -- "auto", "on", or "off"
+    probe = "off", -- "off" or "safe" -- an active runtime capability probe
+  },
+  interaction = {
+    enabled = true,
+    links = true,
+    -- Cells the pointer must move past `press` before it counts as a drag
+    -- rather than a click.
+    drag_threshold_cells = 1,
+    -- Gates installing the double/triple-click mappings at all.
+    double_click = true,
+    selection = true,
+    drag_debounce_ms = 40,
+    settle_ms = 120,
+    copy = true,
+    -- A plain click clears an existing selection; it never moves the source
+    -- cursor under any gesture.
+    copy_on_select = false,
+    word_select = true,
+    paragraph_select = true,
+    find = true,
   },
 })
 ```
@@ -266,13 +327,40 @@ Open a Markdown buffer, then use:
 | `:MdViewerClose` | Close the active preview |
 | `:MdViewerToggle [position]` | Toggle a preview |
 | `:MdViewerRefresh` | Force a fresh render |
+| `:MdViewerCopy` | Copy the current selection (also `y` with the preview focused) |
+| `:MdViewerClearSelection` | Clear the current selection without clicking |
+| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given (also `/`) |
+| `:MdViewerFindNext` | Jump to the next match (also `n`) |
+| `:MdViewerFindPrevious` | Jump to the previous match (also `N`) |
+| `:MdViewerFindClear` | Clear the active search |
 | `:MdViewerHealth` | Show environment and renderer checks |
 | `:MdViewerDebug` | Show session, timing, and placement diagnostics |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
 When the preview has focus, `j`/`k`, arrow keys, Ctrl-e/Ctrl-y,
 Ctrl-d/Ctrl-u, Ctrl-f/Ctrl-b, PageUp/PageDown, and `gg`/`G` move the rendered
-viewport. The mouse wheel scrolls the preview only when the pointer is over it.
+viewport. The mouse wheel scrolls the preview only when the pointer is over
+it.
+
+### Mouse gestures
+
+All of these are dispatched through the `interact` transport to the live
+Chromium DOM — see the important note at the top of this document. Every
+gesture is gated by its own `interaction.*` config flag; setting one to
+`false` disables just that gesture without touching the others.
+
+| Gesture | Action |
+|---|---|
+| Click and drag | Selects the dragged text (real DOM selection), matching browser/VS Code drag-select |
+| Plain click | Clears an active selection. Never moves the source cursor, whether or not anything is selected. |
+| Double-click | Selects the word under the pointer |
+| Triple-click | Selects the enclosing paragraph/block |
+| Ctrl-click / Cmd-click | Activates a link under the pointer: opens `http(s)`/`mailto` externally via `vim.ui.open`, opens an in-document-root local file, or scrolls to a same-document `#fragment`. Refuses (with a notification) any link resolving to an unsafe scheme (`javascript:`, `data:`, etc.) or escaping the configured document root. Over non-link text, it does nothing. |
+
+Copying (`y` / `:MdViewerCopy`) is always manual — nothing is copied
+automatically on selection unless `interaction.copy_on_select = true`, which
+is off by default (silently overwriting the system clipboard on every drag
+would be hostile).
 
 ## How rendering works
 
@@ -294,21 +382,40 @@ disabled in its browser context, raw Markdown HTML is disabled, and remote
 images are removed. Local images are converted to data URIs only after root,
 realpath, file type, signature, and size checks.
 
+Mouse and keyboard interaction adds no new attack surface of its own: every
+gesture resolves against the same sanitized, already-rendered document —
+nothing re-parses Markdown or re-touches the filesystem on a click, a drag,
+or a search. Link activation and local-file opening independently re-check
+the document root (mirroring the image-loading check, symlinks included) and
+refuse anything outside it or carrying an unsafe scheme, and every search
+match or selection is handled as plain text — a query or a selection
+containing HTML is matched/copied literally, never interpreted as markup.
+Diagnostics (`:MdViewerDebug`) report selection/search **lengths and counts
+only**, never the selected or searched text itself.
+
 Enabling `security.network` or `render.raw_html` relaxes the default policy and
 is reported by the health command. Review [SECURITY.md](SECURITY.md) before
 changing those options.
 
 ## Known beta limitations
 
-- The rendered preview is a PNG surface, not native terminal text. Drag to
-  highlight rendered text (a real, browser-painted selection), press `y` or
-  run `:MdViewerCopy` to copy it, and use `/`, `n`, `N` to search — clicking
-  anywhere clears the current highlight rather than moving the source cursor.
-- Direct iTerm2 use is the supported terminal configuration; tmux is untested.
+- The rendered preview is a PNG surface, not native terminal text or a real
+  embedded webview — see the note at the top of this document. Interaction
+  is real, browser-backed hit-testing and DOM manipulation forwarded over
+  the same local NDJSON transport as rendering, not terminal text selection.
+- Source-position precision degrades honestly (exact byte column → line →
+  block → none) depending on what the Markdown parser can establish for a
+  given piece of content; it is never guessed or interpolated.
+- Only iTerm2 and WezTerm have real historical confirmation, and only for
+  basic image rendering — every interaction feature and every raw-image
+  placement fix is graphically unvalidated on every terminal. See
+  [Terminal support](#terminal-support) and
+  [docs/manual-testing.md](docs/manual-testing.md).
+- tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
 - Graphical correctness still requires interactive terminal testing; headless
-  tests cannot validate pixels, overlay behavior, or flicker.
+  tests cannot validate pixels, overlay behavior, click accuracy, or flicker.
 
 See [troubleshooting](docs/troubleshooting.md) and the
 [manual test checklist](docs/manual-testing.md) when reporting a graphical bug.

@@ -19,6 +19,17 @@ JavaScript is disabled in the render context, and local image access is confined
 to a canonical document root. The renderer uses an existing Chrome or Chromium
 installation; Playwright browser downloads are intentionally disabled.
 
+Mouse and keyboard interaction (drag-to-select, double/triple-click, search,
+link activation) is forwarded to the same already-rendered, already-sanitized
+document over the same local stdin/stdout transport as rendering. It adds no
+new attack surface: no interaction re-parses Markdown or re-touches the
+filesystem, link activation and local-file opening re-run the same
+document-root and symlink checks image loading already uses, and search
+queries and selected text are always handled as plain text -- never
+interpreted as markup or executed. Diagnostics (`:MdViewerDebug`) report
+selection and search state as lengths and counts only, never as the
+underlying text.
+
 Initial `npm ci` dependency installation may contact the configured npm
 registry. Review the committed lockfile and npm configuration before installing
 in a sensitive environment.

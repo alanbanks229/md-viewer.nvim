@@ -18,6 +18,21 @@ return function(t)
     { row = 1, col = 2, width = 40, height = 20, exclusions = { { row = 3, col = 4, width = 5, height = 1 } } }
   session.viewport_calibration_tier = "env"
 
+  -- Part 7 §7.4: selection/find state (length only, never the text itself),
+  -- interaction request/stale/coalesced counters, and the content revision
+  -- the cached frame is pinned to must all be visible, and a selected
+  -- string must never appear verbatim in the diagnostics buffer.
+  session.renderer_revision = "9:1"
+  session.selection_active = true
+  session.selection_text_length = 123
+  session.find_active = true
+  session.find_query = "needle"
+  session.find_match_count = 4
+  session.find_active_index = 1
+  session.interaction_request_count = 6
+  session.interaction_stale_count = 2
+  session.coalesced_drag_events = 3
+
   vim.cmd("MdViewerDebug")
   vim.wait(2000, function() return vim.bo.filetype == "lua" end, 20)
   t.eq("lua", vim.bo.filetype, "MdViewerDebug renders its snapshot buffer")
@@ -27,6 +42,14 @@ return function(t)
   t.ok(buffer_text:match('"env"'), "snapshot carries the simulated session's calibration tier value")
   t.ok(buffer_text:match("placement"), "snapshot reports the session placement field")
   t.ok(buffer_text:match("exclusions"), "snapshot placement includes its exclusion rectangles")
+  t.ok(buffer_text:match('content_revision = "9:1"'), "snapshot reports the session's current content revision")
+  t.ok(buffer_text:match("selection_text_length = 123"), "snapshot reports the cached selection's length")
+  t.ok(buffer_text:match('find_query = "needle"'), "snapshot reports the active search query")
+  t.ok(buffer_text:match("find_match_count = 4"), "snapshot reports the active search's match count")
+  t.ok(buffer_text:match("interaction_request_count = 6"), "snapshot reports the interaction request count")
+  t.ok(buffer_text:match("interaction_stale_count = 2"), "snapshot reports the stale-interaction count")
+  t.ok(buffer_text:match("coalesced_drag_events = 3"), "snapshot reports the coalesced-drag-event count")
+  t.ok(buffer_text:match("interaction_enabled = true"), "snapshot reports the global interaction-enabled state")
 
   vim.cmd("bwipeout!")
   controller.close(source)

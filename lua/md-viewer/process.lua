@@ -18,7 +18,7 @@ end
 local function deliver_error(proc, message)
   for id, callback in pairs(proc.callbacks) do
     proc.callbacks[id] = nil
-    vim.schedule(function() callback(nil, message) end)
+    vim.schedule(function() callback(nil, message, { code = "PROCESS_EXIT" }) end)
   end
 end
 
@@ -41,7 +41,11 @@ local function consume(proc, data)
           if response.ok then
             callback(response.result, nil)
           else
-            callback(nil, response.error or "renderer error")
+            -- `code`/`detail` (see protocol.js) let a caller distinguish e.g. a
+            -- STALE_INTERACTION supersession from a genuine failure without
+            -- parsing the human-readable message. Third argument, so every
+            -- existing two-arg callback keeps working unchanged.
+            callback(nil, response.error or "renderer error", { code = response.code, detail = response.detail })
           end
         end)
       end
@@ -127,7 +131,7 @@ function M.request(method, params, callback)
     if write_err and proc.callbacks[id] then
       local cb = proc.callbacks[id]
       proc.callbacks[id] = nil
-      vim.schedule(function() cb(nil, "renderer stdin: " .. tostring(write_err)) end)
+      vim.schedule(function() cb(nil, "renderer stdin: " .. tostring(write_err), { code = "PROCESS_WRITE_ERROR" }) end)
     end
   end)
   return id
