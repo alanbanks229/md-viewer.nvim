@@ -2806,3 +2806,83 @@ headless verification proves the dispatch and capture-quality logic are
 wired correctly; it does not prove the rendered result looks sharp or feels
 right to a human in a real iTerm2 session. Operator confirmation on real
 hardware remains the natural next step.
+
+## Post-Part-6 follow-up 3: the preview "rolled" whenever any notification popped up
+
+Commit `37b18de` on `feat/interaction-transport`.
+
+Operator report, after using the follow-up above on real hardware: pressing
+`y` to copy, while a "snacks.nvim"-style floating notification was visible,
+made the preview pane redisplay its *own already-shown, unchanged* image
+shifted down by about one content row, with the row that had been below the
+visible viewport wrapping around to appear at the top. Three diagnostic
+questions to the operator ruled out the interact/scroll pipeline entirely:
+the shift snapped back to correct the instant the notification closed, it
+reproduced for *any* md-viewer notification (not only copy's), and
+`laststatus=3` on the operator's system ruled out a `raw_statusline_guard_cells`
+window-count interaction that had briefly looked like a candidate. That
+combination pointed at the raw-Kitty image *placement* code, not rendering —
+a re-display of unchanged bytes, not a wrongly-scrolled new capture.
+
+**Root cause.** `controller.lua`'s `reconcile_placement`, run from a `WinNew`/
+`WinClosed` autocmd and from the `ui_poll_ms` backend poll, recomputes
+`preview.placement()` on every occlusion-relevant window event and calls
+`session.backend.move()` (delete the old Kitty placement, re-crop and
+re-place the image) whenever the freshly computed placement differs from
+`session.last_placement` in *any* field — including `exclusions`, the
+rectangle list `coordinates.passive_overlays` builds for every non-focusable
+floating window that geometrically overlaps the preview (used so a click
+landing on a notification doesn't resolve into the markdown underneath it).
+A notification opening adds one exclusion; closing it removes one — neither
+changes the image's actual on-screen row/col/width/height at all, yet the
+old code re-cropped and redrew the image anyway. `kitty_raw.lua`'s
+`place_regions`/`visible_regions` split the placement into multiple
+independently-cropped regions around each exclusion and re-issue them as a
+fresh set of Kitty placement IDs; that redundant delete-and-resplit cycle is
+what was visible as the shift.
+
+The fix didn't need to touch that crop-splitting logic at all, because it
+turned out to be unnecessary for this case in the first place: every
+terminal profile in `terminal.lua` sets the raw image's z-index to `-1`
+(confirmed by grep, not assumed), meaning the image is *always* composited
+strictly beneath normal terminal cell content. A floating window — with a
+real background color, as virtually every float has — already visually
+occludes the image without any crop at all. The `exclusions` list is only
+ever actually consumed for click-resolution (`coordinates.cell_to_css`,
+read via `session.last_placement.exclusions` in `interaction.locate`), never
+for anything visual.
+
+**Fix.** `reconcile_placement` now decides whether to call `backend.move()`
+using a new `same_geometry` check — row/col/width/height only, deliberately
+ignoring `exclusions` — instead of the old `coordinates.same` (which also
+compared exclusions). `session.last_placement` is still unconditionally
+updated to the freshly computed placement either way, so click-resolution
+never goes stale; only the unnecessary visual re-crop is skipped. `coordinates.same`
+itself is untouched (still exclusion-aware) since nothing else consumes it
+after this change removed its one caller. The now-unused `coordinates`
+import was removed from `controller.lua`.
+
+### Tests
+
+`tests/lua/cases/controller.lua` gained a direct regression test: with a
+stubbed `kitty_raw` backend counting `move()` calls, opening a real
+non-focusable floating window over the preview area (mirroring the existing
+passive-overlay test just above it) waits for the autocmd-driven reconcile
+to add an exclusion to `session.last_placement`, then asserts `move()` was
+never called; closing the float is asserted the same way on the way back
+down to zero exclusions.
+
+### Verification
+
+Lua headless suite: 479/479 assertions (up from 474 by this one new test).
+`npm test --prefix renderer`: 128/128, unchanged — this fix never touches
+the renderer. `stylua --check`: clean.
+
+**No graphical validation was performed** — unchanged from every part and
+follow-up before it. The regression test proves `backend.move()` is no
+longer invoked for a passive float's own exclusion change, which is the
+mechanism identified as the cause; it does not independently re-prove the
+visual artifact is gone in a real iTerm2 session, since headless tests
+cannot observe actual Kitty graphics compositing. Operator confirmation on
+real hardware remains the natural next step, same as the reports above that
+led to it.
