@@ -13,11 +13,15 @@ repository right now, not what was planned.
 | 1 | Foundations — capability layer, browser discovery, CI, test harness | `0d62c1f` (initial), `b2ceaf9` (post-commit `:MdViewerHealth` crash fix — see below) |
 | 2 | Portable rendering — generic Kitty backend, profile-driven placement, calibration tiers | `03f2381` |
 | 3 | Interaction transport — `interact` method, document isolation, staleness lanes, DOM hit-testing | `dbd151f` |
-| 4 | Mouse layer, click-to-source, safe links | `e3139e8` |
+| 4 | Mouse layer, click-to-source (later removed — see Part 7), safe links | `e3139e8` |
 | 5 | Exact source provenance — inline mapping, byte-accurate columns | `1db9cfe` |
+| 6 | Selection and search — DOM selection, copy, rendered-text find | `c06f4bc` |
+| 7 | Hardening and docs — regression, security review, lifecycle coverage, expanded diagnostics, honest compatibility matrix, full documentation pass | `26e637d` |
 
-Parts 1–2 were merged to `main` via PR #1. Parts 3–5 are on the branch
-`feat/interaction-transport`, cut from `main`, and have not been pushed.
+Parts 1–2 were merged to `main` via PR #1. Parts 3–7, seven post-Part-6
+follow-up fixes, and one out-of-band UX change (click-to-source removal) are
+on the branch `feat/interaction-transport`, cut from `main`, and have not
+been pushed as of Part 7's completion.
 
 ---
 
@@ -3326,3 +3330,387 @@ not proven and need the operator's iTerm2:
    half of the 20px cell, so the two are indistinguishable from these screenshots.
    Changing the terminal font size once and re-measuring settles it; if it tracks
    cell width, the setting should be expressed as a fraction rather than pixels.
+
+## What Part 7 actually built
+
+Commit `26e637d`. Full regression, a real security review, complete
+lifecycle-cleanup verification, expanded diagnostics, and a full
+documentation pass across every doc file — turning six parts plus seven
+post-Part-6 follow-ups into a `v0.3.0` release.
+
+### 7.1 Full regression, and a real bug it found
+
+Ran the full automated suite as a baseline (530/530 Lua, 128/128 Node,
+stylua clean) before touching anything, then re-verified by hand the
+behaviors earlier parts touched but did not own: initial rendering, unsaved
+edits, cleanup, and backend fallback, each via a real headless command
+sequence (`controller.open()`, a live buffer edit with no `:w`,
+`controller.close()`, `backends.select()` in a TUI-less environment), not
+just by re-running existing unit tests.
+
+Building a new lifecycle test (`tests/lua/cases/lifecycle.lua`) that opened
+two sessions in two different windows surfaced a genuine, real regression:
+opening a *second* window with `nvim_open_win`/`:split` transiently
+collapsed the two sessions into one. Traced to `controller.lua`'s
+`WinEnter`/`BufEnter`/`TabEnter`/`VimResume`/`FocusGained` autocmd, which
+reassigns `session.source_win` synchronously off `nvim_get_current_buf()`.
+`:split other.md` (and, it turns out, even a bare `nvim_open_win(buf2, ...)`
+call) fires `WinEnter` for the new window *while it still shows the window it
+split from's buffer* — that is how `:split` works, before the buffer swap
+that follows a moment later in the same command. The old code read
+`nvim_get_current_buf()` at that transient instant and reassigned
+`source_win` to the new window; nothing ever corrected it back, since the
+*real* source window (still legitimately showing the source buffer) was
+never touched again. Confirmed on real Neovim commands, not just the
+`nvim_open_win` reproduction: `:leftabove vsplit /tmp/other.md` while a
+preview was open for `/tmp/test1.md` left `session.source_win` pointed at
+the new window showing the unrelated file, silently breaking
+`WinScrolled`-driven cursor-follow in the window the user was actually still
+working in.
+
+**Fix.** The reassignment is now deferred one event-loop tick via
+`vim.schedule`, re-reading `nvim_get_current_buf()`/`nvim_get_current_win()`
+only once the whole compound command has settled — by which point a
+`:split other.md` has already swapped in the new file, so the stale
+`WinEnter`'s check (`current_buf == the buffer captured at fire time`) now
+correctly fails and skips the reassignment, while a plain `:split` with no
+buffer change (a legitimate case where the new window really does now show
+the source buffer) still passes it. New regression test in
+`tests/lua/cases/controller.lua`, confirmed to fail without the fix
+(`git stash` the fix, watch `source_win` come back `1011` instead of the
+expected `1000`, restore it).
+
+### 7.2 Security review
+
+Real attacks, not re-assertions of what Parts 3–6 already covered (which
+turned out to be substantial: `classifyLink`'s unsafe-scheme rejection,
+document-root/symlink containment for both image loading and local-file link
+clicks, cross-document interaction isolation, and literal (non-HTML)
+handling of search/selection text were all already tested end to end before
+Part 7 began). What Part 7 added:
+
+- `tests/node/security-runtime.test.js`: `javaScriptEnabled: false` actually
+  stops a `<script>`/`onerror` handler from running, tested by handing
+  `browser.js` a `<script>` tag directly — bypassing the sanitizer on
+  purpose — to prove the *second*, independent layer holds even if the first
+  ever had a bug. A second test attempts `page.goto()` to a real external
+  URL (something no code path in `browser.js` ever does — confirmed by a
+  companion structural test that greps `browser.js` for any navigating API)
+  and confirms the network policy refuses it and the page never displays the
+  external site's content.
+- `tests/node/no-listening-port.test.js`: spawns the real renderer
+  subprocess, forces a full real-Chromium launch, and diffs the system's
+  listening-TCP-port list before and after (`lsof -iTCP -sTCP:LISTEN`) —
+  asserting "no listening port" against actual OS state rather than against
+  the absence of `net.createServer` calls in the source, which would miss a
+  dependency (Playwright's own CDP transport, in particular) introducing one
+  without any md-viewer code changing at all. Confirmed Playwright's local
+  Chromium launch uses pipe transport, not a TCP debug port, on this
+  platform.
+- `tests/node/markdown.test.js`: arbitrary `data-*` attributes (beyond the
+  four provenance keys the allowlist actually grants) and
+  `javascript:`/`vbscript:`/`data:`/protocol-relative hrefs are stripped
+  even when `rawHtml: true`.
+- `tests/lua/cases/interaction.lua`: a symlink inside the document root
+  pointing at a real file outside it is rejected for local-file link clicks
+  (`security.resolve_local_link`), mirroring the existing Node-side
+  `localImageDataUri` symlink test that only ever covered image loading.
+- A parallel security-review agent independently read the full branch diff
+  (`git diff origin/main...HEAD` plus the working-tree diagnostics changes)
+  against the same threat model and found no additional concrete,
+  exploitable findings — every high-risk surface it checked (path
+  traversal, XSS-equivalent DOM injection, command injection, network-policy
+  bypass, and the new `process.lua` error-metadata threading) was either
+  read-only, already defended by the existing controls, or explicitly
+  defended in the new code itself.
+
+### 7.3 Cleanup and lifecycle
+
+New `tests/lua/cases/lifecycle.lua` covers the paths nothing else exercised
+end to end (TabLeave/VimSuspend and tab-hidden placement teardown were
+already thoroughly covered by `tests/lua/cases/tabpage_placement.lua` via a
+real `:tabnew`/`:tabclose`, which is what actually fires those autocmds):
+
+- A real `BufWipeout` — on both the source buffer and the preview buffer
+  independently — releases the session, clears the backend image, and
+  restores mouse mappings once it was the last graphical session.
+- A real `VimLeavePre` (`close_all`) sweeps *every* open session's image,
+  calls each backend's own `clear_all()` as a backstop, restores mouse
+  mappings, and stops the renderer subprocess — tested with two concurrent
+  sessions, not one, so "every" is actually exercised.
+- A `selection_preview` request still in flight when its session closes: the
+  late-arriving callback does not error and does not resurrect any
+  image/display state on the now-closed session — relying on the same
+  pointer-identity check (`session.pointer ~= pointer`) the existing code
+  already used for this, now with a regression test proving it holds across
+  a real close.
+
+No lifecycle-path *code* changes were needed beyond the `source_win` fix
+above — `close_session`'s existing `valid()`/pointer-identity guards already
+made every path safe; they were simply untested until now.
+
+### 7.4 Diagnostics
+
+`process.lua`'s `M.request` callback gained an optional third argument,
+`meta = { code, detail }`, threading the renderer's machine-readable error
+code (`protocol.js`'s `response.code`) through to Lua without changing any
+existing two-argument callback's signature. `interaction.lua`'s new
+`interact_request` wrapper is the only consumer: it counts every `interact`
+request sent per session (`interaction_request_count`) and, by checking
+`meta.code == "STALE_INTERACTION"`, separately counts how many lost a race
+against a newer request (`interaction_stale_count`) — a real,
+machine-readable classification rather than pattern-matching the
+human-readable error string, which is what the codebase's one prior
+precedent for this (`renderer.lua`'s `"capture cache missing"` string match)
+would have required.
+
+`coalesced_drag_events` counts a debounce firing while a prior
+`selection_preview` request is still in flight (the point it would have sent
+is dropped; whichever `on_drag` call produces the next point is what
+actually gets sent once the in-flight one completes) — mirroring
+`coalesced_scroll_events`'s existing role for scroll.
+
+`selection_text_length` (never the text) is now recorded everywhere a
+selection becomes active (`word_select`, `paragraph_select`, both drag-preview
+and settle callbacks) and cleared everywhere one is dropped
+(`clear_selection`, `forget_selection`) — wiring up a field
+(`pointer.cached_selected_text`) that had existed, unused, since Part 6.
+
+`:MdViewerDebug` now reports: `content_revision`, `selection_active`,
+`selection_text_length`, `find_active`/`find_query`/`find_match_count`/
+`find_active_index`, `interaction_request_count`, `interaction_stale_count`,
+`coalesced_drag_events`, and the global `interaction_enabled` state.
+`:MdViewerHealth` now reports `interaction_enabled` and, via the renderer's
+existing `health` response (`browser.js`'s `activeDocument`/
+`cachedDocumentFrames`, already computed but never surfaced to Lua):
+`chromium_active_document`, `chromium_cached_document_frames`,
+`chromium_cached_documents`, `chromium_lane_documents`,
+`chromium_interaction_documents`. `:checkhealth md-viewer` gained an
+`interaction_enabled` ok/warn line and an explicit note that Chromium's
+active-document state is not queried by `:checkhealth` (it cannot await the
+renderer subprocess) and is only available via `:MdViewerHealth`.
+
+All three commands were invoked directly in a headless session (policy §5) —
+not just their underlying `collect()`/`snapshot()` functions — with a real
+preview open and synthetic selection/find state injected on the session, and
+every new field rendered without error. `checkhealth` in particular was
+driven exactly as `:checkhealth md-viewer`, per policy §5's standing
+requirement, and confirmed clean (`checkhealth: checks done`, no error).
+
+### 7.5 Manual compatibility matrix
+
+`docs/manual-testing.md` was rewritten from a thin, single-terminal,
+Part-1-era checklist (18 rows, all `PENDING`, iTerm2 only) into a repeatable
+five-terminal (iTerm2, Kitty, WezTerm, Ghostty, Warp) procedure using the
+four honest status labels, covering every scenario §7.5 lists. Every cell
+defaults to `Protocol-compatible but unvalidated`, since this development
+environment has no graphical terminal at all — no cell was marked
+`Supported` on the strength of anything short of an actual human watching a
+real screen, per policy §4.
+
+The one nuance recorded explicitly: two real, historical operator
+confirmations exist (iTerm2 and WezTerm, both from Part 2, both basic PNG
+rendering only, both predating the interaction transport). The document
+calls these out as scope-limited and superseded by everything Part 3 onward
+added — every interaction feature and every raw-image placement fix (the
+roll/blink fix, the notification bleed-through fix, the sub-cell
+`raw_cell_offset_px`/`raw_overlay_bleed_cells` calibration) shipped with zero
+graphical validation on any terminal, a fact each of the seven post-Part-6
+follow-up writeups already stated individually; this document is the first
+place it's stated as one honest, consolidated claim about the matrix as a
+whole.
+
+The passive-overlay alignment section records the two open questions
+follow-up 7 left (does a given terminal implement the Kitty protocol's
+`X`/`Y` keys; is the iTerm2 offset a constant margin or does it scale with
+cell width) as a per-terminal table with one row filled in (iTerm2,
+partially — the constant-vs-scaling question is explicitly unresolved) and
+four rows unmeasured. **The pixels-vs-fraction decision `part-7-hardening-
+and-docs.md` asked to be made before `v0.3.0` freezes the option was
+considered and explicitly deferred, not resolved**: `raw_cell_offset_px`
+ships as pixels, unchanged, because the single iTerm2 measurement cannot
+distinguish the two theories and there is no second data point available in
+this environment to decide with. This is recorded as real, open future work
+in both `docs/manual-testing.md` and here, not silently punted.
+
+### 7.6 Documentation
+
+Every file `part-7-hardening-and-docs.md` named was updated. The largest gap
+found: `doc/md-viewer.txt`, `docs/troubleshooting.md`, and `docs/security.md`
+still described the pre-Part-3 product outright (`doc/md-viewer.txt` said
+"Preview text is not selectable", which had been false since Part 6;
+`docs/troubleshooting.md` referenced `:MdViewerSpikeStop`, a command that
+does not exist — stale even at the time it was written, since the real
+command is `:MdViewerClose`). Six parts of shipped interaction surface
+(selection, search, copy, link activation, six new commands, an entire
+`interaction.*` config block) were not documented in README.md's
+configuration block, `doc/md-viewer.txt`, or `docs/architecture.md` at all
+before this pass.
+
+- README.md and `docs/architecture.md` now both lead with the exact raster-
+  surface/synthetic-interaction distinction `part-7-hardening-and-docs.md`
+  §7.6 specifies, verbatim, in a prominent position (README's top
+  `[!IMPORTANT]` callout; architecture.md's opening blockquote).
+  `docs/architecture.md` gained a full new "Interaction" section (staleness
+  lanes, document isolation, hit-testing/precision levels, selection/search,
+  link dispatch, Lua-side gesture dispatch) that did not exist at all before
+  this pass — Parts 3–6 built all of it without architecture.md ever being
+  updated to describe it.
+- README.md gained the `interaction.*` config block, all six new commands
+  in the usage table, a "Mouse gestures" section, and a "Terminal support"
+  section that replaces the old single-terminal "supported environment"
+  claim with an honest summary and a pointer to the full matrix.
+  `doc/md-viewer.txt` mirrors all of it in Vim help format, gained two new
+  TOC sections (`Mouse interaction`, `Terminal support`), and was verified
+  with a real `:helptags` run (no errors).
+- `SECURITY.md` and `docs/security.md` each gained a section on the
+  interaction surface: what it can and cannot do, and why it introduces no
+  new attack surface (re-uses the same sanitized document, the same
+  document-root/symlink checks, and treats all search/selection text as
+  plain text).
+- `docs/troubleshooting.md` gained nine new sections mapping every
+  post-Part-6 follow-up's symptom to its setting or mechanism (notification
+  bleed-through, alignment gap/overhang, roll/blink, stranded-tabpage image,
+  interaction not responding, no selection after a drag, wrong click
+  position, wrong terminal profile) and fixed the stale
+  `:MdViewerSpikeStop` reference.
+- `CHANGELOG.md` gained the `[0.3.0]` entry (Added/Changed/Fixed, covering
+  Parts 3–7 and every post-Part-6 follow-up). `VERSIONING.md`'s two stale
+  "click-to-source" example references were corrected to describe what
+  actually shipped. `prompts/part-7-hardening-and-docs.md`'s own §7.5 line
+  was corrected the same way, per policy §6.5, since it named a scenario
+  ("click-to-source") that no longer exists as a gesture to test.
+
+### 7.7 Final polish
+
+`stylua --check` clean throughout (CI already enforces it since Part 1).
+Dead-code sweep of `interaction.lua` (the file most touched across Parts
+3–7) found and removed three genuinely unused items, confirmed by grep
+across the whole repository including tests: `M.is_captured` (defined,
+never called anywhere — `M.captured_session()` is the function actually
+used), and two pointer-table fields, `content_revision` and
+`interaction_serial`, both set on every press and never read anywhere.
+README's terminal claims were written to match `docs/manual-testing.md`
+exactly (both describe the same two-terminal historical confirmation, the
+same five recognized terminals, and the same tmux/screen/Zellij
+non-support). Version bumped to `0.3.0` in `renderer/package.json`,
+`renderer/package-lock.json` (via `npm version`, not hand-edited, to keep
+the lockfile internally consistent), and `lua/md-viewer/init.lua`'s
+`M.version` field.
+
+## Tests run and results (Part 7)
+
+```
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
+NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+npm test --prefix renderer
+stylua --check lua/ plugin/ tests/lua/
+```
+
+- Lua: **591/591 assertions** (up from a measured 530/530 baseline —
+  +61 from `lifecycle.lua` (new), the controller.lua `source_win`
+  regression test, the interaction.lua symlink/diagnostics/coalescing
+  tests, the process.lua/protocol.lua boundary tests, and the health.lua/
+  debug.lua field-rendering assertions).
+- Node: **134/134 tests** (up from a measured 128/128 baseline — +6 from
+  `security-runtime.test.js` (3), `no-listening-port.test.js` (1), and two
+  new `markdown.test.js` sanitization tests).
+- `stylua --check lua/ plugin/ tests/lua/`: clean.
+- `:checkhealth md-viewer`, `:MdViewerHealth`, and `:MdViewerDebug` each
+  invoked directly (not just their library functions) in a real headless
+  session per policy §5, with a preview open and synthetic selection/find
+  state present; all three completed without error and every new field
+  rendered correctly, including through `nvim_buf_set_lines`'s
+  embedded-newline rejection that broke `:MdViewerHealth` in Part 1.
+- The `controller.lua` `source_win` regression test was confirmed meaningful
+  the way this project always confirms a regression test: `git stash` the
+  fix, watch the new test fail with the wrong window id, restore the fix,
+  watch it pass.
+
+**No graphical validation was performed**, unchanged from every part and
+follow-up before it — this development environment has no attached
+graphical terminal. Everything in §7.1–§7.4 above is proven by real headless
+command execution (real autocmds, real windows/buffers/tabpages, a real
+renderer subprocess, real Chromium where the security tests need it) but
+none of it is real terminal compositing. `docs/manual-testing.md` records
+that honestly rather than papering over it.
+
+## Known limitations and unresolved risks (Part 7)
+
+- **Every scenario in the compatibility matrix remains graphically
+  unvalidated**, on every one of the five recognized terminals, as of this
+  writing. The two historical Part 1–2 confirmations (iTerm2, WezTerm) cover
+  basic PNG rendering only and predate the entire interaction transport and
+  every raw-image placement fix.
+- **The `raw_cell_offset_px` pixels-vs-fraction question is unresolved**,
+  not just unmeasured — it was explicitly considered and deferred for lack
+  of a second data point. Shipping `v0.3.0` with the option as pixels is a
+  real, if narrow, risk that the API shape needs to change later in a way
+  that breaks an operator's configured value, if a second terminal or a
+  cross-font-size iTerm2 measurement shows the offset scales with cell
+  width rather than being constant.
+- **tmux, screen, and Zellij remain entirely unsupported** — detection and
+  an honest `:MdViewerHealth` warning only, no passthrough implementation.
+  This is unchanged from every prior part and is now explicit policy, not
+  an oversight.
+- **The `source_win` fix's scope was verified narrowly.** The regression
+  test covers the specific compound-command shape that was reported
+  (`:split other-file`); it does not exhaustively enumerate every Vim
+  command sequence that could produce a similar transient buffer/window
+  mismatch (e.g. `:edit`-in-place mid-autocmd, or a session-restore plugin
+  replaying window layout). The `vim.schedule` deferral is a general fix
+  (it re-reads state after the *whole* command settles, not after a
+  specific known-bad shape), so it should generalize, but that has not been
+  separately stress-tested.
+- **The security review's scope is this branch's diff**, not the codebase's
+  full attack surface from first principles. It confirms nothing *newly
+  introduced* by Parts 3–7 broke an existing control or added a new gap;
+  it does not re-certify Part 1–2's own security work, which was already
+  covered in those parts' own reviews.
+
+## Decisions that changed assumptions in the original specification (Part 7)
+
+- **`raw_cell_offset_px` ships as pixels, not a fraction, with the shape
+  question recorded as open rather than settled** — §7.5's acceptance
+  criterion asked for the question to be "decided before v0.3.0 freezes the
+  option." It was considered and explicitly deferred instead of guessed at,
+  because guessing wrong would be a worse outcome (a breaking config change
+  later) than shipping with the question still open and documented as such.
+- **The manual-testing rewrite treats "two historical, scope-limited
+  confirmations" as closer to zero than to partial credit.** An earlier
+  draft instinct would have been to mark iTerm2 `Supported` for "basic
+  rendering" rows and unvalidated for the rest; the final document instead
+  states plainly, in prose, that those confirmations predate and do not
+  cover any of Part 3 onward's work, so a reader skimming only the table
+  cannot walk away over-trusting iTerm2's column.
+- **A full regression pass is expected to find and fix real bugs, not only
+  re-run existing tests** — the `source_win` bug was found by building new
+  test coverage for an unrelated requirement (§7.3's lifecycle table) and
+  noticing the fixture itself was behaving unexpectedly. Policy §1's "one
+  part per session" boundary was read as compatible with fixing a bug in
+  already-shipped code discovered during the regression/hardening pass
+  Part 7 exists to perform, as distinct from adding new functionality that
+  belongs to a future part.
+
+## Safe stopping point and first next action
+
+The tree is green and complete for everything achievable without a
+graphical terminal: 591/591 Lua assertions, 134/134 Node tests, stylua
+clean, security review complete (real attacks attempted, not just
+re-assertions), every lifecycle path tested end to end, diagnostics
+expanded and verified via real command invocation, and documentation
+brought current across every file `part-7-hardening-and-docs.md` named.
+
+**The first next action is entirely the operator's, not code.** Work
+through `docs/manual-testing.md` in every terminal actually available,
+starting with iTerm2 (the terminal with prior, if scope-limited,
+confirmation) and prioritizing the two rows every post-Part-6 follow-up
+writeup flagged as unconfirmed: passive-overlay opacity (no Markdown
+showing through a notification) and placement stability (no roll/blink when
+one appears or disappears). Record real results — `Supported`,
+`Experimental`, or honestly `Unsupported` — in the matrix, and resolve the
+`raw_cell_offset_px` pixels-vs-fraction question the moment a second
+terminal or a font-size change on iTerm2 is available to measure against.
+Once that operator pass is recorded, `v0.3.0` is ready to tag exactly as it
+stands in code today — no further implementation work is expected to be
+required first.

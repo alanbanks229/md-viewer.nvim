@@ -1,10 +1,10 @@
 ---
 part: 7
 title: Hardening, documentation, and the compatibility matrix
-status: not-started
+status: done
 model: Sonnet 5
 depends_on: parts 1-6 and the post-Part-6 follow-ups
-commit: ""
+commit: "26e637d"
 ships: v0.3.0
 ---
 

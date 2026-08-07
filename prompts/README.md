@@ -20,8 +20,11 @@ The reference documents bundle two independent goals:
 
 - **Portability** — run correctly on iTerm2, Kitty, WezTerm, Ghostty, and Warp,
   across macOS and Linux (Windows best-effort).
-- **Interaction** — click-to-source, text selection, copy, search, and safe
-  links over the rasterized preview.
+- **Interaction** — text selection, copy, search, and safe links over the
+  rasterized preview. (Click-to-source was also built this way in Part 4,
+  then replaced by click-to-deselect in an out-of-band follow-up after Part
+  6 — it fought the drag-to-select gesture. See CHANGELOG.md's `[0.3.0]`
+  entry.)
 
 Portability is sequenced first because it is lower-risk, shorter, and produces a
 genuinely shippable release on its own. Interaction is then built as a vertical
@@ -40,11 +43,22 @@ stopping point is coherent.
 | 4 | [Mouse and navigation](part-4-mouse-and-navigation.md) | Gesture model, cell→CSS coordinates, click-to-source, safe links | Sonnet 5 / Sonnet 5 | done | e3139e8 |
 | 5 | [Source provenance](part-5-source-provenance.md) | Exact Markdown columns, UTF-16→UTF-8 byte conversion | **Opus 5** / **Opus 5** | done | 1db9cfe |
 | 6 | [Selection and search](part-6-selection-and-search.md) | DOM selection, copy, rendered-text find | Sonnet 5 / Sonnet 5 | done | c06f4bc |
-| 7 | [Hardening and docs](part-7-hardening-and-docs.md) | Regression, security review, compatibility matrix, documentation | Sonnet 5 / Sonnet 5 | not-started | — |
+| 7 | [Hardening and docs](part-7-hardening-and-docs.md) | Regression, security review, compatibility matrix, documentation | Sonnet 5 / Sonnet 5 | done | 26e637d |
 
 **Release checkpoints.** Part 2 completes a shippable `v0.2.0` — genuinely
 cross-terminal, with no interaction changes. Part 7 completes `v0.3.0`. Parts 3
 through 6 are not individually releasable but each is independently revertible.
+
+**Part 7 is done; `v0.3.0` is ready to tag.** All automated verification is
+green (591/591 Lua assertions, 134/134 Node tests, stylua clean, including a
+real security review and a real regression fix found and closed during the
+pass — see `docs/cross-platform-implementation-status.md`'s "What Part 7
+actually built"). What remains is exclusively the "Operator verification
+(manual)" work in `prompts/part-7-hardening-and-docs.md` and
+`docs/manual-testing.md`: this development environment has no graphical
+terminal, so every scenario in the compatibility matrix is honestly recorded
+as unvalidated pending a human actually launching md-viewer in a real
+terminal and looking at it.
 
 **Parts 5 and 6 are swappable.** Both depend only on Parts 3 and 4, and neither
 depends on the other. Part 5 is placed first because it upgrades Part 4's
