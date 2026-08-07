@@ -22,6 +22,7 @@ local function default_env() return vim.fn.environ() end
 -- profile (not hardcoded in the encoder) so a future profile with a real,
 -- verified reason to differ has somewhere to say so. `image.double_buffer`
 -- in user config always overrides it.
+
 M.profiles = {
   iterm2 = {
     id = "iterm2",
@@ -42,7 +43,9 @@ M.profiles = {
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
-    caveats = { "Kitty is the reference implementation of the graphics protocol this backend uses." },
+    caveats = {
+      "Kitty is the reference implementation of the graphics protocol this backend uses.",
+    },
   },
   wezterm = {
     id = "wezterm",
@@ -51,7 +54,9 @@ M.profiles = {
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
-    caveats = { "WezTerm implements the Kitty graphics protocol." },
+    caveats = {
+      "WezTerm implements the Kitty graphics protocol.",
+    },
   },
   ghostty = {
     id = "ghostty",
@@ -60,7 +65,9 @@ M.profiles = {
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
-    caveats = { "Ghostty implements the Kitty graphics protocol." },
+    caveats = {
+      "Ghostty implements the Kitty graphics protocol.",
+    },
   },
   warp = {
     id = "warp",

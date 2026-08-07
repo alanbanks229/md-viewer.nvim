@@ -216,8 +216,10 @@ export class BrowserRenderer {
         documentId: params.documentId, contentRevision,
         layoutKey, html, theme, fontSizePx, scrollPastEnd, scrollPastEndOffsetPx, width, height,
       });
-    } else if (viewportChanged) {
-      this.layout.documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+    } else {
+      if (viewportChanged) {
+        this.layout.documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+      }
     }
     const layoutMs = performance.now() - layoutStarted;
 

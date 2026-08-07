@@ -55,6 +55,12 @@ function M.create(source_buf, source_win)
     selection_render_pending = false,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
+    -- Documents this preview has followed links through, oldest first, and
+    -- where in that list it currently sits. Entry 1 is the document the
+    -- preview was opened on; `M.retarget` appends, and md-viewer.controller's
+    -- back/forward walk the index without appending.
+    history = nil,
+    history_index = 0,
     find_active = false,
     find_query = nil,
     find_match_count = 0,
@@ -102,6 +108,24 @@ function M.visible_in_tab(tab)
       return session
     end
   end
+end
+
+---Re-key `session` onto `new_buf`, so one preview window can follow a link to
+---another document instead of being torn down and rebuilt. Sessions are keyed
+---by source buffer and `document_id` is derived from it, so both move together
+---or neither does.
+---
+---Refuses (returns nil) when `new_buf` already owns a session: that preview is
+---the legitimate owner of the buffer and silently stealing it would leave two
+---sessions believing they render the same document.
+function M.retarget(session, new_buf)
+  if not session or new_buf == session.source_buf then return nil end
+  if sessions[new_buf] then return nil end
+  sessions[session.source_buf] = nil
+  session.source_buf = new_buf
+  session.document_id = "buffer-" .. new_buf
+  sessions[new_buf] = session
+  return session
 end
 
 function M.remove(source_buf)

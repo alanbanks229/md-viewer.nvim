@@ -313,31 +313,64 @@ export function hitTestInPage(input) {
   }
 
   // A terminal reports which *cell* was clicked and never where inside it, so
-  // the click genuinely covers a whole cell -- typically wider than a rendered
-  // character. Resolving only the cell's centre discards that, and it discards
-  // it exactly at the edges of the text: the cell holding the first character
-  // of a line also holds the page's left padding, so its centre lands on the
-  // article and the click does nothing at all. That was reported as "I cannot
-  // click the first character of a line".
+  // the click genuinely covers a whole cell -- and a cell is neither as wide as
+  // a rendered character nor as tall as a rendered line. Resolving only the
+  // cell's centre throws that away, and it throws it away exactly where the
+  // text is. Both axes have produced a reported bug:
   //
-  // So probe outward from the centre, bounded by the cell the user actually
-  // clicked, and take the nearest content. This is not the clamping Part 3
-  // refused: it never reaches beyond one cell, so a click in the middle of the
-  // scroll-past-end padding still finds nothing across the whole cell and still
-  // honestly reports "none". Horizontal only -- a cell is about as tall as a
-  // rendered line, so probing vertically could answer from the line above or
-  // below, which is a worse error than the one being fixed.
+  //   - horizontally, the cell holding the first character of a line also holds
+  //     the page's left padding, so its centre lands on the article and the
+  //     click does nothing. Reported as "I cannot click the first character of
+  //     a line".
+  //   - vertically, a cell covers 20 CSS px (coordinates.lua's estimated tier)
+  //     while a rendered line is 25, so an inline link's box -- 18 px for a
+  //     16 px font -- can fall entirely *between* two cell-row centres. This is
+  //     measured, not reasoned: on a real document a link occupying y
+  //     91.6-109.6, with cell-row centres at 90 and 110, was unreachable from
+  //     every cell in the window at any click position. Enlarging the terminal
+  //     font changed nothing about the geometry except its phase, and made the
+  //     same link clickable again -- which is exactly how it was reported.
+  //
+  // So probe outward from the centre in both axes, bounded by the cell the user
+  // actually clicked, and take the nearest content. This is not the clamping
+  // Part 3 refused: it never reaches beyond half a cell, so a click in the
+  // middle of the scroll-past-end padding still finds nothing across the whole
+  // cell and still honestly reports "none". Reaching half a cell vertically can
+  // only ever touch a line that same cell already covers.
   const cellWidth = input.cellWidthPx > 0 ? input.cellWidthPx : 0;
-  const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
+  const cellHeight = input.cellHeightPx > 0 ? input.cellHeightPx : 0;
+  const fractions = [0, 0.25, -0.25, 0.45, -0.45];
+  const probes = [];
+  for (const fx of cellWidth > 0 ? fractions : [0]) {
+    for (const fy of cellHeight > 0 ? fractions : [0]) {
+      // Distance in cell *fractions*, not pixels: a cell twice as tall as it is
+      // wide would otherwise make every vertical probe lose to every horizontal
+      // one, and "nearest" would silently mean "nearest horizontally".
+      probes.push({ dx: fx * cellWidth, dy: fy * cellHeight, distance: Math.abs(fx) + Math.abs(fy) });
+    }
+  }
+  probes.sort((a, b) => a.distance - b.distance);
 
   let element = null;
   let block = null;
   let pointX = x;
+  let pointY = y;
   let sawElement = false;
-  for (const dx of offsets) {
-    const px = x + dx;
-    if (!(px >= 0 && px < window.innerWidth)) continue;
-    const candidate = document.elementFromPoint(px, y);
+  // Tracked apart from the nearest content: if a link is anywhere under the
+  // cell the user clicked, they were clicking the link. The cell is the
+  // resolution limit of the entire input device -- there is no finer answer
+  // available to give -- so prose wins only when the cell holds no link at all.
+  // Probes are ordered nearest-first, so a cell straddling two links still
+  // resolves to the closer one.
+  let linkElement = null;
+  let linkBlock = null;
+  let linkX = x;
+  let linkY = y;
+  for (const probe of probes) {
+    const px = x + probe.dx;
+    const py = y + probe.dy;
+    if (!(px >= 0 && px < window.innerWidth && py >= 0 && py < window.innerHeight)) continue;
+    const candidate = document.elementFromPoint(px, py);
     if (!candidate) continue;
     sawElement = true;
     // The article carries the page padding and the scroll-past-end padding, and
@@ -345,14 +378,29 @@ export function hitTestInPage(input) {
     // bottom padding, and the gaps between blocks all land here.
     const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
     if (!candidateBlock) continue;
-    element = candidate;
-    block = candidateBlock;
-    pointX = px;
-    break;
+    if (element === null) {
+      element = candidate;
+      block = candidateBlock;
+      pointX = px;
+      pointY = py;
+    }
+    if (candidate.closest("a[href]") !== null) {
+      linkElement = candidate;
+      linkBlock = candidateBlock;
+      linkX = px;
+      linkY = py;
+      break;
+    }
+  }
+  if (linkElement !== null) {
+    element = linkElement;
+    block = linkBlock;
+    pointX = linkX;
+    pointY = linkY;
   }
   if (!sawElement) return miss("no_element");
   if (!block) return miss("outside_content");
-  const cellSnapped = pointX !== x;
+  const cellSnapped = pointX !== x || pointY !== y;
 
   let caretNode = null;
   let caretOffset = null;
@@ -361,10 +409,11 @@ export function hitTestInPage(input) {
   const wantRange = input.strategy === "auto" || input.strategy === "caret-range";
 
   // Resolved at the point the content was actually found at, not the cell's
-  // centre: a caret taken from a centre that landed in the page padding would
-  // contradict the block just resolved a few pixels to its right.
+  // centre: a caret taken from a centre that landed in the page padding, or in
+  // the leading between two lines, would contradict the block just resolved a
+  // few pixels away from it.
   if (wantPosition && typeof document.caretPositionFromPoint === "function") {
-    const position = document.caretPositionFromPoint(pointX, y);
+    const position = document.caretPositionFromPoint(pointX, pointY);
     if (position && position.offsetNode) {
       caretNode = position.offsetNode;
       caretOffset = position.offset;
@@ -372,7 +421,7 @@ export function hitTestInPage(input) {
     }
   }
   if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
-    const range = document.caretRangeFromPoint(pointX, y);
+    const range = document.caretRangeFromPoint(pointX, pointY);
     if (range && range.startContainer) {
       caretNode = range.startContainer;
       caretOffset = range.startOffset;

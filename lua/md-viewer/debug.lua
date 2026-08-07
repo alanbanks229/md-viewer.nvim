@@ -63,6 +63,11 @@ function M.snapshot()
       interaction_last_kind = session.last_interaction_kind,
       interaction_last_precision = session.last_interaction_precision,
       interaction_pointer_pressed = session.pointer ~= nil and session.pointer.pressed or false,
+      -- Where this preview sits in the documents it has followed links
+      -- through. Counts and an index only: no paths, which the winbar already
+      -- shows for the one that matters.
+      history_length = session.history and #session.history or 0,
+      history_index = session.history_index or 0,
       selection_active = session.selection_active,
       -- Length only -- see interaction.lua's copy_selection comment. Never
       -- surface the selected text itself in diagnostics.
@@ -79,6 +84,10 @@ function M.snapshot()
   return {
     sessions = sessions,
     interaction_enabled = config.get().interaction.enabled,
+    -- The last link md-viewer handed to the operating system, and what came
+    -- back. This is the difference between "the click never reached the
+    -- plugin" and "the plugin ran the handler and the OS declined".
+    last_external_open = require("md-viewer.interaction").last_external or "none",
     renderer = process.status(),
     backends = backends.health(),
     terminal = terminal.detect(),

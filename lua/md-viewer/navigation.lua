@@ -45,6 +45,26 @@ local function interaction_mappings()
     list[#list + 1] = { "n", function(session) interaction.find_next(session) end, "Next search match" }
     list[#list + 1] = { "N", function(session) interaction.find_previous(session) end, "Previous search match" }
   end
+  if cfg.links then
+    -- Gated on `links` because a link activation is the only thing that ever
+    -- puts a second document in the history: with links off these would be two
+    -- keys that can never do anything.
+    --
+    -- `H`/`L` normally mean "top/bottom of the visible screen", which is
+    -- meaningless in a scratch buffer holding no text -- the same reason `gg`
+    -- and `G` are already rebound here. `controller` is required at call time,
+    -- not at the top of the file: it requires this module.
+    list[#list + 1] = {
+      "H",
+      function(session) require("md-viewer.controller").history_back(session) end,
+      "Previous document in the preview history",
+    }
+    list[#list + 1] = {
+      "L",
+      function(session) require("md-viewer.controller").history_forward(session) end,
+      "Next document in the preview history",
+    }
+  end
   -- Always installed, regardless of which features are enabled above, so it
   -- can fall through cleanly to normal Escape behaviour when neither a find
   -- nor a selection is active: interaction.escape() returns false in that

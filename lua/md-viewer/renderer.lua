@@ -1,6 +1,7 @@
 local config = require("md-viewer.config")
 local process = require("md-viewer.process")
 local preview = require("md-viewer.preview")
+local security = require("md-viewer.security")
 
 local M = {}
 
@@ -35,7 +36,12 @@ function M.request(session, markdown, options, callback)
   session.request_serial = session.request_serial + 1
   local serial = session.request_serial
   local viewport = preview.viewport(session.preview_win, session.backend and session.backend.name)
-  local root = cfg.security.document_root or base_dir(session.source_buf)
+  -- One root, one implementation. This used to compute its own
+  -- (`cfg.security.document_root or base_dir(...)`), which skipped the
+  -- normalization and the project-root detection that the link path gets --
+  -- so a local image and a local link disagreed about the same boundary.
+  local root =
+    security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
   local content_revision = ("%d:%d"):format(
     vim.api.nvim_buf_get_changedtick(session.source_buf),
     session.render_epoch or 0

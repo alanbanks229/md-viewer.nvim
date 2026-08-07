@@ -197,7 +197,74 @@ return function(t)
     t.eq({}, opened, "an unsafe scheme is never opened")
     t.eq(1, #notified, "an unsafe scheme activation is reported to the user")
 
+    -- Every way the hand-off to the OS can fail used to be silent, which made
+    -- "the system refused this link" and "md-viewer never saw the click" look
+    -- identical to the reader. vim.ui.open reports a missing handler by
+    -- *returning* nil rather than raising, so pcall alone never caught it.
+    notified = {}
+    vim.ui.open = function() return nil, "no handler for scheme" end
+    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/c" } })
+    t.eq(1, #notified, "a handler-less system open is reported instead of being swallowed")
+    t.ok(notified[1].message:find("no system handler", 1, true) ~= nil, "and the message says the handler is missing")
+    t.eq(
+      "no handler: no handler for scheme",
+      interaction.last_external.result,
+      ":MdViewerDebug records what the system handler answered"
+    )
+    t.eq("https://example.invalid/c", interaction.last_external.href, "and which link it was for")
+
+    notified = {}
+    vim.ui.open = function() error("spawn failed") end
+    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/d" } })
+    t.eq(1, #notified, "a raising system open is still reported")
+    t.ok(notified[1].message:find("failed to open link", 1, true) ~= nil, "and named as a failure to open")
+
+    -- A handler that starts and *then* fails is the case pcall cannot see at
+    -- all: vim.ui.open returns as soon as the child is spawned. A real process
+    -- is used here rather than a fake, because the whole point is that the
+    -- exit status is observed without blocking the editor.
+    notified = {}
+    vim.ui.open = function() return vim.system({ "sh", "-c", "echo nope 1>&2; exit 3" }, { text = true }) end
+    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/e" } })
+    vim.wait(4000, function() return #notified > 0 end)
+    t.eq(1, #notified, "a system handler that exits non-zero is reported")
+    t.ok(notified[1].message:find("nope", 1, true) ~= nil, "and the handler's own message is carried through")
+    t.eq("nope", interaction.last_external.result, "and recorded for :MdViewerDebug")
+
+    -- The successful case says nothing and records the clean exit.
+    notified = {}
+    vim.ui.open = function() return vim.system({ "true" }, { text = true }) end
+    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/f" } })
+    vim.wait(4000, function() return interaction.last_external.result ~= "spawned" end)
+    t.eq("exited 0", interaction.last_external.result, "a handler that exits cleanly is recorded as such")
+    t.eq({}, notified, "and says nothing to the user")
+
     vim.ui.open = original_open
+    vim.notify = original_notify
+  end
+
+  -- ---------------------------------------------------------------------
+  -- A ctrl/cmd-click whose hit test fails outright is reported. Losing a race
+  -- to a newer request for the same document is not: that is routine, and
+  -- narrating it would fire on ordinary fast clicking.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local original_request = process.request
+    local original_notify, notified = vim.notify, {}
+    vim.notify = function(message) notified[#notified + 1] = message end
+
+    process.request = function(_, _, callback) callback(nil, "renderer said no", { code = "INVALID_INTERACTION" }) end
+    interaction.activate(session, { x = 1, y = 1 }, { ctrl = true })
+    t.eq(1, #notified, "a failed hit test is reported rather than dropped")
+    t.ok(notified[1]:find("renderer said no", 1, true) ~= nil, "and it carries the renderer's own reason")
+
+    notified = {}
+    process.request = function(_, _, callback) callback(nil, "superseded", { code = "STALE_INTERACTION" }) end
+    interaction.activate(session, { x = 1, y = 1 }, { ctrl = true })
+    t.eq({}, notified, "losing a race to a newer request says nothing")
+
+    process.request = original_request
     vim.notify = original_notify
   end
 
@@ -412,6 +479,279 @@ return function(t)
     interaction.forget(session)
     t.eq(nil, interaction.captured_session(), "forget() releases a captured session")
     t.eq(nil, session.pointer, "forget() clears the session's pointer state")
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Document root: the boundary is the enclosing project, not the folder the
+  -- document happens to sit in. Rooting it at the folder made every
+  -- repo-relative link from a subdirectory ("../README.md", "docs/x.md")
+  -- report as a security refusal.
+  -- ---------------------------------------------------------------------
+  do
+    local project = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir .. "/docs", "p")
+      vim.fn.mkdir(dir .. "/.git", "p")
+      return dir
+    end)())
+    vim.fn.writefile({ "# readme" }, project .. "/README.md")
+    vim.fn.writefile({ "# a" }, project .. "/docs/a.md")
+    vim.fn.writefile({ "# b" }, project .. "/docs/b.md")
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, project .. "/docs/a.md")
+    local root = security.document_root(buf, nil, { ".git", ".hg", ".svn" })
+    t.eq(project, root, "an unconfigured root is the nearest ancestor holding a marker")
+
+    local base = project .. "/docs"
+    t.eq(
+      project .. "/README.md",
+      security.resolve_local_link("../README.md", base, root),
+      "a link out of the document's folder but inside the project resolves"
+    )
+    t.eq(project .. "/docs/b.md", security.resolve_local_link("b.md", base, root), "a sibling link still resolves")
+    t.eq(
+      project .. "/docs/a.md",
+      security.resolve_local_link("docs/a.md", project, root),
+      "a project-root-relative link resolves"
+    )
+
+    -- Widening the root must not widen containment itself.
+    local _, escape_reason = security.resolve_local_link("../../etc/passwd", base, root)
+    t.eq("outside_root", escape_reason, "an escape above the project root is still refused")
+
+    -- No marker anywhere: the previous behaviour, unchanged.
+    local bare = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir .. "/nested", "p")
+      return dir
+    end)())
+    local bare_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(bare_buf, bare .. "/nested/doc.md")
+    t.eq(
+      bare .. "/nested",
+      security.document_root(bare_buf, nil, { ".git", ".hg", ".svn" }),
+      "with no marker found the root falls back to the document's own folder"
+    )
+    t.eq(
+      "/explicit/root",
+      security.document_root(buf, "/explicit/root", { ".git" }),
+      "an explicitly configured root always wins"
+    )
+  end
+
+  -- ---------------------------------------------------------------------
+  -- A refusal must say which refusal it was. All three used to arrive as
+  -- "outside the document root", which for a link to a file that is simply
+  -- not there is untrue.
+  -- ---------------------------------------------------------------------
+  do
+    local root = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir, "p")
+      return dir
+    end)())
+    vim.fn.writefile({ "x" }, root .. "/real.md")
+
+    local resolved, reason = security.resolve_local_link("real.md", root, root)
+    t.eq(root .. "/real.md", resolved, "an existing in-root target resolves")
+    t.eq(nil, reason, "a successful resolution reports no reason")
+
+    local missing, missing_reason = security.resolve_local_link("nope.md", root, root)
+    t.eq(nil, missing, "a nonexistent in-root target does not resolve")
+    t.eq("missing", missing_reason, "a nonexistent in-root target is reported as missing, not as an escape")
+
+    local _, outside_reason = security.resolve_local_link("../elsewhere.md", root, root)
+    t.eq("outside_root", outside_reason, "a path above the root is reported as an escape")
+
+    local _, empty_reason = security.resolve_local_link("", root, root)
+    t.eq("malformed", empty_reason, "an empty href is reported as malformed")
+
+    -- A path outside the root must be refused without the filesystem being
+    -- consulted, so the two messages cannot be used to probe for the
+    -- existence of files the reader is not allowed to reach.
+    local _, absent_outside = security.resolve_local_link("../definitely-not-here.md", root, root)
+    t.eq("outside_root", absent_outside, "an out-of-root path is refused as an escape whether or not it exists")
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Activating a local link opens the document in Neovim, in the source
+  -- window, rather than handing it to the OS.
+  -- ---------------------------------------------------------------------
+  do
+    local project = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir .. "/.git", "p")
+      return dir
+    end)())
+    vim.fn.writefile({ "# target" }, project .. "/target.md")
+    vim.fn.writefile({ "png" }, project .. "/picture.png")
+    vim.fn.writefile({ "# doc" }, project .. "/doc.md")
+
+    local opened = {}
+    local original_open = vim.ui.open
+    vim.ui.open = function(target)
+      opened[#opened + 1] = target
+      return { wait = function() end }
+    end
+    local original_notify, notified = vim.notify, {}
+    vim.notify = function(message) notified[#notified + 1] = message end
+
+    -- A real window and a real file-backed buffer: `:edit` is exercised, not
+    -- stubbed, so the jump-list push and the buffer swap are the real ones.
+    vim.cmd.edit(vim.fn.fnameescape(project .. "/doc.md"))
+    local source_win = vim.api.nvim_get_current_win()
+    local source_buf = vim.api.nvim_get_current_buf()
+    local session = { source_buf = source_buf, source_win = source_win }
+
+    interaction.activate_link(session, { link = { type = "local_file", href = "target.md" } })
+    t.eq({}, opened, "a markdown link is not handed to the OS handler")
+    t.eq(
+      project .. "/target.md",
+      vim.fs.normalize(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(source_win))),
+      "a markdown link is edited in the source window"
+    )
+
+    opened, notified = {}, {}
+    interaction.activate_link(session, { link = { type = "local_file", href = "picture.png" } })
+    t.eq({ project .. "/picture.png" }, opened, "a file Neovim has no filetype for still goes to the OS handler")
+
+    -- A link must never be able to ask the OS to run something. The document
+    -- root is not a defence here: this file sits inside it, exactly as a
+    -- cloned repository could ship one beside its README.
+    vim.fn.writefile({ "#!/bin/sh", "echo pwned" }, project .. "/setup.command")
+    vim.fn.writefile({ "#!/bin/sh", "echo pwned" }, project .. "/plain-script")
+    vim.fn.mkdir(project .. "/Evil.app", "p")
+    vim.uv.fs_chmod(project .. "/plain-script", tonumber("755", 8))
+    vim.fn.writefile({ "notes" }, project .. "/notes.rst-unknown")
+
+    for _, href in ipairs({ "setup.command", "plain-script", "Evil.app" }) do
+      opened, notified = {}, {}
+      interaction.activate_link(session, { link = { type = "local_file", href = href } })
+      t.eq({}, opened, ("an executable link (%s) is never handed to the system handler"):format(href))
+      t.ok(
+        #notified > 0 and notified[1]:find("executable", 1, true) ~= nil,
+        ("refusing %s says it was refused for being executable"):format(href)
+      )
+    end
+
+    -- The guard must not swallow ordinary files that simply have no filetype.
+    opened, notified = {}, {}
+    interaction.activate_link(session, { link = { type = "local_file", href = "notes.rst-unknown" } })
+    t.eq(
+      { project .. "/notes.rst-unknown" },
+      opened,
+      "a non-executable file Neovim cannot type still reaches the system handler"
+    )
+
+    t.eq(true, security.is_system_executable(project .. "/setup.command"), "a .command is an executable target")
+    t.eq(true, security.is_system_executable(project .. "/Evil.app"), "an .app bundle is an executable target")
+    t.eq(true, security.is_system_executable(project .. "/plain-script"), "the execute bit alone is enough")
+    t.eq(
+      false,
+      security.is_system_executable(project .. "/notes.rst-unknown"),
+      "an ordinary unreadable-by-filetype file is not"
+    )
+    t.eq(false, security.is_system_executable(project .. "/picture.png"), "a plain image is not")
+    t.eq(false, security.is_system_executable(project), "a plain directory is not, despite its mode bits")
+    -- Name alone is enough to refuse: the extension check never touches the
+    -- filesystem, so it does not depend on the target existing. (In practice
+    -- `resolve_local_link` rejects a missing target before this is reached.)
+    t.eq(true, security.is_system_executable(project .. "/missing.command"), "a missing .command is refused by name")
+    t.eq(false, security.is_system_executable(project .. "/missing.txt-unknown"), "a missing plain name is not refused")
+
+    opened, notified = {}, {}
+    interaction.activate_link(session, { link = { type = "local_file", href = "gone.md" } })
+    t.eq({}, opened, "a missing target is never opened")
+    t.ok(
+      #notified > 0 and notified[1]:find("does not exist", 1, true) ~= nil,
+      "a missing target is reported as missing rather than as a security refusal"
+    )
+
+    vim.ui.open = original_open
+    vim.notify = original_notify
+    vim.cmd("enew!")
+  end
+
+  -- ---------------------------------------------------------------------
+  -- A configured root that excludes the document being previewed refuses
+  -- every local link and image in it. That is correct for the setting, but on
+  -- its own it surfaces one refusal at a time and reads as a broken plugin --
+  -- a real configuration shipped exactly this way, pinning every preview to
+  -- an Obsidian vault. :MdViewerHealth names the condition once.
+  -- ---------------------------------------------------------------------
+  do
+    local elsewhere = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir, "p")
+      return dir
+    end)())
+    local project = vim.uv.fs_realpath((function()
+      local dir = vim.fn.tempname()
+      vim.fn.mkdir(dir .. "/.git", "p")
+      return dir
+    end)())
+    vim.fn.writefile({ "# doc" }, project .. "/doc.md")
+
+    -- A buffer that merely carries the name is enough: summary() only reads the
+    -- name and the config. Nothing here becomes the current buffer, so no other
+    -- case can observe this one having run.
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_name(buf, project .. "/doc.md")
+
+    local function summary(opts)
+      config.reset()
+      config.setup(opts)
+      return security.summary(config.get(), buf)
+    end
+
+    local pinned = summary({ security = { document_root = elsewhere } })
+    t.eq(true, pinned.document_root_excludes_current, "a configured root excluding the document is reported")
+    t.eq(elsewhere, pinned.document_root, "the reported root is the configured one")
+    t.eq("configured (security.document_root)", pinned.document_root_source, "and it is named as configured")
+
+    local detected = summary({})
+    t.eq(false, detected.document_root_excludes_current, "a detected project root never excludes its own document")
+    t.eq(project, detected.document_root, "the detected root is the enclosing project")
+    t.eq(
+      "detected from the project enclosing the document",
+      detected.document_root_source,
+      "and it is named as detected"
+    )
+
+    local contained = summary({ security = { document_root = project } })
+    t.eq(false, contained.document_root_excludes_current, "a configured root containing the document is not flagged")
+
+    vim.api.nvim_buf_delete(buf, { force = true })
+    config.reset()
+    config.setup({ interaction = { drag_threshold_cells = 2 } })
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Retargeting: one preview window follows a link to another document.
+  -- ---------------------------------------------------------------------
+  do
+    local session = state.create(7001, 1)
+    session.renderer_revision = "3:0"
+    session.latest_blocks = { { sourceStart = 0 } }
+    session.scroll_y, session.applied_scroll_y = 400, 400
+    local serial_before = session.request_serial
+
+    t.eq(session, state.retarget(session, 7002), "retarget moves the session onto the new buffer")
+    t.eq(7002, session.source_buf, "retarget updates the session's source buffer")
+    t.eq("buffer-7002", session.document_id, "retarget re-derives the document id")
+    t.eq(nil, state.get(7001), "retarget releases the old buffer's key")
+    t.eq(session, state.get(7002), "retarget registers the new buffer's key")
+
+    -- A second session already owning the target must not be stolen.
+    local other = state.create(7003, 1)
+    t.eq(nil, state.retarget(session, 7003), "retarget refuses a buffer another session already owns")
+    t.eq(7002, session.source_buf, "a refused retarget leaves the session where it was")
+    t.eq(other, state.get(7003), "a refused retarget leaves the other session intact")
+    t.eq(serial_before, session.request_serial, "state.retarget alone does not bump the serial")
+
+    state.remove(7002)
+    state.remove(7003)
   end
 
   -- ---------------------------------------------------------------------

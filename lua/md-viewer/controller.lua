@@ -128,6 +128,16 @@ function M.display_interact_result(session, result)
     notify_error(read_err)
     return
   end
+  -- A find step and a fragment link both scroll the shared page inside the
+  -- interact call and report where they landed. Not recording it left
+  -- `applied_scroll_y` describing the position *before* the jump, so the next
+  -- interact sent that stale value and `ensureDocumentActive` scrolled the page
+  -- back before hit-testing -- a click after a search resolved against a
+  -- different position than the image on screen showed.
+  if type(result.scrollY) == "number" then
+    session.applied_scroll_y = result.scrollY
+    session.scroll_y = result.scrollY
+  end
   if update_occlusion(session) then
     clear_image(session)
     -- The interact PNG is discarded rather than displayed off screen, and
@@ -358,6 +368,7 @@ function M.open(position)
     return
   end
   local session = state.create(source_buf, source_win)
+  M.history_init(session)
   session.backend, session.backend_reason = backend, reason
   session.preview_buf, session.preview_win = preview.open(position, session)
   if backend.name ~= "cells" then
@@ -369,6 +380,195 @@ function M.open(position)
   M.refresh(session)
   if start_ui_poll then start_ui_poll(session) end
   return session
+end
+
+---Point an existing preview at a different source buffer, reusing its window.
+---Used when a local link is activated: the source window edits the new file and
+---the preview follows it, which `close_session` + `M.open` would also achieve
+---but with a visible split teardown and rebuild in between.
+---
+---Everything below is per-document and must not survive the move. The serial
+---bump is what makes that safe: any render or interact response still in flight
+---for the old document fails `renderer.is_stale` and is discarded rather than
+---being applied to the new one.
+---
+---`record` (default true) appends the destination to this preview's history.
+---The back/forward commands pass false: they are *moving through* the history,
+---not extending it, and appending there would make "back" unable to ever leave
+---the last two documents.
+function M.retarget(session, new_buf, record)
+  if not valid(session) or not session.backend or session.backend.name == "cells" then return false end
+  if not state.retarget(session, new_buf) then return false end
+  session.request_serial = session.request_serial + 1
+  session.render_epoch = (session.render_epoch or 0) + 1
+  interaction.forget(session)
+  interaction.forget_selection(session)
+  session.renderer_revision = nil
+  session.latest_blocks = {}
+  session.document_height_px = 0
+  session.scroll_y, session.applied_scroll_y = 0, 0
+  session.last_source_block = nil
+  session.last_image_bytes = nil
+  session.manual_scroll_until = 0
+  session.refresh_deferred = false
+  if record ~= false then M.history_push(session, new_buf) end
+  preview.update_title(session)
+  M.refresh(session)
+  return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Preview history.
+--
+-- Following a link retargets the preview, and without this the document it came
+-- from is simply gone: the source window's jump list can bring the *text* back
+-- (`edit_in_source_window` pushes it), but `preview.pinned` deliberately stops
+-- the preview from following an ordinary buffer switch, so the rendered view
+-- stays on the document the reader has already left.
+--
+-- The list is per session and holds a buffer *and* the file path. The buffer is
+-- what makes returning cheap and exact; the path is the fallback for an entry
+-- whose buffer has since been wiped, which is the ordinary outcome of
+-- `:bwipeout` or a session that has been open a long time.
+-- ---------------------------------------------------------------------------
+
+local function history_entry(buf)
+  local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
+  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil }
+end
+
+function M.history_init(session)
+  session.history = { history_entry(session.source_buf) }
+  session.history_index = 1
+end
+
+---Append `buf` as the newest entry, discarding anything ahead of the current
+---position -- the same rule a browser follows: navigating from a point in the
+---middle of the history abandons the forward branch rather than interleaving
+---with it.
+function M.history_push(session, buf)
+  if not session.history then M.history_init(session) end
+  local history = session.history
+  for index = #history, session.history_index + 1, -1 do
+    history[index] = nil
+  end
+  -- Re-entering the document that is already current is not a new entry:
+  -- otherwise a fragment link, or a link back to where the reader just came
+  -- from, would grow the list without adding anywhere to go.
+  if history[session.history_index] and history[session.history_index].buf == buf then return end
+  history[#history + 1] = history_entry(buf)
+  local limit = config.get().interaction.history_limit
+  while #history > limit do
+    table.remove(history, 1)
+  end
+  session.history_index = #history
+end
+
+---Resolve a history entry to a buffer that can actually be displayed, reopening
+---the file when the buffer it recorded is gone. Returns nil when neither is
+---available any more, which is a dead entry rather than an error.
+local function history_buf(entry)
+  if entry.buf and vim.api.nvim_buf_is_valid(entry.buf) then return entry.buf end
+  if not entry.path or not vim.uv.fs_stat(entry.path) then return nil end
+  local buf = vim.fn.bufadd(entry.path)
+  if buf == 0 then return nil end
+  vim.fn.bufload(buf)
+  entry.buf = buf
+  return buf
+end
+
+---Move the preview (and the source window with it) `step` entries through the
+---history. Dead entries are stepped over rather than reported: a wiped buffer
+---whose file is also gone is not something the reader can act on.
+local function history_go(session, step, direction)
+  if not valid(session) or session.backend.name == "cells" then return false end
+  if not session.history then M.history_init(session) end
+  local index = session.history_index
+  while true do
+    index = index + step
+    local entry = session.history[index]
+    if not entry then
+      vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
+      return false
+    end
+    local buf = history_buf(entry)
+    if buf then
+      if buf == session.source_buf then
+        session.history_index = index
+        return true
+      end
+      -- The source window follows, for the same reason activating a link moves
+      -- it: the preview and the text below the cursor describing the same
+      -- document is the whole point of the split.
+      local win = session.source_win
+      if win and vim.api.nvim_win_is_valid(win) then
+        local ok, err = pcall(vim.api.nvim_win_call, win, function()
+          vim.cmd("normal! m'")
+          vim.api.nvim_win_set_buf(win, buf)
+        end)
+        if not ok then
+          notify_error(err)
+          return false
+        end
+      end
+      if not M.retarget(session, buf, false) then
+        -- The only way this refuses is another preview already owning that
+        -- document. The source window has moved by now, so saying nothing
+        -- would leave the two panes describing different files with no
+        -- explanation.
+        vim.notify("md-viewer: another preview already owns that document", vim.log.levels.WARN)
+        return false
+      end
+      session.history_index = index
+      return true
+    end
+  end
+end
+
+---`session` is passed explicitly by the preview-local `H`/`L` mappings, which
+---already know which preview they belong to, and omitted by the commands,
+---which resolve it the same way every other :MdViewer* command does.
+function M.history_back(session)
+  session = session or current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  history_go(session, -1, "previous")
+end
+
+function M.history_forward(session)
+  session = session or current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  history_go(session, 1, "next")
+end
+
+---Re-point the preview when the source window returns, by any means, to a
+---document already in this preview's history -- `<C-o>` after a link click
+---being the case that matters. `preview.pinned` stops the preview following
+---arbitrary buffer switches, and that stays true: only a document the preview
+---itself navigated through is followed, and the move never appends, so the
+---forward branch survives to be walked back up.
+local function follow_history_buffer(session, buf)
+  if not session.history or buf == session.source_buf then return end
+  -- One document can legitimately appear at more than one position (a link
+  -- back to where the reader came from puts it there twice), so search outward
+  -- from where the preview currently is rather than from the start -- landing
+  -- at the far end of the list would make the next `<C-o>` jump somewhere the
+  -- reader has never been. Backwards wins a tie, because the gesture this
+  -- exists for is the backwards one.
+  local history = session.history
+  for distance = 0, #history do
+    for _, index in ipairs({ session.history_index - distance, session.history_index + distance }) do
+      if history[index] and history[index].buf == buf then
+        if M.retarget(session, buf, false) then session.history_index = index end
+        return
+      end
+    end
+  end
 end
 
 function M.toggle(position)
@@ -657,6 +857,16 @@ function M.setup_autocmds()
         local source_session = state.get(buf)
         if source_session and vim.api.nvim_get_current_buf() == buf then
           source_session.source_win = vim.api.nvim_get_current_win()
+        end
+        -- The source window arriving back at a document this preview has
+        -- already shown (`<C-o>` after following a link) takes the preview
+        -- with it. Deliberately narrow: only buffers in this session's own
+        -- history qualify, so `preview.pinned` still holds for every other
+        -- buffer switch.
+        if source_session then return end
+        local win_session = state.from_source_win(vim.api.nvim_get_current_win())
+        if win_session and valid(win_session) and vim.api.nvim_get_current_buf() == buf then
+          follow_history_buffer(win_session, buf)
         end
       end)
       each_session(function(session)

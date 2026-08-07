@@ -63,7 +63,14 @@ M.defaults = {
     manual_scroll_hold_ms = 500,
     alignment_tolerance = 0.10,
   },
-  security = { network = false, document_root = nil },
+  security = {
+    network = false,
+    document_root = nil,
+    -- Markers that identify the project enclosing the document when
+    -- `document_root` is unset. See md-viewer.security.document_root for why
+    -- the default boundary is the project rather than the document's folder.
+    document_root_markers = { ".git", ".hg", ".svn" },
+  },
   interaction = {
     enabled = true,
     links = true,
@@ -83,6 +90,16 @@ M.defaults = {
     word_select = true,
     paragraph_select = true,
     find = true,
+    -- How many documents back a preview remembers when a link retargets it.
+    -- Bounded rather than unbounded: each entry pins a buffer number and a
+    -- path, and a reader following links for an hour should not accumulate an
+    -- ever-growing list.
+    history_limit = 32,
+    -- How long to keep watching a system handler md-viewer started for an
+    -- external link before assuming it is running normally. Only failures that
+    -- happen inside this window can be reported; past it, a still-running
+    -- handler *is* the success case.
+    external_open_timeout_ms = 5000,
   },
   terminal = {
     profile = "auto",
@@ -176,6 +193,16 @@ local function validate(cfg)
   )
   assert(tri_state[cfg.terminal.kitty_graphics], "md-viewer: terminal.kitty_graphics must be auto, on, or off")
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
+  assert(
+    vim.islist(cfg.security.document_root_markers),
+    "md-viewer: security.document_root_markers must be a list of marker names"
+  )
+  for _, marker in ipairs(cfg.security.document_root_markers) do
+    assert(
+      type(marker) == "string" and marker ~= "",
+      "md-viewer: security.document_root_markers entries must be non-empty strings"
+    )
+  end
   assert(type(cfg.interaction.enabled) == "boolean", "md-viewer: interaction.enabled must be boolean")
   assert(type(cfg.interaction.links) == "boolean", "md-viewer: interaction.links must be boolean")
   assert(type(cfg.interaction.double_click) == "boolean", "md-viewer: interaction.double_click must be boolean")
@@ -197,6 +224,16 @@ local function validate(cfg)
   assert(type(cfg.interaction.word_select) == "boolean", "md-viewer: interaction.word_select must be boolean")
   assert(type(cfg.interaction.paragraph_select) == "boolean", "md-viewer: interaction.paragraph_select must be boolean")
   assert(type(cfg.interaction.find) == "boolean", "md-viewer: interaction.find must be boolean")
+  assert(
+    type(cfg.interaction.history_limit) == "number"
+      and cfg.interaction.history_limit >= 1
+      and cfg.interaction.history_limit == math.floor(cfg.interaction.history_limit),
+    "md-viewer: interaction.history_limit must be a positive integer"
+  )
+  assert(
+    type(cfg.interaction.external_open_timeout_ms) == "number" and cfg.interaction.external_open_timeout_ms >= 0,
+    "md-viewer: interaction.external_open_timeout_ms must be non-negative"
+  )
 end
 
 function M.setup(opts)

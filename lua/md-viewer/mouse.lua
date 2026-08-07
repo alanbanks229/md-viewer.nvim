@@ -136,7 +136,8 @@ function M.detach_if_unused()
       end
     end
   end
-  installed_wheel, installed_gestures, installed_gesture_list, callback, saved = false, false, {}, nil, {}
+  installed_wheel, installed_gestures = false, false
+  installed_gesture_list, callback, saved = {}, nil, {}
 end
 
 function M.is_attached() return installed_wheel or installed_gestures end

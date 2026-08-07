@@ -3,6 +3,7 @@ local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
+local state = require("md-viewer.state")
 local terminal = require("md-viewer.terminal")
 
 local M = {}
@@ -63,10 +64,36 @@ local function temp_writable()
   return true
 end
 
+local function file_backed(buf)
+  return buf
+    and buf > 0
+    and vim.api.nvim_buf_is_valid(buf)
+    and vim.bo[buf].buftype == ""
+    and vim.api.nvim_buf_get_name(buf) ~= ""
+end
+
+---The buffer this report should describe.
+---
+---Not simply the current one: both `:MdViewerHealth` and `:checkhealth` create
+---and enter their own scratch buffer *before* collecting, so "the current
+---buffer" is the report itself, and every document-relative answer in here
+---would describe that instead of any document. Prefer a live preview's source,
+---then a real file, then the alternate buffer the report displaced.
+local function document_buf()
+  for _, session in pairs(state.all()) do
+    if not session.closed and file_backed(session.source_buf) then return session.source_buf end
+  end
+  local current = vim.api.nvim_get_current_buf()
+  if file_backed(current) then return current end
+  local alternate = vim.fn.bufnr("#")
+  if file_backed(alternate) then return alternate end
+  return current
+end
+
 function M.collect(renderer_result, renderer_error)
   local cfg = config.get()
   local backend = backends.health()
-  local sec = security.summary(cfg, vim.api.nvim_get_current_buf())
+  local sec = security.summary(cfg, document_buf())
   local version = vim.version()
   local capability = terminal.capability(cfg.terminal)
   local discovered_executable = renderer_result and renderer_result.executable
@@ -110,6 +137,12 @@ function M.collect(renderer_result, renderer_error)
     network_blocked = sec.network_blocked,
     raw_html = sec.raw_html,
     local_image_root = sec.document_root,
+    document_root_source = sec.document_root_source,
+    -- Set only when an explicitly configured root excludes the document being
+    -- previewed. That combination refuses every local link and image in the
+    -- document, and is otherwise only visible one refusal at a time.
+    document_root_excludes_current = sec.document_root_excludes_current or false,
+    document_root_unbounded = sec.document_root_unbounded or false,
     security_overrides = sec.overrides,
     viewport_calibration_tier = coordinates.calibration_tier(),
     interaction_enabled = cfg.interaction.enabled,
@@ -162,6 +195,9 @@ local order = {
   "local_image_root",
   "security_overrides",
   "viewport_calibration_tier",
+  "document_root_source",
+  "document_root_excludes_current",
+  "document_root_unbounded",
   "interaction_enabled",
   "chromium_active_document",
   "chromium_cached_document_frames",
@@ -253,6 +289,26 @@ function M.check()
     vim.health.ok("Interaction enabled")
   else
     vim.health.warn("Interaction disabled (interaction.enabled = false)")
+  end
+  if report.document_root_excludes_current then
+    vim.health.warn(
+      ("security.document_root is configured as %s, but the current document is outside it"):format(
+        report.local_image_root
+      ),
+      {
+        "Every local link and local image in this document will be refused.",
+        "Unset security.document_root to root each document in its own project, "
+          .. "or adjust security.document_root_markers.",
+      }
+    )
+  elseif report.document_root_unbounded then
+    vim.health.info('Document root: "/" -- local links and images are not confined to a project', {
+      "Deliberate and supported: the preview opens whatever Neovim would open.",
+      report.network_blocked and "Network is blocked, so a document can read a local image but cannot send it."
+        or "Network is ENABLED as well; narrow security.document_root or re-block the network.",
+    })
+  else
+    vim.health.ok(("Document root: %s (%s)"):format(report.local_image_root, report.document_root_source))
   end
   -- `:checkhealth` cannot await the renderer subprocess (see M.collect's own
   -- comment), so which document Chromium currently holds is only ever known

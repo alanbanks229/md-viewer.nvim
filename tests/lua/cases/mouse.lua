@@ -58,6 +58,17 @@ return function(t)
   vim.fn.getmousepos = original_getmousepos
 
   controller.close(source)
+  -- The pointer-shape feature is gone, and so is the global option it needed.
+  -- Asserted rather than assumed: leaving 'mousemoveevent' on would keep
+  -- delivering <MouseMove> to every other mapping in the editor.
+  for _, mode in ipairs(modes) do
+    t.ok(vim.tbl_isempty(vim.fn.maparg("<MouseMove>", mode, false, true)), "no <MouseMove> mapping is ever installed")
+  end
+  t.eq(
+    false,
+    vim.api.nvim_get_option_value("mousemoveevent", {}),
+    "md-viewer never turns the global 'mousemoveevent' on"
+  )
   t.eq(false, mouse.is_attached(), "mouse dispatch is removed once the last graphical preview closes")
   for _, mode in ipairs(modes) do
     for _, lhs in ipairs(gesture_lhs) do

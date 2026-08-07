@@ -31,7 +31,10 @@ local function interact_request(session, params, callback)
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1
     end
-    callback(result, err)
+    -- `meta` is passed on as a third argument so a caller can tell a lost race
+    -- (routine, and not worth telling the user about) from a real failure.
+    -- Callers that only take two arguments are unaffected.
+    callback(result, err, meta)
   end)
 end
 
@@ -454,22 +457,153 @@ local function record_result(session, result)
   session.last_interaction_precision = (result.sourcePosition and result.sourcePosition.precision) or "none"
 end
 
+-- The most recent hand-off to the system handler, for :MdViewerDebug. A user
+-- reporting "clicking an external link does nothing" needs to be able to see
+-- whether md-viewer ever reached this code, what it ran, and what came back;
+-- with none of that recorded, an OS-side failure and a missed click looked
+-- exactly alike from the outside. Never more than one entry, and it holds only
+-- what the document already displayed.
+M.last_external = nil
+
+---Watch a system-handler process to completion without blocking Neovim.
+---
+---`vim.ui.open` returns as soon as the child is spawned, so a handler that
+---starts and *then* fails -- `open: unable to find application`, an `xdg-open`
+---with no desktop session -- reports through its exit status, which nothing
+---looked at. Polling with `kill(pid, 0)` asks the kernel "does this process
+---still exist" and sends no signal; only once it is gone is `wait` called, at
+---which point it returns without waiting for anything.
+---
+---A handler still running after `timeout_ms` is the *successful* case (a
+---browser that stayed in the foreground), so the watch simply stops.
+local function watch_external(handle, href, timeout_ms)
+  if not (handle and handle.pid) then return end
+  local timer = vim.uv.new_timer()
+  if not timer then return end
+  local elapsed, interval = 0, 100
+  timer:start(
+    interval,
+    interval,
+    vim.schedule_wrap(function()
+      elapsed = elapsed + interval
+      local alive = vim.uv.kill(handle.pid, 0) == 0
+      if alive and elapsed < (timeout_ms or 5000) then return end
+      timer:stop()
+      timer:close()
+      if alive then return end
+      local ok, completed = pcall(handle.wait, handle, 1000)
+      if not ok or type(completed) ~= "table" or completed.code == 0 then
+        if M.last_external and M.last_external.href == href then M.last_external.result = "exited 0" end
+        return
+      end
+      local detail = vim.trim(tostring(completed.stderr or ""))
+      if detail == "" then detail = "exit code " .. tostring(completed.code) end
+      if M.last_external and M.last_external.href == href then M.last_external.result = detail end
+      vim.notify(("md-viewer: the system handler refused %s: %s"):format(href, detail), vim.log.levels.ERROR)
+    end)
+  )
+end
+
+---Hand `href` to the operating system's default handler for it.
+---
+---Every failure mode here used to be silent. `vim.ui.open` does not raise when
+---there is no handler to run -- it returns `nil, <reason>` -- and it never
+---waits, so a handler that fails after starting reports through its exit
+---status. Both were discarded, which made an OS-level refusal indis-
+---tinguishable from md-viewer never having seen the click at all.
 function M.open_external(href)
-  local ok, err = pcall(vim.ui.open, href)
-  if not ok then vim.notify("md-viewer: failed to open link: " .. tostring(err), vim.log.levels.ERROR) end
+  M.last_external = { href = href, at = os.date("!%Y-%m-%dT%H:%M:%SZ"), result = "spawned" }
+  local ok, handle, reason = pcall(vim.ui.open, href)
+  if not ok then
+    M.last_external.result = "error: " .. tostring(handle)
+    vim.notify("md-viewer: failed to open link: " .. tostring(handle), vim.log.levels.ERROR)
+    return
+  end
+  if not handle then
+    M.last_external.result = "no handler: " .. tostring(reason)
+    vim.notify(
+      ("md-viewer: no system handler available for %s (%s)"):format(href, tostring(reason)),
+      vim.log.levels.ERROR
+    )
+    return
+  end
+  watch_external(handle, href, config.get().interaction.external_open_timeout_ms)
+end
+
+---Filetypes Neovim can technically load as text but that a reader clicking a
+---link plainly means to *view*, not edit. Everything `vim.filetype.match`
+---cannot name at all (a PNG, a zip) is already handled by the nil branch.
+local os_owned_filetypes = { pdf = true }
+
+local function should_edit_in_neovim(path)
+  local filetype = vim.filetype.match({ filename = path })
+  if not filetype then return false end
+  return not os_owned_filetypes[filetype], filetype
 end
 
 function M.open_local_file(session, href)
   local cfg = config.get()
   local name = vim.api.nvim_buf_get_name(session.source_buf)
   local base_dir = name ~= "" and vim.fs.dirname(vim.fs.normalize(name)) or vim.uv.cwd()
-  local root = security.document_root(session.source_buf, cfg.security.document_root)
-  local resolved = security.resolve_local_link(href, base_dir, root)
+  local root =
+    security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
+  local resolved, reason = security.resolve_local_link(href, base_dir, root)
   if not resolved then
-    vim.notify("md-viewer: refused to open link outside the document root: " .. href, vim.log.levels.WARN)
+    if reason == "missing" then
+      vim.notify("md-viewer: link target does not exist: " .. href, vim.log.levels.WARN)
+    elseif reason == "malformed" then
+      vim.notify("md-viewer: could not resolve link: " .. href, vim.log.levels.WARN)
+    else
+      vim.notify(
+        ("md-viewer: refused to open link outside the document root (%s): %s"):format(root, href),
+        vim.log.levels.WARN
+      )
+    end
     return
   end
-  M.open_external(resolved)
+  local edit, filetype = should_edit_in_neovim(resolved)
+  if not edit then
+    -- Everything reaching here has no Neovim filetype and would be handed to
+    -- the OS. For most of those that means "view it" -- a PNG in Preview, a PDF
+    -- in a reader. For some it means "run it", and a link in an untrusted
+    -- document must never be able to ask for that.
+    if security.is_system_executable(resolved) then
+      vim.notify(
+        "md-viewer: refused to open an executable link via the system handler: " .. resolved,
+        vim.log.levels.WARN
+      )
+      return
+    end
+    M.open_external(resolved)
+    return
+  end
+  M.edit_in_source_window(session, resolved, filetype)
+end
+
+---Open `path` in the session's *source* window, never the preview one, and
+---never by making the preview current -- focus discipline is the same as every
+---other gesture's. The jump list is pushed first so `<C-o>` returns to the
+---document the link was clicked in.
+function M.edit_in_source_window(session, path, filetype)
+  local win = session.source_win
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    M.open_external(path)
+    return
+  end
+  local ok, err = pcall(vim.api.nvim_win_call, win, function()
+    vim.cmd("normal! m'")
+    vim.cmd.edit(vim.fn.fnameescape(path))
+  end)
+  if not ok then
+    vim.notify("md-viewer: failed to open link: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  -- Only Markdown is worth following with the preview; re-pointing it at a
+  -- `.lua` file would render its source as prose.
+  if filetype ~= "markdown" then return end
+  local new_buf = vim.api.nvim_win_get_buf(win)
+  if new_buf == session.source_buf then return end
+  require("md-viewer.controller").retarget(session, new_buf)
 end
 
 ---§4.4 dispatch table. `result` is a full `activate_at` interact response, so
@@ -552,8 +686,18 @@ end
 ---per operator decision, matching the plain click's own removal below).
 function M.activate(session, point, modifiers)
   if not config.get().interaction.links then return end
-  M.request_hit(session, point, modifiers, 1, function(result, err)
-    if err or not result then return end
+  M.request_hit(session, point, modifiers, 1, function(result, err, meta)
+    if err or not result then
+      -- Reported rather than dropped. A ctrl-click whose hit test failed and a
+      -- ctrl-click that landed on ordinary prose both did nothing and said
+      -- nothing, so a genuinely broken activation was indistinguishable from
+      -- "there was no link there". A lost race is exempt: a newer request for
+      -- the same document superseded this one, which is routine.
+      if err and not (meta and meta.code == "STALE_INTERACTION") then
+        vim.notify("md-viewer: could not resolve that click: " .. tostring(err), vim.log.levels.WARN)
+      end
+      return
+    end
     if result.kind == "link" and result.link then
       record_result(session, result)
       M.activate_link(session, result)

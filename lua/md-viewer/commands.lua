@@ -31,6 +31,8 @@ function M.setup()
   vim.api.nvim_create_user_command("MdViewerFindNext", function() controller.find_next() end, {})
   vim.api.nvim_create_user_command("MdViewerFindPrevious", function() controller.find_previous() end, {})
   vim.api.nvim_create_user_command("MdViewerFindClear", function() controller.find_clear() end, {})
+  vim.api.nvim_create_user_command("MdViewerBack", function() controller.history_back() end, {})
+  vim.api.nvim_create_user_command("MdViewerForward", function() controller.history_forward() end, {})
 end
 
 return M
