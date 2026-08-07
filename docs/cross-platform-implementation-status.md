@@ -2886,3 +2886,60 @@ visual artifact is gone in a real iTerm2 session, since headless tests
 cannot observe actual Kitty graphics compositing. Operator confirmation on
 real hardware remains the natural next step, same as the reports above that
 led to it.
+
+## Post-Part-6 follow-up 4: the preview stayed put, unmoved, when a third-party plugin's own splits took over the screen
+
+Commit `8ead804` on `feat/interaction-transport`.
+
+Operator report, confirming the previous fix worked but surfacing a new,
+distinct issue while testing on real hardware: pressing `<leader>gd` to open
+`codediff.nvim`'s diff/explorer view left the old preview image sitting on
+screen at its old size and position, visibly overlapping the new diff panes,
+until closing the diff view again. Traced by reading `codediff.nvim`'s
+actual installed source (`~/.local/share/nvim/lazy/codediff.nvim`, found via
+the operator's own dotfiles repo) rather than guessing at a third-party
+plugin's behavior: its `ui/lib/split.lua` opens each pane with
+`vim.api.nvim_open_win(bufnr, false, { split = position, win = -1 })` — a
+plain, non-floating split, "relative to editor" so it resizes the *whole*
+tabpage's existing layout, including md-viewer's own preview split, as an
+immediate side effect of opening.
+
+**Root cause.** `controller.lua`'s `WinNew` autocmd only called
+`reconcile_occlusion()` (which computes a fresh placement and, since the
+prior follow-up above, calls `backend.move()` when geometry actually
+changed) for a *floating* window (`win_config.relative ~= ""`). A plain
+split — exactly what `codediff.nvim` opens — was filtered out of this path
+entirely. The only other thing that could have caught the resulting
+geometry change was the separate `WinResized`/`VimResized` autocmd, or,
+failing that, the `ui_poll_timer` background poll (default every 50ms) —
+neither is guaranteed to run before the user's own eyes register the stale,
+overlapping frame.
+
+**Fix.** `WinNew` now calls `reconcile_occlusion()` unconditionally, for any
+new window, floating or not.
+
+### Tests
+
+Verified this genuinely closes the gap, not just plausibly: added a
+regression test in `tests/lua/cases/controller.lua` that opens a real,
+non-floating split (`split = "left", win = -1`, mirroring `codediff.nvim`'s
+own call) sized to shrink the preview window, and asserts `backend.move()`
+gets called. Confirmed the test is meaningful the same way Part 4's original
+click-dispatch bug was: reverted the fix locally (`git stash`), re-ran the
+suite, watched this exact test fail (`backend.move()` never called), then
+restored the fix and watched it pass.
+
+### Verification
+
+Lua headless suite: 481/481 assertions (up from 479 by this one new test).
+`npm test --prefix renderer`: 128/128, unchanged — this fix never touches
+the renderer. `stylua --check`: clean.
+
+**No graphical validation was performed** — unchanged from every part and
+follow-up before it. The regression test proves the specific mechanism
+identified (a plain split's `WinNew` alone reconciling the preview's
+geometry) now works; it does not independently re-prove the visual glitch is
+gone in a real `codediff.nvim` session on real hardware, since headless
+tests cannot observe actual Kitty graphics compositing or interact with a
+real third-party plugin's live window-management timing. Operator
+confirmation on real hardware remains the natural next step.
