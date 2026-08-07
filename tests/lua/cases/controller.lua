@@ -96,6 +96,38 @@ return function(t)
   t.eq(math.min(10, placement.width) + 2, passive_rect.width, "notification cutout includes both border columns")
   vim.api.nvim_win_close(passive_win, true)
 
+  -- Regression: a passive (non-focusable) float appearing/disappearing must
+  -- never trigger backend.move(). raw_zindex is -1 for every terminal
+  -- profile (terminal.lua), so the image is always composited beneath real
+  -- terminal content and needs no visual re-crop to stay hidden under one --
+  -- re-cropping on every such exclusion change was the actual cause of a
+  -- reported bug (the same image redisplayed shifted/rolled by ~1 row for as
+  -- long as a notification stayed open). The exclusion itself must still be
+  -- tracked, since interaction.locate's click-resolution depends on it.
+  local move_calls = 0
+  session.backend.move = function(image_id)
+    move_calls = move_calls + 1
+    return image_id
+  end
+  t.eq(0, #(session.last_placement.exclusions or {}), "sanity: no exclusion before the notification opens")
+  local notify_buf = vim.api.nvim_create_buf(false, true)
+  local notify_win = vim.api.nvim_open_win(notify_buf, false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.wait(300, function() return #(session.last_placement.exclusions or {}) > 0 end, 10)
+  t.ok(#(session.last_placement.exclusions or {}) > 0, "the exclusion is still tracked for click-resolution")
+  t.eq(0, move_calls, "a passive float's own exclusion change must not trigger a visual re-place")
+  vim.api.nvim_win_close(notify_win, true)
+  vim.wait(300, function() return #(session.last_placement.exclusions or {}) == 0 end, 10)
+  t.eq(0, #(session.last_placement.exclusions or {}), "the exclusion is removed once the float closes")
+  t.eq(0, move_calls, "closing the passive float must not trigger a visual re-place either")
+
   vim.keymap.set("n", "<ScrollWheelDown>", "<Nop>", { desc = "test prior wheel mapping" })
   mouse.attach(controller.navigate)
   t.eq(true, mouse.is_attached(), "mouse wheel dispatch attaches for graphical preview")

@@ -1,7 +1,6 @@
 local backends = require("md-viewer.backends")
 local config = require("md-viewer.config")
 local preview = require("md-viewer.preview")
-local coordinates = require("md-viewer.coordinates")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
 local sync = require("md-viewer.sync")
@@ -394,19 +393,38 @@ local function refresh_raw_sessions()
   end)
 end
 
+---Row/col/width/height only -- deliberately ignoring `exclusions`. Every
+---raw-Kitty terminal profile places the image at `raw_zindex = -1`
+---(terminal.lua), strictly below normal cell content, so a passive floating
+---window (a notification, for instance) already visually occludes the image
+---without any crop/exclusion at all -- exclusions exist only so
+---`interaction.locate`'s click-resolution (`coordinates.cell_to_css`) can
+---refuse a click that lands on one. Re-cropping and re-placing the image via
+---`backend.move()` purely because a transient float's exclusion rectangle
+---appeared or disappeared was visible on screen as the image being redrawn
+---shifted/rolled by roughly one row for as long as the float stayed open --
+---a real, reported bug, not a hypothetical -- for no visual benefit at all,
+---since the float already draws on top of the unchanged image either way.
+local function same_geometry(a, b)
+  return a and b and a.row == b.row and a.col == b.col and a.width == b.width and a.height == b.height
+end
+
 local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
-  if not force and coordinates.same(session.last_placement, placement) then return end
-  local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
-  if not ok then
-    notify_error(moved)
-    return
+  if force or not same_geometry(session.last_placement, placement) then
+    local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
+    if not ok then
+      notify_error(moved)
+      return
+    end
+    if not moved then
+      notify_error(err or "failed to update image placement")
+      return
+    end
   end
-  if not moved then
-    notify_error(err or "failed to update image placement")
-    return
-  end
+  -- Always refresh, even when no move() happened: exclusions (or any other
+  -- field) may have changed and click-resolution reads this on every click.
   session.last_placement = placement
 end
 
