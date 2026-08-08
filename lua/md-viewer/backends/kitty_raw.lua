@@ -117,7 +117,14 @@ local function png_dimensions(bytes)
     local a, b, c, d = bytes:byte(offset, offset + 3)
     return ((a * 256 + b) * 256 + c) * 256 + d
   end
-  return u32(17), u32(21)
+  local width, height = u32(17), u32(21)
+  -- A zero dimension is a valid-looking header and a real hazard: `0` is
+  -- truthy in Lua, so it used to sail past every caller's `if not width` check
+  -- and produce a placement cropping a region out of an image with no pixels
+  -- in it. On WezTerm that is `draw_width == 0`, which is the divisor in the
+  -- c/r branch of upstream issue #6344 -- a panic that takes the terminal down.
+  if width < 1 or height < 1 then return nil end
+  return width, height
 end
 
 local function intersect(a, b)
@@ -167,6 +174,74 @@ local function new_placement_id()
   return next_placement_id
 end
 
+-- ---------------------------------------------------------------------------
+-- Placement preconditions (upstream WezTerm issue #6344).
+--
+-- WezTerm does not place images freely: `assign_image_to_cells`
+-- (term/src/terminalstate/image.rs) slices every placement into per-cell
+-- fragments, and until #6344 was fixed that function had two integer divisions
+-- with nothing in front of them. They sit on *different* branches, so each of
+-- the two kinds of placement this backend emits reaches exactly one:
+--
+--   * a placement WITHOUT c/r -- every selection-overlay rectangle -- divides
+--     `draw_width / cell_pixel_width` and `draw_height / cell_pixel_height`,
+--     where `cell_pixel_width = pixel_width / physical_cols`. A pty carrying no
+--     pixel geometry makes that zero.
+--   * a placement WITH c/r -- every base frame -- divides
+--     `(cols * cell_pixel_width) * image_width / draw_width`, where
+--     `draw_width = min(w, image_width - x)`. A `w=0`, or a crop origin at or
+--     past the image's edge, makes that zero.
+--
+-- A divide by zero is a Rust panic and the panic takes the whole application
+-- down -- every window, every pane, whatever was unsaved in them. That is what
+-- the 2026-08-07 probe hit on 20240203-110809-5046fc22. Upstream added an
+-- `anyhow::ensure!` for each condition afterwards; md-viewer enforces the same
+-- two preconditions on its own side, so the February 2024 stable stays
+-- supported without asking anyone to install a nightly.
+--
+-- Everything this backend already computes satisfies both, which is the point:
+-- the guards below refuse only inputs that are never produced, so they change
+-- no bytes on any terminal. `tests/lua/cases/backend_kitty.lua` pins the exact
+-- output of the iTerm2/Ghostty/Kitty path as golden strings so that stays true.
+-- ---------------------------------------------------------------------------
+
+---Whether a measured cell can be placed against at all. WezTerm floors the
+---cell to whole pixels and divides by it, so a cell that floors to zero is a
+---crash rather than a rounding error. Nothing `cellpixels` accepts today gets
+---near it (its plausibility band starts at 2px) -- this states the precondition
+---rather than leaving that band to imply it.
+local function cell_is_placeable(cell)
+  return cell ~= nil and math.floor(cell.width) >= 1 and math.floor(cell.height) >= 1
+end
+
+---Whether one crop rectangle lies wholly inside the image it is taken from,
+---and covers at least one pixel. Returns the width and height to send, or nil.
+---
+---Deliberately a refusal and not a clamp. Silently shrinking an out-of-bounds
+---crop would draw a subtly wrong rectangle, and a subtly wrong rectangle that
+---nobody is told about is the exact shape of every defect this area has
+---produced so far -- the stage-5 bars sized in captured rather than drawn
+---pixels went unnoticed for a whole stage. A refusal is visible: the overlay
+---drops to the captured-frame path for the gesture and says why.
+local function crop_within(image_w, image_h, x, y, w, h)
+  if not (tonumber(image_w) and tonumber(image_h) and tonumber(x) and tonumber(y)) then return nil end
+  if not (tonumber(w) and tonumber(h)) then return nil end
+  if x < 0 or y < 0 or w < 1 or h < 1 then return nil end
+  if x + w > image_w or y + h > image_h then return nil end
+  return math.floor(w), math.floor(h)
+end
+
+---A finite number, or `fallback` when the field is absent, or nil when it is
+---present but not a number this can be arithmetic with. Non-finite geometry
+---has to be dropped rather than defaulted: NaN survives every comparison as
+---false and would reach the wire as a garbage `w=`/`h=`.
+local function coord(value, fallback)
+  value = tonumber(value)
+  if value == nil then return fallback end
+  if value ~= value or value == math.huge or value == -math.huge then return nil end
+  return value
+end
+
 --- Sub-cell offset at which the image starts inside its first cell, as the
 --- Kitty graphics protocol's `X`/`Y` placement keys. Returns "" when both are
 --- zero so a terminal that does not implement those keys receives exactly the
@@ -193,28 +268,35 @@ local function placement_sequences(item, placement)
   local sequences, ids = {}, {}
   local offset = cell_offset()
   for _, region in ipairs(visible_regions(placement)) do
-    local pid = new_placement_id()
     local x1 = math.floor(region.x * item.width_px / placement.width)
     local y1 = math.floor(region.y * item.height_px / placement.height)
     local x2 = math.floor((region.x + region.width) * item.width_px / placement.width)
     local y2 = math.floor((region.y + region.height) * item.height_px / placement.height)
-    local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,c=%d,r=%d,z=%d%s"):format(
-      item.id,
-      pid,
-      x1,
-      y1,
-      math.max(1, x2 - x1),
-      math.max(1, y2 - y1),
-      region.width,
-      region.height,
-      zindex(),
-      offset
-    )
-    sequences[#sequences + 1] = at({
-      row = placement.row + region.y,
-      col = placement.col + region.x,
-    }, command(control))
-    ids[#ids + 1] = pid
+    -- This is the c/r branch of #6344: a zero `w`/`h`, or a crop origin at the
+    -- image's edge, is the divisor. The pid is allocated after the guard so a
+    -- refused region does not consume one.
+    local crop_w, crop_h =
+      crop_within(item.width_px, item.height_px, x1, y1, math.max(1, x2 - x1), math.max(1, y2 - y1))
+    if crop_w and region.width >= 1 and region.height >= 1 then
+      local pid = new_placement_id()
+      local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,c=%d,r=%d,z=%d%s"):format(
+        item.id,
+        pid,
+        x1,
+        y1,
+        crop_w,
+        crop_h,
+        region.width,
+        region.height,
+        zindex(),
+        offset
+      )
+      sequences[#sequences + 1] = at({
+        row = placement.row + region.y,
+        col = placement.col + region.x,
+      }, command(control))
+      ids[#ids + 1] = pid
+    end
   end
   return table.concat(sequences), ids
 end
@@ -254,6 +336,30 @@ local sheets = {} -- tint key -> { id, width_px, height_px }
 local overlays = {} -- set id -> { sheet_key, placements = { rect key -> placement id } }
 local next_overlay_set = 0
 
+---One overlay set's placement ids in a stable order (by rect key).
+---
+---The deletions these produce are independent of one another -- distinct
+---placement ids, all in a single write -- so the terminal cannot tell the
+---orders apart. `pairs` over a hash table, however, has no defined order, and
+---it was observed to reorder between two builds of this file that differed
+---nowhere near it. That is a trap: it makes the emitted stream unassertable,
+---so the one thing this backend most needs to be able to prove -- that the
+---terminals validated by hand still receive exactly what they were validated
+---against -- could not be written down. Sorting costs nothing at these sizes
+---and buys `tests/lua/cases/backend_kitty.lua` a golden it can trust.
+local function ordered_pids(placements)
+  local keys = {}
+  for key in pairs(placements or {}) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  local pids = {}
+  for _, key in ipairs(keys) do
+    pids[#pids + 1] = placements[key]
+  end
+  return pids
+end
+
 ---Whether this terminal may be driven with overlay placements at all.
 ---`interaction.selection_overlay` "on"/"off" overrides; "auto" defers to the
 ---profile's probe-validated `selection_overlay` flag.
@@ -271,6 +377,16 @@ function M.overlay_supported()
   if not cell then
     return false,
       ("the terminal's pixel cell size is unknown (%s), and overlay rectangles are sized in pixels"):format(cell_reason)
+  end
+  -- Also a correctness precondition rather than a capability judgement, and on
+  -- WezTerm 20240203 a safety one: a cell that floors to zero pixels is the
+  -- divisor in the no-c/r branch of issue #6344. See `cell_is_placeable`.
+  if not cell_is_placeable(cell) then
+    return false,
+      ("the terminal's cell floors to %dx%d px, which no natural-size placement can be sized against"):format(
+        math.floor(cell.width),
+        math.floor(cell.height)
+      )
   end
   if mode == "on" then return true, "interaction.selection_overlay=on (explicit override)" end
   local profile, profile_id = active_profile()
@@ -342,6 +458,12 @@ end
 ---the rectangle's size out of the sheet; no c/r keys, so it displays at
 ---natural pixel size.
 local function overlay_placement_sequence(sheet, rect, placement, cell_w, cell_h, calibration)
+  -- The no-c/r branch of #6344 divides by the cell rather than by `w`, so what
+  -- matters here is that the crop stays inside the sheet: an oversized `w`
+  -- would be silently clamped by the terminal to `image_width - x` anyway, and
+  -- a crop starting past the edge is the one shape that cannot be drawn.
+  local crop_w, crop_h = crop_within(sheet.width_px, sheet.height_px, 0, 0, rect.width, rect.height)
+  if not crop_w then return nil end
   local pid = new_placement_id()
   local col, x_offset = overlay_cell_position(rect.x, cell_w, placement.col, calibration.x)
   local row, y_offset = overlay_cell_position(rect.y, cell_h, placement.row, calibration.y)
@@ -350,8 +472,8 @@ local function overlay_placement_sequence(sheet, rect, placement, cell_w, cell_h
   local control = ("a=p,q=2,C=1,i=%d,p=%d,x=0,y=0,w=%d,h=%d,z=%d%s"):format(
     sheet.id,
     pid,
-    math.max(1, rect.width),
-    math.max(1, rect.height),
+    crop_w,
+    crop_h,
     overlay_zindex(),
     offset
   )
@@ -472,11 +594,17 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   local wanted = {}
   local order = {}
   for _, rect in ipairs(rects or {}) do
-    local x0 = math.max(0, math.floor((tonumber(rect.x) or 0) * scale_x + 0.5))
-    local y0 = math.max(0, math.floor((tonumber(rect.y) or 0) * scale_y + 0.5))
-    local x1 = math.min(drawn_w, math.floor(((tonumber(rect.x) or 0) + (tonumber(rect.width) or 0)) * scale_x + 0.5))
-    local y1 = math.min(drawn_h, math.floor(((tonumber(rect.y) or 0) + (tonumber(rect.height) or 0)) * scale_y + 0.5))
-    if x1 > x0 and y1 > y0 then
+    -- `coord` keeps the old "absent means 0" behaviour for every finite input
+    -- and drops NaN/infinite geometry outright: NaN compares false against
+    -- everything, so it would slip past the `x1 > x0` guard below in one
+    -- direction and reach the wire as a garbage `w=`/`h=` in the other.
+    local rx, ry = coord(rect.x, 0), coord(rect.y, 0)
+    local rw, rh = coord(rect.width, 0), coord(rect.height, 0)
+    local x0 = rx and math.max(0, math.floor(rx * scale_x + 0.5))
+    local y0 = ry and math.max(0, math.floor(ry * scale_y + 0.5))
+    local x1 = rx and rw and math.min(drawn_w, math.floor((rx + rw) * scale_x + 0.5))
+    local y1 = ry and rh and math.min(drawn_h, math.floor((ry + rh) * scale_y + 0.5))
+    if x0 and y0 and x1 and y1 and x1 > x0 and y1 > y0 then
       local pieces = { { x = x0, y = y0, width = x1 - x0, height = y1 - y0 } }
       for _, cut in ipairs(cuts) do
         local next_pieces = {}
@@ -501,6 +629,22 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
     end
   end
 
+  -- Validate every rectangle against the sheet before touching `set`: a
+  -- refusal partway through the diff below would strand the placements it had
+  -- already moved out of `set.placements`, and they would never be deleted.
+  for _, piece_key in ipairs(order) do
+    local piece = wanted[piece_key]
+    if not crop_within(sheet.width_px, sheet.height_px, 0, 0, piece.width, piece.height) then
+      return nil,
+        ("a %dx%d rectangle does not fit the %dx%d tint sheet"):format(
+          piece.width,
+          piece.height,
+          sheet.width_px,
+          sheet.height_px
+        )
+    end
+  end
+
   local additions = {}
   local fresh = {}
   for _, piece_key in ipairs(order) do
@@ -510,18 +654,22 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
       set.placements[piece_key] = nil
     else
       local pid, sequence = overlay_placement_sequence(sheet, wanted[piece_key], placement, cell_w, cell_h, calibration)
+      -- The pre-pass above already proved every rectangle fits, so this cannot
+      -- be nil; if it ever is, refusing the frame is right -- the caller drops
+      -- to captured frames, which are correct and merely slower.
+      if not pid then return nil, "a rectangle could not be expressed as a crop of the tint sheet" end
       additions[#additions + 1] = sequence
       fresh[piece_key] = pid
     end
   end
   local deletions = {}
-  for _, pid in pairs(set.placements) do
+  for _, pid in ipairs(ordered_pids(set.placements)) do
     deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(set.sheet_id, pid))
   end
   local superseded = set.superseded
   set.superseded = nil
   if superseded then
-    for _, pid in pairs(superseded.placements) do
+    for _, pid in ipairs(ordered_pids(superseded.placements)) do
       deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(superseded.sheet_id, pid))
     end
   end
@@ -553,7 +701,7 @@ function M.overlay_clear(set_id)
   local set = set_id and overlays[set_id] or nil
   if not set then return false end
   local deletions = {}
-  for _, pid in pairs(set.placements) do
+  for _, pid in ipairs(ordered_pids(set.placements)) do
     deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(set.sheet_id, pid))
   end
   if #deletions > 0 then send(table.concat(deletions)) end
@@ -704,5 +852,14 @@ function M.health()
     caveats = capability.caveats,
   }
 end
+
+-- Exported for `tests/lua/cases/backend_kitty.lua` only.
+--
+-- Nothing this backend computes can currently violate either precondition --
+-- that is what they are for, and it is also why a test driven through the
+-- public API alone cannot tell whether they do anything at all. Mutating each
+-- guard to a no-op and re-running the suite is what surfaced that; asserting
+-- them directly is what fixed it.
+M._preconditions = { cell_is_placeable = cell_is_placeable, crop_within = crop_within }
 
 return M

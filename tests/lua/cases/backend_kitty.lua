@@ -1,3 +1,34 @@
+-- The exact stream `golden_session()` below produces on every profile that was
+-- validated by hand -- iTerm2, Ghostty and Kitty -- with the image and
+-- placement id counters normalized to their order of first appearance. Nothing
+-- else in it is run-dependent. Regenerate with MD_VIEWER_DUMP_GOLDEN=1 only
+-- after establishing that the change was meant to alter what those three
+-- terminals receive; the whole point of pinning it is that stage 6's WezTerm
+-- work did not.
+-- One line per complete operation: an upload, a cursor-framed placement, or a
+-- deletion. Read top to bottom it is the whole contract -- upload once, four
+-- cropped placements around a passive float, one tint sheet, two overlay crops
+-- (the first carrying a sub-cell X/Y remainder), a diffed frame that emits its
+-- replacement *before* the deletion it supersedes, a re-crop, then teardown.
+local GOLDEN_VALIDATED_STREAM = "<ESC>_Ga=t,f=100,t=d,q=2,i=<0>,m=0;iVBORw0KGgoAAAANSUhEUgAAAGQAAABk<ESC>\\"
+  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<0>,x=0,y=0,w=100,h=20,c=10,r=2,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[9;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<1>,x=0,y=40,w=100,h=60,c=10,r=6,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[7;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<2>,x=0,y=20,w=30,h=20,c=3,r=2,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[7;9H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<3>,x=60,y=20,w=40,h=20,c=4,r=2,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>_Ga=t,f=100,t=d,q=2,i=<1>,m=0;iVBORw0KGgoAAAANSUhEUgAAAGQAAABk<ESC>\\"
+  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<4>,x=0,y=0,w=20,h=10,z=-1,X=6,Y=7;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[11;7H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<5>,x=0,y=0,w=33,h=12,z=-1;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[11;7H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<6>,x=0,y=0,w=33,h=12,z=-1,X=1,Y=0;<ESC>\\<ESC>[u"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<1>,p=<5>;<ESC>\\"
+  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<7>,x=0,y=0,w=100,h=100,c=10,r=10,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<0>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<1>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<2>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<3>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<1>,p=<6>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=i,q=2,i=<1>,p=<4>;<ESC>\\"
+  .. "<ESC>_Ga=d,d=I,q=2,i=<0>;<ESC>\\"
+
 return function(t)
   local config = require("md-viewer.config")
   local raw_backend = require("md-viewer.backends.kitty_raw")
@@ -455,9 +486,310 @@ return function(t)
   t.eq(nil, drawn_output:match(",X=%d"), "a rect landing on a cell boundary needs no sub-cell offset")
   raw_backend.clear_all()
 
+  -- ---------------------------------------------------------------------
+  -- Upstream WezTerm issue #6344: no placement may divide by zero.
+  --
+  -- `assign_image_to_cells` (term/src/terminalstate/image.rs) has two integer
+  -- divisions, one on each branch, and md-viewer's two kinds of placement
+  -- reach one each:
+  --
+  --   * without c/r -- every overlay rectangle -- it divides by
+  --     `cell_pixel_width` / `cell_pixel_height`, which is the pty's pixel
+  --     geometry over the grid;
+  --   * with c/r -- every base frame -- it divides by
+  --     `draw_width = min(w, image_width - x)`.
+  --
+  -- On 20240203-110809-5046fc22, before upstream added its own guards, either
+  -- zero is a Rust panic that takes the whole application down. These
+  -- assertions are what makes that unreachable from md-viewer's side, so the
+  -- February 2024 stable can stay a support target.
+  -- ---------------------------------------------------------------------
+
+  -- The two preconditions, asserted directly. Nothing the arithmetic above can
+  -- produce violates either -- that is the point of them -- so driving them
+  -- through the public API alone proves nothing about whether they work.
+  local precondition = raw_backend._preconditions
+  t.eq(true, precondition.cell_is_placeable({ width = 1, height = 1 }), "a 1x1 px cell is placeable")
+  t.eq(true, precondition.cell_is_placeable({ width = 7.6, height = 16.4 }), "a fractional cell floors to placeable")
+  t.eq(false, precondition.cell_is_placeable({ width = 0.9, height = 16 }), "a cell under 1px wide is not placeable")
+  t.eq(false, precondition.cell_is_placeable({ width = 16, height = 0 }), "a zero-height cell is not placeable")
+  t.eq(false, precondition.cell_is_placeable(nil), "an absent cell is not placeable")
+
+  t.eq(20, (precondition.crop_within(100, 100, 0, 0, 20, 10)), "an interior crop passes through unchanged")
+  t.eq(100, (precondition.crop_within(100, 100, 0, 0, 100, 100)), "a crop filling the image exactly is allowed")
+  t.eq(1, (precondition.crop_within(100, 100, 99, 99, 1, 1)), "a single pixel at the far corner is allowed")
+  t.eq(nil, precondition.crop_within(100, 100, 0, 0, 101, 10), "a crop wider than the image is refused, not clamped")
+  t.eq(nil, precondition.crop_within(100, 100, 0, 0, 10, 101), "a crop taller than the image is refused")
+  t.eq(nil, precondition.crop_within(100, 100, 95, 0, 10, 10), "a crop running off the right edge is refused")
+  t.eq(nil, precondition.crop_within(100, 100, 100, 0, 1, 1), "a crop starting at the right edge is refused")
+  t.eq(nil, precondition.crop_within(100, 100, 0, 0, 0, 10), "a zero-width crop is refused (#6344's own title case)")
+  t.eq(nil, precondition.crop_within(100, 100, 0, 0, 10, 0), "a zero-height crop is refused")
+  t.eq(nil, precondition.crop_within(0, 0, 0, 0, 1, 1), "nothing can be cropped out of a zero-sized image")
+  t.eq(nil, precondition.crop_within(100, 100, -1, 0, 10, 10), "a negative origin is refused")
+
+  -- A PNG header may declare 0x0, and `0` is truthy in Lua -- so a zero
+  -- dimension used to sail past every `if not width` check in this file and
+  -- produce a c/r placement cropping a region out of an image with no pixels
+  -- in it, which is `draw_width == 0`: the WezTerm panic itself.
+  local zero_png = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\0\0\0\0\0"
+  t.eq(false, pcall(raw_backend.show, zero_png, placement), "a PNG declaring 0x0 is rejected outright")
+
+  ---Every `a=p` placement in an output blob, as its numeric keys.
+  local function placements_in(text)
+    local found = {}
+    for control in text:gmatch("\27_G(a=p[^;]*);") do
+      local keys = {}
+      for key, value in control:gmatch("([%a])=(%-?%d+)") do
+        keys[key] = tonumber(value)
+      end
+      found[#found + 1] = keys
+    end
+    return found
+  end
+
+  ---Assert #6344's preconditions against every placement in `text`, given the
+  ---pixel dimensions of each image id it may reference.
+  local function assert_placeable(text, dims, label)
+    local found = placements_in(text)
+    t.ok(#found > 0, ("%s emitted at least one placement to check"):format(label))
+    for index, keys in ipairs(found) do
+      local image = dims[keys.i]
+      local where = ("%s placement %d (i=%s)"):format(label, index, tostring(keys.i))
+      t.ok(image ~= nil, where .. " names a known image")
+      if image then
+        t.ok((keys.w or 0) >= 1 and (keys.h or 0) >= 1, where .. " has a non-zero crop size")
+        t.ok(
+          (keys.x or 0) >= 0 and (keys.x or 0) + keys.w <= image.width,
+          ("%s crops inside the image horizontally (x=%d w=%d, image %d wide)"):format(
+            where,
+            keys.x or 0,
+            keys.w or 0,
+            image.width
+          )
+        )
+        t.ok(
+          (keys.y or 0) >= 0 and (keys.y or 0) + keys.h <= image.height,
+          ("%s crops inside the image vertically (y=%d h=%d, image %d tall)"):format(
+            where,
+            keys.y or 0,
+            keys.h or 0,
+            image.height
+          )
+        )
+      end
+      if keys.c or keys.r then t.ok((keys.c or 0) >= 1 and (keys.r or 0) >= 1, where .. " spans at least one cell") end
+    end
+    return #found
+  end
+
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(7, 16) -- a cell the 100x100-over-10x10 capture does NOT imply
+  reset_sequences()
+  local guard_base = raw_backend.show(fake_png(), {
+    row = 0,
+    col = 0,
+    width = 10,
+    height = 10,
+    exclusions = { { row = 3, col = 3, width = 3, height = 3 } },
+  })
+  local guard_sheet_png = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\200\0\0\0\200"
+  local guard_dims = { [guard_base] = { width = 100, height = 100 } }
+  raw_backend.overlay_apply(
+    nil,
+    guard_base,
+    { { x = 0, y = 0, width = 100, height = 100 } },
+    { widthPx = 100, heightPx = 100 },
+    tint,
+    guard_sheet_png,
+    { row = 0, col = 0, width = 10, height = 10 }
+  )
+  -- The sheet's own id, taken from the placement that crops it: "no c/r" is the
+  -- shape only an overlay placement has, so this cannot pick up the base upload.
+  local guard_sheet_id = tonumber(output():match("a=p,q=2,C=1,i=(%d+),p=%d+,x=0,y=0,w=%d+,h=%d+,z="))
+  guard_dims[guard_sheet_id] = { width = 200, height = 200 }
+  -- Rectangles that run off every edge of the drawn box, at the maximum
+  -- sub-cell offset, plus one that covers it entirely.
+  raw_backend.overlay_apply(
+    nil,
+    guard_base,
+    {
+      { x = -50, y = -50, width = 200, height = 200 },
+      { x = 99, y = 99, width = 100, height = 100 },
+      { x = 6, y = 15, width = 1, height = 1 },
+      { x = 0, y = 0, width = 1000, height = 1000 },
+    },
+    { widthPx = 100, heightPx = 100 },
+    tint,
+    nil,
+    { row = 0, col = 0, width = 10, height = 10, exclusions = { { row = 2, col = 2, width = 2, height = 2 } } }
+  )
+  raw_backend.move(guard_base, { row = 0, col = 0, width = 10, height = 10, exclusions = {} })
+  assert_placeable(output(), guard_dims, "#6344 sweep")
+
+  -- Degenerate geometry never reaches the wire at all. `w=0`/`h=0` is the
+  -- literal trigger named in the upstream issue title ("zero-height kitty
+  -- graphic"); NaN is worse, because it compares false against everything and
+  -- would slip past an ordinary `x1 > x0` guard.
+  local nan = 0 / 0
+  for _, bad in ipairs({
+    { label = "zero width", rect = { x = 10, y = 10, width = 0, height = 20 } },
+    { label = "zero height", rect = { x = 10, y = 10, width = 20, height = 0 } },
+    { label = "negative width", rect = { x = 10, y = 10, width = -20, height = 20 } },
+    { label = "NaN x", rect = { x = nan, y = 10, width = 20, height = 20 } },
+    { label = "NaN width", rect = { x = 10, y = 10, width = nan, height = 20 } },
+    { label = "infinite height", rect = { x = 10, y = 10, width = 20, height = math.huge } },
+    { label = "sub-pixel sliver", rect = { x = 10.1, y = 10.1, width = 0.2, height = 0.2 } },
+  }) do
+    reset_sequences()
+    raw_backend.overlay_apply(
+      nil,
+      guard_base,
+      { bad.rect },
+      { widthPx = 100, heightPx = 100 },
+      tint,
+      nil,
+      { row = 0, col = 0, width = 10, height = 10 }
+    )
+    t.eq(0, #placements_in(output()), ("a %s rect emits no placement at all"):format(bad.label))
+  end
+
+  -- A cell that floors to zero pixels is the divisor on the no-c/r branch, so
+  -- it is refused for the same reason an unmeasurable cell is -- and "on"
+  -- cannot force it, because this is a safety precondition and not a
+  -- capability judgement.
+  stub_cell(0.5, 0.5)
+  local floor_ok, floor_reason = raw_backend.overlay_supported()
+  t.eq(false, floor_ok, "a cell that floors to zero pixels disables the overlay")
+  t.ok(floor_reason:match("floors to 0x0"), "and the refusal names the floored cell: " .. tostring(floor_reason))
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" }, interaction = { selection_overlay = "on" } })
+  t.eq(false, (raw_backend.overlay_supported()), "selection_overlay=on cannot force a cell that floors to zero")
+  stub_cell(1, 1)
+  t.eq(true, (raw_backend.overlay_supported()), "a cell that floors to exactly one pixel is placeable")
+  stub_cell(10, 10)
+  raw_backend.clear_all()
+
+  -- Deletions come out in a defined order. They are independent of each other
+  -- -- distinct placement ids, one write -- so no terminal can tell the orders
+  -- apart, but `pairs` over a hash table has no defined order and was seen to
+  -- reorder between two builds that differed nowhere near it. That makes the
+  -- emitted stream unassertable, which is why this is pinned: the three rects
+  -- below are emitted in an order their sorted rect keys deliberately reverse.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(10, 10)
+  raw_backend.clear_all()
+  reset_sequences()
+  local ordered_base = raw_backend.show(fake_png(), placement)
+  local ordered_set = raw_backend.overlay_apply(nil, ordered_base, {
+    { x = 90, y = 0, width = 10, height = 10 },
+    { x = 10, y = 0, width = 10, height = 10 },
+    { x = 50, y = 0, width = 10, height = 10 },
+  }, viewport, tint, fake_png(), placement)
+  local emitted = {}
+  for pid in output():gmatch("a=p,q=2,C=1,i=%d+,p=(%d+),x=0,y=0,w=%d+,h=%d+,z=") do
+    emitted[#emitted + 1] = pid
+  end
+  t.eq(3, #emitted, "three overlay rectangles were placed")
+  reset_sequences()
+  raw_backend.overlay_clear(ordered_set)
+  local deleted = {}
+  for pid in output():gmatch("a=d,d=i,q=2,i=%d+,p=(%d+)") do
+    deleted[#deleted + 1] = pid
+  end
+  -- Emitted x=90, x=10, x=50 -> keys "90:...", "10:...", "50:...", which sort
+  -- to 10, 50, 90: the second, third and first placements, in that order.
+  t.eq(
+    table.concat({ emitted[2], emitted[3], emitted[1] }, ","),
+    table.concat(deleted, ","),
+    "deletions are emitted in rect-key order, not hash order"
+  )
+  raw_backend.clear_all()
+
+  -- ---------------------------------------------------------------------
+  -- Byte identity for the three operator-validated terminals.
+  --
+  -- The #6344 guards above must not change one byte of what iTerm2, Ghostty
+  -- and Kitty receive -- they were each validated by hand against the exact
+  -- output of this path. A representative session is pinned below with only
+  -- the two id counters normalized to their order of first appearance; those
+  -- advance across the whole test file and are the only run-dependent part of
+  -- the stream. Anything else -- key order, crop arithmetic, cursor framing,
+  -- base64 chunking, the place-before-delete ordering -- fails this on all
+  -- three profiles at once.
+  -- ---------------------------------------------------------------------
+  local function normalize_ids(text)
+    local seen, counts = {}, {}
+    local function tag(prefix, value)
+      local key = prefix .. value
+      if not seen[key] then
+        seen[key] = ("%s<%d>"):format(prefix, counts[prefix] or 0)
+        counts[prefix] = (counts[prefix] or 0) + 1
+      end
+      return seen[key]
+    end
+    text = text:gsub("(i=)(%d+)", function(prefix, value) return tag(prefix, value) end)
+    text = text:gsub("(p=)(%d+)", function(prefix, value) return tag(prefix, value) end)
+    return (text:gsub("\27", "<ESC>"))
+  end
+
+  ---One fixed session, byte for byte: an upload cropped around a passive
+  ---float, a first overlay frame that has to upload the sheet, a second that
+  ---diffs against it, a re-crop, then teardown.
+  local function golden_session()
+    reset_sequences()
+    local golden_placement = {
+      row = 4,
+      col = 2,
+      width = 10,
+      height = 10,
+      exclusions = { { row = 6, col = 5, width = 3, height = 2 } },
+    }
+    local base = raw_backend.show(fake_png(), golden_placement)
+    local set = raw_backend.overlay_apply(
+      nil,
+      base,
+      { { x = 5.5, y = 7.25, width = 20, height = 10 }, { x = 40, y = 60, width = 33, height = 12 } },
+      { widthPx = 100, heightPx = 100 },
+      tint,
+      fake_png(),
+      golden_placement
+    )
+    raw_backend.overlay_apply(
+      set,
+      base,
+      { { x = 5.5, y = 7.25, width = 20, height = 10 }, { x = 41, y = 60, width = 33, height = 12 } },
+      { widthPx = 100, heightPx = 100 },
+      tint,
+      nil,
+      golden_placement
+    )
+    raw_backend.move(base, { row = 4, col = 2, width = 10, height = 10, exclusions = {} })
+    raw_backend.overlay_clear(set)
+    raw_backend.clear(base)
+    local text = normalize_ids(output())
+    raw_backend.clear_all()
+    return text
+  end
+
+  local golden = {}
+  for _, profile in ipairs({ "iterm2", "ghostty", "kitty" }) do
+    config.reset()
+    config.setup({ terminal = { profile = profile } })
+    stub_cell(10, 10)
+    golden[profile] = golden_session()
+  end
+  t.eq(golden.iterm2, golden.ghostty, "iTerm2 and Ghostty receive identical bytes")
+  t.eq(golden.iterm2, golden.kitty, "iTerm2 and Kitty receive identical bytes")
+  if os.getenv("MD_VIEWER_DUMP_GOLDEN") then io.write("GOLDEN>>>" .. golden.iterm2 .. "<<<GOLDEN\n") end
+  t.eq(GOLDEN_VALIDATED_STREAM, golden.iterm2, "the validated terminals' byte stream is unchanged")
+
   -- Without a measured cell there is no way to know what a pixel is worth on
   -- screen, so the overlay refuses -- and "on" cannot override a correctness
   -- precondition the way it overrides a capability judgement.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
   stub_cell(nil)
   config.reset()
   config.setup({ terminal = { profile = "iterm2" } })
