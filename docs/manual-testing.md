@@ -54,9 +54,9 @@ a human actually watched happen on a real screen earns `Supported`.
 | Terminal | Status as of this document |
 |---|---|
 | iTerm2 3.5+ | See the matrix below — a subset of scenarios (basic PNG rendering only, from Parts 1–2) has real historical confirmation; everything from Part 3 onward (click, selection, search, the placement/notification fixes) is unvalidated. See "What has actually been confirmed, and what has not" below before trusting any `Supported` cell. |
-| Kitty | `Protocol-compatible but unvalidated` for everything. Never launched. |
-| WezTerm | Basic PNG rendering has real historical confirmation from Part 2 (see below); everything since is unvalidated, same caveat as iTerm2. |
-| Ghostty | `Protocol-compatible but unvalidated` for everything. Never launched. |
+| Kitty | The drag-highlight overlay is operator-validated (2026-08-08), across repeated drags. Everything else is `Protocol-compatible but unvalidated`. |
+| WezTerm | Basic PNG rendering has real historical confirmation from Part 2 (see below); everything since is unvalidated, same caveat as iTerm2. The drag-highlight overlay is **disqualified**: on `20240203-110809-5046fc22` it failed to render natural-size placements and crashed the application. That build predates upstream's fix (issue #6344) to the code path that crashed, so this is re-testable — see `prompts/drag_highlight_stage_6_wezterm_probe.md`. |
+| Ghostty | The drag-highlight overlay is operator-validated (1.3.1, 2026-08-08). Everything else is `Protocol-compatible but unvalidated`. |
 | Warp | `Protocol-compatible but unvalidated` for everything. Never launched. Warp's own Kitty-graphics support is newer and less established than the other four; if it fails outright, that is useful information — record it as `Unsupported` with what specifically broke, not as a bug in md-viewer. |
 
 macOS Terminal.app is not in this matrix: it does not implement the Kitty
@@ -106,6 +106,8 @@ row `Protocol-compatible but unvalidated` rather than guessing.
 | Forward drag-to-select | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
 | Backward (reverse) drag-to-select | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
 | Multi-paragraph selection | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
+| Instant drag highlight (overlay rectangles, not a re-captured frame)⁴ | Supported | Supported | Unsupported — crashed the probe | Supported | Protocol-compatible but unvalidated |
+| Repeated drags stay instant (the overlay is not overtaken by the base image)⁴ | Supported | Supported | Unsupported | Supported | Protocol-compatible but unvalidated |
 | Double-click word selection | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
 | Triple-click paragraph selection | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
 | Copying a selection (`y` / `:MdViewerCopy`, both registers) | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated | Protocol-compatible but unvalidated |
@@ -149,6 +151,14 @@ gesture — see "Post-Part-6 follow-up: click-to-source removed" in
 ³ These two rows are the two bugs `image.raw_overlay_bleed_cells` and the
 atomic placement-swap fix exist for (Post-Part-6 follow-ups 3, 6, and 7).
 Neither has been graphically confirmed on any terminal.
+⁴ The only two `Supported` rows in this document, and the only ones an
+operator drove by hand and watched: iTerm2 on 2026-08-07 (stage 4) and
+Ghostty 1.3.1 on 2026-08-08 (stage 6). The second row is separate on purpose —
+it is the defect that made Ghostty look like it worked. The base image and
+the overlay shared a z-index, the protocol breaks that tie by image id, and
+md-viewer re-uploads the base on every full frame, so the highlight was
+overtaken after exactly one drag while every placement still reported
+success. A terminal that passes row 1 has not passed row 2; drag three times.
 
 ## Passive-overlay alignment (per terminal)
 

@@ -118,6 +118,18 @@ function M.collect(renderer_result, renderer_error)
     backend_decision = backend.decision,
     raw_graphics_zindex = backend.kitty_raw.zindex,
     raw_graphics_zindex_source = backend.kitty_raw.zindex_source,
+    -- Whether a drag paints its highlight as overlay rectangles (a few hundred
+    -- bytes per frame) or by re-photographing the page, and why.
+    raw_graphics_overlay_supported = backend.kitty_raw.overlay_supported,
+    raw_graphics_overlay_reason = backend.kitty_raw.overlay_reason,
+    -- The overlay's own layer. It must sit exactly one above
+    -- raw_graphics_zindex: equal numbers mean the base and the highlight are
+    -- ordered by image id instead, and the highlight disappears under the base
+    -- as soon as a full frame is re-uploaded.
+    raw_graphics_overlay_zindex = backend.kitty_raw.overlay_zindex or "none (interaction.selection_overlay=off)",
+    -- What a pixel is worth on screen. Overlay rectangles are sized in pixels,
+    -- so "unmeasured" here is the whole reason the overlay is off.
+    raw_graphics_cell_pixels = backend.kitty_raw.cell_pixels,
     raw_graphics_double_buffer = backend.kitty_raw.double_buffer,
     raw_graphics_double_buffer_source = backend.kitty_raw.double_buffer_source,
     raw_graphics_cell_offset_px = backend.kitty_raw.cell_offset_px,
@@ -177,6 +189,10 @@ local order = {
   "backend_decision",
   "raw_graphics_zindex",
   "raw_graphics_zindex_source",
+  "raw_graphics_overlay_supported",
+  "raw_graphics_overlay_reason",
+  "raw_graphics_overlay_zindex",
+  "raw_graphics_cell_pixels",
   "raw_graphics_double_buffer",
   "raw_graphics_double_buffer_source",
   "raw_graphics_cell_offset_px",

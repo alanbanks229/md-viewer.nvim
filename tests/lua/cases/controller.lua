@@ -410,6 +410,38 @@ return function(t)
     t.eq(false, controller.restore_clean_base(session), "a frame cached against other content is refused")
     t.eq(true, session.base_selection_painted, "a refusal leaves the base marked painted")
 
+    -- Which frames become the cached clean base. Recorded wherever a frame
+    -- reaches the screen rather than in M.refresh alone: a scroll taken while
+    -- a selection was up drops the cache, and interact frames never reach
+    -- M.refresh, so clicking to deselect -- which produces a perfectly good
+    -- selection-free frame -- used to leave the drag overlay disabled until
+    -- some later render happened to land with nothing selected.
+    local function interact_frame(bytes)
+      local path = vim.fn.tempname()
+      local fd = assert(vim.uv.fs_open(path, "w", 384))
+      vim.uv.fs_write(fd, bytes, 0)
+      vim.uv.fs_close(fd)
+      controller.display_interact_result(session, { pngPath = path, scrollY = 40, captureScale = "device" })
+    end
+    session.backend.show = function() return 12 end
+    session.backend.update = function() return 12 end
+    session.clean_image_bytes = nil
+    session.clean_image_revision = nil
+
+    session.selection_active = true
+    interact_frame("selected-frame")
+    t.eq(nil, session.clean_image_bytes, "a frame captured with a selection painted in is not cached as clean")
+    t.eq(true, session.base_selection_painted, "and is marked as carrying a selection")
+
+    session.selection_active = false
+    interact_frame("clean-frame")
+    t.eq("clean-frame", session.clean_image_bytes, "a selection-free interact frame becomes the clean base")
+    t.eq(40, session.clean_image_scroll_y, "cached against the scroll position it was taken at")
+    t.eq("1:0", session.clean_image_revision, "and against the content revision it belongs to")
+    t.eq("device", session.clean_image_scale, "the capture scale rides along so the restore matches")
+    t.eq(false, session.base_selection_painted, "the frame on screen is now known to be clean")
+    t.eq(true, controller.restore_clean_base(session), "so the next drag has a base to composite over")
+
     controller.close(source)
     pcall(vim.api.nvim_set_current_win, entry_win)
   end

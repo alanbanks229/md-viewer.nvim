@@ -85,6 +85,28 @@ return function(t)
   end
   t.eq(false, saw_verified, "no environment-only capability report ever claims verified")
 
+  -- `selection_overlay` is the per-profile gate for the drag-highlight overlay,
+  -- true only where a human drove those placements in the real terminal.
+  local overlay_by_profile = {
+    iterm2 = true,
+    ghostty = true,
+    kitty = true,
+    wezterm = false,
+    warp = false,
+    generic_kitty = false,
+    unknown = false,
+  }
+  for profile, expected in pairs(overlay_by_profile) do
+    local capability = terminal.capability({ profile = profile }, {})
+    t.eq(expected, capability.selection_overlay, ("selection_overlay for the %s profile"):format(profile))
+    -- Every Kitty-protocol profile draws its base at -2 so the overlay always
+    -- has -1 to itself. The two layers must not coincide: the protocol breaks
+    -- a z-index tie by image id, and md-viewer re-uploads the base on every
+    -- full frame, so a shared layer lets the base climb above the highlight
+    -- and stay there.
+    t.eq(-2, capability.default_raw_zindex, ("%s leaves -1 free for the overlay"):format(profile))
+  end
+
   -- `terminal` config validation rejects bad values with actionable errors.
   config.reset()
   local bad_profile_ok, bad_profile_err = pcall(config.setup, { terminal = { profile = "not-a-profile" } })

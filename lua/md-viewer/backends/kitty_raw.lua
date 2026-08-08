@@ -5,6 +5,14 @@ local terminal = require("md-viewer.terminal")
 local cellpixels = require("md-viewer.cellpixels")
 local next_id = 0x4d000000 + (vim.uv.os_getpid() % 0xffff) * 256
 local next_placement_id = 0x5d000000 + (vim.uv.os_getpid() % 0xffff) * 256
+-- Tint sheets get their own id space, above every id `next_id` can reach in a
+-- session, because the Kitty protocol breaks a z-index tie by image id: the
+-- lower id draws underneath. `resolve_layers` already keeps the two layers
+-- apart, so this is the second of two independent guarantees rather than the
+-- load-bearing one -- but it is the rule the protocol itself states, and it is
+-- what keeps the highlight on top if the layers are ever pinned together.
+-- Base ids would need ~536M frames to climb this far.
+local next_sheet_id = 0x6d000000 + (vim.uv.os_getpid() % 0xffff) * 256
 
 local function command(control, payload) return "\27_G" .. control .. ";" .. (payload or "") .. "\27\\" end
 
@@ -32,8 +40,10 @@ local function active_profile()
   return terminal.profiles[capability.profile_id] or terminal.profiles.unknown, capability.profile_id
 end
 
---- Effective z-index and where it came from: an explicit `image.raw_zindex`
---- always wins; otherwise the active terminal profile's default.
+--- The z-index the configuration asks for, and where it came from: an explicit
+--- `image.raw_zindex` always wins; otherwise the active terminal profile's
+--- default. `resolve_layers` below turns this into the layer the base image is
+--- actually drawn on, which is not always the same number.
 local function resolve_zindex()
   local explicit = config.get().image.raw_zindex
   if explicit ~= nil then return math.floor(explicit), "explicit override (image.raw_zindex)" end
@@ -53,7 +63,51 @@ local function resolve_double_buffer()
   return default, ("profile default (%s)"):format(profile_id)
 end
 
-local function zindex() return (resolve_zindex()) end
+---The two layers this backend draws on -- the base image, and the selection
+---overlay one step above it -- derived together so that they can never collide.
+---Returns base, overlay (nil when the overlay is disabled outright), and where
+---the configured value came from.
+---
+---They have to be derived together because the Kitty graphics protocol breaks a
+---z-index tie by *image id*: "if two images with the same z-index overlap then
+---the image with the lower id is considered to have the lower z-index". A base
+---and an overlay sharing a layer are therefore ordered by which image was
+---uploaded most recently -- and md-viewer re-uploads the base on every full
+---frame, so the first settle capture after a drag puts the base permanently on
+---top of the tint sheet. That is the 2026-08-08 Ghostty defect: exactly one
+---instant highlight per session, then the overlay drawn underneath every later
+---one, with nothing reporting an error because every placement was accepted.
+---Ghostty sorts placements by (z, image id) and rebuilds the list from an
+---unordered map each frame, so it has no creation order to fall back on;
+---iTerm2 happens to draw the later-created placement on top, which is the only
+---reason a shared layer ever appeared to work (probe check 4c).
+---
+---The overlay is always `base + 1`, and that is only ever a problem at exactly
+---one value. A base at -1 would put the overlay at 0, where the Kitty protocol
+---draws it *over* Neovim's own text rather than under it -- so at -1, and only
+---at -1, the base gives way to -2 instead. Both sit in the same "under text,
+---over background" band (only z < INT32_MIN/2 goes beneath a non-default cell
+---background), so that shift is invisible. A base deliberately put above the
+---text keeps its layer and takes the overlay up with it, which is the only
+---place the highlight can be seen from there.
+---
+---`interaction.selection_overlay = "off"` leaves an explicit `image.raw_zindex`
+---exactly where it was put: with no overlay there is nothing to make room for.
+---The gate is that config value rather than `M.overlay_supported()` so the
+---base's layer cannot shift mid-session when a resize costs us the cell
+---measurement.
+local function resolve_layers()
+  local configured, source = resolve_zindex()
+  if config.get().interaction.selection_overlay == "off" then return configured, nil, source end
+  if configured == -1 then
+    return -2, -1, ("%s, lowered from -1 to leave the selection overlay its own layer"):format(source)
+  end
+  return configured, configured + 1, source
+end
+
+local function zindex() return (resolve_layers()) end
+
+local function overlay_zindex() return (select(2, resolve_layers())) end
 
 local function png_dimensions(bytes)
   if type(bytes) ~= "string" or #bytes < 24 or bytes:sub(1, 8) ~= "\137PNG\r\n\26\n" or bytes:sub(13, 16) ~= "IHDR" then
@@ -224,13 +278,6 @@ function M.overlay_supported()
   return false, ("profile %s is not validated for translucent overlay placements"):format(profile_id)
 end
 
----One layer above the base, clamped below 0 so the overlay stays under
----Neovim's own text (statusline, notifications) the way the base does. With
----the iTerm2 profile's base at -2 this is -1, the exact pair the probe
----validated; an explicit `image.raw_zindex = -1` degrades to same-z, where
----iTerm2 draws the later-created placement on top (probe check 4c).
-local function overlay_zindex() return math.min(-1, zindex() + 1) end
-
 local function tint_key(tint)
   local alpha = math.max(0, math.min(255, math.floor((tonumber(tint and tint.a) or 0) * 255 + 0.5)))
   local function channel(value) return math.max(0, math.min(255, math.floor(tonumber(value) or 0))) end
@@ -352,8 +399,8 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
         ("overlay sheet %dx%d is smaller than the %dx%d it must cover"):format(width_px, height_px, need_w, need_h)
     end
     local previous = sheets[key]
-    next_id = next_id + 1
-    sheet = { id = next_id, width_px = width_px, height_px = height_px }
+    next_sheet_id = next_sheet_id + 1
+    sheet = { id = next_sheet_id, width_px = width_px, height_px = height_px }
     sheets[key] = sheet
     send(chunks(vim.base64.encode(sheet_png), ("a=t,f=100,t=d,q=2,i=%d"):format(sheet.id)))
     -- A smaller predecessor for the same color is fully replaced: any set
@@ -606,7 +653,7 @@ function M.health()
   for _, item in pairs(owned) do
     placements = placements + #(item.placement_ids or {})
   end
-  local zindex_value, zindex_source = resolve_zindex()
+  local zindex_value, overlay_zindex_value, zindex_source = resolve_layers()
   local double_buffer_value, double_buffer_source = resolve_double_buffer()
   local offset = config.get().image.raw_cell_offset_px or {}
   local overlay_supported, overlay_reason = M.overlay_supported()
@@ -623,7 +670,10 @@ function M.health()
     -- What a pixel is worth on screen. Overlay rectangles are sized in these,
     -- so "unmeasured" here is exactly why the overlay is off.
     cell_pixels = cellpixels.describe(),
-    overlay_zindex = math.min(-1, zindex_value + 1),
+    -- Reported beside `zindex` rather than alone: the pair is the diagnostic.
+    -- Two equal numbers mean the highlight is ordered by image id instead of by
+    -- layer, which is how the Ghostty defect presented (see `resolve_layers`).
+    overlay_zindex = overlay_zindex_value,
     overlay_sheets = vim.tbl_count(sheets),
     overlay_sets = overlay_sets,
     overlay_placements = overlay_placements,

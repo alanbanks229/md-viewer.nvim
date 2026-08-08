@@ -17,11 +17,47 @@ All notable changes to this project will be documented here. The project uses
   frame, so the settled highlight is exactly what the page paints.
 
   **Enabled only where it was validated by hand in a real terminal**, which
-  today means iTerm2 alone. WezTerm failed to render these placements and then
-  crashed outright under them, so it keeps the existing full-frame path
-  untouched; everywhere unvalidated does the same. `interaction.selection_overlay`
+  today means iTerm2, Ghostty and Kitty. WezTerm failed to render these
+  placements and then crashed outright under them, so it keeps the existing
+  full-frame path untouched; everywhere else does the same, and the drag stays
+  correct there — merely slower. `interaction.selection_overlay`
   (`"auto"` / `"on"` / `"off"`) overrides that, and `"on"` is how you would try
   another terminal — see the WezTerm caveat above before you do.
+
+- Fixed: on Ghostty the instant highlight worked once per session and then
+  silently stopped, so every drag after the first behaved like the old
+  re-photographed path. It was not falling back — the highlight was being drawn
+  *underneath* the preview image.
+
+  The Kitty graphics protocol breaks a tie between two images on the same layer
+  by image id: the lower id draws underneath. md-viewer drew the preview and the
+  highlight on the same layer and numbered them from the same counter, so the
+  highlight outranked the preview for exactly one drag, and the next full frame —
+  the one taken when you release the mouse — took the lead back and kept it.
+  iTerm2 resolves that tie by which placement was made most recently, which is
+  why it never showed there. Ghostty follows the specification.
+
+  The preview and the highlight now always sit one layer apart, and the tint
+  image is numbered from a range above every preview frame, so neither the layer
+  nor the tie-break can put the highlight underneath. If you had pinned
+  `image.raw_zindex = -1` to work around anything here, you no longer need to;
+  it is now handled for you, and `interaction.selection_overlay = "off"` is the
+  only setting that still leaves that value untouched.
+
+- Fixed: scrolling the preview while text was selected disabled the instant
+  highlight for every drag afterwards, until the preview happened to re-render
+  with nothing selected. Any frame that reaches the screen without a selection
+  painted into it now re-arms it — including the one a click-to-deselect
+  produces.
+
+### Added
+
+- `:MdViewerHealth` now reports whether the drag highlight is being drawn as
+  overlay rectangles and why, the layer it draws on beside the preview's own,
+  and the terminal's measured cell size. The Ghostty bug above was invisible
+  from the outside precisely because none of this was reported: a terminal
+  drawing the highlight underneath the preview looked exactly like one falling
+  back to full frames.
 
 - Fixed: those drag rectangles were drawn too large — noticeably wider than the
   text and tall enough that adjacent lines in a code block touched, where the

@@ -51,9 +51,54 @@ return function(t)
   config.reset()
   config.setup({ terminal = { profile = "kitty" } })
   local kitty_health = raw_backend.health()
-  t.eq(-1, kitty_health.zindex, "profile default zindex for kitty")
+  t.eq(-2, kitty_health.zindex, "profile default zindex for kitty")
   t.ok(kitty_health.zindex_source:match("profile default"), "profile default is named as the source")
   t.ok(kitty_health.zindex_source:match("kitty"), "source names the active profile")
+
+  -- The base and the selection overlay are derived together and must never
+  -- coincide: the Kitty protocol breaks a z-index tie by image id, so a base
+  -- sharing the overlay's layer overtakes it the first time it is re-uploaded
+  -- (the 2026-08-08 Ghostty defect -- one instant highlight, then none).
+  for _, profile in ipairs({ "iterm2", "kitty", "ghostty", "wezterm", "warp", "generic_kitty" }) do
+    config.reset()
+    config.setup({ terminal = { profile = profile } })
+    local layered = raw_backend.health()
+    t.eq(-2, layered.zindex, ("%s draws its base at -2"):format(profile))
+    t.eq(-1, layered.overlay_zindex, ("%s leaves -1 to the selection overlay"):format(profile))
+  end
+
+  -- An explicit -1 is the one value that has to move: the overlay would land on
+  -- 0, where the protocol draws it over Neovim's text instead of under it. The
+  -- base gives way, and the health report says so rather than silently
+  -- disagreeing with the configured value.
+  config.reset()
+  config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = -1 } })
+  local pinned = raw_backend.health()
+  t.eq(-2, pinned.zindex, "an explicit raw_zindex=-1 is lowered to -2")
+  t.eq(-1, pinned.overlay_zindex, "so the overlay still gets its own layer")
+  t.ok(pinned.zindex_source:match("lowered from %-1"), "and the health report explains the move")
+
+  -- Every other explicit value keeps its layer and takes the overlay with it.
+  -- A base deliberately put above the text is the only place a highlight over
+  -- that base can be seen from.
+  config.reset()
+  config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = 5 } })
+  local above = raw_backend.health()
+  t.eq(5, above.zindex, "a base above the text keeps the layer it asked for")
+  t.eq(6, above.overlay_zindex, "and the overlay follows it up rather than hiding under it")
+
+  -- With the overlay disabled outright there is nothing to make room for.
+  config.reset()
+  config.setup({
+    terminal = { profile = "ghostty" },
+    image = { raw_zindex = -1 },
+    interaction = {
+      selection_overlay = "off",
+    },
+  })
+  local unlayered = raw_backend.health()
+  t.eq(-1, unlayered.zindex, "selection_overlay=off leaves an explicit -1 exactly where it was put")
+  t.eq(nil, unlayered.overlay_zindex, "and reports no overlay layer at all")
 
   -- An explicit override still beats a different profile's default.
   config.reset()
@@ -309,6 +354,39 @@ return function(t)
   raw_backend.clear_all()
   t.ok(output():find("a=d,d=I", 1, true) ~= nil, "clear_all frees the sheet image")
   t.eq(0, raw_backend.health().overlay_sheets, "no sheets survive clear_all")
+
+  -- ---------------------------------------------------------------------
+  -- The tint sheet outranks every base image by id, for as long as the
+  -- session lasts.
+  --
+  -- This is the 2026-08-08 Ghostty defect. The two layers are kept apart by
+  -- resolve_layers above, but the protocol's own tie-break is by image id --
+  -- "the image with the lower id is considered to have the lower z-index" --
+  -- and sheets used to be allocated from the same counter as base frames. The
+  -- sheet therefore outranked the base for exactly one drag, and the first
+  -- settle capture after it took the lead back permanently: one instant
+  -- highlight per session, then the overlay drawn underneath every later one,
+  -- with every placement still reported as accepted.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ terminal = { profile = "ghostty" } })
+  reset_sequences()
+  local id_base = raw_backend.show(fake_png(), placement)
+  raw_backend.overlay_apply(nil, id_base, { rect }, viewport, tint, fake_png(), placement)
+  -- The base carries c/r, the overlay crop does not, so "h=<n>,z=" is the
+  -- shape only an overlay placement has.
+  local sheet_id = tonumber(output():match("a=p,q=2,C=1,i=(%d+),p=%d+,x=0,y=0,w=%d+,h=%d+,z="))
+  t.ok(sheet_id ~= nil, "the overlay placement names the sheet it crops")
+  t.ok(sheet_id > id_base, "the sheet starts above the base image it composites over")
+  local rolling, highest_base = id_base, id_base
+  for _ = 1, 50 do
+    rolling = raw_backend.update(rolling, fake_png(), placement)
+    highest_base = math.max(highest_base, rolling)
+  end
+  t.ok(sheet_id > highest_base, "and stays above it however many full frames are re-uploaded")
+  raw_backend.clear(rolling)
+  raw_backend.clear_all()
+  config.reset()
 
   -- ---------------------------------------------------------------------
   -- Rectangles are sized in the pixels the base image is DRAWN at, not the

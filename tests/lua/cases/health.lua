@@ -39,6 +39,22 @@ return function(t)
   t.ok(report_text:match("chromium active document:"), "the report states which document Chromium currently holds")
   t.ok(report_text:match("chromium cached document frames:"), "the report states how many document frames are cached")
 
+  -- The drag-highlight overlay's own diagnostics. Without these, a terminal
+  -- silently drawing the highlight underneath the base image looks identical
+  -- to one falling back to full captures -- which is exactly how the
+  -- 2026-08-08 Ghostty defect presented, and why it took source-reading to
+  -- find. The two z-indices must be reported together: equal numbers mean the
+  -- base and the highlight are ordered by image id rather than by layer.
+  t.ok(report_text:match("raw graphics overlay supported:"), "the report states whether the overlay is in use")
+  t.ok(report_text:match("raw graphics overlay reason:"), "and why, so a refusal is actionable")
+  t.ok(report_text:match("raw graphics overlay zindex:"), "the overlay's layer is reported beside the base's")
+  t.ok(report_text:match("raw graphics cell pixels:"), "and what a pixel is worth on screen")
+  local base_z = tonumber(report_text:match("raw graphics zindex:%s+(%-?%d+)"))
+  local overlay_z = tonumber(report_text:match("raw graphics overlay zindex:%s+(%-?%d+)"))
+  if base_z and overlay_z then
+    t.eq(base_z + 1, overlay_z, "the overlay sits exactly one layer above the base, never on it")
+  end
+
   vim.cmd("bwipeout!")
   vim.env.TMUX = original_tmux
   require("md-viewer.process").stop()

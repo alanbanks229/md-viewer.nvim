@@ -139,6 +139,24 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- screen for the whole drag, which is exactly what the operator reported on
   -- 2026-08-08. `M.restore_clean_base` is how a gesture gets out of it.
   session.base_selection_painted = session.selection_active == true
+  -- The newest frame known to carry no browser-painted selection, kept so a
+  -- drag starting on top of an earlier one can get a clean base back without a
+  -- renderer round trip (see `M.restore_clean_base`).
+  --
+  -- Recorded here, at the one place every full frame passes through, rather
+  -- than in `M.refresh` alone. A scroll taken while a selection was up used to
+  -- drop this cache and nothing put it back: interact frames never reached
+  -- `M.refresh`, so clicking to deselect -- which produces a perfectly good
+  -- clean frame -- left the drag overlay disabled until some later render
+  -- happened to land with nothing selected. `restore_clean_base` re-applies
+  -- through here with `selection_active` still true, so it cannot overwrite
+  -- the entry it is reading.
+  if not session.base_selection_painted then
+    session.clean_image_bytes = image_bytes
+    session.clean_image_scroll_y = session.applied_scroll_y or 0
+    session.clean_image_revision = session.renderer_revision
+    session.clean_image_scale = capture_scale
+  end
   -- Any full frame supersedes the drag overlay: a settle frame has the
   -- highlight baked in by the browser, and a scroll/render frame moves the
   -- geometry the overlay rectangles were computed against. Cleared *after*
@@ -365,20 +383,10 @@ function M.refresh(session, render_options)
     session.viewport_height_render_px = result.viewport.heightPx
     session.viewport_calibration_tier = result.viewport.tier
     session.last_image_bytes = result.image
-    -- The newest frame known to carry no browser-painted selection, kept so a
-    -- drag starting on top of an earlier selection can get a clean base back
-    -- without a renderer round trip (see `M.restore_clean_base`). Interact
-    -- frames never reach here at all, so the only way this picks up a painted
-    -- selection is a render or scroll capture taken while one was live --
-    -- which is exactly when `selection_active` is true.
-    if session.selection_active then
-      session.clean_image_bytes = nil
-    else
-      session.clean_image_bytes = result.image
-      session.clean_image_scroll_y = result.scrollY or session.applied_scroll_y or 0
-      session.clean_image_revision = session.renderer_revision
-      session.clean_image_scale = meta.captureScale
-    end
+    -- A capture taken while a DOM selection was live has it painted in, so the
+    -- cached clean base cannot be this frame. `apply_image` records the
+    -- replacement whenever a selection-free frame does reach the screen.
+    if session.selection_active then session.clean_image_bytes = nil end
     if update_occlusion(session) then
       clear_image(session)
       finish()

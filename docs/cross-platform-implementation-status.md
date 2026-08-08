@@ -4905,22 +4905,8 @@ settled highlight after release is the browser's own paint in every case — so
 the known geometry defect is confined to the moving frames of a drag and
 corrects itself the instant the mouse comes up.
 
-The stage-5 fix above is in the working tree, uncommitted, awaiting the
-operator's eyes in a real iTerm2 — headless Lua stubs the transport and never
-reaches a terminal, so no automated result can speak to this.
-
-First next action, in order:
-
-1. **Operator validates the rectangle geometry.** Drag across a fenced code
-   block (adjacent lines must have visible gaps and must not touch), a heading,
-   prose, a list, a table, and a line mixing prose with `inline code` (one band,
-   not two). Release and watch the transition: the highlight must not change
-   size or colour as the settle frame replaces the overlay.
-2. **Confirm the overlay is still on**, via `:MdViewerHealth` →
-   `cell_pixels`. A terminal or multiplexer that does not fill in
-   `ws_xpixel`/`ws_ypixel` now disables the overlay by design; the reason says
-   so verbatim.
-3. Then commit, and record the hash in `prompts/README.md` row f6.
+The stage-5 fix above shipped as `a80bda1` and `525ff5f`, operator-validated on
+iTerm2. `prompts/README.md` row f6 records both hashes.
 
 Two things are deliberately **not** done, and are the natural next stage:
 
@@ -4934,3 +4920,191 @@ Two things are deliberately **not** done, and are the natural next stage:
 - **End-of-line continuation stubs.** Chromium paints ~4.8 CSS px past the last
   glyph of a soft-broken line; the overlay skips it. The operator asked for
   parity. Deferred so the geometry fix could be validated on its own.
+
+---
+
+# Stage 6 — the overlay's own layer, Ghostty, and what WezTerm actually does (2026-08-08)
+
+## The report
+
+Ghostty was installed and `interaction.selection_overlay = "on"` was set. The
+first drag of a session painted instantly, exactly as iTerm2 does. Every drag
+after it behaved like the old re-photographed path. iTerm2, on the same config
+and the same document, is instant every time.
+
+The reported symptom was "Ghostty falls back to capturing the headless Chrome
+image". It does not. `overlay_frames` climbs on every drag and every placement
+is accepted — the highlight is drawn, and drawn **underneath the base image**.
+That is why nothing surfaced as an error, and why this needed source-reading
+rather than instrumentation to find.
+
+## Root cause
+
+The Kitty graphics protocol specifies the tie-break between two images on the
+same layer:
+
+> If two images with the same z-index overlap then the image with the lower id
+> is considered to have the lower z-index.
+
+Ghostty implements it literally — `src/renderer/image.zig`:
+
+```zig
+return lhs.z < rhs.z or (lhs.z == rhs.z and lhs.image_id.zLessThan(rhs.image_id));
+// .kitty => |lhs_id| return lhs_id < rhs_id;
+```
+
+and it rebuilds that placement list from an unordered hash map on every frame
+before sorting, so there is no creation order to fall back on. iTerm2 resolves
+the same tie by which placement was made most recently (the stage-4 probe's
+check 4c), which is the *only* reason a shared layer ever appeared to work.
+
+Two things put the two layers on top of each other:
+
+- `overlay_zindex()` was `math.min(-1, zindex() + 1)`, which collapses onto the
+  base whenever the base is already at -1. The `ghostty` profile's
+  `default_raw_zindex` was -1, and the operator's config also pinned
+  `image.raw_zindex = -1` explicitly.
+- `kitty_raw.lua` allocated base images and tint sheets from **one shared
+  counter**, so the sheet outranked the base only until the next base frame.
+
+Which produces exactly one working highlight:
+
+| Event | base id | sheet id | wins at z = -1 |
+|---|---|---|---|
+| session start | B | — | — |
+| first drag, sheet uploaded | B | B+1 | sheet — highlight visible |
+| release, settle capture re-uploads the base | B+2 | B+1 | base — highlight hidden |
+| every later drag | B+3, B+4, … | B+1 | base, permanently |
+
+## The fix
+
+`resolve_layers` in `lua/md-viewer/backends/kitty_raw.lua` derives both layers
+from one place with the invariant `overlay = base + 1`. The overlay is the layer
+that cannot move — at 0 the protocol draws it over Neovim's own text — so the
+base gives way, and only at exactly -1, where `base + 1` would be 0. Every other
+configured value keeps its layer and takes the overlay up with it, which is the
+only place a highlight over a base above the text could be seen from.
+`interaction.selection_overlay = "off"` leaves an explicit `-1` alone, because
+with no overlay there is nothing to make room for; the health report names the
+move when it happens rather than silently disagreeing with the configured value.
+
+Every Kitty-protocol profile now defaults to -2. -2 and -1 render identically
+for the base (only z < INT32_MIN/2 goes beneath a non-default cell background),
+so this costs nothing on profiles that never draw an overlay, and it means
+enabling one later is a one-line change rather than a layer audit.
+
+Tint sheets also moved to their own id range (`0x6d000000 + pid`), above
+anything the base counter reaches in a session. That is the second of two
+independent guarantees rather than the load-bearing one — but it is the rule
+the protocol itself states, and it keeps the highlight on top even if the two
+layers are ever pinned together.
+
+`tests/lua/cases/backend_kitty.lua` pins both: the layer pairs across every
+profile and every explicit override, and the sheet id staying above the base
+across 50 full-frame re-uploads. That second assertion fails on the old code.
+
+Ghostty's profile is now `selection_overlay = true` with
+`validation = "operator-validated (2026-08-08)"`, so `"auto"` enables it and the
+`"on"` override is no longer needed.
+
+## Two things this exposed
+
+**The diagnostics did not exist.** `kitty_raw.health()` had computed
+`overlay_supported`, `overlay_reason`, `cell_pixels` and `overlay_zindex` since
+stage 4, and `health.lua` never printed any of them — `config.lua` documented a
+`cell_pixels` line that no one could read. All four are now in the report, and
+the two z-indices are deliberately adjacent: equal numbers are the whole bug,
+visible at a glance. This is what makes a WezTerm probe possible at all.
+
+**The clean-base cache was maintained in the wrong place.** `apply_image` is
+documented as the single choke point every frame passes through, but
+`clean_image_bytes` was only written in `M.refresh`. A scroll taken while a
+selection was up nil'd it, and nothing put it back: interact frames never reach
+`M.refresh`, so clicking to deselect — which produces a perfectly good
+selection-free frame — left the overlay disabled until some later render
+happened to land with nothing selected. The cache now lives beside the
+`base_selection_painted` assignment it belongs to. Terminal-agnostic; iTerm2 had
+it too.
+
+Still open, and deliberately not fixed here: immediately after scrolling with a
+selection up, the *first* drag still uses captured frames, because the cached
+clean frame is at the previous scroll position and `restore_clean_base`
+correctly refuses it. Closing that needs the renderer to label each captured
+frame with whether a selection was painted into it (rather than Lua inferring it
+from `session.selection_active`, which a concurrent drag can flip underneath the
+answer) — a small `interact.js` change, and the honest way to do it. Anything
+that clears the DOM selection mid-gesture from the Lua side races the drag's own
+preview requests.
+
+## WezTerm — researched, not re-probed
+
+No behaviour change; `selection_overlay` stays `false`. But the record was thin
+on *why*, and both halves of the 2026-08-07 failure now have a named cause in
+upstream source.
+
+**The crash.** The probe ran against `20240203-110809-5046fc22` — the February
+2024 stable, and still what is installed on this machine. Upstream issue #6344,
+"Crash on zero-height kitty graphic" (a divide-by-zero in
+`assign_image_to_cells` that "causes the terminal to crash, and all is lost"),
+was filed in November 2024 and fixed afterwards. The guards it added — refusing
+a placement when the pty reports no cell pixel size, and when the drawable
+region is zero — are in the exact function every overlay rectangle goes through.
+The crash evidence on file does not describe current WezTerm.
+
+**The geometry.** WezTerm does not place images freely. `assign_image_to_cells`
+(`term/src/terminalstate/image.rs`) slices a placement into per-cell fragments
+and attaches them to text cells. It parses everything the overlay needs — `z`,
+crop `x/y/w/h`, natural size with no `c`/`r`, `X`/`Y`, placement ids, `a=d,d=i`
+— and `cell_pixel_width = self.pixel_width / physical_cols` confirms it reports
+pty pixel geometry, so `cellpixels.measure()` will work there. But `X`/`Y` land
+in `cell_padding_left` / `cell_padding_top`, and those are passed **unchanged to
+every cell** of the placement, where the protocol specifies the offset applies
+to the first cell only; the per-cell texture slice (`x_delta`) is computed
+without accounting for it. Prediction: a highlight bar wider than one cell draws
+as a comb of inset stripes, with an unpainted gap of `X` pixels at the left of
+every cell. That matches "failed to render the natural-size bars where they were
+placed" precisely, and it is falsifiable.
+
+There is also a cost asymmetry worth knowing before reading any WezTerm timing:
+each placement rewrites every cell it covers and bumps the line sequence number,
+and each deletion walks those rows again across the full line width. An overlay
+frame of 60-80 rectangles is O(rows × cols) cell mutations twice over, against
+one GPU placement each on iTerm2 and Ghostty.
+
+`prompts/drag_highlight_stage_6_wezterm_probe.md` is the procedure, ordered so
+the decisive check (a multi-cell bar with a non-zero `X`) comes before anything
+that risks the crash. If it fails, `prompts/drag_highlight_stage_3_damage_band.md`
+is the answer for WezTerm — which is exactly the contingency it was shelved as.
+
+## Kitty enabled (2026-08-08, same session)
+
+The operator confirmed iTerm2 and Ghostty are both instant across repeated
+drags, then installed Kitty and found it slow — which is correct behaviour for
+a profile with no `selection_overlay` flag: `"auto"` never turned the overlay
+on there, so every drag took the full-capture path.
+
+`selection_overlay = true` is now set on the `kitty` profile. The evidence
+grade is deliberately one notch below iTerm2's and Ghostty's, and the
+`validation` string says so: *"reference implementation; enabled 2026-08-08,
+operator confirmation pending"*. The argument for enabling it is that Kitty is
+where this protocol is specified — the sub-cell `X`/`Y` offsets, the
+natural-size crops without `c`/`r`, and the same-z image-id ordering that the
+stage-6 layer fix exists to satisfy are all Kitty's own definitions, and
+Ghostty (now validated) is a reimplementation of them. That is a stronger
+argument than the one WezTerm failed on, and it is still an argument.
+
+This splits what the flag means from what is known, so the comment above
+`M.profiles` was rewritten to say it outright: the flag decides whether
+md-viewer *sends* the workload, `validation` records how much anyone has
+actually seen, and a `validation` string is never promoted on reasoning alone.
+`docs/manual-testing.md` keeps Kitty's matrix cells at `Protocol-compatible but
+unvalidated` for the same reason — enabling something and validating it are
+different acts, and that document only records the second.
+
+**Confirmed the same day.** The operator dragged repeatedly in Kitty and
+reported it instant, matching iTerm2 and Ghostty. `validation` is now
+`operator-validated (2026-08-08)` and `docs/manual-testing.md` carries the
+first two `Supported` cells it has ever had for Kitty. The repeated-drag case
+is the one that mattered: one working highlight followed by none is the shape
+every failure in this area has taken, and a single drag cannot tell the two
+apart.

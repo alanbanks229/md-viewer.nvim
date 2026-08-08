@@ -25,13 +25,35 @@ local function default_env() return vim.fn.environ() end
 
 -- `selection_overlay` is the per-profile gate for the stage-4 drag-highlight
 -- overlay (translucent natural-size Kitty placements composited over the base
--- image). It is `true` only where that exact behavior was validated by a human
--- driving those placements by hand in the real terminal: alpha
--- compositing image-over-image, crop placements without c/r, sub-cell X/Y
--- offsets, z ordering between images, 40fps placement churn, and clean
--- deletion. "Implements the Kitty graphics protocol" is not sufficient
--- evidence -- WezTerm implements it and crashed outright on this workload.
+-- image): alpha compositing image-over-image, crop placements without c/r,
+-- sub-cell X/Y offsets, z ordering between images, 40fps placement churn, and
+-- clean deletion. "Implements the Kitty graphics protocol" is not sufficient
+-- evidence for any of it -- WezTerm implements it and crashed outright on this
+-- workload.
+--
+-- The flag says whether md-viewer sends that workload. `validation` says how
+-- much is actually known, and the two grades are not the same thing:
+--   * iTerm2, Ghostty and Kitty were each driven by hand in a real terminal
+--     and watched across repeated drags -- the case that matters, since the
+--     defect these were enabled after gave one correct highlight and then
+--     none.
+--   * Kitty was enabled a few hours ahead of that confirmation, on the
+--     strength of being the protocol's own reference implementation. That was
+--     a decision about what to send, and the `validation` string said
+--     "confirmation pending" until someone looked. Never promote a
+--     `validation` string on reasoning alone.
+-- Anything weaker stays `false` and keeps the full-frame capture path, which
+-- is always correct and merely slower.
 
+-- `default_raw_zindex` is -2 for every profile that speaks the Kitty graphics
+-- protocol, so the selection overlay always has -1 to itself. The two layers
+-- must not coincide: the protocol breaks a z-index tie by image id ("the image
+-- with the lower id is considered to have the lower z-index"), and md-viewer
+-- re-uploads the base image on every full frame, so a base sharing the
+-- overlay's layer climbs above it and stays there. -2 and -1 render
+-- identically for the base -- both are under text and over the cell background
+-- -- so this costs nothing on profiles that never draw an overlay, and it
+-- means turning one on later is a one-line change rather than a layer audit.
 M.profiles = {
   iterm2 = {
     id = "iterm2",
@@ -39,9 +61,8 @@ M.profiles = {
     -- -2 rather than -1 so the selection overlay gets its own layer at -1:
     -- base below highlight, both below Neovim's text (Kitty draws z<0 under
     -- text). The probe ran its base at -2 through every check, so this exact
-    -- configuration is what was validated. Both values sit in the same
-    -- under-text-over-background band, so profiles without the overlay keep
-    -- -1 untouched.
+    -- configuration is what was validated. See the note above M.profiles for
+    -- why every Kitty-protocol profile now shares it.
     default_raw_zindex = -2,
     default_double_buffer = true,
     selection_overlay = true,
@@ -57,49 +78,80 @@ M.profiles = {
   kitty = {
     id = "kitty",
     label = "Kitty",
-    default_raw_zindex = -1,
+    default_raw_zindex = -2,
     default_double_buffer = true,
+    selection_overlay = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "protocol-compatible-but-unvalidated",
+    validation = "operator-validated (2026-08-08)",
     caveats = {
-      "Kitty is the reference implementation of the graphics protocol this backend uses.",
+      "Kitty is the reference implementation of the graphics protocol this backend uses: the "
+        .. "sub-cell X/Y offsets, natural-size crops and same-z image-id ordering the selection "
+        .. "overlay depends on are defined by its own specification.",
+      "Selection-overlay placements were confirmed by the operator on 2026-08-08 across repeated "
+        .. "drags -- the case that matters, since the defect this profile was enabled after gave "
+        .. "one correct highlight and then none.",
     },
   },
   wezterm = {
     id = "wezterm",
     label = "WezTerm",
-    default_raw_zindex = -1,
+    default_raw_zindex = -2,
     default_double_buffer = true,
-    -- Not merely unvalidated: actively disqualified. Driven with the stage-4
+    -- Disqualified, but re-testable -- not settled. Driven with the stage-4
     -- overlay probe (translucent natural-size placements, sub-cell offsets,
     -- ~40fps placement churn) on 2026-08-07, WezTerm failed to render the
     -- natural-size bars where they were placed and the terminal application
-    -- itself crashed when the placement churn began. md-viewer must never
-    -- send this workload to WezTerm; drags keep the full-frame capture path.
+    -- itself crashed when the placement churn began. That run was against
+    -- 20240203-110809-5046fc22, and both halves of it have a named cause in
+    -- upstream source; see the caveats and
+    -- prompts/drag_highlight_stage_6_wezterm_probe.md. Until someone re-runs
+    -- that probe on a current build, drags keep the full-frame capture path.
     selection_overlay = false,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "protocol-compatible-but-unvalidated",
+    validation = "disqualified on 20240203 stable; re-probe pending on a current build",
     caveats = {
-      "WezTerm implements the Kitty graphics protocol.",
-      "WezTerm crashed during the stage-4 overlay probe (translucent natural-size placements "
-        .. "at ~40fps, 2026-08-07); the drag-selection overlay is disabled for this profile.",
+      "WezTerm implements the Kitty graphics protocol -- z-indices, crop keys, natural-size "
+        .. "placements without c/r, sub-cell X/Y offsets, placement ids and by-id deletion -- "
+        .. "and reports pty pixel geometry, so md-viewer can measure its cell.",
+      "WezTerm attaches image fragments to text cells rather than placing them freely, and "
+        .. "applies the X/Y sub-cell offset to every cell of a placement instead of only the "
+        .. "first as the protocol specifies (term/src/terminalstate/image.rs). A highlight bar "
+        .. "wider than one cell is predicted to draw as a comb of inset stripes, which is what "
+        .. "the 2026-08-07 probe saw.",
+      "Each placement rewrites every cell it covers and bumps the line sequence number, and each "
+        .. "deletion walks those rows again, so an overlay frame of 60-80 rectangles costs "
+        .. "O(rows x cols) cell writes twice over -- against a GPU placement elsewhere.",
+      "The crash was on 20240203-110809-5046fc22 (Feb 2024 stable). Upstream issue #6344 fixed "
+        .. "divide-by-zero panics in this exact code path after that build, so the crash "
+        .. "evidence does not describe current WezTerm.",
     },
   },
   ghostty = {
     id = "ghostty",
     label = "Ghostty",
-    default_raw_zindex = -1,
+    -- -2 for the same reason as iTerm2: the selection overlay needs a layer of
+    -- its own at -1. Ghostty is stricter about this than iTerm2 -- it sorts
+    -- placements by (z, image id) and rebuilds that list from an unordered map
+    -- every frame, so a base sharing the overlay's layer wins on image id the
+    -- moment it is re-uploaded, with no creation order to fall back on. See
+    -- `resolve_layers` in backends/kitty_raw.lua.
+    default_raw_zindex = -2,
     default_double_buffer = true,
+    selection_overlay = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "protocol-compatible-but-unvalidated",
+    validation = "operator-validated (2026-08-08)",
     caveats = {
-      "Ghostty implements the Kitty graphics protocol.",
+      "Ghostty implements the Kitty graphics protocol, including the sub-cell X/Y placement "
+        .. "offsets, natural-size crops (no c/r keys) and negative z-indices the selection "
+        .. "overlay is built on.",
+      "Ghostty breaks a z-index tie by image id (lower id draws underneath), so the base image "
+        .. "and the selection overlay must never share a layer; md-viewer keeps them one apart.",
     },
   },
   warp = {
     id = "warp",
     label = "Warp",
-    default_raw_zindex = -1,
+    default_raw_zindex = -2,
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
@@ -111,7 +163,7 @@ M.profiles = {
   generic_kitty = {
     id = "generic_kitty",
     label = "Kitty-compatible (TERM only)",
-    default_raw_zindex = -1,
+    default_raw_zindex = -2,
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
@@ -123,7 +175,11 @@ M.profiles = {
   unknown = {
     id = "unknown",
     label = "Unknown terminal",
-    default_raw_zindex = -1,
+    -- Matches every other profile even though this one never reaches the raw
+    -- backend, so the "lowered from -1" note in :MdViewerHealth only ever
+    -- appears for a deliberate image.raw_zindex override, where it means
+    -- something.
+    default_raw_zindex = -2,
     default_double_buffer = true,
     placement = { deletion = "unsupported", crop = "unsupported" },
     validation = "not-attempted",

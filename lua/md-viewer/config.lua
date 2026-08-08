@@ -121,22 +121,26 @@ M.defaults = {
     -- "auto" defers to the terminal profile: the highlight is drawn as
     -- translucent overlay rectangles composited over the existing base image
     -- (no screenshot, no PNG on the wire per frame) only where a human
-    -- validated that exact behavior in a live terminal session --
-    -- today that is iTerm2 alone. WezTerm crashed outright under this
-    -- workload (2026-08-07), so everywhere unvalidated keeps the full-frame
-    -- capture path. "on" forces the overlay regardless of profile -- this is
-    -- how you qualify a new terminal: set it, drag, and look. Be aware that
-    -- WezTerm did not merely fail here, it crashed, so a terminal that cannot
-    -- do this may take itself down rather than degrade. "off" disables it
-    -- everywhere.
+    -- validated that exact behavior in a live terminal session -- today
+    -- iTerm2, Ghostty and Kitty. WezTerm crashed outright under this workload
+    -- (2026-08-07, on a build since fixed upstream; see the profile's
+    -- caveats), so everywhere unvalidated keeps the full-frame capture path,
+    -- which stays correct and is merely slower. "on" forces
+    -- the overlay regardless of profile -- this is how you qualify a new
+    -- terminal: set it, drag, and look. Be aware that WezTerm did not merely
+    -- fail here, it crashed, so a terminal that cannot do this may take itself
+    -- down rather than degrade. "off" disables it everywhere, and is the only
+    -- setting that leaves an explicit `image.raw_zindex` of -1 alone (the
+    -- overlay otherwise needs -1 for itself and pushes the base to -2).
     --
     -- One precondition no setting can override: the terminal must report its
     -- pixel cell size (`cellpixels.lua`). Overlay rectangles are sized in
     -- pixels, and without it there is no way to know what a pixel is worth on
     -- screen -- getting that wrong misdraws the highlight rather than
-    -- degrading it. `:MdViewerHealth`'s `cell_pixels` says whether it is
-    -- known. Multiplexers that do not propagate `ws_xpixel` are the usual
-    -- reason it is not.
+    -- degrading it. `:MdViewerHealth`'s `raw graphics cell pixels` says
+    -- whether it is known, and `raw graphics overlay supported`/`reason` say
+    -- what the gate decided. Multiplexers that do not propagate `ws_xpixel`
+    -- are the usual reason it is not.
     --
     -- The commit frame after release is always a true browser-rendered capture
     -- with the browser's own selection paint, whatever this is set to.

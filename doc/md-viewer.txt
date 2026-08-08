@@ -253,12 +253,24 @@ Nothing is sent, and the global 'mousemoveevent' is left alone.
 TERMINAL SUPPORT                                        *md-viewer-terminals*
 
 md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp by
-Kitty-graphics-protocol compatibility. Only iTerm2 and WezTerm have real
-historical, human-observed confirmation, and only for basic image
-rendering -- every interaction feature and every raw-image placement fix is
-graphically unvalidated on every terminal as of this writing. See
-docs/manual-testing.md for the full scenario matrix and the four honest
+Kitty-graphics-protocol compatibility. Only iTerm2, Ghostty, Kitty and
+WezTerm have real historical, human-observed confirmation, and mostly for
+image rendering and the drag-to-highlight overlay; the other interaction
+features are graphically unvalidated on every terminal as of this writing.
+See docs/manual-testing.md for the full scenario matrix and the four honest
 status labels it uses.
+
+The instant drag highlight -- the selection drawn as translucent overlay
+rectangles rather than re-photographing the page each frame -- is enabled on
+iTerm2, Ghostty and Kitty, each of which an operator drove by hand and
+watched across repeated drags. It is off on WezTerm, which crashed under
+that workload on a build predating an upstream fix to the same code path; see
+prompts/drag_highlight_stage_6_wezterm_probe.md. Everywhere else the drag
+falls back to full captured frames -- always correct, merely slower. Set
+`interaction.selection_overlay` to "on" (see |md-viewer-setup|) to qualify
+your own terminal, after reading that option's notes in lua/md-viewer/
+config.lua. :MdViewerHealth (see |md-viewer-health|) reports whether the
+overlay is in use, why, and the layer it draws on.
 
 tmux, screen, and Zellij are not supported: no escape-sequence passthrough
 is implemented for any of them. :MdViewerHealth detects a multiplexer and
