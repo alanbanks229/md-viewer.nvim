@@ -986,8 +986,9 @@ function M.setup_autocmds()
     group = group,
     callback = function()
       -- A terminal font-size change moves the pixel cell without changing
-      -- anything Neovim reports except the grid, so the measurement has to be
-      -- retaken here or overlay rectangles keep the old cell's scale.
+      -- anything Neovim reports except the grid. `cellpixels` no longer caches
+      -- at all for exactly that reason, so this is now a formality; it stays
+      -- because a resize is genuinely the moment the cell can move.
       cellpixels.invalidate()
       each_session(function(session)
         if not update_occlusion(session) then M.schedule(session, 80, "resize_timer") end

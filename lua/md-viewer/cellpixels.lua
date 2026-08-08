@@ -41,7 +41,10 @@ local REQUEST = {
 local MIN_CELL_PX, MAX_CELL_PX = 2, 200
 
 local declared = false
-local cache = nil
+-- Only *permanent* failures are remembered: a platform with no TIOCGWINSZ
+-- constant and a Neovim with no LuaJIT ffi will not acquire either mid-session.
+-- Everything else is re-read every call. See M.measure.
+local unavailable = nil
 
 local function ffi_handle()
   local ok, ffi = pcall(require, "ffi")
@@ -59,10 +62,24 @@ local function ffi_handle()
   return ffi
 end
 
----Forget the cached measurement. Called on `VimResized`: a terminal font-size
----change moves the cell without changing anything Neovim reports except the
----grid, and the grid may not change at all if the window resized to match.
-function M.invalidate() cache = nil end
+---Retained because `VimResized` still calls it and saying so is clearer than a
+---silently missing call. There is nothing left to invalidate: `M.measure` reads
+---the ioctl every time.
+function M.invalidate() end
+
+---One `TIOCGWINSZ` read: returns cols, rows, xpixel, ypixel, or nil when the
+---ioctl is refused. Split out and left on the module so a test can substitute
+---a terminal whose pixel geometry changes while its grid does not -- which is
+---the case that was silently wrong before, and which nothing on a headless
+---file descriptor can reproduce.
+function M.read_winsize(ffi, request)
+  local winsize = ffi.new("struct md_viewer_winsize")
+  -- File descriptor 1: Neovim's stdout is the terminal. A headless or piped
+  -- Neovim has no pixel geometry to report and lands in the caller's guards.
+  local called, rc = pcall(ffi.C.ioctl, 1, request, winsize)
+  if not called or rc ~= 0 then return nil end
+  return tonumber(winsize.ws_col), tonumber(winsize.ws_row), tonumber(winsize.ws_xpixel), tonumber(winsize.ws_ypixel)
+end
 
 ---The terminal's cell in physical pixels, or `nil` and a reason.
 ---
@@ -70,53 +87,56 @@ function M.invalidate() cache = nil end
 ---fractional -- a terminal is free to report a pixel size that does not divide
 ---evenly, and rounding here would reintroduce the error this module exists to
 ---remove.
+---
+---**Not cached, deliberately.** It used to be, validated by "the grid still
+---matches what was measured", and that check is not sufficient: a terminal can
+---change its pixel geometry without changing the grid at all. WezTerm does it
+---on every launch -- measured on both 20240203-110809-5046fc22 and
+---20260805-104032, it sizes the pty at half scale and corrects it about two
+---seconds later, with the row and column counts identical throughout. A
+---measurement taken in that window was cached for the rest of the session, and
+---every overlay rectangle came out at half scale for it, which is the same
+---defect stage 5 fixed arriving by a different route. A terminal font-size
+---change does the same thing more slowly.
+---
+---The ioctl costs 0.16 us. The overlay path calls this a handful of times per
+---drag frame, so the cache was saving microseconds and risking the one number
+---in this plugin that has to be right.
 function M.measure()
-  if cache ~= nil then
-    if cache == false then return nil, M.reason end
-    -- A grid that no longer matches what was measured means the window or the
-    -- font changed under us.
-    if cache.cols == vim.o.columns and cache.rows == vim.o.lines then return cache end
-    cache = nil
-  end
+  if unavailable then return nil, M.reason end
 
   local sysname = (vim.uv.os_uname() or {}).sysname or ""
   local request = REQUEST[sysname]
   if not request then
-    cache, M.reason = false, ("no TIOCGWINSZ constant for %s"):format(sysname == "" and "this platform" or sysname)
+    unavailable, M.reason = true, ("no TIOCGWINSZ constant for %s"):format(sysname == "" and "this platform" or sysname)
     return nil, M.reason
   end
 
   local ffi = ffi_handle()
   if not ffi then
-    cache, M.reason = false, "LuaJIT ffi is unavailable"
+    unavailable, M.reason = true, "LuaJIT ffi is unavailable"
     return nil, M.reason
   end
 
-  local winsize = ffi.new("struct md_viewer_winsize")
-  -- File descriptor 1: Neovim's stdout is the terminal. A headless or piped
-  -- Neovim has no pixel geometry to report and lands in the guard below.
-  local called, rc = pcall(ffi.C.ioctl, 1, request, winsize)
-  if not called or rc ~= 0 then
-    cache, M.reason = false, "TIOCGWINSZ was refused (no terminal on stdout?)"
+  local cols, rows, xpixel, ypixel = M.read_winsize(ffi, request)
+  if not cols then
+    M.reason = "TIOCGWINSZ was refused (no terminal on stdout?)"
     return nil, M.reason
   end
 
-  local cols, rows = tonumber(winsize.ws_col), tonumber(winsize.ws_row)
-  local xpixel, ypixel = tonumber(winsize.ws_xpixel), tonumber(winsize.ws_ypixel)
   if cols <= 0 or rows <= 0 or xpixel <= 0 or ypixel <= 0 then
-    cache, M.reason = false, "the terminal reports no pixel geometry (ws_xpixel/ws_ypixel are zero)"
+    M.reason = "the terminal reports no pixel geometry (ws_xpixel/ws_ypixel are zero)"
     return nil, M.reason
   end
 
   local width, height = xpixel / cols, ypixel / rows
   if width < MIN_CELL_PX or width > MAX_CELL_PX or height < MIN_CELL_PX or height > MAX_CELL_PX then
-    cache, M.reason = false, ("implausible cell size %.2fx%.2f px from TIOCGWINSZ"):format(width, height)
+    M.reason = ("implausible cell size %.2fx%.2f px from TIOCGWINSZ"):format(width, height)
     return nil, M.reason
   end
 
-  cache = { width = width, height = height, cols = cols, rows = rows }
   M.reason = nil
-  return cache
+  return { width = width, height = height, cols = cols, rows = rows }
 end
 
 ---A one-line summary for `:MdViewerHealth` and `:MdViewerDebug`.
