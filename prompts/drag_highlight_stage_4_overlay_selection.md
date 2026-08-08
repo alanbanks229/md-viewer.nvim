@@ -137,6 +137,63 @@ against anything they were not rasterised against. The only approximation is the
 
 ---
 
+### What the highlight must look like, from the operator's own screenshots
+
+The operator supplied two screenshots of the real preview with a live selection.
+Match this, because it is the standard you will be judged against:
+
+- **Ragged, per-line-box rectangles.** Each line's highlight ends exactly where
+  that line's text ends — never a full-width band. This is what
+  `Range.getClientRects()` already returns, one rect per line box.
+- **Inline `<code>` spans get their own separate, taller rectangle**, vertically
+  offset from the prose around them, because they are their own line boxes with
+  their own padding. A sentence containing two inline-code spans shows three
+  distinct rectangles at two different heights.
+- **Blank lines inside a selected code block show a short stub rectangle**, not
+  nothing and not a full-width bar.
+- **The text stays completely legible** through the translucent grey — syntax
+  colours read normally underneath it.
+- A large selection can produce **60-80 rectangles**. Budget for that.
+
+### The geometry trap that decides whether this looks right
+
+**Text line height and terminal cell height do not align, and never will.**
+
+With the operator's settings, `--md-viewer-line-height` is **25 CSS px**
+(`round(16 × 22/14)`), while a terminal cell is **20 CSS px** (1020px viewport ÷
+51 cells). Successive lines start at y = 0, 25, 50, 75… and cell boundaries fall
+at 0, 20, 40, 60… They only re-align every 100px, so the phase drifts
+continuously down the page.
+
+Consequently **you cannot snap highlight rectangles to whole cells.** One cell is
+too short for a 25px line and leaves a visible gap between highlighted lines; two
+cells is too tall and bleeds into the neighbouring line. Either way it looks
+obviously wrong, and inline-code rects — which are a different height again —
+make it worse.
+
+The Kitty protocol's `c`/`r` placement keys scale an image into a whole number of
+cells, so **do not use them for this.** Place the image at its **natural pixel
+size** (omit `c`/`r`) and position it with the sub-cell `X`/`Y` offset keys. That
+gives pixel-exact rectangles on a cell-based grid.
+
+This means one tiny image per distinct rectangle *size*, not one image total.
+That is still nearly free if you do two things:
+
+- **Cache uploaded rectangle images keyed by exact pixel size.** A document has
+  only a handful of distinct line-box heights, so after a moment the cache is
+  warm and no upload happens at all.
+- **Diff the rect set between frames and re-place only what changed.** Extending
+  a drag by one line changes one or two rectangles; the rest keep their existing
+  placements untouched. Do not delete and re-place all 60 every frame.
+
+**If the terminals do not honour `X`/`Y` sub-cell offsets, this design cannot
+produce correct geometry — stop and fall back to stage 3.** Note that
+`image.raw_cell_offset_px` already exists with the comment "when the terminal
+honours it", so this is genuinely unsettled. It is the single most important
+thing step 1 must answer.
+
+---
+
 ## Step 1 — verify the terminal can do this at all, before building anything
 
 This design rests on one assumption that no headless test can settle: **that
