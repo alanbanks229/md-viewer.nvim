@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
-import zlib from "node:zlib";
+import { decodePngPixels } from "./helpers/decode-png.mjs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
@@ -85,55 +85,6 @@ test("buildSelectionResult passes selection rect geometry through", () => {
   assert.ok(MAX_SELECTION_RECTS >= 128, "the rect cap must comfortably exceed a real frame's 60-80 rects");
 });
 
-/// Enough of a PNG decoder to recover raw samples; deliberately not a
-/// dependency (same rationale as browser.test.js's copy).
-function decodePngPixels(buffer) {
-  assert.equal(buffer.readUInt32BE(0), 0x89504e47, "not a PNG");
-  let offset = 8;
-  let width = 0, height = 0, depth = 0, colorType = 0, interlace = 0;
-  const idat = [];
-  while (offset < buffer.length) {
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.toString("ascii", offset + 4, offset + 8);
-    const data = buffer.subarray(offset + 8, offset + 8 + length);
-    if (type === "IHDR") {
-      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
-      depth = data[8]; colorType = data[9]; interlace = data[12];
-    } else if (type === "IDAT") idat.push(data);
-    else if (type === "IEND") break;
-    offset += 12 + length;
-  }
-  assert.equal(depth, 8);
-  assert.equal(interlace, 0);
-  const channels = { 0: 1, 2: 3, 4: 2, 6: 4 }[colorType];
-  assert.ok(channels, `unsupported colour type ${colorType}`);
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  const stride = width * channels;
-  const pixels = Buffer.alloc(height * stride);
-  let pos = 0;
-  for (let y = 0; y < height; y += 1) {
-    const filter = raw[pos]; pos += 1;
-    const line = raw.subarray(pos, pos + stride); pos += stride;
-    const current = pixels.subarray(y * stride, (y + 1) * stride);
-    const prior = y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : null;
-    for (let x = 0; x < stride; x += 1) {
-      const a = x >= channels ? current[x - channels] : 0;
-      const b = prior ? prior[x] : 0;
-      const c = prior && x >= channels ? prior[x - channels] : 0;
-      let value = line[x];
-      if (filter === 1) value += a;
-      else if (filter === 2) value += b;
-      else if (filter === 3) value += (a + b) >> 1;
-      else if (filter === 4) {
-        const p = a + b - c;
-        const pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c);
-        value += (pa <= pb && pa <= pc) ? a : (pb <= pc ? b : c);
-      }
-      current[x] = value & 0xff;
-    }
-  }
-  return { width, height, channels, pixels };
-}
 
 test("buildOverlaySheetPng produces a solid straight-alpha sheet and caches it", () => {
   const tint = SELECTION_TINT.dark;
