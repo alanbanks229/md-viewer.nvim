@@ -3,6 +3,39 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Capturing a preview frame is roughly 2.3-2.8x cheaper, pixel for pixel.
+  Chromium now launches with `--disable-frame-rate-limit`, removing a fixed
+  compositor wait that dominated the capture regardless of how much was being
+  captured (a 1x1-pixel screenshot measured the same 32ms as a full frame), and
+  frames are encoded through Chromium's speed-optimised PNG path. PNG is
+  lossless either way and the decoded pixels are identical; frames are about
+  40-60% larger, which costs a fraction of a millisecond to reach the terminal.
+
+  **This is a renderer-side improvement and does not, on its own, make
+  drag-to-highlight feel faster.** Measured in a real iTerm2 session, capture
+  time per drag frame fell from 103.2ms to 36.5ms with no perceptible change to
+  the gesture, in both iTerm2 and WezTerm. The cost that governs how the drag
+  feels is downstream of Neovim — the terminal decoding and compositing a fresh
+  full-viewport image every frame — and is addressed separately. See
+  `docs/cross-platform-implementation-status.md`.
+
+### Added
+
+- `browser.fast_png_encode` (default `true`) to turn the speed-optimised PNG
+  encoding off, and `capture_encoder` in `:MdViewerDebug` reporting which of
+  the two capture paths produced the last frame.
+
+### Fixed
+
+- A capture taken while the preview was scrolled could have screenshotted the
+  top of the document rather than what was on screen, had the new capture path
+  shipped without carrying the page's scroll offset. Caught before release and
+  covered by a regression test.
+
 ## [0.3.0] - 2026-08-07
 
 ### Added

@@ -76,7 +76,7 @@ end
 ---render/capture path and `display_interact_result`'s interact path funnel
 ---through, so there is exactly one place that knows how to show/update a
 ---backend image.
-local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms)
+local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -96,6 +96,10 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   if png_bytes then session.last_png_bytes = png_bytes end
   if capture_ms then session.last_capture_ms = capture_ms end
   if capture_scale then session.last_capture_scale = capture_scale end
+  -- Which of the renderer's two screenshot paths produced this frame. The fast
+  -- one falls back silently and permanently on its first failure, so without
+  -- this a browser that refused it would just look inexplicably slow.
+  if capture_encoder then session.last_capture_encoder = capture_encoder end
   if capture_scale == "css" then
     session.fast_png_bytes = session.last_png_bytes
     session.fast_capture_ms = session.last_capture_ms
@@ -146,7 +150,7 @@ function M.display_interact_result(session, result)
     session.refresh_deferred = true
     return
   end
-  apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs)
+  apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs, result.captureEncoder)
 end
 
 local function show_cached(session)
@@ -249,7 +253,16 @@ function M.refresh(session, render_options)
       finish()
       return
     end
-    if not apply_image(session, result.image, meta.captureScale, session.last_png_bytes, session.last_capture_ms) then
+    if
+      not apply_image(
+        session,
+        result.image,
+        meta.captureScale,
+        session.last_png_bytes,
+        session.last_capture_ms,
+        meta.captureEncoder
+      )
+    then
       finish()
       return
     end

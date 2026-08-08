@@ -45,6 +45,15 @@ stopping point is coherent.
 | 6 | [Selection and search](part-6-selection-and-search.md) | DOM selection, copy, rendered-text find | Sonnet 5 / Sonnet 5 | done | c06f4bc |
 | 7 | [Hardening and docs](part-7-hardening-and-docs.md) | Regression, security review, compatibility matrix, documentation | Sonnet 5 / Sonnet 5 | done | 26e637d |
 
+### Post-Part-7 follow-ups: drag-to-highlight responsiveness
+
+| # | Prompt | Objective | Plan / implement model | Status | Commit |
+|---|--------|-----------|------------------------|--------|--------|
+| f1 | [Stage 1 — fast frames](drag_highlight_stage_1_fast_frames.md) | Measure the frame budget; remove the trailing debounce | **Opus 5** / **Opus 5** | done (capture-scale half reverted by `c44e22f`) | 2bcee86 |
+| f2 | Round 2 — sharp frames | Revert the blurry moving frame; keep selecting when a drag leaves the window | **Opus 5** / **Opus 5** | done | c44e22f |
+| f3 | [Stage 2 — make a sharp frame cheap](drag_highlight_stage_2_transport.md) | Remove the compositor frame-rate cap and the PNG encode cost, pixel-for-pixel | **Opus 5** / **Opus 5** | implemented, uncommitted — 2.8x faster renderer, **no felt change** | — |
+| f4 | [Stage 3 — stop sending a whole screen per frame](drag_highlight_stage_3_damage_band.md) | Damage-band capture and placement; the terminal's own decode is the measured bottleneck | **Opus 5** / **Opus 5** | not started | — |
+
 **Release checkpoints.** Part 2 completes a shippable `v0.2.0` — genuinely
 cross-terminal, with no interaction changes. Part 7 completes `v0.3.0`. Parts 3
 through 6 are not individually releasable but each is independently revertible.

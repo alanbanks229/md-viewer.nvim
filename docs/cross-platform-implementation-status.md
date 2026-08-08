@@ -4255,6 +4255,13 @@ the same shape `controller.schedule_scroll` already used.
 
 ### What changed
 
+> **Superseded on both counts — see the round 2 and stage 2 sections below.**
+> The capture-scale half of this stage was reverted in `c44e22f`: moving drag
+> frames are device scale again, and the cheap capture survives only as an
+> opt-in `interaction.fast_drag` defaulting to `false`. The Lua test described
+> below as asserting `"css"` asserts `"device"` again. The debounce/pacing half
+> described here is unchanged and still stands.
+
 - `lua/md-viewer/interaction.lua`'s `M.schedule_selection_preview`: the
   preview frame now captures at `render.fast_scroll and "css" or "device"`
   (reusing the existing flag rather than inventing `fast_drag`), and dispatch
@@ -4309,3 +4316,326 @@ is the operator's call, made by dragging in a real terminal. The numbers
 above show the two changed mechanisms doing what they were built to do —
 capture is materially cheaper, and dispatch no longer waits or starves — but
 say nothing about what a real Kitty/iTerm2 draw feels like.
+
+---
+
+## Post-Part-7 follow-up: drag-highlight responsiveness, round 2 — sharp frames
+
+**Commit:** `c44e22f` — "sharp drag frames, and a drag that leaves the window
+keeps selecting"
+
+Two operator-reported bugs from a real iTerm2 session, both real:
+
+1. The preview went blurry and emoji looked bloated for the whole of every
+   drag. Stage 1's capture-scale change was the cause and was reverted:
+   moving drag frames are **device scale** again. The cheap capture survives
+   as an opt-in `interaction.fast_drag`, defaulting to `false`, deliberately
+   *not* wired to `render.fast_scroll` — nobody reads text mid-scroll, but a
+   drag-to-select puts the reader's eye on the exact glyphs being crossed.
+2. A drag leaving the preview window stopped extending the selection.
+   `interaction.locate_for_drag` now clamps an out-of-window pointer to the
+   placement edge, and `resolveSelectionInPage` slides an endpoint that landed
+   on no block onto the nearest one. The clamp alone was a no-op: the edge
+   column is the page's own 26px side padding, so every request from it came
+   back `focus_miss`. `hitTestInPage` still reports an honest `outside_content`
+   miss for that padding, so a click in the margin never activates a link.
+
+---
+
+## Post-Part-7 follow-up: drag-highlight responsiveness, stage 2 — make a sharp frame cheap
+
+**Status:** implemented, **not committed**, pending operator validation in a
+real terminal.
+
+### What the frame budget is actually made of
+
+Stage 2 began with measurement and no production code, because the previous
+round's ranking of suspects turned out not to describe the cost at all.
+
+Decomposing `page.screenshot()` against real Chromium (Chrome 151) showed that
+capture time is **not** dominated by rasterization, CDP transfer, or the file
+write, and that **area is nearly irrelevant**:
+
+```
+990x1020 CSS @ deviceScaleFactor 2 (1980x2040 device px), dense document
+  full device-scale PNG (production)      ~82-98 ms
+  a 1x1 PIXEL clip                         ~32 ms
+  a 990x260 band                           ~32 ms
+  full-size JPEG (same pixel count)        ~32 ms
+```
+
+A one-pixel screenshot costs the same ~32ms as a full frame. That fixed floor
+is `Page.captureScreenshot` waiting for the compositor to commit a fresh
+frame, capped at the display refresh rate (~2 x 16.2ms). Everything above the
+floor is **PNG encoding**, which is linear in pixel count and content density.
+
+The operator's real session (`:MdViewerDebug`, iTerm2, 99x51 cells) put real
+numbers on both halves:
+
+```
+viewport 990x1020 px, dsf 2      retina_capture_ms      103.21
+retina_png_bytes  471484         retina_image_update_ms   0.783
+fast_png_bytes    210423         fast_capture_ms         51.90
+```
+
+Encode is therefore ~69% of their frame (103.2 - 32.4) and the floor ~31%.
+`fast_capture_ms` confirms the model independently: 51.9 - 32.4 = 19.5ms of
+encode for 1.0M px against 70.8ms for 4.04M px, a 3.6x ratio against a 4.0x
+area ratio.
+
+### The four previously-suspected costs really are noise
+
+Measured, not assumed:
+
+- `rehydrateMs` (which contains the re-resolved drag anchor, `page.evaluate`
+  function re-serialization, and the unconditional `applyScroll`) —
+  **0.57-1.25ms** of a 75ms frame.
+- Lua-side `fs_read` + `vim.base64.encode` + escape assembly — **0.075ms**
+  for an 86KB frame, **0.120ms** for a 151KB one.
+
+All four together are under 1% of the frame. Perfect work on every one of
+them would buy roughly 1ms out of 75.
+
+### Terminal transfer is also noise
+
+Never previously timed, and the reason lever A was ranked first. The
+operator's `retina_image_update_ms` — `vim.base64.encode` plus `nvim_ui_send`
+of a whole 471KB frame — is **0.78ms**. This removes the premise that a
+damage-rectangle placement would attack "both dominant costs at once": the
+upload is not a cost. (Caveat: this measures `nvim_ui_send` returning, not
+iTerm2's own decode and composite, which happens asynchronously and which
+nothing in-process can observe.)
+
+### What changed
+
+Two changes, both **pixel-preserving**, neither touching placement, transport,
+staleness lanes, or selection semantics:
+
+- `renderer/src/browser.js` launches Chromium with `--disable-frame-rate-limit`.
+  This removes the refresh-rate cap on the compositor wait: the floor measured
+  32.3ms -> 19.8ms, reproducibly across three runs, with **byte-identical**
+  PNG output (same SHA). Idle CPU is unchanged (0.4% of one core with and
+  without), which matters because this browser is persistent.
+- `captureViewport` now issues `Page.captureScreenshot` over a raw CDP session
+  with `optimizeForSpeed: true`, which Playwright does not expose. PNG is
+  lossless either way; this only trades compression ratio for encoder time.
+  The PNG is ~40% larger, costing ~0.3ms more of a 0.78ms upload.
+  `browser.fast_png_encode` (default `true`) turns it off, and any failure
+  falls back permanently to `page.screenshot` for the life of the process.
+
+`clip` is in **document** coordinates, so the capture reads the page's live
+scroll offset (`visualViewport.pageLeft/pageTop`) rather than trusting
+`active.scrollY`. An early version of the benchmark omitted this and silently
+screenshotted the top of the document at every scrolled position — the same
+shape as the `display_interact_result` `scrollY` bug this repository already
+shipped once. There is now a test for it.
+
+`captureEncoder` is reported through to `:MdViewerDebug` as `capture_encoder`,
+so a browser that refused the fast path looks refused rather than merely slow.
+
+### Before and after
+
+Same real drag, same document, same machine, three runs each. The envelopes
+were produced by a **real drag in a live Neovim** (see below), then replayed
+verbatim into the real renderer subprocess:
+
+```
+per moving drag frame        BEFORE (c44e22f)      AFTER
+  wall (Lua-observed)        79.1 / 73.9 / 74.2    32.1 / 33.5 / 33.7
+  captureMs                  75.5 / 70.4 / 70.5    28.0 / 29.2 / 29.9
+  pngBytes                          140105               208713
+```
+
+**~75.7ms -> ~33.1ms, 2.3x** — roughly 13 to 30 moving frames per second
+before terminal transfer.
+
+### Verification
+
+- **A live Neovim driven through the real input layer.** A headless server with
+  `--listen`, real windows, real `mouse.attach` mappings, driven by
+  `nvim_input_mouse` over `--remote-expr` from a separate process. Its
+  `preview.placement()`/`preview.viewport()` pair came out at 99x51 cells ->
+  990x1020 px — the operator's real geometry exactly. A press, ten drags and a
+  release (one deliberately past the window edge) produced 12 real interact
+  envelopes, with `pointer_pressed` false afterwards and no stuck state.
+  Attaching a UI to that server is still not possible: `nvim_ui_attach` from an
+  `-l` client kills the channel over `--listen` just as it does under `--embed`.
+  The image backend is therefore the one part that stays faked.
+- **Chained into a real Chromium renderer subprocess.** Those 12 envelopes were
+  replayed verbatim; selection text lengths were identical before and after
+  (0, 25, 74, 125, 161, 177, 197, 217, 241, 247, 248, 248), and the commit
+  frame matched the final preview frame.
+- **Pixel verification with an independent decoder.** The tests decode PNGs
+  back to raw samples with a decoder that shares no code with the encoder under
+  test, rather than comparing file bytes (which necessarily differ).
+
+### One measured, deliberately accepted difference
+
+The CDP capture issues its screenshot marginally earlier in the raster
+pipeline than Playwright's path, which does extra round trips first. Against a
+fully settled capture of the same state, the production frame differs by a
+**constant 10 samples out of 4,039,200 (0.0002%)**, max delta 16/255,
+greyscale, in one fixed region — present on every frame regardless of where
+the selection is, so it is not selection-related.
+
+It is emphatically not a stale frame: the same frames differ from the
+*previous* frame's settled image by 8,000-62,000 samples, three to four orders
+of magnitude more. `tests/node/browser.test.js` asserts exactly that ratio, so
+a genuinely stale frame fails loudly. It is also not a sharpness change — the
+frame is still full device resolution.
+
+### Levers evaluated and rejected
+
+- **A, damage-rectangle capture and partial placement.** Rejected during this
+  stage, **and that rejection was wrong — see "Operator validation" below.**
+  The reasoning was that upload is 0.78ms so there is no transfer cost to
+  attack. That number measures `nvim_ui_send` *returning* — handing bytes to
+  Neovim — not the terminal decoding and compositing them, a caveat recorded
+  twice in this document and then overridden by the number anyway. Operator
+  testing showed the terminal's own decode is the actual bottleneck, and lever
+  A is the only evaluated option that addresses it.
+- **B, stop screenshotting and composite the highlight terminal-side.**
+  Rejected. It would make a moving frame nearly free, but it requires the
+  highlight to be drawn by Lua from geometry rather than by the browser that
+  owns the selection — which is precisely the way for the picture and
+  `selection_text` to disagree. It also depends on unverified Kitty alpha/z
+  behaviour on iTerm2 and changes what "the image on screen" means for
+  `coordinates.cell_to_css`, `session.last_placement` and every diagnostic.
+- **C, JPEG.** Rejected on protocol grounds: the Kitty graphics protocol has no
+  JPEG format (`f=100` is PNG; `f=24`/`f=32` are raw RGB/RGBA), so a JPEG
+  cannot be carried without transcoding, which costs more than it saves. Its
+  lossless cousin — `optimizeForSpeed` — is what shipped instead.
+- **`Page.startScreencast`.** Rejected. Push-based frames would remove the wait
+  entirely, but measurement showed it silently dropping frames (500ms timeouts
+  on some mutations) and its frames carry no request identity, so a superseded
+  request could be answered from a newer one's frame.
+- **`HeadlessExperimental.beginFrame`.** Unavailable — removed from Chrome 151.
+- **Further compositor flags** (`--run-all-compositor-stages-before-draw`,
+  `--deterministic-mode`, `--disable-gpu`). Measured, no gain beyond
+  `--disable-frame-rate-limit` alone; `--disable-gpu` additionally changed the
+  rendered pixels, and combining the first with `--disable-frame-rate-limit`
+  hung the capture outright.
+
+### Tests
+
+All four gates: **142 Node tests, 755 Lua assertions, stylua clean**,
+`npm ci --ignore-scripts` unchanged. `:MdViewerDebug` was invoked as the real
+command in headless Neovim and produced a 63-line buffer.
+
+Four new tests in `tests/node/browser.test.js`, all against real Chromium:
+the fast encoder is lossless at both scales and both scroll positions; a drag
+frame paints the selection it reports rather than the previous one; a scrolled
+capture shows what is on screen rather than the document top; and
+`browser.fast_png_encode = false` falls back and is re-read per request.
+
+### This cannot be validated here
+
+Whether the drag *feels* crisp and snappy is the operator's call, made by
+dragging in a real terminal. Nothing above was seen in a graphical terminal.
+The operator supplied one measurement — the `:MdViewerDebug` numbers quoted
+above — and nothing else about this stage has been observed by eye.
+
+### Safe stopping point
+
+The tree is coherent and all gates pass, but **nothing is committed** — the
+operator asked to validate in a real terminal first. First next action: drag
+in iTerm2 and judge; then `:MdViewerDebug` and compare `retina_capture_ms`
+against the 103.21 recorded above, and confirm `capture_encoder` reads
+`cdp_fast_png`.
+
+### Operator validation — the result, and what it overturns
+
+Tested in real iTerm2 and WezTerm sessions. **The change did what it was
+measured to do and made no perceptible difference to the gesture.**
+
+```
+iTerm2, 99x51 cells (990x1020 px, 4.04M device px)
+  capture_encoder            cdp_fast_png     (fast path engaged)
+  retina_capture_ms          103.21 -> 36.51  (2.8x, as predicted)
+  retina_png_bytes           471484 -> 755566 (+60%)
+  retina_image_update_ms     0.783 -> 0.790   (unchanged)
+  operator verdict           "feels the same"
+
+WezTerm, 87x51 cells (870x1020 px, 3.55M device px)
+  retina_capture_ms          29.92
+  operator verdict           "feels the same, still laggy while dragging"
+```
+
+A ~67ms per-frame saving in the renderer produced no felt change, in two
+independent terminals. The renderer was therefore never the limiter.
+
+The discriminating experiment was shrinking the preview to 20x10 cells —
+320x320 CSS px, **0.41M device pixels, a 10x reduction, at unchanged
+sharpness**:
+
+```
+iTerm2, 20x10 cells
+  retina_capture_ms          15.98            (only 20ms below full size)
+  retina_png_bytes           107864
+  retina_image_update_ms     0.128
+  operator verdict           "very snappy and smooth"
+```
+
+Capture time moved by 20ms while the felt experience changed completely. The
+variable that tracks the gesture's responsiveness is **pixel count per frame**,
+and the cost lives in the terminal's PNG decode and composite — downstream of
+`nvim_ui_send`, and invisible to every measurement obtainable inside Neovim.
+
+**What this means for lever A.** A slow drag — the case where responsiveness
+matters, because the reader's eye is on the glyphs being crossed — changes two
+or three lines of highlight. That damage band is roughly 990x75 CSS px =
+**0.30M device pixels, below the 0.41M frame the operator judged snappy**, at
+full size and full sharpness. Lever A is no longer the speculative option it
+was ranked as here; it is the only evaluated lever that touches the measured
+bottleneck. Its worst case (a fast drag spanning the viewport) degrades to
+today's behaviour rather than worse.
+
+**Standing correction to this document's method.** Two measurements in this
+stage were correct and led to a wrong conclusion because of what they did not
+cover: `retina_image_update_ms` is not terminal cost, and `captureMs` is not
+frame cost. Any future claim about drag responsiveness has to be validated by
+the operator dragging in a real terminal before it is believed.
+
+#### Follow-up A/B: `browser.fast_png_encode = false` — confounded, but suggestive
+
+The operator flipped the setting off and reported the gesture felt *slightly
+faster*, with the renderer measurably **slower** (`retina_capture_ms`
+36.51 → 59.44, `capture_encoder` correctly `playwright_png`).
+
+The window was the same (990×1020, 99×51 cells) but the **document was not**:
+`document_height_px` 6417 → 11723 and `applied_scroll_y` 990 → 3036, so a
+different picture was on screen and `retina_png_bytes` (241595) is not
+comparable with the earlier 755566. No conclusion about byte count can be drawn
+from this pair.
+
+The inversion itself — slower renderer, better feel — is the part worth
+chasing, and points at md-viewer applying **no backpressure against the
+terminal**: frames are pushed at it regardless of whether it has drawn the
+previous one, so a faster renderer may simply grow a queue. See the open
+question in `prompts/drag_highlight_stage_3_damage_band.md`.
+
+**Both were then resolved by a further operator test, and both readings were
+withdrawn.** Dragging rapidly for 2-3 seconds and stopping with the button
+still held made the highlight **snap into place immediately** — there is no
+growing queue, so md-viewer is not outrunning the terminal and pacing is not
+the fix. Re-tested, the operator reports the difference between
+`fast_png_encode` `true` and `false` is negligible; the earlier "slightly
+faster" was noise. Byte count therefore has no demonstrated effect on the
+gesture, and **`fast_png_encode` stays defaulted to `true`** — a measured
+renderer improvement with no measured downside, and one that will matter again
+once damage bands make the capture floor and encode the dominant remaining
+cost.
+
+The same session produced the clearest justification yet for a damage band: in
+the operator's words, dragging across **two words takes the same time as
+dragging a very large distance**. A two-word change currently costs a full
+4.04M-pixel frame.
+
+**One tension remains unexplained and is recorded as open in the stage 3
+prompt.** Removing 67ms of renderer time per frame was imperceptible, while
+shrinking the viewport 10x was dramatic. A pixel-proportional cost therefore
+lives downstream of the renderer, is not `retina_image_update_ms`, and is not a
+queue. Stage 3 opens by measuring the real in-situ frame period and the
+`<LeftDrag>` delivery rate before touching the placement path, because that
+measurement can invalidate the damage-band plan far more cheaply than the
+placement work can.

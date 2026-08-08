@@ -26,7 +26,19 @@ M.defaults = {
     fast_scroll = true,
     scroll_settle_ms = 160,
   },
-  browser = { channel = "chrome", executable_path = nil, launch_timeout_ms = 10000 },
+  browser = {
+    channel = "chrome",
+    executable_path = nil,
+    launch_timeout_ms = 10000,
+    -- Encode captured PNGs for speed rather than for size. Not a quality knob:
+    -- PNG is lossless either way and the decoded pixels are identical -- the
+    -- test suite decodes both encodings back to raw samples and compares them,
+    -- rather than taking that on trust. It trades ~40% more bytes (which cost
+    -- 0.78ms to reach the terminal for a whole 471KB frame) for roughly a third
+    -- off the encode, which is the largest variable cost of a drag frame. Set
+    -- false to fall back to Playwright's default encoding.
+    fast_png_encode = true,
+  },
   image = {
     backend = "auto",
     zindex = 20,
@@ -205,6 +217,7 @@ local function validate(cfg)
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
   )
+  assert(type(cfg.browser.fast_png_encode) == "boolean", "md-viewer: browser.fast_png_encode must be boolean")
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")
   assert(
     type(cfg.preview.loading_interval_ms) == "number" and cfg.preview.loading_interval_ms > 0,

@@ -28,6 +28,7 @@ function M.snapshot()
       layout_reused = session.last_layout_reused,
       markdown_reused = session.last_markdown_reused,
       capture_scale = session.last_capture_scale,
+      capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,
       capture_ms = session.last_capture_ms,

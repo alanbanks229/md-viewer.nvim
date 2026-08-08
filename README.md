@@ -210,6 +210,10 @@ require("md-viewer").setup({
     channel = "chrome",
     executable_path = nil,
     launch_timeout_ms = 10000,
+    -- Encode captured frames for speed rather than for size. Lossless either
+    -- way: the picture is identical, the file is larger. Set false to use
+    -- Playwright's default encoding.
+    fast_png_encode = true,
   },
   image = {
     backend = "kitty_raw", -- "auto", "nvim_img", "kitty_raw", or "cells"
