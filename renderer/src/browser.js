@@ -574,7 +574,8 @@ export class BrowserRenderer {
         result.overlaySheetPng = buildOverlaySheetPng(
           envelope.overlaySheet.widthPx,
           envelope.overlaySheet.heightPx,
-          result.selectionTint
+          result.selectionTint,
+          { x: envelope.overlaySheet.marginX ?? 0, y: envelope.overlaySheet.marginY ?? 0 }
         ).toString("base64");
       }
     }

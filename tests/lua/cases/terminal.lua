@@ -86,25 +86,49 @@ return function(t)
   t.eq(false, saw_verified, "no environment-only capability report ever claims verified")
 
   -- `selection_overlay` is the per-profile gate for the drag-highlight overlay,
-  -- true only where a human drove those placements in the real terminal.
+  -- true only where someone actually looked -- by eye for iTerm2, Ghostty and
+  -- Kitty, by photograph for WezTerm.
+  --
+  -- `overlay_encoding` is how a rectangle's sub-cell position is expressed.
+  -- Only WezTerm differs, and only because it insets every cell of a placement
+  -- by the X/Y offset rather than the first cell alone.
   local overlay_by_profile = {
-    iterm2 = true,
-    ghostty = true,
-    kitty = true,
-    wezterm = false,
-    warp = false,
-    generic_kitty = false,
-    unknown = false,
+    iterm2 = { overlay = true, encoding = "sub-cell-offset" },
+    ghostty = { overlay = true, encoding = "sub-cell-offset" },
+    kitty = { overlay = true, encoding = "sub-cell-offset" },
+    wezterm = { overlay = true, encoding = "sheet-margin" },
+    warp = { overlay = false, encoding = "sub-cell-offset" },
+    generic_kitty = { overlay = false, encoding = "sub-cell-offset" },
+    unknown = { overlay = false, encoding = "sub-cell-offset" },
   }
-  for profile, expected in pairs(overlay_by_profile) do
+  for profile, want in pairs(overlay_by_profile) do
     local capability = terminal.capability({ profile = profile }, {})
-    t.eq(expected, capability.selection_overlay, ("selection_overlay for the %s profile"):format(profile))
+    t.eq(want.overlay, capability.selection_overlay, ("selection_overlay for the %s profile"):format(profile))
+    t.eq(want.encoding, capability.overlay_encoding, ("overlay_encoding for the %s profile"):format(profile))
     -- Every Kitty-protocol profile draws its base at -2 so the overlay always
     -- has -1 to itself. The two layers must not coincide: the protocol breaks
     -- a z-index tie by image id, and md-viewer re-uploads the base on every
     -- full frame, so a shared layer lets the base climb above the highlight
     -- and stay there.
     t.eq(-2, capability.default_raw_zindex, ("%s leaves -1 free for the overlay"):format(profile))
+  end
+
+  -- The flag and the evidence are different grades, and the flag must never
+  -- silently upgrade the evidence. WezTerm was enabled on photographs, not on
+  -- anyone's eyes, and its `validation` string has to keep saying so until
+  -- someone has actually dragged in it.
+  local wez = terminal.capability({ profile = "wezterm" }, {})
+  t.ok(wez.validation:match("pixel%-verified"), "the wezterm validation string records how it was checked")
+  t.ok(wez.validation:match("20240203%-110809"), "and names the old stable build it was checked on")
+  t.ok(wez.validation:match("20260805%-104032"), "and the current build too")
+  t.ok(wez.validation:match("operator confirmation pending"), "and does not claim an operator has looked")
+  t.eq(nil, wez.validation:match("operator%-validated"), "specifically, it never says operator-validated")
+  for _, seen in ipairs({ "iterm2", "ghostty", "kitty" }) do
+    local capability = terminal.capability({ profile = seen }, {})
+    t.ok(
+      capability.validation:match("operator%-validated"),
+      ("%s keeps the stronger grade someone actually earned"):format(seen)
+    )
   end
 
   -- `terminal` config validation rejects bad values with actionable errors.

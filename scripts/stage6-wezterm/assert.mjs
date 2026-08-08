@@ -304,21 +304,39 @@ for (const rect of expect.rects) {
   // Contiguity: the comb. If WezTerm's per-cell padding were an inset rather
   // than a translation, every cell boundary inside the bar would carry an
   // unpainted gap of X pixels. Scan the whole interior, not just one row.
-  let holes = 0;
-  let firstHole = null;
-  for (let y = top; y <= bottom; y += 1) {
-    for (let x = left; x <= right; x += 1) {
-      if (!isTinted(overlaid, x, y)) {
-        holes += 1;
-        if (!firstHole) firstHole = { x: x - overlayFrame.reg.originX, y: y - overlayFrame.reg.originY };
-      }
-    }
+  // Counted across the rectangle's *expected* span, not its measured bounding
+  // box. A comb collapses the measured box to a single stripe, and then
+  // "no holes inside the box" is trivially true -- which is how an early
+  // version of this check passed a screenshot with sixty stripes in it.
+  let runs = 0;
+  let painted = 0;
+  let inRun = false;
+  for (let x = x0; x < x0 + rect.width; x += 1) {
+    const on = isTinted(overlaid, x, midY);
+    if (on) painted += 1;
+    if (on && !inRun) runs += 1;
+    inRun = on;
   }
   check(
-    holes === 0,
-    `${rect.name}: solid, with no gap at any cell boundary (the comb check)`,
-    `${holes} unpainted pixels inside the bar, first at content (${firstHole?.x}, ${firstHole?.y}); ` +
-      `a comb would put a gap of ${rect.expect_sub_cell_x} px at each of ~${Math.ceil(rect.width / reg.cellWidth)} cell boundaries`
+    runs === 1 && painted === rect.width,
+    `${rect.name}: one solid run across the whole bar, no gap at any cell boundary (the comb check)`,
+    `${runs} separate painted runs covering ${painted} of ${rect.width} px; ` +
+      `a comb puts a gap of ${rect.expect_sub_cell_x} px at each of ~${Math.ceil(rect.width / reg.cellWidth)} cell boundaries`
+  );
+
+  let rows = 0;
+  let paintedRows = 0;
+  inRun = false;
+  for (let y = y0; y < y0 + rect.height; y += 1) {
+    const on = isTinted(overlaid, midX, y);
+    if (on) paintedRows += 1;
+    if (on && !inRun) rows += 1;
+    inRun = on;
+  }
+  check(
+    rows === 1 && paintedRows === rect.height,
+    `${rect.name}: one solid run down the whole bar (the comb check, vertically)`,
+    `${rows} separate painted runs covering ${paintedRows} of ${rect.height} px`
   );
 }
 

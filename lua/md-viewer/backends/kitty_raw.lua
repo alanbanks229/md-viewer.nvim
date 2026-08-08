@@ -394,14 +394,40 @@ function M.overlay_supported()
   return false, ("profile %s is not validated for translucent overlay placements"):format(profile_id)
 end
 
-local function tint_key(tint)
-  local alpha = math.max(0, math.min(255, math.floor((tonumber(tint and tint.a) or 0) * 255 + 0.5)))
-  local function channel(value) return math.max(0, math.min(255, math.floor(tonumber(value) or 0))) end
-  return ("%d,%d,%d,%d"):format(channel(tint and tint.r), channel(tint and tint.g), channel(tint and tint.b), alpha)
+---The transparent margin this terminal's tint sheet needs, or nil.
+---
+---Only WezTerm asks for one, and only because it insets every cell of a
+---placement by the `X`/`Y` sub-cell offset rather than the first cell alone.
+---One cell on each axis is exactly enough: the crop starts `cell - offset`
+---pixels into the margin, so the largest offset a cell can carry still leaves
+---at least one margin pixel to crop from. See the note above `M.profiles` in
+---md-viewer.terminal.
+function M.overlay_margin()
+  local profile = active_profile()
+  if profile.overlay_encoding ~= "sheet-margin" then return nil end
+  local cell = cellpixels.measure()
+  if not cell then return nil end
+  return { x = math.floor(cell.width), y = math.floor(cell.height) }
 end
 
-local function sheet_for(tint, min_width, min_height)
-  local sheet = sheets[tint_key(tint)]
+local function tint_key(tint, margin)
+  local alpha = math.max(0, math.min(255, math.floor((tonumber(tint and tint.a) or 0) * 255 + 0.5)))
+  local function channel(value) return math.max(0, math.min(255, math.floor(tonumber(value) or 0))) end
+  -- The margin is part of the identity: a marginless sheet cannot stand in for
+  -- a margined one, and cropping the wrong one would silently shift every
+  -- rectangle by up to a cell.
+  return ("%d,%d,%d,%d+%d,%d"):format(
+    channel(tint and tint.r),
+    channel(tint and tint.g),
+    channel(tint and tint.b),
+    alpha,
+    margin and margin.x or 0,
+    margin and margin.y or 0
+  )
+end
+
+local function sheet_for(tint, margin, min_width, min_height)
+  local sheet = sheets[tint_key(tint, margin)]
   if sheet and sheet.width_px >= min_width and sheet.height_px >= min_height then return sheet end
   return nil
 end
@@ -418,6 +444,13 @@ local function required_sheet_size(item, placement)
     width = math.max(width, math.ceil(placement.width * cell.width))
     height = math.max(height, math.ceil(placement.height * cell.height))
   end
+  -- The margin sits outside the drawn box: a crop runs from `margin - offset`
+  -- to `margin + rect width`, so the sheet has to be that much larger again.
+  local margin = M.overlay_margin()
+  if margin then
+    width = width + margin.x
+    height = height + margin.y
+  end
   return width, height
 end
 
@@ -428,9 +461,13 @@ function M.overlay_needs_sheet(base_image_id, tint, placement)
   local item = owned[base_image_id]
   if not item then return false end
   local width, height = required_sheet_size(item, placement)
-  if tint then return sheet_for(tint, width, height) == nil end
-  for _, sheet in pairs(sheets) do
-    if sheet.width_px >= width and sheet.height_px >= height then return false end
+  local margin = M.overlay_margin()
+  if tint then return sheet_for(tint, margin, width, height) == nil end
+  local prefix = tint_key(nil, margin):match("^.-(%+%d+,%d+)$")
+  for key, sheet in pairs(sheets) do
+    -- Only a sheet with this terminal's margin can serve: same reason the
+    -- margin is part of the cache key.
+    if key:sub(-#prefix) == prefix and sheet.width_px >= width and sheet.height_px >= height then return false end
   end
   return true
 end
@@ -457,21 +494,34 @@ end
 ---Compose (but do not send) one overlay crop placement. The crop keys select
 ---the rectangle's size out of the sheet; no c/r keys, so it displays at
 ---natural pixel size.
-local function overlay_placement_sequence(sheet, rect, placement, cell_w, cell_h, calibration)
+local function overlay_placement_sequence(sheet, rect, placement, cell_w, cell_h, calibration, margin)
+  local col, x_offset = overlay_cell_position(rect.x, cell_w, placement.col, calibration.x)
+  local row, y_offset = overlay_cell_position(rect.y, cell_h, placement.row, calibration.y)
+
+  local crop_x, crop_y, want_w, want_h, offset = 0, 0, rect.width, rect.height, ""
+  if margin then
+    -- Express the sub-cell position by cropping into the sheet's transparent
+    -- margin, and send no X/Y keys at all. The placement's leading `x_offset`
+    -- pixels come out transparent, so the tint starts exactly where the
+    -- rectangle does -- with nothing for WezTerm to inset per cell.
+    crop_x, crop_y = margin.x - x_offset, margin.y - y_offset
+    want_w, want_h = x_offset + rect.width, y_offset + rect.height
+  elseif x_offset ~= 0 or y_offset ~= 0 then
+    offset = (",X=%d,Y=%d"):format(x_offset, y_offset)
+  end
+
   -- The no-c/r branch of #6344 divides by the cell rather than by `w`, so what
   -- matters here is that the crop stays inside the sheet: an oversized `w`
   -- would be silently clamped by the terminal to `image_width - x` anyway, and
   -- a crop starting past the edge is the one shape that cannot be drawn.
-  local crop_w, crop_h = crop_within(sheet.width_px, sheet.height_px, 0, 0, rect.width, rect.height)
+  local crop_w, crop_h = crop_within(sheet.width_px, sheet.height_px, crop_x, crop_y, want_w, want_h)
   if not crop_w then return nil end
   local pid = new_placement_id()
-  local col, x_offset = overlay_cell_position(rect.x, cell_w, placement.col, calibration.x)
-  local row, y_offset = overlay_cell_position(rect.y, cell_h, placement.row, calibration.y)
-  local offset = ""
-  if x_offset ~= 0 or y_offset ~= 0 then offset = (",X=%d,Y=%d"):format(x_offset, y_offset) end
-  local control = ("a=p,q=2,C=1,i=%d,p=%d,x=0,y=0,w=%d,h=%d,z=%d%s"):format(
+  local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,z=%d%s"):format(
     sheet.id,
     pid,
+    crop_x,
+    crop_y,
     crop_w,
     crop_h,
     overlay_zindex(),
@@ -510,8 +560,9 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   if not cell then return nil, cell_reason end
 
   local need_w, need_h = required_sheet_size(item, placement)
-  local key = tint_key(tint)
-  local sheet = sheet_for(tint, need_w, need_h)
+  local margin = M.overlay_margin()
+  local key = tint_key(tint, margin)
+  local sheet = sheet_for(tint, margin, need_w, need_h)
   if not sheet then
     if type(sheet_png) ~= "string" then return nil, "need_sheet" end
     local width_px, height_px = png_dimensions(sheet_png)
@@ -634,7 +685,11 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   -- already moved out of `set.placements`, and they would never be deleted.
   for _, piece_key in ipairs(order) do
     local piece = wanted[piece_key]
-    if not crop_within(sheet.width_px, sheet.height_px, 0, 0, piece.width, piece.height) then
+    -- With a margin the crop runs from `margin - offset`, so the worst case is
+    -- the whole margin plus the rectangle; without one it is the rectangle.
+    local reach_w = piece.width + (margin and margin.x or 0)
+    local reach_h = piece.height + (margin and margin.y or 0)
+    if not crop_within(sheet.width_px, sheet.height_px, 0, 0, reach_w, reach_h) then
       return nil,
         ("a %dx%d rectangle does not fit the %dx%d tint sheet"):format(
           piece.width,
@@ -653,7 +708,8 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
       fresh[piece_key] = existing
       set.placements[piece_key] = nil
     else
-      local pid, sequence = overlay_placement_sequence(sheet, wanted[piece_key], placement, cell_w, cell_h, calibration)
+      local pid, sequence =
+        overlay_placement_sequence(sheet, wanted[piece_key], placement, cell_w, cell_h, calibration, margin)
       -- The pre-pass above already proved every rectangle fits, so this cannot
       -- be nil; if it ever is, refusing the frame is right -- the caller drops
       -- to captured frames, which are correct and merely slower.

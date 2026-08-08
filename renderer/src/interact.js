@@ -280,7 +280,23 @@ export function validateEnvelope(params) {
     if (widthPx <= 0 || heightPx <= 0) {
       throw createInteractError("INVALID_INTERACTION", "overlaySheet dimensions must be positive");
     }
-    overlaySheet = { widthPx, heightPx };
+    // A transparent margin, for terminals that express a rectangle's sub-cell
+    // position by cropping into it rather than with the protocol's X/Y keys.
+    // Optional: absent means no margin, and no margin is byte-identical to the
+    // sheet every other terminal was validated against.
+    const marginX = sheet.marginX === undefined || sheet.marginX === null
+      ? 0
+      : requireFiniteNumber(sheet.marginX, "overlaySheet.marginX");
+    const marginY = sheet.marginY === undefined || sheet.marginY === null
+      ? 0
+      : requireFiniteNumber(sheet.marginY, "overlaySheet.marginY");
+    if (marginX < 0 || marginY < 0 || marginX >= widthPx || marginY >= heightPx) {
+      throw createInteractError(
+        "INVALID_INTERACTION",
+        "overlaySheet margins must be non-negative and leave some sheet behind"
+      );
+    }
+    overlaySheet = { widthPx, heightPx, marginX, marginY };
   }
 
   return {

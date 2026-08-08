@@ -62,6 +62,8 @@ return function(t)
   end
 
   local placement = { row = 0, col = 0, width = 10, height = 10 }
+  -- 200x200: large enough to cover a drawn box plus a one-cell margin.
+  local big_sheet = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\200\0\0\0\200"
 
   -- Z-index: explicit override, in every sign, always wins over the profile
   -- default and is the literal value encoded into the placement command.
@@ -269,12 +271,12 @@ return function(t)
 
   -- Gating: profile flag under "auto", explicit on/off overrides.
   config.reset()
-  config.setup({ terminal = { profile = "wezterm" } })
-  local wez_supported, wez_reason = raw_backend.overlay_supported()
-  t.eq(false, wez_supported, "the wezterm profile refuses overlay placements (it crashed the probe)")
-  t.ok(wez_reason:match("not validated"), "the refusal names the profile gate")
+  config.setup({ terminal = { profile = "warp" } })
+  local warp_supported, warp_reason = raw_backend.overlay_supported()
+  t.eq(false, warp_supported, "an unvalidated profile refuses overlay placements")
+  t.ok(warp_reason:match("not validated"), "the refusal names the profile gate")
   config.reset()
-  config.setup({ terminal = { profile = "wezterm" }, interaction = { selection_overlay = "on" } })
+  config.setup({ terminal = { profile = "warp" }, interaction = { selection_overlay = "on" } })
   t.eq(true, (raw_backend.overlay_supported()), "selection_overlay=on forces the overlay past the profile")
   config.reset()
   config.setup({ terminal = { profile = "iterm2" }, interaction = { selection_overlay = "off" } })
@@ -368,6 +370,97 @@ return function(t)
   t.ok(carry_output:find(",X=4,Y=7", 1, true) ~= nil, "and keeps the remainder as the sub-cell offset")
   config.reset()
   config.setup({ terminal = { profile = "iterm2" } })
+
+  -- ---------------------------------------------------------------------
+  -- The WezTerm encoding: no X/Y keys, the offset cropped out of the sheet's
+  -- transparent margin instead.
+  --
+  -- WezTerm applies X/Y to every cell of a placement rather than the first,
+  -- and applies it as an inset, so each cell paints cell-minus-X pixels wide.
+  -- A 960px bar at X=3 was photographed as 60 separate 13px runs on both
+  -- 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15. Moving the offset
+  -- into the image leaves nothing to inset, and it is still one placement per
+  -- rectangle -- the splitting alternatives cost up to nine.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(10, 10)
+  t.eq(nil, raw_backend.overlay_margin(), "profiles on the default encoding ask for no margin")
+  config.reset()
+  config.setup({ terminal = { profile = "wezterm" } })
+  local wez_margin = raw_backend.overlay_margin()
+  t.eq(10, wez_margin.x, "the wezterm margin is one whole cell wide")
+  t.eq(10, wez_margin.y, "and one whole cell tall")
+  stub_cell(7.6, 16.4)
+  t.eq(7, raw_backend.overlay_margin().x, "a fractional cell floors: the margin must be a whole pixel count")
+  t.eq(16, raw_backend.overlay_margin().y, "in both axes")
+  stub_cell(10, 10)
+
+  raw_backend.clear_all()
+  reset_sequences()
+  local wez_base = raw_backend.show(fake_png(), placement) -- 100x100 px over 10x10 cells
+  -- The sheet has to cover the margin as well as the drawn box, so the 100x100
+  -- sheet every other profile accepts here is refused.
+  t.eq(true, raw_backend.overlay_needs_sheet(wez_base, tint, placement), "wezterm needs a sheet of its own")
+  local small_ok, small_why = raw_backend.overlay_apply(nil, wez_base, { rect }, viewport, tint, fake_png(), placement)
+  t.eq(nil, small_ok, "a sheet with no room for the margin is refused")
+  t.ok(small_why:match("must cover"), "and says what it failed to cover: " .. tostring(small_why))
+
+  reset_sequences()
+  local wez_set = raw_backend.overlay_apply(nil, wez_base, { rect }, viewport, tint, big_sheet, placement)
+  t.ok(wez_set ~= nil, "a sheet that covers the margin is accepted")
+  local wez_output = output()
+  -- The same rect the golden session places at X=6,Y=7 on every other profile.
+  -- Here: cursor to the same cell, no X/Y at all, and the crop starts
+  -- (cell - offset) into the margin and is (offset + size) long.
+  t.eq(nil, wez_output:match("X=%d+"), "no sub-cell X key is sent to wezterm")
+  t.eq(nil, wez_output:match("Y=%d+"), "and no Y key either -- that is the whole point")
+  t.ok(
+    wez_output:find("x=4,y=3,w=26,h=17", 1, true) ~= nil,
+    "the offset moves into the crop: x=cell-6, y=cell-7, w=6+20, h=7+10 -- " .. wez_output:gsub("%c", "."):sub(1, 300)
+  )
+  t.ok(wez_output:find("\27[1;1H", 1, true) ~= nil, "and the placement still sits at the rectangle's own cell")
+
+  -- A rectangle already on a cell boundary still crops the full margin away,
+  -- so the first tinted pixel is the first pixel of the cell.
+  reset_sequences()
+  raw_backend.overlay_apply(
+    wez_set,
+    wez_base,
+    { { x = 20, y = 30, width = 15, height = 12 } },
+    viewport,
+    tint,
+    nil,
+    placement
+  )
+  t.ok(
+    output():find("x=10,y=10,w=15,h=12", 1, true) ~= nil,
+    "a cell-aligned rect crops past the whole margin: " .. output():gsub("%c", "."):sub(1, 200)
+  )
+
+  -- The two encodings are not interchangeable, and neither are their sheets:
+  -- cropping a marginless sheet with margin arithmetic would shift every
+  -- rectangle by up to a cell.
+  local wez_sheet_id = tonumber(wez_output:match("a=p,q=2,C=1,i=(%d+),p=%d+,x=%d+,y=%d+,w=%d+,h=%d+,z="))
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  t.eq(
+    true,
+    raw_backend.overlay_needs_sheet(wez_base, tint, placement),
+    "the margined sheet cannot serve a profile that crops from zero"
+  )
+  reset_sequences()
+  raw_backend.overlay_apply(nil, wez_base, { rect }, viewport, tint, big_sheet, placement)
+  local plain_sheet_id = tonumber(output():match("a=t,f=100,t=d,q=2,i=(%d+)"))
+  t.ok(plain_sheet_id ~= nil and plain_sheet_id ~= wez_sheet_id, "so a second sheet is uploaded for the other encoding")
+  t.ok(output():find(",X=6,Y=7", 1, true) ~= nil, "and that profile still gets the sub-cell keys it was validated with")
+  raw_backend.clear_all()
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(10, 10)
+  reset_sequences()
+  overlay_base = raw_backend.show(fake_png(), placement)
+  set_id = raw_backend.overlay_apply(nil, overlay_base, { rect }, viewport, tint, fake_png(), placement)
 
   -- Deletion: clearing the set removes every placement; clear_all also frees
   -- the sheet.
@@ -464,7 +557,6 @@ return function(t)
   --   x: 10*0.7 = 7        w: round(30*0.7) - 7 = 21 - 7 = 14
   --   y: 10*1.6 = 16       h: round(35*1.6) - 16 = 56 - 16 = 40
   -- The capture-relative arithmetic would have said 20x25 at (10,10).
-  local big_sheet = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\200\0\0\0\200"
   reset_sequences()
   local drawn_set = raw_backend.overlay_apply(
     nil,

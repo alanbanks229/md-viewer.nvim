@@ -35,7 +35,7 @@ local cellpixels = require("md-viewer.cellpixels")
 -- do: it does not override the cell-size or floored-cell preconditions below,
 -- because those are correctness and safety, not a capability judgement.
 require("md-viewer.config").setup({
-  terminal = { profile = "wezterm" },
+  terminal = { profile = vim.env.MD_VIEWER_STAGE6_PROFILE or "wezterm" },
   interaction = { selection_overlay = "on" },
 })
 
@@ -132,20 +132,27 @@ vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { end_col = cols, hl_group = "Stage6
 -- Buffer line N shows at screen row N-1; the last screen row is the cmdline,
 -- so the far corner mark goes one row above it.
 local corner_row = rows - 2
-vim.api.nvim_buf_set_extmark(
-  buf,
-  ns,
-  corner_row,
-  cols - 1,
-  { end_col = cols, hl_group = "Stage6Fiducial" }
-)
+vim.api.nvim_buf_set_extmark(buf, ns, corner_row, cols - 1, { end_col = cols, hl_group = "Stage6Fiducial" })
 vim.api.nvim_win_set_cursor(0, { corner_row + 1, 0 })
 vim.cmd("redraw")
 
 -- ---------------------------------------------------------------------------
 -- Measure, then draw.
 -- ---------------------------------------------------------------------------
-local cell, cell_reason = cellpixels.measure()
+-- Wait for the reading to settle before computing anything from it. WezTerm
+-- sizes its pty at half scale and corrects it about two seconds in, with the
+-- grid identical either side, so a probe that reads once at startup measures
+-- the wrong terminal. Production re-reads every drag frame and a drag happens
+-- long after this; the rig has to reproduce that, not race it.
+local cell, cell_reason
+local settle_deadline = vim.uv.now() + 15000
+local previous = nil
+while vim.uv.now() < settle_deadline do
+  cell, cell_reason = cellpixels.measure()
+  if cell and previous and previous.width == cell.width and previous.height == cell.height then break end
+  previous = cell and { width = cell.width, height = cell.height } or nil
+  vim.wait(1000, function() return false end, 100)
+end
 if not cell then die("cellpixels.measure() failed: " .. tostring(cell_reason)) end
 
 local supported, support_reason = raw.overlay_supported()
@@ -153,22 +160,19 @@ local cw, ch = math.floor(cell.width), math.floor(cell.height)
 local base_w, base_h = BASE_COLS * cw, BASE_ROWS * ch
 local placement = { row = BASE_ROW, col = BASE_COL, width = BASE_COLS, height = BASE_ROWS }
 
--- MD_VIEWER_STAGE6_MARGIN switches the overlay to the WezTerm-compatible
--- encoding: the sheet carries a transparent margin of one cell on each axis,
--- the placement is cell-aligned with no X/Y keys, and the sub-cell offset is
--- expressed by cropping into the margin instead. See overlay-sheet.js.
-local MARGIN = vim.env.MD_VIEWER_STAGE6_MARGIN == "1"
+-- Whatever encoding the active profile selects, `overlay_margin` says how much
+-- extra sheet it needs: one cell on each axis for the sheet-margin encoding,
+-- nothing otherwise -- and a zero margin builds the byte-identical PNG.
+local margin = raw.overlay_margin()
+local margin_x, margin_y = margin and margin.x or 0, margin and margin.y or 0
 local base_png = png(base_w, base_h, BASE_RGB, out .. "/base.png")
-local sheet_png = MARGIN and png(cw + base_w, ch + base_h, TINT, out .. "/sheet.png", cw, ch)
-  or png(base_w, base_h, TINT, out .. "/sheet.png")
+local sheet_png = png(base_w + margin_x, base_h + margin_y, TINT, out .. "/sheet.png", margin_x, margin_y)
 
 -- Rectangles in base-relative device pixels. The viewport passed to
 -- overlay_apply is the base image's own size, so the scale is exactly 1 and a
 -- rect coordinate is a device pixel -- which is what makes the expectations
 -- below arithmetic rather than estimation.
-local function rect(x, y, w, h, name, note)
-  return { x = x, y = y, width = w, height = h, name = name, note = note }
-end
+local function rect(x, y, w, h, name, note) return { x = x, y = y, width = w, height = h, name = name, note = note } end
 local cases = {
   rect(0, 0, 8 * cw, 2 * ch, "A-aligned", "cell-aligned in both axes; X and Y are both zero"),
   rect(
@@ -195,6 +199,7 @@ local expectations = {
   cell_floor = { width = cw, height = ch },
   overlay_supported = supported,
   overlay_reason = support_reason,
+  overlay_margin = { x = margin_x, y = margin_y },
   base = { row = BASE_ROW, col = BASE_COL, cols = BASE_COLS, rows = BASE_ROWS, width_px = base_w, height_px = base_h },
   base_rgb = BASE_RGB,
   tint = TINT,
@@ -221,85 +226,21 @@ vim.fn.writefile({ vim.json.encode(expectations) }, out .. "/expectations.json")
 
 if not supported then die("overlay_supported() is false: " .. tostring(support_reason)) end
 
----The candidate WezTerm encoding, emitted by hand so this run can measure it
----before anything decides whether it belongs in `overlay_apply`.
----
----For a rectangle at (px, py) size (w, h) in drawn pixels, with cw/ch the cell:
----  cursor cell = base + (floor(px/cw), floor(py/ch)), and X = px % cw
----  no X/Y placement keys at all -- that is the whole point
----  crop origin = (cw - X, ch - Y) into the margin, size = (X + w, Y + h)
----The sheet's first cw columns and ch rows are transparent, so the first X
----pixels of the placement come out transparent and the tint starts exactly
----where the rectangle does.
-local margin_sheet_id, margin_pids = nil, {}
-function margin_overlay(base_image_id, rects, place)
-  local send = vim.api.nvim_ui_send
-  local function apc(control, payload) return "\27_G" .. control .. ";" .. (payload or "") .. "\27\\" end
-  if not margin_sheet_id then
-    margin_sheet_id = 0x7d000000 + (vim.uv.os_getpid() % 0xffff) * 256
-    local encoded = vim.base64.encode(sheet_png)
-    local offset, chunk_control, out_chunks = 1, ("a=t,f=100,t=d,q=2,i=%d"):format(margin_sheet_id), {}
-    while offset <= #encoded do
-      local piece = encoded:sub(offset, offset + 4095)
-      offset = offset + #piece
-      out_chunks[#out_chunks + 1] = apc(chunk_control .. ",m=" .. (offset <= #encoded and 1 or 0), piece)
-      chunk_control = "q=2"
-    end
-    send(table.concat(out_chunks))
-  end
-  local sequences = {}
-  for index, r in ipairs(rects) do
-    local col_index, row_index = math.floor(r.x / cw), math.floor(r.y / ch)
-    local sub_x, sub_y = r.x - col_index * cw, r.y - row_index * ch
-    local pid = 0x7e000000 + index
-    margin_pids[#margin_pids + 1] = pid
-    local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,z=%d"):format(
-      margin_sheet_id, pid, cw - sub_x, ch - sub_y, sub_x + r.width, sub_y + r.height, -1
-    )
-    sequences[#sequences + 1] = ("\27[s\27[%d;%dH%s\27[u"):format(
-      place.row + row_index + 1, place.col + col_index + 1, apc(control)
-    )
-  end
-  send(table.concat(sequences))
-  return 1, { rects = #rects, placed = #rects, bytes = #table.concat(sequences), encoding = "margin" }
-end
-
 -- Phase 1: the base frame alone. Establishes the fiducials, the content
 -- origin, the device cell size and the untinted base colour.
 local base_id = raw.show(base_png, placement)
 handshake(1)
 
 -- Phase 2: the highlight rectangles over it.
-local set_id, stats
-if MARGIN then
-  set_id, stats = margin_overlay(base_id, cases, placement)
-  if not set_id then die("margin overlay refused: " .. tostring(stats)) end
-else
-  set_id, stats = raw.overlay_apply(
-    nil,
-    base_id,
-    cases,
-    { widthPx = base_w, heightPx = base_h },
-    TINT,
-    sheet_png,
-    placement
-  )
-  if not set_id then die("overlay_apply refused: " .. tostring(stats)) end
-end
+local set_id, stats =
+  raw.overlay_apply(nil, base_id, cases, { widthPx = base_w, heightPx = base_h }, TINT, sheet_png, placement)
+if not set_id then die("overlay_apply refused: " .. tostring(stats)) end
 vim.fn.writefile({ vim.json.encode(stats) }, out .. "/apply-stats.json")
 handshake(2)
 
 -- Phase 3: deleted again. Must be indistinguishable from phase 1 -- prompt
 -- check 5, and the one failure mode that has recurred in this area.
-if MARGIN then
-  local deletions = {}
-  for _, pid in ipairs(margin_pids) do
-    deletions[#deletions + 1] = ("\27_Ga=d,d=i,q=2,i=%d,p=%d;\27\\"):format(margin_sheet_id, pid)
-  end
-  vim.api.nvim_ui_send(table.concat(deletions))
-else
-  raw.overlay_clear(set_id)
-end
+raw.overlay_clear(set_id)
 handshake(3)
 
 raw.clear_all()

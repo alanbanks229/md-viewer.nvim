@@ -57,13 +57,32 @@ test("capture:false opts a mutating selection action out of the screenshot", () 
   assert.equal(validateEnvelope({ ...BASE_ENVELOPE, capture: true }).capture, true);
 });
 
-test("overlaySheet is validated as {widthPx, heightPx} with positive numbers", () => {
+test("overlaySheet is validated as {widthPx, heightPx} with optional margins", () => {
   assert.equal(validateEnvelope({ ...BASE_ENVELOPE }).overlaySheet, null);
   assert.deepEqual(
     validateEnvelope({ ...BASE_ENVELOPE, overlaySheet: { widthPx: 1980, heightPx: 2040 } }).overlaySheet,
-    { widthPx: 1980, heightPx: 2040 }
+    { widthPx: 1980, heightPx: 2040, marginX: 0, marginY: 0 },
+    "an absent margin normalizes to zero, which builds the sheet every terminal but WezTerm gets"
   );
-  for (const bad of ["sheet", [1, 2], { widthPx: 0, heightPx: 10 }, { widthPx: 10 }, { widthPx: 10, heightPx: NaN }]) {
+  assert.deepEqual(
+    validateEnvelope({
+      ...BASE_ENVELOPE,
+      overlaySheet: { widthPx: 1980, heightPx: 2040, marginX: 14, marginY: 32 },
+    }).overlaySheet,
+    { widthPx: 1980, heightPx: 2040, marginX: 14, marginY: 32 }
+  );
+  for (const bad of [
+    "sheet",
+    [1, 2],
+    { widthPx: 0, heightPx: 10 },
+    { widthPx: 10 },
+    { widthPx: 10, heightPx: NaN },
+    // A margin has to leave some sheet behind, or every crop of it is empty.
+    { widthPx: 10, heightPx: 10, marginX: 10 },
+    { widthPx: 10, heightPx: 10, marginY: 99 },
+    { widthPx: 10, heightPx: 10, marginX: -1 },
+    { widthPx: 10, heightPx: 10, marginY: NaN },
+  ]) {
     assert.throws(() => validateEnvelope({ ...BASE_ENVELOPE, overlaySheet: bad }), (error) => {
       assert.equal(error.code, "INVALID_INTERACTION");
       return true;

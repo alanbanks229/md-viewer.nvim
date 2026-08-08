@@ -31,7 +31,7 @@ echo "out:    $out"
 MD_VIEWER_REPO="$repo" \
 MD_VIEWER_STAGE6_OUT="$out" \
 MD_VIEWER_STAGE6_BUILD="$build" \
-MD_VIEWER_STAGE6_MARGIN="${MD_VIEWER_STAGE6_MARGIN:-0}" \
+MD_VIEWER_STAGE6_PROFILE="${MD_VIEWER_STAGE6_PROFILE:-wezterm}" \
 "$gui" --config-file "$repo/scripts/stage6-wezterm/wezterm.lua" \
   start --always-new-process -- \
   nvim -u NONE -i NONE --cmd "set runtimepath+=$repo" \

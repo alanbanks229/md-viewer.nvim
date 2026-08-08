@@ -271,9 +271,17 @@ local function sheet_dims(session)
     width = math.max(width, placement.width * cell.width)
     height = math.max(height, placement.height * cell.height)
   end
+  -- Terminals on the sheet-margin encoding crop the sub-cell offset out of a
+  -- transparent margin instead of sending X/Y keys, so their sheet has to be a
+  -- cell larger on each axis. Absent everywhere else, and a zero margin builds
+  -- the identical PNG -- see buildOverlaySheetPng.
+  local backend = session.backend
+  local margin = backend and backend.overlay_margin and backend.overlay_margin() or nil
   return {
-    widthPx = math.max(1, math.floor(width + 0.5)),
-    heightPx = math.max(1, math.floor(height + 0.5)),
+    widthPx = math.max(1, math.floor(width + (margin and margin.x or 0) + 0.5)),
+    heightPx = math.max(1, math.floor(height + (margin and margin.y or 0) + 0.5)),
+    marginX = margin and margin.x or nil,
+    marginY = margin and margin.y or nil,
   }
 end
 

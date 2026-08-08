@@ -45,6 +45,28 @@ local function default_env() return vim.fn.environ() end
 -- Anything weaker stays `false` and keeps the full-frame capture path, which
 -- is always correct and merely slower.
 
+-- `overlay_encoding` is how a selection rectangle's sub-cell position is
+-- expressed. Two values:
+--
+--   * "sub-cell-offset" (the default, and what every profile but WezTerm uses):
+--     the placement carries the Kitty protocol's `X`/`Y` keys, which say how far
+--     into its first cell the image starts.
+--   * "sheet-margin": no `X`/`Y` keys at all. The tint sheet carries a
+--     transparent margin of one cell on each axis, and the crop starts
+--     `cell - offset` pixels into it, so the placement's leading pixels come out
+--     transparent and the tint begins exactly where the rectangle does.
+--
+-- The second exists for one measured defect. WezTerm applies `X`/`Y` to *every*
+-- cell of a placement rather than only the first, and applies it as an inset:
+-- each cell paints `cell - X` pixels wide. A 960px highlight bar at X=3 draws as
+-- 60 separate 13px runs with 3px of untinted base between each -- photographed
+-- on both 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15, which are
+-- identical here. Moving the offset into the image leaves nothing for WezTerm to
+-- inset per cell, and it stays one placement per rectangle.
+--
+-- The default path is untouched, byte for byte, and
+-- `tests/lua/cases/backend_kitty.lua` pins that as a golden stream.
+
 -- `default_raw_zindex` is -2 for every profile that speaks the Kitty graphics
 -- protocol, so the selection overlay always has -1 to itself. The two layers
 -- must not coincide: the protocol breaks a z-index tie by image id ("the image
@@ -97,33 +119,35 @@ M.profiles = {
     label = "WezTerm",
     default_raw_zindex = -2,
     default_double_buffer = true,
-    -- Disqualified, but re-testable -- not settled. Driven with the stage-4
-    -- overlay probe (translucent natural-size placements, sub-cell offsets,
-    -- ~40fps placement churn) on 2026-08-07, WezTerm failed to render the
-    -- natural-size bars where they were placed and the terminal application
-    -- itself crashed when the placement churn began. That run was against
-    -- 20240203-110809-5046fc22, and both halves of it have a named cause in
-    -- upstream source; see the caveats and
-    -- prompts/drag_highlight_stage_6_wezterm_probe.md. Until someone re-runs
-    -- that probe on a current build, drags keep the full-frame capture path.
-    selection_overlay = false,
+    -- The only profile that does not express sub-cell position with the
+    -- protocol's own X/Y keys. See the note above M.profiles for the measured
+    -- reason, and `overlay_placement_sequence` in backends/kitty_raw.lua for
+    -- the encoding.
+    overlay_encoding = "sheet-margin",
+    selection_overlay = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "disqualified on 20240203 stable; re-probe pending on a current build",
+    validation = "pixel-verified by automated screenshot on 20240203-110809-5046fc22 and "
+      .. "20260805-104032-4b1c3c15 (2026-08-08); operator confirmation pending",
     caveats = {
       "WezTerm implements the Kitty graphics protocol -- z-indices, crop keys, natural-size "
         .. "placements without c/r, sub-cell X/Y offsets, placement ids and by-id deletion -- "
         .. "and reports pty pixel geometry, so md-viewer can measure its cell.",
-      "WezTerm attaches image fragments to text cells rather than placing them freely, and "
-        .. "applies the X/Y sub-cell offset to every cell of a placement instead of only the "
-        .. "first as the protocol specifies (term/src/terminalstate/image.rs). A highlight bar "
-        .. "wider than one cell is predicted to draw as a comb of inset stripes, which is what "
-        .. "the 2026-08-07 probe saw.",
+      "WezTerm applies the X/Y sub-cell offset to every cell of a placement instead of only the "
+        .. "first as the protocol specifies, and applies it as an inset: each cell paints "
+        .. "cell-minus-X pixels wide. A 960px bar at X=3 was photographed as 60 separate 13px "
+        .. "runs. md-viewer therefore sends WezTerm no X/Y keys at all and expresses the offset "
+        .. "in the tint sheet instead (overlay_encoding = sheet-margin), which was photographed "
+        .. "as one solid bar on both builds.",
+      "Both builds behave identically here: 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15 "
+        .. "were driven through the same checks and passed the same 36 of 36. There is no version "
+        .. "boundary and md-viewer does not look for one.",
       "Each placement rewrites every cell it covers and bumps the line sequence number, and each "
-        .. "deletion walks those rows again, so an overlay frame of 60-80 rectangles costs "
-        .. "O(rows x cols) cell writes twice over -- against a GPU placement elsewhere.",
-      "The crash was on 20240203-110809-5046fc22 (Feb 2024 stable). Upstream issue #6344 fixed "
-        .. "divide-by-zero panics in this exact code path after that build, so the crash "
-        .. "evidence does not describe current WezTerm.",
+        .. "deletion walks those rows again, so an overlay frame costs O(rows x cols) cell writes "
+        .. "twice over -- against a GPU placement on iTerm2 and Ghostty. Rect-set diffing is what "
+        .. "keeps that affordable: a moving frame re-places only the rectangles that changed.",
+      "Upstream issue #6344's divide-by-zero panics are unreachable from md-viewer: the cell must "
+        .. "floor to at least one pixel and every crop must be at least one pixel and wholly "
+        .. "inside its image before anything is emitted.",
     },
   },
   ghostty = {
@@ -309,9 +333,10 @@ function M.capability(cfg, env)
     graphics = graphics,
     reason = reason,
     default_raw_zindex = profile.default_raw_zindex,
-    -- Only ever true for profiles a human validated with the overlay probe;
-    -- see the comment above M.profiles.
+    -- Only ever true for profiles someone actually looked at, by eye or by
+    -- photograph; see the comment above M.profiles.
     selection_overlay = profile.selection_overlay == true,
+    overlay_encoding = profile.overlay_encoding or "sub-cell-offset",
     placement = profile.placement,
     multiplexer = mux,
     multiplexer_evidence = mux_evidence,
