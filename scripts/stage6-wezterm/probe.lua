@@ -55,7 +55,7 @@ local function die(message)
   vim.cmd("qa!")
 end
 
-local function png(width, height, colour, path)
+local function png(width, height, colour, path, margin_x, margin_y)
   local result = vim
     .system({
       "node",
@@ -67,6 +67,8 @@ local function png(width, height, colour, path)
       tostring(colour.b),
       tostring(colour.a),
       path,
+      tostring(margin_x or 0),
+      tostring(margin_y or 0),
     }, { text = true })
     :wait()
   if result.code ~= 0 then die("make-png failed: " .. tostring(result.stderr)) end
@@ -151,8 +153,14 @@ local cw, ch = math.floor(cell.width), math.floor(cell.height)
 local base_w, base_h = BASE_COLS * cw, BASE_ROWS * ch
 local placement = { row = BASE_ROW, col = BASE_COL, width = BASE_COLS, height = BASE_ROWS }
 
+-- MD_VIEWER_STAGE6_MARGIN switches the overlay to the WezTerm-compatible
+-- encoding: the sheet carries a transparent margin of one cell on each axis,
+-- the placement is cell-aligned with no X/Y keys, and the sub-cell offset is
+-- expressed by cropping into the margin instead. See overlay-sheet.js.
+local MARGIN = vim.env.MD_VIEWER_STAGE6_MARGIN == "1"
 local base_png = png(base_w, base_h, BASE_RGB, out .. "/base.png")
-local sheet_png = png(base_w, base_h, TINT, out .. "/sheet.png")
+local sheet_png = MARGIN and png(cw + base_w, ch + base_h, TINT, out .. "/sheet.png", cw, ch)
+  or png(base_w, base_h, TINT, out .. "/sheet.png")
 
 -- Rectangles in base-relative device pixels. The viewport passed to
 -- overlay_apply is the base image's own size, so the scale is exactly 1 and a
@@ -213,28 +221,85 @@ vim.fn.writefile({ vim.json.encode(expectations) }, out .. "/expectations.json")
 
 if not supported then die("overlay_supported() is false: " .. tostring(support_reason)) end
 
+---The candidate WezTerm encoding, emitted by hand so this run can measure it
+---before anything decides whether it belongs in `overlay_apply`.
+---
+---For a rectangle at (px, py) size (w, h) in drawn pixels, with cw/ch the cell:
+---  cursor cell = base + (floor(px/cw), floor(py/ch)), and X = px % cw
+---  no X/Y placement keys at all -- that is the whole point
+---  crop origin = (cw - X, ch - Y) into the margin, size = (X + w, Y + h)
+---The sheet's first cw columns and ch rows are transparent, so the first X
+---pixels of the placement come out transparent and the tint starts exactly
+---where the rectangle does.
+local margin_sheet_id, margin_pids = nil, {}
+function margin_overlay(base_image_id, rects, place)
+  local send = vim.api.nvim_ui_send
+  local function apc(control, payload) return "\27_G" .. control .. ";" .. (payload or "") .. "\27\\" end
+  if not margin_sheet_id then
+    margin_sheet_id = 0x7d000000 + (vim.uv.os_getpid() % 0xffff) * 256
+    local encoded = vim.base64.encode(sheet_png)
+    local offset, chunk_control, out_chunks = 1, ("a=t,f=100,t=d,q=2,i=%d"):format(margin_sheet_id), {}
+    while offset <= #encoded do
+      local piece = encoded:sub(offset, offset + 4095)
+      offset = offset + #piece
+      out_chunks[#out_chunks + 1] = apc(chunk_control .. ",m=" .. (offset <= #encoded and 1 or 0), piece)
+      chunk_control = "q=2"
+    end
+    send(table.concat(out_chunks))
+  end
+  local sequences = {}
+  for index, r in ipairs(rects) do
+    local col_index, row_index = math.floor(r.x / cw), math.floor(r.y / ch)
+    local sub_x, sub_y = r.x - col_index * cw, r.y - row_index * ch
+    local pid = 0x7e000000 + index
+    margin_pids[#margin_pids + 1] = pid
+    local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,z=%d"):format(
+      margin_sheet_id, pid, cw - sub_x, ch - sub_y, sub_x + r.width, sub_y + r.height, -1
+    )
+    sequences[#sequences + 1] = ("\27[s\27[%d;%dH%s\27[u"):format(
+      place.row + row_index + 1, place.col + col_index + 1, apc(control)
+    )
+  end
+  send(table.concat(sequences))
+  return 1, { rects = #rects, placed = #rects, bytes = #table.concat(sequences), encoding = "margin" }
+end
+
 -- Phase 1: the base frame alone. Establishes the fiducials, the content
 -- origin, the device cell size and the untinted base colour.
 local base_id = raw.show(base_png, placement)
 handshake(1)
 
 -- Phase 2: the highlight rectangles over it.
-local set_id, stats = raw.overlay_apply(
-  nil,
-  base_id,
-  cases,
-  { widthPx = base_w, heightPx = base_h },
-  TINT,
-  sheet_png,
-  placement
-)
-if not set_id then die("overlay_apply refused: " .. tostring(stats)) end
+local set_id, stats
+if MARGIN then
+  set_id, stats = margin_overlay(base_id, cases, placement)
+  if not set_id then die("margin overlay refused: " .. tostring(stats)) end
+else
+  set_id, stats = raw.overlay_apply(
+    nil,
+    base_id,
+    cases,
+    { widthPx = base_w, heightPx = base_h },
+    TINT,
+    sheet_png,
+    placement
+  )
+  if not set_id then die("overlay_apply refused: " .. tostring(stats)) end
+end
 vim.fn.writefile({ vim.json.encode(stats) }, out .. "/apply-stats.json")
 handshake(2)
 
 -- Phase 3: deleted again. Must be indistinguishable from phase 1 -- prompt
 -- check 5, and the one failure mode that has recurred in this area.
-raw.overlay_clear(set_id)
+if MARGIN then
+  local deletions = {}
+  for _, pid in ipairs(margin_pids) do
+    deletions[#deletions + 1] = ("\27_Ga=d,d=i,q=2,i=%d,p=%d;\27\\"):format(margin_sheet_id, pid)
+  end
+  vim.api.nvim_ui_send(table.concat(deletions))
+else
+  raw.overlay_clear(set_id)
+end
 handshake(3)
 
 raw.clear_all()

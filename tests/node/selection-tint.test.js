@@ -86,6 +86,35 @@ test("buildSelectionResult passes selection rect geometry through", () => {
 });
 
 
+test("an overlay sheet margin is transparent, and absent by default", () => {
+  const tint = SELECTION_TINT.dark;
+  // Byte identity matters more than it looks: every terminal except WezTerm
+  // keeps the marginless sheet, and those were validated against these exact
+  // bytes. An optional parameter must not move them.
+  assert.ok(
+    buildOverlaySheetPng(64, 32, tint).equals(buildOverlaySheetPng(64, 32, tint, { x: 0, y: 0 })),
+    "a zero margin produces the identical PNG"
+  );
+
+  // The margin is what lets a sub-cell offset be expressed in the image rather
+  // than in the placement's X/Y keys, which is the only encoding WezTerm draws
+  // as a solid bar: it insets every cell of a placement by X instead of only
+  // the first, so a multi-cell bar comes out as a comb of stripes.
+  const decoded = decodePngPixels(buildOverlaySheetPng(64, 32, tint, { x: 16, y: 8 }));
+  const alphaAt = (x, y) => decoded.pixels[(y * decoded.width + x) * 4 + 3];
+  assert.equal(alphaAt(15, 20), 0, "the left margin is fully transparent");
+  assert.equal(alphaAt(20, 7), 0, "the top margin is fully transparent");
+  assert.equal(alphaAt(15, 7), 0, "and so is the corner where they meet");
+  assert.equal(alphaAt(16, 8), Math.round(tint.a * 255), "the body starts exactly at the margin");
+  assert.equal(alphaAt(63, 31), Math.round(tint.a * 255), "and runs to the far corner");
+
+  assert.throws(
+    () => buildOverlaySheetPng(16, 32, tint, { x: 16, y: 0 }),
+    /leaves nothing/,
+    "a margin that consumes the whole sheet is refused rather than silently empty"
+  );
+});
+
 test("buildOverlaySheetPng produces a solid straight-alpha sheet and caches it", () => {
   const tint = SELECTION_TINT.dark;
   const png = buildOverlaySheetPng(64, 32, tint);

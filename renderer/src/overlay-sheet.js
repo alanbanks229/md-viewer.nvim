@@ -48,17 +48,33 @@ const MAX_CACHED_SHEETS = 4;
 /// exactly the quantization Chromium applies to the ::selection rgba() --
 /// measured, not assumed -- so the sheet and the browser-painted settle frame
 /// composite identically.
-export function buildOverlaySheetPng(width, height, tint) {
+///
+/// `margin` is {x, y} and defaults to none. When set, the leftmost `x` columns
+/// and topmost `y` rows are fully transparent and the rest is the tint. That
+/// exists for one terminal: WezTerm insets every cell of a placement by the
+/// sub-cell `X`/`Y` offset instead of only the first, which draws a
+/// multi-cell highlight bar as a comb of stripes. A margin lets the sub-cell
+/// offset be expressed in the *image* -- crop `margin.x - X` pixels in and the
+/// first X pixels of the placement come out transparent -- so the placement
+/// itself can be cell-aligned with no `X`/`Y` keys at all, and the comb is
+/// unreachable. Every other terminal keeps the marginless sheet and the exact
+/// bytes it was validated against.
+export function buildOverlaySheetPng(width, height, tint, margin) {
   const w = Math.floor(width);
   const h = Math.floor(height);
   if (!(w > 0 && h > 0 && w <= MAX_SHEET_DIMENSION && h <= MAX_SHEET_DIMENSION)) {
     throw new Error(`overlay sheet dimensions out of range: ${width}x${height}`);
   }
+  const marginX = Math.max(0, Math.floor(margin?.x ?? 0));
+  const marginY = Math.max(0, Math.floor(margin?.y ?? 0));
+  if (marginX >= w || marginY >= h) {
+    throw new Error(`overlay sheet margin ${marginX}x${marginY} leaves nothing of ${w}x${h}`);
+  }
   const alpha = Math.max(0, Math.min(255, Math.round((tint?.a ?? 0) * 255)));
   const r = Math.max(0, Math.min(255, Math.round(tint?.r ?? 0)));
   const g = Math.max(0, Math.min(255, Math.round(tint?.g ?? 0)));
   const b = Math.max(0, Math.min(255, Math.round(tint?.b ?? 0)));
-  const key = `${w}x${h}:${r},${g},${b},${alpha}`;
+  const key = `${w}x${h}+${marginX},${marginY}:${r},${g},${b},${alpha}`;
   const hit = cache.get(key);
   if (hit) return hit;
 
@@ -67,7 +83,8 @@ export function buildOverlaySheetPng(width, height, tint) {
   for (let y = 0; y < h; y += 1) {
     const row = y * stride;
     raw[row] = 0; // filter: none
-    for (let x = 0; x < w; x += 1) {
+    if (y < marginY) continue; // rows in the margin stay zeroed: fully transparent
+    for (let x = marginX; x < w; x += 1) {
       const offset = row + 1 + x * 4;
       raw[offset] = r;
       raw[offset + 1] = g;

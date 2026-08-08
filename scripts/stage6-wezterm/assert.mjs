@@ -103,13 +103,22 @@ function registration(image) {
   // TIOCGWINSZ reported. Anything shorter is something else magenta on the
   // desktop: a 128px run off a wallpaper was accepted as a 1.28px cell before
   // this bound existed, and every downstream number was quietly nonsense.
+  //
+  // Optional, though: on 20240203-110809-5046fc22 the strip does not render at
+  // all. The base image below is the ruler either way, and it is found by a
+  // 1440px run of one exact colour, which nothing on a desktop imitates -- so
+  // a missing strip costs the cross-check, not the measurement.
   const minimumRun = (expect.columns - 1) * expect.cell_floor.width * 0.9;
-  if (!strip || strip.width < minimumRun) return null;
+  if (strip && strip.width < minimumRun) strip = null;
 
-  let stripTop = strip.y;
-  while (stripTop > 0 && isFiducial(pixelAt(image, strip.x + 2, stripTop - 1))) stripTop -= 1;
-  let stripBottom = strip.y;
-  while (stripBottom + 1 < image.height && isFiducial(pixelAt(image, strip.x + 2, stripBottom + 1))) stripBottom += 1;
+  let stripTop = null;
+  let stripBottom = null;
+  if (strip) {
+    stripTop = strip.y;
+    while (stripTop > 0 && isFiducial(pixelAt(image, strip.x + 2, stripTop - 1))) stripTop -= 1;
+    stripBottom = strip.y;
+    while (stripBottom + 1 < image.height && isFiducial(pixelAt(image, strip.x + 2, stripBottom + 1))) stripBottom += 1;
+  }
 
   // The base image, found the same way as the strip: by its longest run.
   //
@@ -123,8 +132,9 @@ function registration(image) {
   // columns, but not all of either, so the longest run on each axis is still
   // the base image's true extent. Walking out from one point would stop at the
   // first rectangle it met.
-  const widest = longestRun(image, isBaseGrey, "row", stripBottom + 1);
-  const tallest = longestRun(image, isBaseGrey, "column", stripBottom + 1);
+  const from = stripBottom === null ? 0 : stripBottom + 1;
+  const widest = longestRun(image, isBaseGrey, "row", from);
+  const tallest = longestRun(image, isBaseGrey, "column", from);
   if (!widest || widest.length < BASE.cols * expect.cell_floor.width * 0.9) return null;
   if (!tallest || tallest.length < BASE.rows * expect.cell_floor.height * 0.9) return null;
   const left = widest.start;
@@ -140,7 +150,7 @@ function registration(image) {
     cellWidth,
     cellHeight,
     base: { left, right, top, bottom },
-    strip: { x: strip.x, width: strip.width, top: stripTop, bottom: stripBottom },
+    strip: strip ? { x: strip.x, width: strip.width, top: stripTop, bottom: stripBottom } : null,
   };
 }
 
@@ -211,16 +221,20 @@ check(
 
 const corner = expect.fiducial_corner;
 const cornerAt = at(baseFrame, corner.col * reg.cellWidth, corner.row * reg.cellHeight);
-check(
-  isFiducial(pixelAt(base, cornerAt.x + 1, cornerAt.y + 1)),
-  "the far-corner fiducial lands where the cell pitch predicts, across the whole grid",
-  `expected a mark at (${cornerAt.x}, ${cornerAt.y})`
-);
-check(
-  near(reg.strip.top, reg.originY, 1) && near(reg.strip.bottom - reg.strip.top + 1, reg.cellHeight, 1),
-  "the fiducial row agrees with the base image about the content origin and cell height",
-  `strip rows ${reg.strip.top}..${reg.strip.bottom}, base-derived origin y ${reg.originY}, cell height ${reg.cellHeight}`
-);
+if (reg.strip) {
+  check(
+    isFiducial(pixelAt(base, cornerAt.x + 1, cornerAt.y + 1)),
+    "the far-corner fiducial lands where the cell pitch predicts, across the whole grid",
+    `expected a mark at (${cornerAt.x}, ${cornerAt.y})`
+  );
+  check(
+    near(reg.strip.top, reg.originY, 1) && near(reg.strip.bottom - reg.strip.top + 1, reg.cellHeight, 1),
+    "the fiducial row agrees with the base image about the content origin and cell height",
+    `strip rows ${reg.strip.top}..${reg.strip.bottom}, base-derived origin y ${reg.originY}, cell height ${reg.cellHeight}`
+  );
+} else {
+  console.log("  --   no fiducial strip rendered; registered from the base image alone");
+}
 
 // --- what counts as painted -------------------------------------------------
 // The tint is measured, not assumed: phase 1 gives the untinted base colour and
