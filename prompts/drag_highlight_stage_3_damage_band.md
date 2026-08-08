@@ -118,6 +118,70 @@ Ask for this; it is free.
 
 ---
 
+## Two candidate designs — the operator has explicitly authorised a refactor
+
+Do not assume the current architecture is fixed. The operator has said, in
+these words, "I don't mind a refactor whatsoever, that is what source control is
+for." Both designs below are in scope. Pick with measurement and with the
+operator's eyes, not by defaulting to the smaller change.
+
+### Design A — send only the strip that changed
+
+Capture and place a damage band instead of the whole viewport. Roughly 10-30×
+fewer pixels per moving frame.
+
+**Quality risk: none.** The pixels are identical, there are simply fewer of them
+per frame. This is the conservative option and the rest of this file is written
+around it.
+
+**Feasibility risk:** the terminal must composite a small image over a larger
+already-placed one, at a higher z-index, at an exact cell offset, repeatedly.
+`kitty_raw` has never done this. See step 2.
+
+### Design B — take the highlight out of the picture entirely
+
+Render the page with a **transparent background** (`omitBackground` on the
+capture, producing an RGBA PNG), place that image *above* the text layer
+(Kitty z-index `>= 0`; it currently sits at `-1`, i.e. below text), and let
+**Neovim itself** paint the selection rectangles as ordinary highlighted cells
+underneath. The renderer returns the selection's client rects — a ~1ms
+`page.evaluate`, no screenshot — and Lua draws them.
+
+**During a drag, no image is captured, encoded, transferred, or decoded at
+all.** The highlight updates at Neovim's own redraw speed. This is not a 10×
+improvement over today, it is closer to 100×, and it is the only design that
+makes a moving frame genuinely free.
+
+**Quality risk: real, and it is the thing this operator has twice rejected
+changes over.** Glyphs are anti-aliased against an assumed background colour. If
+Chromium rasterises text against transparency and the terminal composites a
+selection colour behind it afterwards, letters can show halos or colour fringes
+along their edges. Selection rectangles also snap to whole terminal cells, so
+the highlight's edges become blocky rather than following the text exactly.
+
+Mitigation worth evaluating: use the Neovim-drawn highlight only while the
+pointer is moving, and let the existing device-scale settle frame after release
+restore a true browser-rendered highlight. That trades "slightly blocky while
+dragging" for "instant while dragging". Whether that is a good trade is the
+**operator's call, not yours** — put it in front of them before building on it.
+
+**Feasibility risk:** the terminal must alpha-composite an RGBA image over
+terminal text cells. Also unverified. See step 2.
+
+### What both share
+
+Both depend on the same unknown: whether iTerm2 and WezTerm layer graphics the
+way the Kitty specification says. **One session of testing with the operator
+answers it for both**, so step 2 covers both and should be done before
+committing to either design.
+
+If step 2 says overlays work but alpha does not, build A. If both work, put the
+trade in front of the operator with a real side-by-side and let them choose. If
+neither works, stop and report — that is a genuine dead end and is worth saying
+plainly rather than shipping something worse.
+
+---
+
 ## Order of work
 
 **Step 1 and step 2 are each a commit boundary. Either can invalidate the rest
