@@ -1,11 +1,11 @@
 ---
 part: follow-up
 title: Drag-to-highlight, stage 2 — make a sharp frame cheap
-status: implemented, uncommitted (operator validation pending)
+status: done (renderer-side only; did not change how the gesture feels)
 model: Opus 5 (max reasoning effort)
 depends_on: 2bcee86 (stage 1), c44e22f (round 2 — drag frames are device scale
   again, and off-content selection endpoints resolve)
-commit: (not committed -- operator asked to validate in a real terminal first)
+commit: 742d746
 ---
 
 # Drag-to-Highlight, Stage 2 — Make a Sharp Frame Cheap
