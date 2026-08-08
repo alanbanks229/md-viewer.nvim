@@ -81,9 +81,9 @@ return function(t)
     t.eq("interact", requests[1].method)
     t.eq("selection_preview", requests[1].params.action)
     t.eq(
-      "device",
+      "css",
       requests[1].params.captureScale,
-      "a drag-preview frame stays sharp -- the fast/cheap CSS scale is scroll-only"
+      "a drag-preview frame reuses render.fast_scroll's cheap scale, mirroring scroll's own moving frame"
     )
     t.ok(requests[1].params.anchorCoordinates ~= nil, "a selection request always carries an explicit anchor")
     t.eq(true, session.pointer.selection_request_in_flight, "the request is marked in flight")
@@ -111,6 +111,7 @@ return function(t)
       requests[2].params.coordinates.y,
       "the coalesced request uses the newest drag point, not an intermediate one"
     )
+    t.eq("css", requests[2].params.captureScale, "the coalesced re-fire is still a preview frame -- fast scale")
     t.eq(true, session.selection_active, "a successful preview marks the selection active")
     t.eq(1, #displayed, "a successful preview displays its captured frame")
 
@@ -122,6 +123,104 @@ return function(t)
     t.eq("device", requests[3].params.captureScale, "the settled request uses device scale")
     callbacks[3]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
     vim.wait(100, function() return #displayed >= 3 end, 5)
+
+    process.request = original_request
+  end
+
+  -- ---------------------------------------------------------------------
+  -- render.fast_scroll = false falls the preview frame back to device scale
+  -- too: the reuse is a live read of the flag, not a hardcoded "css".
+  -- ---------------------------------------------------------------------
+  do
+    config.setup({
+      interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), {}),
+      render = { fast_scroll = false },
+    })
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback) requests[#requests + 1] = { method = method, params = params } end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 1 end, 5)
+    t.eq(1, #requests)
+    t.eq(
+      "device",
+      requests[1].params.captureScale,
+      "render.fast_scroll = false falls the drag-preview frame back to device scale"
+    )
+
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
+  -- drag_debounce_ms = 0 (the default): a preview request dispatches
+  -- synchronously on the threshold-crossing on_drag call, with no timer wait
+  -- needed, mirroring controller.schedule_scroll's immediate-fire shape. A
+  -- second on_drag while that request is still in flight coalesces
+  -- synchronously too, and no second request is sent until the first
+  -- completes.
+  -- ---------------------------------------------------------------------
+  do
+    setup_interaction({ drag_debounce_ms = 0 })
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = params
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15)) -- crosses the 1-cell threshold
+    t.eq(1, #requests, "drag_debounce_ms = 0 dispatches the first preview frame with no timer wait at all")
+    t.eq(true, session.pointer.selection_request_in_flight)
+
+    interaction.on_drag(session, point(10, 20)) -- arrives while the first request is still in flight
+    t.eq(1, #requests, "no second request is issued while the first is still in flight")
+    t.eq(1, session.coalesced_drag_events, "the synchronous re-attempt while in flight still counts as coalesced")
+
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+    t.eq(2, #requests, "completing the in-flight request immediately sends the newest coalesced point")
+
+    callbacks[2]({ kind = "selection", ok = true, text = "ab", collapsed = false }, nil)
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Release while a preview request is still in flight defers the settled
+  -- commit via pointer.pending_settle rather than racing a second concurrent
+  -- request; the deferred commit fires automatically, still at device scale,
+  -- once the in-flight preview's own completion callback runs.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 1 end, 5)
+    t.eq(1, #requests, "the drag issues its one preview request")
+    t.eq(true, session.pointer.selection_request_in_flight, "the preview request is still outstanding")
+
+    interaction.on_release(session, point(10, 15))
+    t.eq(1, #requests, "release while a preview is in flight must not send a second, concurrent request")
+    t.ok(session.pointer.pending_settle ~= nil, "release while in flight defers via pointer.pending_settle")
+
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq(2, #requests, "the deferred commit fires once the in-flight preview's callback runs")
+    t.eq("selection_commit", requests[2].params.action, "the deferred request is the settled commit")
+    t.eq("device", requests[2].params.captureScale, "the deferred commit still captures at device scale")
+    callbacks[2]({ kind = "selection", ok = true, text = "ab", collapsed = false }, nil)
 
     process.request = original_request
   end

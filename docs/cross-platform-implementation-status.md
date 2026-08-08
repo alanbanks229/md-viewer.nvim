@@ -4162,3 +4162,150 @@ an external link opening (or saying why it did not), a short inline link being
 clickable at the terminal's default font size, `:MdViewerBack`, and
 `:MdViewerForward`/`<C-o>`. Everything above is headless-verified only; per
 §4 none of it may be described as validated on any terminal.
+
+## Post-Part-7 follow-up: drag-highlight responsiveness, stage 1 — measure, then fast frames
+
+Operator report, from real use on iTerm2: dragging to highlight text in the
+preview renders too slowly. `prompts/drag_highlight_stage_1_fast_frames.md`
+scoped a measurement-first, two-change fix: the capture scale of moving
+drag-preview frames, and the debounce sitting ahead of them. Five riskier
+suspects (per-frame temp file with a blocking `fs_read`, full PNG re-upload,
+per-frame anchor re-resolution, `page.evaluate` re-serialization,
+unconditional `applyScroll`) are explicitly out of scope and live in
+`prompts/drag_highlight_stage_2_transport.md`, which the operator directed
+must not be touched in this session — including the "Measurements from
+stage 1" section that prompt normally asks this stage to fill in. That table
+is recorded here instead, and stage 2 remains an unfilled placeholder.
+
+### Method
+
+Two throwaway benchmark scripts (not committed), both driving the real
+renderer subprocess and real Chromium, no stubbing:
+
+- **Node-side**, modeled on `tests/node/interact.test.js`'s subprocess
+  harness: `kitchen-sink.md` + 60 filler paragraphs (5,400 characters, 90
+  layout blocks), one `render`, then 20 `selection_preview` requests with
+  incrementing coordinates simulating a drag sweep across one line, at
+  `captureScale: "device"` and again at `"css"`, reading back each
+  response's real `rehydrateMs`/`captureMs`/`totalMs`/`pngBytes`.
+- **Lua-side**, modeled on `tests/lua/cases/process.lua`'s real (non-stubbed)
+  subprocess usage: a headless `nvim -l` script that seeds the same document
+  via a real `render` request over `process.lua`, then calls
+  `interaction.request_selection` directly in the same 20-frame sweep,
+  timing the Lua-observed round trip with `vim.uv.hrtime()`, plus real
+  (non-fabricated) timings for `renderer.read_png`'s blocking `fs_read` and
+  `vim.base64.encode` on the returned PNG.
+- A third pair of scripts isolated the debounce/pacing question specifically:
+  one measuring wall-clock from a single `on_drag` call to its request
+  reaching `process.request`, the other simulating a continuous 300ms drag
+  (`on_drag` every 15ms, a stubbed ~30ms request latency) and counting how
+  many requests actually left Lua under each `drag_debounce_ms` value.
+
+**Honesty gap.** None of this drives a real terminal. The final
+`nvim_ui_send` write and whatever the terminal does with those bytes cannot
+be measured without one, and this session did not have one attached. Every
+number below stops at the boundary of what Lua and the real renderer
+subprocess can produce on their own.
+
+### Measurements
+
+Per-frame, `captureScale: "device"` vs `"css"` (averages over 20 frames,
+same document, same machine):
+
+```
+                 device        css
+Node  wallMs      68.40       33.23
+Node  rehydrateMs  1.11        1.04
+Node  captureMs   64.88       30.07
+Node  totalMs     67.95       32.85
+Node  pngBytes  86822.9    38397.0
+
+Lua   wall_ms     67.90       32.52   (dispatch + IPC + renderer round trip)
+Lua   pngBytes  86823        38397
+Lua   fs_read_ms  0.108        0.094  (real, blocking, headless-safe)
+Lua   base64_ms   0.060        0.027  (real, pure Lua, headless-safe)
+```
+
+The Node- and Lua-observed wall-clock numbers agree closely (68.4 vs 67.9,
+33.2 vs 32.5), and `captureMs` accounts for ~95% of `totalMs` in both. The
+PNG-read and base64-encode steps are sub-millisecond and did not need
+optimizing. **This exonerates `page.evaluate`'s selection-resolve step
+(`rehydrateMs`) and the Lua-side PNG handling as suspects for the per-frame
+cost — the screenshot itself is the entire story**, and it is ~2.1x more
+expensive at device scale, matching the ~2.26x larger PNG.
+
+Debounce/pacing, same machine:
+
+```
+first-dispatch latency (single on_drag call):
+  drag_debounce_ms=40 (old default): 37.71 ms before the request is sent
+  drag_debounce_ms=0  (new default):  0.01 ms
+
+requests actually sent over a continuous 300ms drag (new point every 15ms):
+  drag_debounce_ms=40 (old default): 1 request for the whole gesture
+  drag_debounce_ms=0  (new default): 11 requests, coalesced_drag_events=19
+```
+
+The old default did not merely add 40ms of latency — under input faster than
+the debounce interval, the *trailing* debounce (it resets on every call
+rather than firing on a schedule) can send exactly one frame for an entire
+drag, all the way at the end. This is the case the fix removes: dispatch is
+now gated only by the existing one-in-flight/newest-point-only backpressure,
+the same shape `controller.schedule_scroll` already used.
+
+### What changed
+
+- `lua/md-viewer/interaction.lua`'s `M.schedule_selection_preview`: the
+  preview frame now captures at `render.fast_scroll and "css" or "device"`
+  (reusing the existing flag rather than inventing `fast_drag`), and dispatch
+  fires immediately when `interaction.drag_debounce_ms <= 0`, using
+  `debounce.call` only as an opt-in throttle when it is set above `0`.
+  Everything else — `M.settle_selection` (always `"device"`, deferred via
+  `pointer.pending_settle` when a preview is still in flight), the
+  one-in-flight/newest-point-only coalescing, `M.on_drag` — is unchanged.
+- `lua/md-viewer/config.lua`: `interaction.drag_debounce_ms` default `40` →
+  `0`. The knob is preserved, not removed — the config schema and
+  `validate()` are untouched.
+- This is a deliberate, narrower reuse of the earlier "post-clear capture
+  frames render at full (device) scale" fix (`CHANGELOG.md`'s `[0.3.0]`,
+  first `### Fixed`), not a reversion of it. That fix stopped every interact
+  capture — including the settled commit — from silently inheriting
+  whatever scale a recent scroll had cached. Only the *preview* frame's
+  scale changes here; `M.settle_selection`'s commit is still unconditionally
+  `"device"`, so what the reader is left looking at after releasing the
+  mouse is unchanged.
+
+### Tests
+
+`tests/lua/cases/selection.lua`: the existing preview-frame assertion
+(previously asserting `"device"`, the behavior this stage changes) now
+asserts `"css"`; added cases for `render.fast_scroll = false` falling back to
+`"device"`, `drag_debounce_ms = 0` dispatching and coalescing synchronously
+with no timer wait, and a release arriving while a preview is still in
+flight deferring correctly via `pointer.pending_settle` (no prior test
+exercised that path). All four gates: 721 Lua assertions (from before this
+change's own additions), 136 Node tests, stylua clean.
+
+`:MdViewerDebug` was invoked as the real command (not the library function)
+against a real headless session with a fake-but-functioning image backend
+(only the terminal write itself is faked; render, capture, and interact are
+all real) driving an actual press/drag/release. `fast_capture_ms` (26.72),
+`fast_png_bytes` (10732), `retina_capture_ms` (49.31), and
+`retina_png_bytes` (23772) all populated correctly, confirming the
+moving/settled split stays observable through the existing fields as
+required.
+
+### Not done here
+
+The five stage-2 suspects are untouched, per scope. `applyScroll` running
+unconditionally per interact (suspect 5) is plausible from the numbers above
+only as noise inside `rehydrateMs`, which averaged ~1ms either way — not
+worth pursuing without a stronger signal. The other four were not measured
+at all; they are `page.evaluate`/transport-level and out of this stage's
+scope regardless of what the numbers show.
+
+**This cannot be validated.** Whether the drag now *feels* more responsive
+is the operator's call, made by dragging in a real terminal. The numbers
+above show the two changed mechanisms doing what they were built to do —
+capture is materially cheaper, and dispatch no longer waits or starves — but
+say nothing about what a real Kitty/iTerm2 draw feels like.

@@ -154,31 +154,38 @@ function M.on_drag(session, mouse)
   end
 end
 
----Debounced (interaction.drag_debounce_ms), coalescing drag-preview request:
----at most one `selection_preview` request in flight, and only the newest
----pending drag point is ever sent -- mirroring
+---Coalescing drag-preview request: at most one `selection_preview` request in
+---flight, and only the newest pending drag point is ever sent -- mirroring
 ---`controller.schedule_scroll`'s one-in-flight/one-coalesced-pending shape.
----No fixed frame rate: screenshot and terminal-transfer completion supply the
----pacing, same as scrolling.
+---With the default `interaction.drag_debounce_ms = 0`, dispatch is immediate
+---(no fixed frame rate: screenshot and terminal-transfer completion supply
+---the pacing, same as scrolling); `drag_debounce_ms` above `0` still
+---debounces ahead of that, for anyone who deliberately wants added latency.
+---The preview frame captures at `render.fast_scroll`'s scale, the same
+---moving/settled split scrolling already uses -- reused rather than a new
+---`fast_drag` flag, since a moving drag frame and a moving scroll frame are
+---the same kind of thing. The commit frame (`M.settle_selection`) always
+---captures at device scale.
 function M.schedule_selection_preview(session)
   local pointer = session.pointer
   if not pointer then return end
   local cfg = config.get().interaction
-  debounce.call(session, "selection_debounce_timer", cfg.drag_debounce_ms, function()
+  local function attempt()
     if session.pointer ~= pointer or not pointer.drag_started then return end
     local point = pointer.newest_pending_drag_point
     if not point then return end
     if pointer.selection_request_in_flight then
-      -- This debounce firing found a request already in flight: the point it
-      -- would have sent is dropped, and whichever on_drag call produces the
-      -- next point is what the in-flight request's own completion callback
-      -- (the `elseif` branch below) will actually send.
+      -- This attempt found a request already in flight: the point it would
+      -- have sent is dropped, and whichever on_drag call produces the next
+      -- point is what the in-flight request's own completion callback (the
+      -- `elseif` branch below) will actually send.
       session.coalesced_drag_events = (session.coalesced_drag_events or 0) + 1
       return
     end
     pointer.selection_request_in_flight = true
     local requested_point = point
-    M.request_selection(session, pointer.anchor_point, point, "device", false, function(result, err)
+    local capture_scale = config.get().render.fast_scroll and "css" or "device"
+    M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
       if session.pointer ~= pointer then return end
       pointer.selection_request_in_flight = false
       if not err and result and result.ok ~= false then
@@ -199,7 +206,12 @@ function M.schedule_selection_preview(session)
         M.schedule_selection_preview(session)
       end
     end)
-  end)
+  end
+  if cfg.drag_debounce_ms > 0 then
+    debounce.call(session, "selection_debounce_timer", cfg.drag_debounce_ms, attempt)
+  else
+    attempt()
+  end
 end
 
 ---Send a `selection_preview`/`selection_commit` interact request. Every

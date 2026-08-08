@@ -160,6 +160,33 @@ All notable changes to this project will be documented here. The project uses
 - Drag-select and post-clear capture frames render at full (device) scale
   instead of inheriting scroll's low-resolution fast-frame default.
 
+### Changed
+
+- Drag-to-select's moving preview frame now captures at `render.fast_scroll`'s
+  cheap scale (`"css"` by default) instead of always `"device"`, the same
+  moving/settled split scrolling already uses. This is a deliberate,
+  narrower reuse of the earlier "post-clear capture frames render at full
+  (device) scale" fix above, not a reversion of it: that fix stopped
+  *every* interact capture (including the settled commit) from silently
+  inheriting whatever scale a recent scroll had cached. Only the drag
+  *preview* frame changes here -- `M.settle_selection`'s commit, fired on
+  release, is still always `"device"`, so what the reader is left looking
+  at is unchanged. Measured on this machine: a real per-frame screenshot at
+  device scale averaged ~65-68ms and ~87KB; at CSS scale, ~30-33ms and
+  ~38KB -- the capture step, not IPC or the Lua-side PNG read/encode,
+  dominates per-frame cost.
+- `interaction.drag_debounce_ms` now defaults to `0` (was `40`). The old
+  default gated every drag-preview request behind a *trailing* debounce that
+  resets on every `<LeftDrag>` event, ahead of a pipeline that already has
+  its own one-in-flight backpressure (mirroring `controller.schedule_scroll`,
+  which has no such gate). Under continuous drag input faster than the
+  debounce interval this could starve dispatch far worse than adding 40ms of
+  latency: measured with a simulated 300ms continuous drag (a new point
+  every 15ms), the old default sent exactly **one** request for the whole
+  gesture, while immediate dispatch with in-flight coalescing sent eleven.
+  The knob still works if set above `0`, for anyone who wants deliberate
+  throttling back.
+
 ## [0.2.0] - 2026-08-06
 
 ### Added

@@ -80,7 +80,15 @@ M.defaults = {
     -- inventing new plumbing.
     double_click = true,
     selection = true,
-    drag_debounce_ms = 40,
+    -- 0 fires each drag-preview frame immediately, using only the
+    -- one-in-flight flag for backpressure -- the same shape
+    -- controller.schedule_scroll uses for its own moving frame. A trailing
+    -- debounce ahead of a pipeline that already has backpressure only adds
+    -- latency, and under input faster than the debounce interval it can
+    -- starve dispatch outright (it resets on every call rather than firing on
+    -- a schedule). Kept as a knob rather than removed: set above 0 to
+    -- deliberately throttle preview requests.
+    drag_debounce_ms = 0,
     settle_ms = 120,
     copy = true,
     -- Disabled by default: neither VS Code nor a browser copies on every
