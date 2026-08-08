@@ -263,10 +263,13 @@ status labels it uses.
 The instant drag highlight -- the selection drawn as translucent overlay
 rectangles rather than re-photographing the page each frame -- is enabled on
 iTerm2, Ghostty and Kitty, each of which an operator drove by hand and
-watched across repeated drags. It is off on WezTerm, which crashed under
-that workload on a build predating an upstream fix to the same code path; see
-prompts/drag_highlight_stage_6_wezterm_probe.md. Everywhere else the drag
-falls back to full captured frames -- always correct, merely slower. Set
+watched across repeated drags. It is off on WezTerm for cost rather than
+correctness: its geometry was photographed correct on both the 20240203
+stable and a current build, using an encoding md-viewer sends WezTerm alone,
+but sustained placement traffic grows the terminal's memory without bound --
+172 MB to 786 MB in four seconds with four rectangles. See the 2026-08-08
+section of docs/cross-platform-implementation-status.md. Everywhere else the
+drag falls back to full captured frames -- always correct, merely slower. Set
 `interaction.selection_overlay` to "on" (see |md-viewer-setup|) to qualify
 your own terminal, after reading that option's notes in lua/md-viewer/
 config.lua. :MdViewerHealth (see |md-viewer-health|) reports whether the

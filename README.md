@@ -50,14 +50,22 @@ watched it work.
 The instant drag highlight — the selection painted as translucent overlay
 rectangles instead of re-photographing the page for every frame — is enabled
 on **iTerm2, Ghostty and Kitty**, each of which an operator drove by hand and
-watched across repeated drags. It is off on WezTerm, which crashed under that
-workload in 2026-08; that was a build predating an upstream fix to the same
-code path, so the finding is re-testable rather than final (see
-[the probe](prompts/drag_highlight_stage_6_wezterm_probe.md)). Everywhere
-else the drag falls back to full captured frames, which are always correct
-and merely slower. `interaction.selection_overlay = "on"` forces it on if you
-want to qualify your own terminal — read that option's notes first; WezTerm
-did not degrade under it, it crashed.
+watched across repeated drags.
+
+It is off on **WezTerm**, and the reason is cost rather than correctness. Its
+geometry was settled in 2026-08 by photographing a real window on both
+`20240203-110809-5046fc22` and a current build: WezTerm applies the protocol's
+sub-cell offset to every cell of a placement instead of the first, and as an
+inset, so a highlight bar draws as a comb of stripes. md-viewer has an encoding
+that avoids it — it sends WezTerm no offset keys at all — and that draws
+correctly on both builds. What stops it is memory: sustained placement traffic
+grows WezTerm's resident size without bound, 172 MB to 786 MB in four seconds
+with four rectangles, enough to exhaust a laptop during one drag. So WezTerm
+keeps the full captured-frame path, which is always correct and merely slower,
+and the same is true of every other terminal.
+`interaction.selection_overlay = "on"` forces it on if you want to qualify your
+own terminal — read that option's notes first, and note that on WezTerm it will
+draw correctly and eat your memory.
 
 The full, terminal-by-terminal scenario matrix — with the four honest labels
 this project uses (`Supported`, `Experimental`, `Protocol-compatible but

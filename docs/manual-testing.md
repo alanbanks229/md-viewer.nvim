@@ -55,7 +55,7 @@ a human actually watched happen on a real screen earns `Supported`.
 |---|---|
 | iTerm2 3.5+ | See the matrix below — a subset of scenarios (basic PNG rendering only, from Parts 1–2) has real historical confirmation; everything from Part 3 onward (click, selection, search, the placement/notification fixes) is unvalidated. See "What has actually been confirmed, and what has not" below before trusting any `Supported` cell. |
 | Kitty | The drag-highlight overlay is operator-validated (2026-08-08), across repeated drags. Everything else is `Protocol-compatible but unvalidated`. |
-| WezTerm | Basic PNG rendering has real historical confirmation from Part 2 (see below); everything since is unvalidated, same caveat as iTerm2. The drag-highlight overlay is **disqualified**: on `20240203-110809-5046fc22` it failed to render natural-size placements and crashed the application. That build predates upstream's fix (issue #6344) to the code path that crashed, so this is re-testable — see `prompts/drag_highlight_stage_6_wezterm_probe.md`. |
+| WezTerm | Basic PNG rendering has real historical confirmation from Part 2 (see below); everything since is unvalidated, same caveat as iTerm2. The drag-highlight overlay is **off, on cost grounds**: its geometry was photographed correct on both `20240203-110809-5046fc22` and `20260805-104032-4b1c3c15` (42 of 42 pixel assertions each) using the `sheet-margin` encoding md-viewer sends WezTerm alone, but sustained placement traffic grows the terminal's resident memory without bound — 172 MB to 786 MB in four seconds with four rectangles at 40fps. Drags therefore keep the full-frame capture path, which is correct and merely slower. The 2026-08-07 crash (issue #6344) is unreachable from md-viewer regardless. See the 2026-08-08 section in `docs/cross-platform-implementation-status.md`. |
 | Ghostty | The drag-highlight overlay is operator-validated (1.3.1, 2026-08-08). Everything else is `Protocol-compatible but unvalidated`. |
 | Warp | `Protocol-compatible but unvalidated` for everything. Never launched. Warp's own Kitty-graphics support is newer and less established than the other four; if it fails outright, that is useful information — record it as `Unsupported` with what specifically broke, not as a bug in md-viewer. |
 
@@ -197,7 +197,7 @@ edge in the image. Record results here:
 |---|---|---|---|---|
 | iTerm2 | Yes (measured) | ~10px of a 20px cell (horizontal only; vertical measured exact) | Undetermined — one measurement only, see question 2 above | The only terminal measured at all. `raw_cell_offset_px`/`raw_overlay_bleed_cells` ship with `v0.3.0` on the strength of this single measurement. |
 | Kitty | Unmeasured | — | — | |
-| WezTerm | Unmeasured | — | — | |
+| WezTerm | Yes, but applied to *every* cell of a placement rather than the first, and as an inset: each cell paints `cell - X` px. Measured 2026-08-08 on both `20240203-110809-5046fc22` and `20260805-104032-4b1c3c15`, which are identical here. | None needed: the content origin and the graphics origin coincide, so `raw_cell_offset_px` stays 0. | n/a | md-viewer therefore sends WezTerm no `X`/`Y` keys at all — see `overlay_encoding = "sheet-margin"`. Photographs: `docs/stage6-wezterm/`. |
 | Ghostty | Unmeasured | — | — | |
 | Warp | Unmeasured | — | — | |
 

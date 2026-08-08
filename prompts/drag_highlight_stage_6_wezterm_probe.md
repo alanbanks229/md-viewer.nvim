@@ -1,3 +1,19 @@
+---
+part: follow-up
+title: Drag-to-highlight, stage 7 — re-probe and support WezTerm selection overlays
+status: done — outcome 4, for a reason this file did not anticipate. The comb
+  this prompt predicted is real and is fixed (a "sheet-margin" encoding that
+  sends WezTerm no X/Y keys at all; photographed correct on both target
+  builds, 42/42 pixel assertions each). Upstream #6344 is unreachable from
+  md-viewer. But sustained placement traffic grows WezTerm's memory without
+  bound -- 172 MB to 786 MB in four seconds with four rectangles -- so the
+  overlay stays off and WezTerm keeps the full-capture path. There is no
+  version boundary: the two builds are identical in every respect measured.
+  Two of this file's premises were wrong and are corrected in the status
+  document's 2026-08-08 section.
+commits: b077334, 6b7cc6d, ae47533, 3f827f9, 53ca49e, e2efc0a
+---
+
 # Stage 6 — Re-Probe and Support WezTerm Selection Overlays
 
 > Read `prompts/00-policy.md` first. §4 (honesty) is the load-bearing one here:

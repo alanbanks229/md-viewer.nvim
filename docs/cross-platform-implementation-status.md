@@ -5108,3 +5108,162 @@ first two `Supported` cells it has ever had for Kitty. The repeated-drag case
 is the one that mattered: one working highlight followed by none is the shape
 every failure in this area has taken, and a single drag cannot tell the two
 apart.
+
+---
+
+# Stage 7 — WezTerm: the geometry is solved, the cost is not (2026-08-08)
+
+Commits: `b077334`, `6b7cc6d`, `ae47533`, `3f827f9`, `53ca49e`, `e2efc0a`.
+
+## The builds
+
+| | build string | where |
+|---|---|---|
+| stable | `20240203-110809-5046fc22` | `/Applications/WezTerm.app` — still the newest tagged release; there have been none since February 2024 |
+| current | `20260805-104032-4b1c3c15` | unpacked under `tmp/stage6/`, run in place, never installed over the stable one |
+
+Both were driven by `scripts/stage6-wezterm/run.sh`, which launches one window
+with a pinned config, runs `probe.lua` under nvim inside it, screenshots three
+phases, and asserts on the decoded pixels. Everything it draws goes through
+`kitty_raw.show`, `kitty_raw.overlay_apply` and the renderer's own
+`overlay-sheet.js`, so the photographs are of what a drag actually sends.
+
+## Outcome
+
+**Prompt outcome 4, narrowly, and for a reason nobody predicted.** WezTerm's
+selection overlay is correct and is still off. The blocker is not geometry and
+not the crash — both are solved and proven — it is that sustained placement
+traffic grows WezTerm's memory without bound.
+
+| check | 20240203 | 20260805 |
+|---|---|---|
+| 1 — cell measurable, layers −2/−1 | pass (16×35 px, exact) | pass (16×35 px, exact) |
+| 2 — one static translucent bar | pass | pass |
+| 3 — multi-cell bar with a sub-cell offset | pass **with the new encoding**, fails without | same |
+| 4 — churn | **fail: unbounded memory growth** | **fail: unbounded memory growth** |
+| 5 — deletion leaves nothing behind | pass | pass |
+| 6 — z-order | not reached | not reached |
+
+42 of 42 pixel assertions on each build for checks 1, 2, 3 and 5.
+
+## Three predictions on file, and what the pixels said
+
+**The comb: confirmed, and worse than predicted.** The prediction was that
+WezTerm applies the `X`/`Y` sub-cell offset to every cell of a placement rather
+than only the first. It does — and it applies it as an *inset*, so each cell
+paints `cell − X` pixels wide rather than being shifted. A 960 px bar at X=3
+photographs as 60 separate 13 px runs with 3 px of untinted base between each:
+
+![the comb](stage6-wezterm/check3-comb-sub-cell-offset.png)
+
+Controlled: same terminal, same window, same rectangles, only the encoding
+differing.
+
+| encoding | most-fragmented row inside the base image | checks |
+|---|---|---|
+| `sub-cell-offset` (what every other terminal gets) | 60 separate runs of 13 px | 33/44 |
+| `sheet-margin` (new) | one run of 128 px | 42/42 |
+
+![solved](stage6-wezterm/check3-solid-sheet-margin.png)
+
+I should record that this document's own source-derived explanation of the
+mechanism was **wrong**, in the opposite direction: reading
+`populate_image_quad` I concluded the padding is added to the quad's right edge
+as well as its left, which would make consecutive cells abut exactly and the
+comb impossible. The pixels disagree, on both builds, and I could not reconcile
+the two from the source I could read. The encoding was chosen because it is
+correct under *either* reading — it sends no offset key at all — and then
+verified by photograph rather than by argument.
+
+**The crash: real, named, and now unreachable.** Upstream #6344 is two integer
+divisions in `assign_image_to_cells`, on different branches, and md-viewer's two
+kinds of placement reach one each: without `c`/`r` (every overlay rectangle) it
+divides by `cell_pixel_width`; with `c`/`r` (every base frame) it divides by
+`draw_width = min(w, image_width − x)`. `b077334` enforces both preconditions
+before anything is emitted — the measured cell must floor to at least 1 px,
+every crop must be at least 1 px and wholly inside its image, `png_dimensions`
+rejects a header declaring a zero dimension (`0` is truthy in Lua, so that one
+was genuinely reachable), and non-finite rect geometry is dropped. Every guard
+was mutation-tested; two initially had no test that could fail.
+
+**"WezTerm reports bad pixel geometry": wrong, and it was md-viewer's bug.**
+Mid-investigation the stable build appeared to report a cell of 8×18 against a
+device cell of 16×35, which would have justified a version boundary. It does
+not. Both builds report `1600×1050` for a `100×30` grid — exactly the device
+cell — about two seconds after launch, and `800×480` before that, with the row
+and column counts identical either side. `cellpixels.measure` cached its first
+answer and re-validated it against the grid, which never changes, so a preview
+opened in that window kept a half-scale cell for the whole session. That is
+stage 5's defect arriving by a route stage 5's fix did not cover. Fixed in
+`3f827f9`: the ioctl costs 0.164 µs and is now re-read every call.
+
+**There is therefore no version boundary.** The two builds behave identically in
+every respect measured, and md-viewer does not look for one.
+
+## What stops it: memory
+
+| workload | terminal resident size |
+|---|---|
+| base image placed, then nothing sent (control) | 173 MB, flat for 12 s |
+| 4 rectangles replaced at 40fps | 172 MB → 786 MB in ~4 s |
+| 70 rectangles, 2 moving per frame (a real drag's shape) | 172 MB → 1.4 GB in 6 s |
+| 70 rectangles, all moving | 172 MB → 6.5 GB before the guard fired |
+
+md-viewer's own counters stay flat throughout — 20 live placements, one set, one
+sheet, across more than a thousand frames — so the growth is on the far side of
+the deletion, and the idle control rules out the environment. It is per-frame
+rather than per-cell: four rectangles grow it about as fast as seventy. One
+earlier run died on `Failed to allocate 23962752 quads` and an unwrap at
+`wezterm-gui/src/termwindow/render/draw.rs:258`.
+
+A drag would exhaust a laptop's application memory in seconds. It did exactly
+that to the machine this was measured on, twice — the first time via a
+full-frame-capture baseline the harness no longer runs, the second via the
+overlay itself. `scripts/stage6-wezterm/churn.sh` now aborts on a resident-size
+ceiling.
+
+The wire and Lua costs, by contrast, are fine: 2501 B and 0.69 ms mean for a
+frame that replaces 20 rectangles, against a ~25 ms budget. Cost was never the
+problem in the places it was expected to be.
+
+## What shipped
+
+* The `sheet-margin` encoding, selected by a new per-profile `overlay_encoding`
+  and used by WezTerm alone. It stays in the tree because it is proven correct,
+  costs nothing while unused, and is what a future fix would need.
+* `selection_overlay = false` for WezTerm, which keeps the full-frame capture
+  path — correct, and merely slower. The `validation` string carries both
+  halves rather than rounding to "unsupported".
+* The #6344 preconditions, terminal-agnostically.
+* The `cellpixels` fix, terminal-agnostically. This one matters everywhere: any
+  terminal that settles its pty geometry after launch was affected.
+* `scripts/stage6-wezterm/`, committed, so none of this has to be re-derived.
+
+iTerm2, Ghostty and Kitty are untouched. `tests/lua/cases/backend_kitty.lua`
+pins their entire byte stream as a golden — 1178 bytes, verified identical to
+the pre-change code.
+
+## Upstream
+
+Two reports worth filing, neither yet filed:
+
+1. `X`/`Y` are applied to every cell of a placement rather than the first, and
+   as an inset. Minimal repro: transmit any solid image, place it with
+   `a=p,w=960,h=35,X=3` and no `c`/`r`, and photograph the result.
+2. Sustained placement/deletion traffic grows resident memory without bound,
+   with either encoding and with as few as four rectangles. Repro:
+   `scripts/stage6-wezterm/churn.sh`, four rectangles, 40fps — 173 MB to
+   ~950 MB in four seconds, while the client's live placement count stays at
+   four and an idle control holds flat.
+
+## What is not known
+
+* Checks 4 and 6 never passed, so nothing about z-order or scroll behaviour
+  under a live drag was observed on WezTerm.
+* No operator has dragged in WezTerm. Nothing here claims otherwise.
+* Whether the memory growth is specific to macOS or to this GPU backend. It is
+  **not** specific to the new encoding: driving the same four rectangles through
+  the `sub-cell-offset` encoding — the one iTerm2, Ghostty and Kitty have used
+  all along — grows WezTerm identically, 173 MB → 958 MB in four seconds. So
+  this is WezTerm and placement churn, not anything stage 7 introduced, and the
+  upstream repro does not need md-viewer's encoding at all.
