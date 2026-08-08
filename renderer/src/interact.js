@@ -589,43 +589,119 @@ export function resolveSelectionInPage(input) {
   // resolvable endpoint is not a selection -- so a point with no usable caret
   // falls back to an element text boundary (start or end, picked by which
   // side of the element's horizontal midpoint the point fell on) rather than
-  // reporting a miss. Returns null only when the point is outside the
-  // viewport or lands on no addressable block at all.
+  // reporting a miss, and a point over no block at all slides onto the nearest
+  // one (see `nearestBlockPoint`). Returns null only when the point is outside
+  // the viewport or the document holds no addressable block whatsoever.
   function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
     if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
     const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
     const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
 
-    let element = null;
-    let block = null;
-    let pointX = x;
-    for (const dx of offsets) {
-      const px = x + dx;
-      if (!(px >= 0 && px < window.innerWidth)) continue;
-      const candidate = document.elementFromPoint(px, y);
-      if (!candidate) continue;
-      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
-      if (!candidateBlock) continue;
-      element = candidate;
-      block = candidateBlock;
-      pointX = px;
-      break;
+    // Probe the terminal cell the point came from for addressable content --
+    // half a cell either side, never further. See hitTestInPage for why the
+    // cell, not its centre, is the honest resolution of the input device.
+    function probe(atX, atY) {
+      for (const dx of offsets) {
+        const px = atX + dx;
+        if (!(px >= 0 && px < window.innerWidth)) continue;
+        const candidate = document.elementFromPoint(px, atY);
+        if (candidate === null) continue;
+        const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
+        if (candidateBlock === null) continue;
+        return { element: candidate, block: candidateBlock, x: px, y: atY };
+      }
+      return null;
     }
-    if (!block) return null;
+
+    // Slide a point that landed on no block at all onto the edge of the block
+    // nearest it, and report where on that block it now sits.
+    //
+    // This is what makes a drag that runs past the edge of the content behave
+    // the way it does in a browser or any native text editor: the selection
+    // keeps extending toward the nearest text instead of freezing. It matters
+    // far more than "the odd click in the margin" suggests, because
+    // `interaction.locate_for_drag` clamps an off-window drag to the *edge
+    // column* of the placement -- and the edge column is page padding. The
+    // page carries 26px of side padding (renderer/assets/preview.css) while a
+    // terminal cell is ~10-20 CSS px, so the leftmost one or two columns of
+    // the preview hold no block, `probe` above found nothing, and every
+    // request from a drag that left the window came back `focus_miss` and was
+    // silently dropped by interaction.lua's `result.ok ~= false` check. That
+    // is measured against a real Chromium, not reasoned: focus x=10.26 on an
+    // 800px viewport returned focus_miss while x=20 did not.
+    //
+    // Vertical distance dominates the ranking, and heavily: a drag level with
+    // the third paragraph but out in the left margin must stay on the third
+    // paragraph, not jump to whichever block happens to be nearer in raw
+    // Euclidean terms. Blocks scrolled out of view are considered only when
+    // nothing is visible at all -- scroll-past-end padding can leave a
+    // viewport holding no block, and freezing there would be the same bug.
+    //
+    // Deliberately confined to selection endpoints: hitTestInPage must keep
+    // reporting an honest miss, since a click in the margin is not a click on
+    // the nearest paragraph and must never activate its link.
+    function nearestBlockPoint(atX, atY) {
+      const candidates = document.querySelectorAll("[data-source-start][data-source-end]");
+      function pick(visibleOnly) {
+        let best = null;
+        let bestKey = Infinity;
+        for (const candidate of candidates) {
+          const rect = candidate.getBoundingClientRect();
+          if (!(rect.width > 0 && rect.height > 0)) continue;
+          if (visibleOnly && (rect.bottom <= 0 || rect.top >= window.innerHeight)) continue;
+          const dy = atY < rect.top ? rect.top - atY : atY > rect.bottom ? atY - rect.bottom : 0;
+          const dx = atX < rect.left ? rect.left - atX : atX > rect.right ? atX - rect.right : 0;
+          const key = dy * 100000 + dx;
+          // On a tie, prefer the deeper block: a list and its list item both
+          // carry source attributes, and the item is the more specific answer.
+          // querySelectorAll is in document order, so the ancestor is seen first.
+          if (key < bestKey || (key === bestKey && best !== null && best.block.contains(candidate))) {
+            bestKey = key;
+            best = { block: candidate, rect };
+          }
+        }
+        return best;
+      }
+      const best = pick(true) || pick(false);
+      if (best === null) return null;
+      const rect = best.rect;
+      const clamp = (value, low, high) => (high < low ? low : value < low ? low : value > high ? high : value);
+      return {
+        block: best.block,
+        x: clamp(atX, rect.left + 0.5, rect.right - 0.5),
+        y: clamp(atY, rect.top + 0.5, rect.bottom - 0.5),
+      };
+    }
+
+    let hit = probe(x, y);
+    if (hit === null) {
+      const near = nearestBlockPoint(x, y);
+      // The re-probe can still miss -- a block's bounding rect covers the
+      // ragged end of its last wrapped line -- so the block itself stands in
+      // as the element, and the caret fallback below resolves a text boundary.
+      if (near !== null) {
+        hit = probe(near.x, near.y) || { element: near.block, block: near.block, x: near.x, y: near.y };
+      }
+    }
+    if (hit === null) return null;
+    const element = hit.element;
+    const block = hit.block;
+    const pointX = hit.x;
+    const pointY = hit.y;
 
     let caretNode = null;
     let caretOffset = null;
     const wantPosition = strategy === "auto" || strategy === "caret-position";
     const wantRange = strategy === "auto" || strategy === "caret-range";
     if (wantPosition && typeof document.caretPositionFromPoint === "function") {
-      const position = document.caretPositionFromPoint(pointX, y);
+      const position = document.caretPositionFromPoint(pointX, pointY);
       if (position && position.offsetNode) {
         caretNode = position.offsetNode;
         caretOffset = position.offset;
       }
     }
     if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
-      const range = document.caretRangeFromPoint(pointX, y);
+      const range = document.caretRangeFromPoint(pointX, pointY);
       if (range && range.startContainer) {
         caretNode = range.startContainer;
         caretOffset = range.startOffset;

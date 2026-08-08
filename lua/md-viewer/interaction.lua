@@ -73,26 +73,81 @@ function M.forget_selection(session)
   session.find_active_index = nil
   debounce.close(session, "selection_debounce_timer")
   debounce.close(session, "selection_settle_timer")
+  debounce.close(session, "drag_idle_settle_timer")
   if session.pointer then
     session.pointer.selection_request_in_flight = false
     session.pointer.pending_settle = nil
+    session.pointer.pending_idle_settle = nil
   end
+end
+
+---Shared by `M.locate` and `M.locate_for_drag`: everything both need besides
+---the window/point check itself, which differs between them.
+local function interaction_ready(session)
+  if not config.get().interaction.enabled then return false end
+  if not (session.backend and session.backend.name ~= "cells") then return false end
+  if not session.last_placement then return false end
+  if not (session.viewport_width_px and session.viewport_height_render_px) then return false end
+  return true
 end
 
 ---Convert a getmousepos() point into CSS pixels against the placement and
 ---viewport that produced the image currently on screen, or nil when the
----point cannot be resolved to addressable content.
+---point cannot be resolved to addressable content. Strict: a point outside
+---`session.preview_win` is refused, not clamped -- this is also what decides
+---whether a press/click may begin a gesture at all, which must never treat
+---"outside the window" as "the nearest edge of the window".
 function M.locate(session, mouse)
   if not (session and mouse and mouse.winid and mouse.winid ~= 0) then return nil end
-  if not config.get().interaction.enabled then return nil end
-  if not (session.backend and session.backend.name ~= "cells") then return nil end
   if mouse.winid ~= session.preview_win then return nil end
-  if not session.last_placement then return nil end
-  if not (session.viewport_width_px and session.viewport_height_render_px) then return nil end
+  if not interaction_ready(session) then return nil end
   return coordinates.cell_to_css(mouse, session.last_placement, {
     widthPx = session.viewport_width_px,
     heightPx = session.viewport_height_render_px,
   })
+end
+
+---Like `M.locate`, but for a drag already in progress: mouse capture is
+---button-scoped (see the module-local `captured` comment above), so the
+---pointer leaving the preview window -- or straying inside it but outside
+---the placed image itself (blank margin, a winbar) -- must not freeze the
+---selection. It should keep extending toward the nearest edge, the same way
+---a browser or a native text editor behaves when a drag runs past the edge
+---of a scrollable view. `session.last_placement` is already in the same
+---absolute screen-cell space `getmousepos()` reports
+---(`coordinates.for_window`'s doc comment), so clamping is a plain min/max,
+---no unit conversion. The exact point is tried first when the window
+---matches, so this never resolves *differently* than `M.locate` would for a
+---point already inside the placement -- it only adds a fallback for the
+---points `M.locate` would otherwise refuse.
+---
+---This is only half the fix, and on its own it is a no-op: the edge column it
+---clamps to is the page's own side padding, which held no addressable block,
+---so every request it produced came back `focus_miss` and was dropped by the
+---`result.ok ~= false` checks below. `resolveSelectionInPage` in
+---`renderer/src/interact.js` supplies the other half -- see the
+---`nearestBlockPoint` comment there. Change either one without the other and
+---a drag that leaves the window freezes again.
+function M.locate_for_drag(session, mouse)
+  if not (session and mouse) then return nil end
+  if not interaction_ready(session) then return nil end
+  local placement = session.last_placement
+  local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px }
+  if mouse.winid and mouse.winid == session.preview_win then
+    local direct = coordinates.cell_to_css(mouse, placement, viewport)
+    if direct then return direct end
+  end
+  local clamped = {
+    screenrow = math.max(
+      placement.row + 1,
+      math.min(placement.row + placement.height, tonumber(mouse.screenrow) or placement.row + 1)
+    ),
+    screencol = math.max(
+      placement.col + 1,
+      math.min(placement.col + placement.width, tonumber(mouse.screencol) or placement.col + 1)
+    ),
+  }
+  return coordinates.cell_to_css(clamped, placement, viewport)
 end
 
 local function cell_distance(a, b)
@@ -118,6 +173,9 @@ function M.on_press(session, mouse, point, click_count)
     -- Set by on_release when a settle request arrives while a preview is
     -- still in flight; picked up by that preview's own completion callback.
     pending_settle = nil,
+    -- Same idea, for the idle-settle timer (schedule_selection_preview)
+    -- finding a preview request already in flight.
+    pending_idle_settle = nil,
     click_count = click_count,
     multi_click_fired = false,
   }
@@ -144,7 +202,7 @@ function M.on_drag(session, mouse)
   local distance = cell_distance(pointer.press_cell, pointer.latest_cell)
   if distance >= config.get().interaction.drag_threshold_cells then
     pointer.drag_started = true
-    pointer.newest_pending_drag_point = M.locate(session, mouse)
+    pointer.newest_pending_drag_point = M.locate_for_drag(session, mouse)
     if not pointer.anchor_point and pointer.newest_pending_drag_point then
       pointer.anchor_point = pointer.newest_pending_drag_point
     end
@@ -154,63 +212,104 @@ function M.on_drag(session, mouse)
   end
 end
 
----Coalescing drag-preview request: at most one `selection_preview` request in
----flight, and only the newest pending drag point is ever sent -- mirroring
----`controller.schedule_scroll`'s one-in-flight/one-coalesced-pending shape.
----With the default `interaction.drag_debounce_ms = 0`, dispatch is immediate
+---The actual dispatch behind `M.schedule_selection_preview`: at most one
+---`selection_preview` request in flight, only the newest pending drag point
+---is ever sent (mirroring `controller.schedule_scroll`'s
+---one-in-flight/one-coalesced-pending shape), and a request already in
+---flight when this runs drops the point and counts it as coalesced -- the
+---in-flight request's own completion callback below re-fires for whatever
+---point is newest by then. `force_device` is set only by the idle-settle
+---timer scheduled in `M.schedule_selection_preview`; every ordinary drag
+---frame captures at device scale unless `interaction.fast_drag` is on (see
+---`config.lua` for why that is its own knob rather than `render.fast_scroll`,
+---and why it defaults off).
+local function attempt_selection_preview(session, pointer, force_device)
+  if session.pointer ~= pointer or not pointer.drag_started then return end
+  local point = pointer.newest_pending_drag_point
+  if not point then return end
+  if pointer.selection_request_in_flight then
+    if force_device then
+      -- The idle-settle timer found a request already in flight. Rather than
+      -- drop the sharpen attempt outright (which would leave a genuinely
+      -- paused drag showing a soft frame until the next real movement or
+      -- release), the in-flight request's own completion callback below
+      -- picks this up once it finishes.
+      pointer.pending_idle_settle = true
+    else
+      session.coalesced_drag_events = (session.coalesced_drag_events or 0) + 1
+    end
+    return
+  end
+  pointer.selection_request_in_flight = true
+  local requested_point = point
+  local capture_scale = (force_device or not config.get().interaction.fast_drag) and "device" or "css"
+  M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
+    if session.pointer ~= pointer then return end
+    pointer.selection_request_in_flight = false
+    if not err and result and result.ok ~= false then
+      session.selection_active = true
+      session.selection_content_revision = session.renderer_revision
+      session.selection_text_length = type(result.text) == "string" and #result.text or nil
+      require("md-viewer.controller").display_interact_result(session, result)
+    end
+    if pointer.pending_settle then
+      -- Release wins over a still-pending idle sharpen -- the gesture is
+      -- ending, so there is no point capturing a mid-drag frame first.
+      local pending = pointer.pending_settle
+      pointer.pending_settle = nil
+      pointer.pending_idle_settle = nil
+      M.settle_selection(session, pointer, pending.anchor, pending.point)
+    elseif pointer.pending_idle_settle then
+      pointer.pending_idle_settle = nil
+      attempt_selection_preview(session, pointer, true)
+    elseif
+      pointer.drag_started
+      and pointer.newest_pending_drag_point
+      and pointer.newest_pending_drag_point ~= requested_point
+    then
+      M.schedule_selection_preview(session)
+    end
+  end)
+end
+
+---Debounced (`interaction.drag_debounce_ms`, default `0` -- see below),
+---coalescing drag-preview request. With the default, dispatch is immediate
 ---(no fixed frame rate: screenshot and terminal-transfer completion supply
 ---the pacing, same as scrolling); `drag_debounce_ms` above `0` still
 ---debounces ahead of that, for anyone who deliberately wants added latency.
----The preview frame captures at `render.fast_scroll`'s scale, the same
----moving/settled split scrolling already uses -- reused rather than a new
----`fast_drag` flag, since a moving drag frame and a moving scroll frame are
----the same kind of thing. The commit frame (`M.settle_selection`) always
----captures at device scale.
+---
+---When -- and only when -- `interaction.fast_drag` softens the moving frame,
+---this also (re)schedules an idle-settle timer, mirroring
+---`controller.schedule_scroll`'s own `scroll_settle_timer`:
+---`render.scroll_settle_ms` after the *last* drag point with no further
+---movement, one frame captures at device scale even though the mouse button
+---is still down, so a drag that pauses mid-gesture (the reader dwelling on
+---exactly the text being selected, not still moving) is not left soft for as
+---long as the pause lasts. With the default `fast_drag = false` every frame
+---is already sharp and the timer would be pure overhead, so it is not armed
+---at all. `M.settle_selection` on release guarantees the final frame is
+---sharp either way.
 function M.schedule_selection_preview(session)
   local pointer = session.pointer
   if not pointer then return end
   local cfg = config.get().interaction
-  local function attempt()
-    if session.pointer ~= pointer or not pointer.drag_started then return end
-    local point = pointer.newest_pending_drag_point
-    if not point then return end
-    if pointer.selection_request_in_flight then
-      -- This attempt found a request already in flight: the point it would
-      -- have sent is dropped, and whichever on_drag call produces the next
-      -- point is what the in-flight request's own completion callback (the
-      -- `elseif` branch below) will actually send.
-      session.coalesced_drag_events = (session.coalesced_drag_events or 0) + 1
-      return
-    end
-    pointer.selection_request_in_flight = true
-    local requested_point = point
-    local capture_scale = config.get().render.fast_scroll and "css" or "device"
-    M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
-      if session.pointer ~= pointer then return end
-      pointer.selection_request_in_flight = false
-      if not err and result and result.ok ~= false then
-        session.selection_active = true
-        session.selection_content_revision = session.renderer_revision
-        session.selection_text_length = type(result.text) == "string" and #result.text or nil
-        require("md-viewer.controller").display_interact_result(session, result)
-      end
-      if pointer.pending_settle then
-        local pending = pointer.pending_settle
-        pointer.pending_settle = nil
-        M.settle_selection(session, pointer, pending.anchor, pending.point)
-      elseif
-        pointer.drag_started
-        and pointer.newest_pending_drag_point
-        and pointer.newest_pending_drag_point ~= requested_point
-      then
-        M.schedule_selection_preview(session)
-      end
-    end)
+  if cfg.fast_drag then
+    debounce.call(
+      session,
+      "drag_idle_settle_timer",
+      config.get().render.scroll_settle_ms,
+      function() attempt_selection_preview(session, pointer, true) end
+    )
   end
   if cfg.drag_debounce_ms > 0 then
-    debounce.call(session, "selection_debounce_timer", cfg.drag_debounce_ms, attempt)
+    debounce.call(
+      session,
+      "selection_debounce_timer",
+      cfg.drag_debounce_ms,
+      function() attempt_selection_preview(session, pointer, false) end
+    )
   else
-    attempt()
+    attempt_selection_preview(session, pointer, false)
   end
 end
 
@@ -730,11 +829,11 @@ function M.on_release(session, mouse)
   pointer.newest_pending_drag_point = nil
   if captured == session then captured = nil end
   if is_drag then
-    -- Prefer the point under the pointer right now; fall back to the last
-    -- point a drag event actually resolved, since the release can land a
-    -- little outside addressable content (the same cell-edge case Part 5
-    -- fixed for clicks).
-    local release_point = M.locate(session, mouse) or last_drag_point
+    -- Prefer the point under the pointer right now, clamped to the preview
+    -- window's edge if the release lands outside it (same reasoning as
+    -- on_drag); fall back to the last point a drag event actually resolved
+    -- only if that structurally can't be done (no placement yet).
+    local release_point = M.locate_for_drag(session, mouse) or last_drag_point
     if config.get().interaction.selection and pointer.anchor_point and release_point then
       M.settle_selection(session, pointer, pointer.anchor_point, release_point)
     end

@@ -80,11 +80,7 @@ return function(t)
     t.eq(1, #requests, "the first threshold crossing issues exactly one selection_preview request")
     t.eq("interact", requests[1].method)
     t.eq("selection_preview", requests[1].params.action)
-    t.eq(
-      "css",
-      requests[1].params.captureScale,
-      "a drag-preview frame reuses render.fast_scroll's cheap scale, mirroring scroll's own moving frame"
-    )
+    t.eq("device", requests[1].params.captureScale, "a drag-preview frame is sharp by default")
     t.ok(requests[1].params.anchorCoordinates ~= nil, "a selection request always carries an explicit anchor")
     t.eq(true, session.pointer.selection_request_in_flight, "the request is marked in flight")
 
@@ -111,7 +107,7 @@ return function(t)
       requests[2].params.coordinates.y,
       "the coalesced request uses the newest drag point, not an intermediate one"
     )
-    t.eq("css", requests[2].params.captureScale, "the coalesced re-fire is still a preview frame -- fast scale")
+    t.eq("device", requests[2].params.captureScale, "the coalesced re-fire is a preview frame at the same scale")
     t.eq(true, session.selection_active, "a successful preview marks the selection active")
     t.eq(1, #displayed, "a successful preview displays its captured frame")
 
@@ -128,30 +124,39 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- render.fast_scroll = false falls the preview frame back to device scale
-  -- too: the reuse is a live read of the flag, not a hardcoded "css".
+  -- interaction.fast_drag = true is what softens a moving drag frame -- and
+  -- it is the *only* thing that does. render.fast_scroll is left on in both
+  -- halves below so the drag frame is shown to ignore it: coupling the two
+  -- is what blurred the preview for the whole of every gesture, and a moving
+  -- scroll frame and a moving drag frame are only superficially alike (see
+  -- config.lua's fast_drag comment).
   -- ---------------------------------------------------------------------
   do
-    config.setup({
-      interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), {}),
-      render = { fast_scroll = false },
-    })
-    local session = fake_session()
-    local requests = {}
-    local original_request = process.request
-    process.request = function(method, params, callback) requests[#requests + 1] = { method = method, params = params } end
+    local function first_drag_scale(interaction_overrides)
+      config.setup({
+        interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), interaction_overrides),
+        render = { fast_scroll = true },
+      })
+      local session = fake_session()
+      local requests = {}
+      local original_request = process.request
+      process.request = function(method, params) requests[#requests + 1] = { method = method, params = params } end
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(10, 15))
+      vim.wait(200, function() return #requests >= 1 end, 5)
+      interaction.forget_selection(session)
+      process.request = original_request
+      return #requests, requests[1] and requests[1].params.captureScale
+    end
 
-    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
-    interaction.on_drag(session, point(10, 15))
-    vim.wait(200, function() return #requests >= 1 end, 5)
-    t.eq(1, #requests)
-    t.eq(
-      "device",
-      requests[1].params.captureScale,
-      "render.fast_scroll = false falls the drag-preview frame back to device scale"
-    )
+    local count, scale = first_drag_scale({})
+    t.eq(1, count)
+    t.eq("device", scale, "fast_drag defaults off, so a moving drag frame stays sharp under render.fast_scroll")
 
-    process.request = original_request
+    count, scale = first_drag_scale({ fast_drag = true })
+    t.eq(1, count)
+    t.eq("css", scale, "fast_drag = true opts the moving drag frame into the cheap capture")
+
     setup_interaction({})
   end
 
@@ -186,6 +191,10 @@ return function(t)
     t.eq(2, #requests, "completing the in-flight request immediately sends the newest coalesced point")
 
     callbacks[2]({ kind = "selection", ok = true, text = "ab", collapsed = false }, nil)
+    -- No on_release in this block: it is testing preview pacing, not the
+    -- release path. Drop the gesture explicitly so no timer this block armed
+    -- can outlive it and fire against a later block's process.request stub.
+    interaction.forget_selection(session)
     process.request = original_request
     setup_interaction({})
   end
@@ -223,6 +232,207 @@ return function(t)
     callbacks[2]({ kind = "selection", ok = true, text = "ab", collapsed = false }, nil)
 
     process.request = original_request
+  end
+
+  -- ---------------------------------------------------------------------
+  -- By default, a *moving* drag-preview frame captures at device scale, and
+  -- no idle-settle timer is armed at all: interaction.fast_drag is off, so
+  -- there is nothing to sharpen later. render.fast_scroll is deliberately
+  -- left on here -- the drag frame must not follow it, which is exactly the
+  -- coupling that made the preview go blurry for a whole gesture.
+  -- ---------------------------------------------------------------------
+  do
+    config.setup({
+      interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), { drag_debounce_ms = 0 }),
+      render = { fast_scroll = true, scroll_settle_ms = 5 },
+    })
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    t.eq(1, #requests, "the first drag point dispatches immediately")
+    t.eq("device", requests[1].params.captureScale, "the moving drag frame is sharp by default")
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+
+    -- Nothing further may fire on its own: with every frame already sharp an
+    -- idle-settle frame would be a pure duplicate capture.
+    vim.wait(80, function() return #requests >= 2 end, 5)
+    t.eq(1, #requests, "no idle-settle frame is armed when fast_drag is off")
+    t.eq(nil, session.drag_idle_settle_timer, "and no idle-settle timer is left behind")
+
+    interaction.forget_selection(session)
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Idle-settle, opt-in: with interaction.fast_drag on, a drag that pauses
+  -- mid-gesture (mouse still down, no new point for render.scroll_settle_ms)
+  -- automatically captures one sharp, device-scale frame, exactly like
+  -- controller.schedule_scroll's own scroll_settle_timer does for a paused
+  -- scroll. Without it, a reader who opted into the cheap moving frame and
+  -- then stopped to look at what is being selected would stare at the soft
+  -- frame for as long as they paused.
+  -- ---------------------------------------------------------------------
+  do
+    config.setup({
+      interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), { drag_debounce_ms = 0, fast_drag = true }),
+      render = { scroll_settle_ms = 5 },
+    })
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    t.eq(1, #requests, "the first drag point dispatches immediately")
+    t.eq("css", requests[1].params.captureScale, "the moving frame is still the cheap scale")
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+
+    -- No further movement: after scroll_settle_ms of silence, a sharp frame
+    -- fires on its own, with no on_drag/on_release call from the test.
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq(2, #requests, "idle-settle fires a frame on its own once the drag has paused")
+    t.eq("selection_preview", requests[2].params.action, "the idle-settle frame is still a preview, not a commit")
+    t.eq("device", requests[2].params.captureScale, "the idle-settle frame captures at device scale")
+    callbacks[2]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+
+    interaction.forget_selection(session)
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Idle-settle vs. an in-flight request: if the idle timer fires while a
+  -- preview request is still outstanding, it must not drop the sharpen
+  -- attempt (which would leave a genuinely paused drag soft until the next
+  -- real movement or release) -- it defers via pointer.pending_idle_settle
+  -- and the in-flight request's own completion callback picks it up.
+  -- ---------------------------------------------------------------------
+  do
+    config.setup({
+      interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), { drag_debounce_ms = 0, fast_drag = true }),
+      render = { scroll_settle_ms = 5 },
+    })
+    local session = fake_session()
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callbacks[#callbacks + 1] = callback
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15))
+    t.eq(1, #requests, "the first drag point dispatches immediately")
+
+    -- Leave callbacks[1] unresolved (request still in flight) long enough
+    -- for the idle timer to fire against it.
+    vim.wait(60, function() return session.pointer.pending_idle_settle == true end, 5)
+    t.eq(true, session.pointer.pending_idle_settle, "the idle timer found a request in flight and deferred")
+    t.eq(1, #requests, "no second request is sent while the first is still outstanding")
+    t.eq(0, session.coalesced_drag_events or 0, "a deferred idle-settle is not a dropped drag point")
+
+    callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+    t.eq(2, #requests, "completing the in-flight request immediately fires the deferred idle-settle")
+    t.eq("device", requests[2].params.captureScale, "the deferred idle-settle still captures at device scale")
+    callbacks[2]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+
+    interaction.forget_selection(session)
+    process.request = original_request
+    setup_interaction({})
+  end
+
+  -- ---------------------------------------------------------------------
+  -- locate_for_drag clamps an out-of-window mouse position to the nearest
+  -- edge of the placement instead of refusing outright -- M.locate itself
+  -- (used by press/click) stays strict for the identical input, since
+  -- clamping must never let a gesture *begin* outside the window.
+  -- ---------------------------------------------------------------------
+  do
+    local session = fake_session() -- placement: row=0, col=0, width=80, height=24
+    local OTHER_WIN = 9999
+
+    local off_left = { screenrow = 10, screencol = -50, winid = OTHER_WIN }
+    t.eq(nil, interaction.locate(session, off_left), "M.locate stays strict for a point outside the preview window")
+    local clamped_left = interaction.locate_for_drag(session, off_left)
+    t.ok(clamped_left ~= nil, "locate_for_drag resolves a point outside the window instead of refusing")
+    local expected_left = interaction.locate_for_drag(session, { screenrow = 10, screencol = 1, winid = PREVIEW_WIN })
+    t.eq(expected_left.x, clamped_left.x, "the clamped point matches the placement's leftmost column")
+    t.eq(expected_left.y, clamped_left.y, "row 10 is already in range, unaffected by the column clamp")
+
+    local off_top_right = { screenrow = -20, screencol = 500, winid = OTHER_WIN }
+    local clamped_tr = interaction.locate_for_drag(session, off_top_right)
+    local expected_tr = interaction.locate_for_drag(session, { screenrow = 1, screencol = 80, winid = PREVIEW_WIN })
+    t.eq(expected_tr.x, clamped_tr.x, "the clamped point matches the placement's rightmost column")
+    t.eq(expected_tr.y, clamped_tr.y, "the clamped point matches the placement's topmost row")
+
+    local inside = { screenrow = 12, screencol = 40, winid = PREVIEW_WIN }
+    t.eq(
+      interaction.locate(session, inside),
+      interaction.locate_for_drag(session, inside),
+      "inside the window, locate and locate_for_drag agree exactly"
+    )
+
+    -- Same window, but below the placement's own last row (a real case if the
+    -- placed image does not fill the whole window) -- also clamped, not
+    -- refused, since M.locate would otherwise freeze the same as leaving the
+    -- window entirely.
+    local below_placement = { screenrow = 40, screencol = 40, winid = PREVIEW_WIN }
+    t.eq(nil, interaction.locate(session, below_placement), "M.locate stays strict below the placement too")
+    local clamped_below = interaction.locate_for_drag(session, below_placement)
+    local expected_below = interaction.locate_for_drag(session, { screenrow = 24, screencol = 40, winid = PREVIEW_WIN })
+    t.eq(expected_below.x, clamped_below.x, "same-window-but-below-placement clamps to the bottom row")
+    t.eq(expected_below.y, clamped_below.y, "same-window-but-below-placement clamps to the bottom row")
+  end
+
+  -- ---------------------------------------------------------------------
+  -- A drag that leaves the preview window keeps extending toward the
+  -- window's edge instead of freezing there -- mouse capture is button-
+  -- scoped (see interaction.lua's module comment), so on_drag/on_release
+  -- for the captured session keep dispatching even once the pointer is over
+  -- a different window entirely.
+  -- ---------------------------------------------------------------------
+  do
+    setup_interaction({ drag_debounce_ms = 0 })
+    local session = fake_session()
+    local requests = {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = { method = method, params = params }
+      callback({ kind = "selection", ok = true, text = "x", collapsed = false }, nil)
+    end
+
+    interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+    interaction.on_drag(session, point(10, 15)) -- inside the window
+    t.eq(1, #requests, "the first in-window drag point issues a request")
+
+    local OTHER_WIN = 9999
+    local off_window = { screenrow = 10, screencol = -100, winid = OTHER_WIN }
+    interaction.on_drag(session, off_window)
+    t.eq(2, #requests, "a drag point outside the preview window still issues a request instead of freezing")
+    local clamped = interaction.locate_for_drag(session, off_window)
+    t.eq(clamped.x, requests[2].params.coordinates.x, "the off-window request uses the edge-clamped point")
+    t.eq(clamped.y, requests[2].params.coordinates.y, "the off-window request uses the edge-clamped point")
+
+    interaction.on_release(session, off_window)
+    vim.wait(200, function() return #requests >= 3 end, 5)
+    t.eq(3, #requests, "release outside the window still commits, not frozen")
+    t.eq("selection_commit", requests[3].params.action)
+    t.eq(clamped.x, requests[3].params.coordinates.x, "the off-window commit also uses the edge-clamped point")
+
+    process.request = original_request
+    setup_interaction({})
   end
 
   -- ---------------------------------------------------------------------
@@ -752,6 +962,10 @@ return function(t)
     t.eq(1, #requests, "the coalesced point is not sent as its own request")
 
     callbacks[1]({ kind = "selection", ok = true, text = "a", collapsed = false }, nil)
+    -- Same reasoning as the drag_debounce_ms = 0 block above: no on_release
+    -- here, so drop the gesture rather than leave a timer holding this
+    -- block's process.request stub after it has been restored.
+    interaction.forget_selection(session)
     process.request = original_request
   end
 

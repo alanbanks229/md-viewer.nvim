@@ -317,6 +317,7 @@ local function close_session(session)
     "ui_poll_timer",
     "selection_debounce_timer",
     "selection_settle_timer",
+    "drag_idle_settle_timer",
   }) do
     debounce.close(session, name)
   end

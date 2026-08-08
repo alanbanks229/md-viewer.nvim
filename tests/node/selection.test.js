@@ -229,18 +229,75 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.match(response.result.text, /テキスト|emoji/);
   });
 
-  await t.test("a point in the page's own padding is an honest miss, not a guess", async () => {
-    // x=2 sits in .markdown-body's own padding, outside every block's box
-    // entirely -- the same honest "none" hitTestInPage already reports for
-    // this exact region. This is not the element-boundary-normalization case
-    // (see the next test); it is the miss case that must stay a miss.
+  await t.test("a selection endpoint in the page's own padding slides onto the nearest block", async () => {
+    // x=2 sits in .markdown-body's 26px side padding, outside every block's
+    // box entirely. This used to be asserted here as an honest miss --
+    // deliberately, by analogy with hitTestInPage, which still reports "none"
+    // for this exact region and must keep doing so, since a click in the
+    // margin is not a click on the nearest paragraph and must never activate
+    // its link.
+    //
+    // A selection endpoint is the opposite case, and the miss was a real,
+    // operator-reported bug rather than a conservative choice. The margin is
+    // addressable: it is inside the placement, the pointer can sit on those
+    // cells, and interaction.lua's `locate_for_drag` *must* clamp a drag that
+    // left the preview window to exactly this column. The page's padding is
+    // 26px while a terminal cell is ~10-20 CSS px, so the leftmost columns of
+    // every preview landed here, came back `focus_miss`, and were dropped --
+    // which is what "the selection stops extending once my cursor leaves the
+    // render pane" was. Every text UI resolves a drag into the margin the same
+    // way, and so does this now: to the start of the line it is level with.
     const paragraph = blockAt(blocks, 2);
-    const anchor = { x: 2, y: Math.round((paragraph.topPx + paragraph.bottomPx) / 2) };
-    const focus = edges(paragraph).right;
-    const response = await selectionCommit(renderer, "sel-doc", "1:0", anchor, focus);
+    const y = Math.round((paragraph.topPx + paragraph.bottomPx) / 2);
+    const response = await selectionCommit(renderer, "sel-doc", "1:0", { x: 2, y }, edges(paragraph).right);
     assert.equal(response.ok, true, response.error);
-    assert.equal(response.result.ok, false);
-    assert.equal(response.result.reason, "anchor_miss");
+    assert.equal(response.result.ok, true, "a margin endpoint must resolve, not freeze the drag");
+    assert.equal(response.result.collapsed, false);
+    assert.match(response.result.text, /^Alpha beta gamma/, "the left margin anchors at the start of that line");
+  });
+
+  await t.test("a drag that leaves the preview window keeps extending toward the nearest content", async () => {
+    // The end-to-end shape of the bug above, in the direction it was actually
+    // reported: anchor inside the text, focus clamped to the edge column the
+    // way interaction.lua clamps an out-of-window pointer. Each of these
+    // returned `focus_miss` before the nearest-block fallback existed, so the
+    // selection stayed frozen wherever the pointer crossed the window edge.
+    const first = blockAt(blocks, 2);
+    const later = blockAt(blocks, 6);
+    const anchor = { x: 300, y: Math.round((first.topPx + first.bottomPx) / 2) };
+    const laterY = Math.round((later.topPx + later.bottomPx) / 2);
+    const cases = [
+      { label: "left edge column, level with a later block", focus: { x: 5, y: laterY } },
+      { label: "x=0 exactly", focus: { x: 0, y: laterY } },
+      { label: "right edge column", focus: { x: 795, y: laterY } },
+      { label: "below every block, in the scroll-past-end padding", focus: { x: 400, y: 590 } },
+      { label: "the placement's bottom-left corner", focus: { x: 5, y: 590 } },
+    ];
+    for (const { label, focus } of cases) {
+      const response = await selectionCommit(renderer, "sel-doc", "1:0", anchor, focus, {
+        cellWidthPx: 800 / 39,
+        cellHeightPx: 600 / 22,
+      });
+      assert.equal(response.ok, true, response.error);
+      assert.equal(response.result.ok, true, `${label}: must resolve`);
+      assert.equal(response.result.collapsed, false, `${label}: must not collapse`);
+    }
+  });
+
+  await t.test("a hit test in the same padding is still an honest miss", async () => {
+    // The counterpart to the two tests above: relaxing selection endpoints
+    // must not relax activation. A ctrl-click in the margin still resolves to
+    // nothing, so it can never open the nearest paragraph's link.
+    const paragraph = blockAt(blocks, 4);
+    const response = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
+      action: "activate_at",
+      coordinates: { x: 2, y: Math.round((paragraph.topPx + paragraph.bottomPx) / 2) },
+      modifiers: { ctrl: false, shift: false, alt: false, meta: false },
+      clickCount: 1,
+    }));
+    assert.equal(response.ok, true, response.error);
+    assert.notEqual(response.result.kind, "link", "a click in the page margin must not resolve to a link");
+    assert.equal(response.result.hit.reason, "outside_content", "and must still report an honest miss");
   });
 
   await t.test("element-boundary anchors normalize to a usable endpoint", async () => {

@@ -89,6 +89,22 @@ M.defaults = {
     -- a schedule). Kept as a knob rather than removed: set above 0 to
     -- deliberately throttle preview requests.
     drag_debounce_ms = 0,
+    -- Whether a *moving* drag-preview frame may capture at CSS scale (half the
+    -- pixel density of `render.device_scale_factor`) the way a moving scroll
+    -- frame does. Off by default, and deliberately not wired to
+    -- `render.fast_scroll`: the two gestures look the same from the code's
+    -- side and could not be less alike from the reader's. Nobody reads text
+    -- mid-scroll, so scrolling's blur is invisible; a drag-to-select is the
+    -- opposite -- the reader's eye is on the exact glyphs the pointer is
+    -- crossing, slowly, right up to the last one. Sharing `fast_scroll`
+    -- softened exactly the text being looked at, which was reported as the
+    -- preview going blurry and emoji looking bloated for the whole gesture.
+    -- Set true to trade that sharpness back for a ~2.4x cheaper capture per
+    -- moving frame (measured: 23ms vs 56ms on an 800x600 viewport); the
+    -- idle-settle timer below then restores a sharp frame whenever the drag
+    -- pauses, and the commit frame after release is always device scale
+    -- either way.
+    fast_drag = false,
     settle_ms = 120,
     copy = true,
     -- Disabled by default: neither VS Code nor a browser copies on every
@@ -223,6 +239,7 @@ local function validate(cfg)
     type(cfg.interaction.drag_debounce_ms) == "number" and cfg.interaction.drag_debounce_ms >= 0,
     "md-viewer: interaction.drag_debounce_ms must be non-negative"
   )
+  assert(type(cfg.interaction.fast_drag) == "boolean", "md-viewer: interaction.fast_drag must be boolean")
   assert(
     type(cfg.interaction.settle_ms) == "number" and cfg.interaction.settle_ms >= 0,
     "md-viewer: interaction.settle_ms must be non-negative"
