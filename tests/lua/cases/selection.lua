@@ -969,6 +969,120 @@ return function(t)
     process.request = original_request
   end
 
+  -- ---------------------------------------------------------------------
+  -- Stage-4 overlay path: a moving preview frame on an overlay-capable
+  -- backend opts out of capture and is displayed through
+  -- display_selection_overlay; every failure mode falls back to the
+  -- captured path (sticky for the gesture), except a missing tint sheet,
+  -- which retries exactly once with the sheet attached. The commit frame
+  -- never opts out.
+  -- ---------------------------------------------------------------------
+  do
+    setup_interaction({ drag_debounce_ms = 0, settle_ms = 0 })
+    local needs_sheet = false
+    local function overlay_session()
+      local session = fake_session()
+      session.image_id = 7
+      session.backend = {
+        name = "kitty_raw",
+        overlay_supported = function() return true end,
+        overlay_apply = function() end,
+        overlay_needs_sheet = function() return needs_sheet end,
+      }
+      return session
+    end
+
+    local requests, callbacks = {}, {}
+    local original_request = process.request
+    process.request = function(method, params, callback)
+      requests[#requests + 1] = params
+      callbacks[#callbacks + 1] = callback
+    end
+    local original_overlay_display = controller.display_selection_overlay
+    local overlay_displays = {}
+    local overlay_result = { applied = true, reason = nil }
+    controller.display_selection_overlay = function(session, result)
+      overlay_displays[#overlay_displays + 1] = { session = session, result = result }
+      return overlay_result.applied, overlay_result.reason
+    end
+
+    local function fresh_gesture(session)
+      requests, callbacks, displayed, overlay_displays = {}, {}, {}, {}
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(10, 15))
+      vim.wait(200, function() return #requests >= 1 end, 5)
+      t.eq(1, #requests, "the drag issues one preview request")
+    end
+
+    -- Happy path: capture:false, sheet requested only when the backend needs
+    -- it, and the overlay display path is the one that runs.
+    needs_sheet = true
+    local session = overlay_session()
+    fresh_gesture(session)
+    t.eq(false, requests[1].capture, "an overlay preview frame opts out of the capture")
+    t.ok(requests[1].overlaySheet ~= nil, "the first frame asks for the tint sheet the backend lacks")
+    t.eq(1600, requests[1].overlaySheet.widthPx, "sheet dimensions cover the device-scale capture")
+    overlay_result.applied = true
+    callbacks[1]({
+      kind = "selection",
+      ok = true,
+      text = "abc",
+      collapsed = false,
+      rects = { { x = 1, y = 2, width = 3, height = 4 } },
+    }, nil)
+    t.eq(1, #overlay_displays, "the overlay display path runs for the frame")
+    t.eq(0, #displayed, "the captured-frame display path does not")
+    interaction.on_release(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq("selection_commit", requests[2].action, "release still issues the settle commit")
+    t.eq(nil, requests[2].capture, "the commit frame never opts out of capturing")
+    callbacks[2]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
+
+    -- Structural failure: the overlay could not display the frame, so the
+    -- gesture falls back -- the same frame is re-requested through the
+    -- captured path and stays captured for the rest of the gesture.
+    needs_sheet = false
+    session = overlay_session()
+    fresh_gesture(session)
+    overlay_result.applied = false
+    overlay_result.reason = nil
+    callbacks[1]({ kind = "selection", ok = true, text = "abc", collapsed = false, rects = {} }, nil)
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq(2, #requests, "a failed overlay frame is redrawn through the fallback")
+    t.eq(nil, requests[2].capture, "the fallback frame captures normally")
+    t.eq(true, session.pointer.overlay_fallback, "the fallback is sticky for the gesture")
+    callbacks[2]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
+    t.eq(1, #displayed, "the fallback frame displays through the captured path")
+    interaction.on_release(session, point(10, 15))
+    vim.wait(200, function() return #requests >= 3 end, 5)
+    callbacks[3]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
+
+    -- Missing sheet: retried once with the sheet attached, not a sticky
+    -- fallback; a need_sheet answer even WITH the sheet attached is
+    -- structural and does fall back, so the pair can never loop.
+    needs_sheet = false
+    session = overlay_session()
+    fresh_gesture(session)
+    t.eq(nil, requests[1].overlaySheet, "the backend reported the sheet cache warm, so none is requested")
+    overlay_result.applied = false
+    overlay_result.reason = "need_sheet"
+    callbacks[1]({ kind = "selection", ok = true, text = "abc", collapsed = false, rects = {} }, nil)
+    vim.wait(200, function() return #requests >= 2 end, 5)
+    t.eq(2, #requests, "a need_sheet answer retries the frame")
+    t.ok(requests[2].overlaySheet ~= nil, "and the retry carries the sheet request")
+    t.eq(false, requests[2].capture, "the retry stays on the overlay path")
+    t.eq(false, session.pointer.overlay_fallback, "need_sheet alone is not a sticky fallback")
+    callbacks[2]({ kind = "selection", ok = true, text = "abc", collapsed = false, rects = {} }, nil)
+    vim.wait(200, function() return #requests >= 3 end, 5)
+    t.eq(3, #requests, "need_sheet WITH the sheet attached falls back and redraws")
+    t.eq(true, session.pointer.overlay_fallback, "that pair can never loop")
+    callbacks[3]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
+    interaction.forget_selection(session)
+
+    controller.display_selection_overlay = original_overlay_display
+    process.request = original_request
+  end
+
   controller.display_interact_result = original_display
   config.reset()
 end

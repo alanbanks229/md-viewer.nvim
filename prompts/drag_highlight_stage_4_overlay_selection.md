@@ -1,7 +1,11 @@
 ---
 part: follow-up
 title: Drag-to-highlight, stage 4 — overlay the selection instead of re-photographing the page
-status: not started
+status: done — iTerm2 only (per-profile gate; WezTerm crashed the step-1 probe).
+  Operator validated on 2026-08-08: speed confirmed, but the rectangles are
+  taller than Chromium's own paint. Geometry correction is stage 5. See the
+  addendum at the bottom for what step 1 actually returned and which of this
+  file's assumptions it corrected.
 model: Fable 5 (or Opus 5 at max reasoning for the placement work)
 depends_on: 2bcee86 (stage 1), c44e22f (round 2), 742d746 (stage 2)
 supersedes: prompts/drag_highlight_stage_3_damage_band.md, which becomes the
@@ -425,3 +429,48 @@ Follow policy §7. In addition, state explicitly:
 - **that you cannot validate this.** Whether it looks like the VS Code preview,
   and whether the drag feels crisp, is the operator's call, made by dragging in a
   real terminal. Per policy §4, do not describe the result as validated.
+
+---
+
+## Addendum — what implementation actually found (2026-08-07)
+
+Recorded per policy §6.5. Four of this file's assumptions did not survive
+contact with the terminals and the browser; the implementation reflects
+reality, not the text above.
+
+1. **The terminals split.** Step 1's probe (a throwaway script, run by the
+   operator in both terminals): iTerm2 passed every check — alpha
+   compositing, crop placements without c/r, X/Y sub-cell offsets (in device
+   pixels; its CSI 14t cell report is in points), inter-image z order, 40fps
+   churn, clean deletion. WezTerm failed to render natural-size placements at
+   all and the terminal application **crashed** when the churn began. Operator
+   decision: ship the overlay behind a per-profile gate
+   (`terminal.lua` `selection_overlay`, config `interaction.selection_overlay`)
+   — enabled for iTerm2 alone; WezTerm keeps the stage-2 full-frame path.
+   Stage 3 was NOT implemented; it remains the candidate if WezTerm drags ever
+   need improving.
+2. **There was no `::selection` rule to read.** `preview*.css` had none; the
+   highlight was Chromium's default paint (measured: dark ≈ rgba(97,97,97,.846),
+   light ≈ rgba(189,189,189,.576) — too opaque for an overlay that sits above
+   the glyphs). The rule is now pinned per theme (`--selection-bg`, dark
+   rgba(220,220,220,.3) / light rgba(128,128,128,.3)), chosen so the composited
+   result over the page background is bit-identical to what the operator already
+   saw; `SELECTION_TINT` in `renderer/src/interact.js` is the same constant and
+   `tests/node/selection-tint.test.js` fails if CSS and constant ever drift.
+3. **"Inline `<code>` gets its own taller rectangle" is not what this Chromium
+   paints.** Measured from real captures: selection paint spans the full LINE
+   BOX, uniformly across mixed-font lines, tiling between consecutive lines of
+   a block; blank lines paint a one-character-advance stub; lines that flow on
+   paint a ~4.8px end-of-line stub. The rect geometry reproduces the first
+   three (line-box bands from the containing block's line-height, ~1px from
+   Chromium's asymmetric half-leading; measured char-advance stubs) and
+   deliberately skips the end-of-line stub (a fraction of a cell at a rect
+   edge — this file's stated acceptable approximation).
+4. **"One tiny image per distinct rectangle size" was the wrong transport.**
+   One solid tint sheet is uploaded once (renderer-generated PNG, ~27KB base64,
+   `overlaySheetPng` on request) and every rectangle is a *crop* of it at
+   natural pixel size — zero pixels per moving frame, no per-size image cache
+   to bound. Measured end to end through the real input layer, renderer, and
+   Chromium (`scripts/stage4-live/drive.lua`): a changed frame costs ~91-500
+   bytes of placements, an unchanged frame diffs to zero bytes, and the settle
+   frame remains a true ~196KB device-scale capture.

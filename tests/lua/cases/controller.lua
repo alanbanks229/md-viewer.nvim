@@ -298,4 +298,99 @@ return function(t)
     pcall(vim.api.nvim_set_current_win, original_win)
     vim.fn.delete(other_path)
   end
+
+  -- ---------------------------------------------------------------------
+  -- Stage-4 overlay display: display_selection_overlay refuses any result
+  -- whose geometry cannot be proven to match the frame on screen, applies
+  -- matching ones through the backend, and clear_selection_overlay releases
+  -- the placements exactly once.
+  -- ---------------------------------------------------------------------
+  do
+    local entry_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_buf(source)
+    local session = assert(controller.open("right"))
+    local applied, cleared = {}, {}
+    session.backend = {
+      name = "kitty_raw",
+      overlay_supported = function() return true end,
+      overlay_needs_sheet = function() return false end,
+      overlay_apply = function(set_id, image_id, rects, viewport, tint, sheet, placement)
+        applied[#applied + 1] = {
+          set_id = set_id,
+          image_id = image_id,
+          rects = rects,
+          viewport = viewport,
+          tint = tint,
+          sheet = sheet,
+          placement = placement,
+        }
+        return 91, { rects = #rects, bytes = 420, placed = #rects, kept = 0, deleted = 0 }
+      end,
+      overlay_clear = function(set_id) cleared[#cleared + 1] = set_id end,
+      clear = function() return true end,
+    }
+    session.image_id = 7
+    session.last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} }
+    session.renderer_revision = "1:0"
+    session.applied_scroll_y = 40
+    session.viewport_width_px = 800
+    session.viewport_height_render_px = 600
+
+    local good = {
+      contentRevision = "1:0",
+      scrollY = 40,
+      rects = { { x = 1, y = 2, width = 3, height = 4 } },
+      rectsTruncated = false,
+      selectionTint = { r = 220, g = 220, b = 220, a = 0.3 },
+    }
+
+    t.eq(
+      false,
+      (
+        controller.display_selection_overlay(
+          session,
+          vim.tbl_extend("force", vim.deepcopy(good), { contentRevision = "0:9" })
+        )
+      ),
+      "a result from another content revision is refused"
+    )
+    t.eq(
+      false,
+      (controller.display_selection_overlay(session, vim.tbl_extend("force", vim.deepcopy(good), { scrollY = 0 }))),
+      "a result measured at a different scroll than the frame on screen is refused"
+    )
+    t.eq(
+      false,
+      (
+        controller.display_selection_overlay(
+          session,
+          vim.tbl_extend("force", vim.deepcopy(good), { rectsTruncated = true })
+        )
+      ),
+      "a truncated rect set is refused rather than drawn with missing pieces"
+    )
+    t.eq(0, #applied, "refused results never reach the backend")
+
+    t.eq(true, (controller.display_selection_overlay(session, good)), "a matching result applies")
+    t.eq(1, #applied, "the backend received the apply")
+    t.eq(7, applied[1].image_id, "the overlay composites over the base image on screen")
+    t.eq(91, session.overlay_set, "the set id is recorded for the next diff")
+    t.eq(1, session.overlay_rect_count)
+    t.eq(420, session.overlay_last_bytes)
+
+    -- The next frame passes the recorded set id back in, so the backend can
+    -- diff instead of replacing everything.
+    t.eq(true, (controller.display_selection_overlay(session, good)))
+    t.eq(91, applied[2].set_id)
+
+    controller.clear_selection_overlay(session)
+    t.eq(1, #cleared, "clearing releases the backend set")
+    t.eq(91, cleared[1])
+    t.eq(nil, session.overlay_set)
+    controller.clear_selection_overlay(session)
+    t.eq(1, #cleared, "a second clear is a no-op, not a double delete")
+
+    controller.close(source)
+    pcall(vim.api.nvim_set_current_win, entry_win)
+  end
 end

@@ -23,17 +23,35 @@ local function default_env() return vim.fn.environ() end
 -- verified reason to differ has somewhere to say so. `image.double_buffer`
 -- in user config always overrides it.
 
+-- `selection_overlay` is the per-profile gate for the stage-4 drag-highlight
+-- overlay (translucent natural-size Kitty placements composited over the base
+-- image). It is `true` only where that exact behavior was validated by a human
+-- driving those placements by hand in the real terminal: alpha
+-- compositing image-over-image, crop placements without c/r, sub-cell X/Y
+-- offsets, z ordering between images, 40fps placement churn, and clean
+-- deletion. "Implements the Kitty graphics protocol" is not sufficient
+-- evidence -- WezTerm implements it and crashed outright on this workload.
+
 M.profiles = {
   iterm2 = {
     id = "iterm2",
     label = "iTerm2",
-    default_raw_zindex = -1,
+    -- -2 rather than -1 so the selection overlay gets its own layer at -1:
+    -- base below highlight, both below Neovim's text (Kitty draws z<0 under
+    -- text). The probe ran its base at -2 through every check, so this exact
+    -- configuration is what was validated. Both values sit in the same
+    -- under-text-over-background band, so profiles without the overlay keep
+    -- -1 untouched.
+    default_raw_zindex = -2,
     default_double_buffer = true,
+    selection_overlay = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "protocol-compatible-but-unvalidated",
+    validation = "operator-validated (stage-4 overlay probe, 2026-08-07)",
     caveats = {
       "iTerm2 advertises the Kitty graphics protocol, but md-viewer does not run a "
         .. "synchronous response probe (Neovim owns terminal input), so this remains inferred.",
+      "Selection-overlay placements (alpha compositing, sub-cell offsets, placement churn) "
+        .. "were validated by the operator in a live iTerm2 session on 2026-08-07.",
     },
   },
   kitty = {
@@ -52,10 +70,19 @@ M.profiles = {
     label = "WezTerm",
     default_raw_zindex = -1,
     default_double_buffer = true,
+    -- Not merely unvalidated: actively disqualified. Driven with the stage-4
+    -- overlay probe (translucent natural-size placements, sub-cell offsets,
+    -- ~40fps placement churn) on 2026-08-07, WezTerm failed to render the
+    -- natural-size bars where they were placed and the terminal application
+    -- itself crashed when the placement churn began. md-viewer must never
+    -- send this workload to WezTerm; drags keep the full-frame capture path.
+    selection_overlay = false,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
       "WezTerm implements the Kitty graphics protocol.",
+      "WezTerm crashed during the stage-4 overlay probe (translucent natural-size placements "
+        .. "at ~40fps, 2026-08-07); the drag-selection overlay is disabled for this profile.",
     },
   },
   ghostty = {
@@ -226,6 +253,9 @@ function M.capability(cfg, env)
     graphics = graphics,
     reason = reason,
     default_raw_zindex = profile.default_raw_zindex,
+    -- Only ever true for profiles a human validated with the overlay probe;
+    -- see the comment above M.profiles.
+    selection_overlay = profile.selection_overlay == true,
     placement = profile.placement,
     multiplexer = mux,
     multiplexer_evidence = mux_evidence,

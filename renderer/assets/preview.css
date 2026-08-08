@@ -93,6 +93,12 @@ img { display: block; max-width: 100%; height: auto; margin: 1em auto; }
    Selection and therefore need a visible marker of their own. */
 [data-md-viewer-find-mark] { background: var(--find-mark-bg); border-radius: 2px; }
 [data-md-viewer-find-mark][data-active] { background: var(--find-mark-active-bg); }
+/* Pinned rather than left to Chromium's default so the browser-painted settle
+   frame and the Lua-drawn drag overlay agree on one constant -- see the
+   --selection-bg comments in preview-dark.css / preview-light.css. Background
+   only: glyph colors stay untouched, so syntax highlighting reads normally
+   through the selection. */
+::selection { background-color: var(--selection-bg); }
 .hljs-comment, .hljs-quote { color: var(--syntax-comment); }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--syntax-keyword); }
 .hljs-string, .hljs-title, .hljs-section { color: var(--syntax-string); }

@@ -64,6 +64,9 @@ end
 ---(session closing) or no longer exists (process restarted).
 function M.forget_selection(session)
   if not session then return end
+  -- A renderer restart or content change orphans any overlay rectangles on
+  -- screen: nothing will ever supersede them, so they must go now.
+  require("md-viewer.controller").clear_selection_overlay(session)
   session.selection_active = false
   session.selection_content_revision = nil
   session.selection_text_length = nil
@@ -170,6 +173,15 @@ function M.on_press(session, mouse, point, click_count)
     anchor_point = nil,
     selection_request_in_flight = false,
     newest_pending_drag_point = nil,
+    -- Sticky per-gesture opt-out of the overlay display path: set when a
+    -- frame could not be drawn as overlay rectangles (too many rects, stale
+    -- geometry, backend refusal), after which every remaining frame of this
+    -- gesture uses the captured-frame path. Correct and slow beats fast and
+    -- wrong, and a fresh press gets a fresh chance.
+    overlay_fallback = false,
+    -- Ask the next preview request to carry the tint-sheet PNG (once per
+    -- color: the backend's upload cache stays warm across gestures).
+    overlay_want_sheet = false,
     -- Set by on_release when a settle request arrives while a preview is
     -- still in flight; picked up by that preview's own completion callback.
     pending_settle = nil,
@@ -212,6 +224,32 @@ function M.on_drag(session, mouse)
   end
 end
 
+---Whether this gesture's moving frames may be displayed as backend overlay
+---rectangles (stage 4) instead of full captured frames. Requires a backend
+---that implements and currently allows the overlay (kitty_raw consults the
+---terminal profile and `interaction.selection_overlay`), a base image on
+---screen for the rectangles to composite over, and no earlier failure this
+---gesture (`pointer.overlay_fallback`).
+local function overlay_ready(session, pointer)
+  if pointer.overlay_fallback then return false end
+  local backend = session.backend
+  if not (backend and backend.overlay_apply and backend.overlay_supported) then return false end
+  if not backend.overlay_supported() then return false end
+  if not (session.image_id and session.last_placement) then return false end
+  return true
+end
+
+---Dimensions for the tint-sheet PNG request: the largest base image this
+---session can produce (device-scale capture of the render viewport), so one
+---sheet covers every frame regardless of the scale the last capture used.
+local function sheet_dims(session)
+  local scale = config.get().render.device_scale_factor or 1
+  return {
+    widthPx = math.max(1, math.floor((session.viewport_width_px or 0) * scale + 0.5)),
+    heightPx = math.max(1, math.floor((session.viewport_height_render_px or 0) * scale + 0.5)),
+  }
+end
+
 ---The actual dispatch behind `M.schedule_selection_preview`: at most one
 ---`selection_preview` request in flight, only the newest pending drag point
 ---is ever sent (mirroring `controller.schedule_scroll`'s
@@ -223,6 +261,14 @@ end
 ---frame captures at device scale unless `interaction.fast_drag` is on (see
 ---`config.lua` for why that is its own knob rather than `render.fast_scroll`,
 ---and why it defaults off).
+---
+---On the overlay path (stage 4) the request opts out of capturing entirely:
+---the renderer answers with selection rectangles from the same evaluate that
+---applied the selection, and `controller.display_selection_overlay` draws
+---them over the base image already on screen. A frame the overlay cannot
+---display correctly falls back to the captured path -- for the rest of the
+---gesture when the reason is structural (`overlay_fallback`), or for exactly
+---one round trip when the backend merely needs the tint sheet uploaded.
 local function attempt_selection_preview(session, pointer, force_device)
   if session.pointer ~= pointer or not pointer.drag_started then return end
   local point = pointer.newest_pending_drag_point
@@ -243,6 +289,13 @@ local function attempt_selection_preview(session, pointer, force_device)
   pointer.selection_request_in_flight = true
   local requested_point = point
   local capture_scale = (force_device or not config.get().interaction.fast_drag) and "device" or "css"
+  local overlay = overlay_ready(session, pointer)
+  local overlay_opts = nil
+  if overlay then
+    local want_sheet = pointer.overlay_want_sheet
+      or (session.backend.overlay_needs_sheet and session.backend.overlay_needs_sheet(session.image_id))
+    overlay_opts = { overlay = true, sheet = want_sheet and sheet_dims(session) or nil }
+  end
   M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
     if session.pointer ~= pointer then return end
     pointer.selection_request_in_flight = false
@@ -250,7 +303,24 @@ local function attempt_selection_preview(session, pointer, force_device)
       session.selection_active = true
       session.selection_content_revision = session.renderer_revision
       session.selection_text_length = type(result.text) == "string" and #result.text or nil
-      require("md-viewer.controller").display_interact_result(session, result)
+      if overlay then
+        pointer.overlay_want_sheet = false
+        local applied, reason = require("md-viewer.controller").display_selection_overlay(session, result)
+        if not applied then
+          if reason == "need_sheet" and not (overlay_opts and overlay_opts.sheet) then
+            -- Expected once per color: re-request with the sheet attached.
+            pointer.overlay_want_sheet = true
+          else
+            pointer.overlay_fallback = true
+          end
+          -- This frame displayed nothing; redraw it through whichever path
+          -- the flags above now select.
+          pointer.newest_pending_drag_point = pointer.newest_pending_drag_point or requested_point
+          M.schedule_selection_preview(session)
+        end
+      else
+        require("md-viewer.controller").display_interact_result(session, result)
+      end
     end
     if pointer.pending_settle then
       -- Release wins over a still-pending idle sharpen -- the gesture is
@@ -269,7 +339,7 @@ local function attempt_selection_preview(session, pointer, force_device)
     then
       M.schedule_selection_preview(session)
     end
-  end)
+  end, overlay_opts)
 end
 
 ---Debounced (`interaction.drag_debounce_ms`, default `0` -- see below),
@@ -317,8 +387,16 @@ end
 ---optional field is always populated -- the same wire-encoding discipline
 ---`request_hit`'s `modifiers` table follows -- so nothing here can degrade
 ---into an unexpected JSON shape.
-function M.request_selection(session, anchor, focus, capture_scale, is_commit, callback)
-  interact_request(session, {
+---
+---`opts.overlay` marks a stage-4 overlay frame: the renderer skips the
+---screenshot (`capture = false`) and answers with selection rectangles
+---instead; `opts.sheet` additionally asks for the tint-sheet PNG at the given
+---device-pixel dimensions (sent only until the backend's upload cache is
+---warm). The commit path never passes opts, so a release always produces the
+---true browser-rendered frame.
+function M.request_selection(session, anchor, focus, capture_scale, is_commit, callback, opts)
+  opts = opts or {}
+  local params = {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = is_commit and "selection_commit" or "selection_preview",
@@ -330,7 +408,12 @@ function M.request_selection(session, anchor, focus, capture_scale, is_commit, c
     viewportHeightPx = session.viewport_height_render_px,
     scrollY = session.applied_scroll_y or 0,
     captureScale = capture_scale,
-  }, callback)
+  }
+  if opts.overlay then
+    params.capture = false
+    if opts.sheet then params.overlaySheet = { widthPx = opts.sheet.widthPx, heightPx = opts.sheet.heightPx } end
+  end
+  interact_request(session, params, callback)
 end
 
 ---Fire the final, settled (device-scale) selection frame after release. If a

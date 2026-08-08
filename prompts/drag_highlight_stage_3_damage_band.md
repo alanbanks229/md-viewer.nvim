@@ -1,7 +1,14 @@
 ---
 part: follow-up
 title: Drag-to-highlight, stage 3 — find the frame cost that is real, then remove it
-status: not started
+status: shelved (2026-08-07) — stage 4's step-1 probe split the terminals.
+  iTerm2 passed alpha compositing outright, so stage 4's overlay shipped there
+  (per-profile gate) and this stage was not needed for it. WezTerm crashed
+  under the overlay probe and keeps the stage-2 full-frame drag path; this
+  file is the standing candidate if WezTerm drags ever need improving. Note
+  its Design A's strip placements are themselves unvalidated on WezTerm — run
+  a probe first, WezTerm's Kitty implementation mishandled natural-size
+  placements and placement churn.
 model: Opus 5 (max reasoning effort) for steps 2 and 3; step 1 is mechanical
 depends_on: 2bcee86 (stage 1), c44e22f (round 2), 742d746 (stage 2)
 commit:

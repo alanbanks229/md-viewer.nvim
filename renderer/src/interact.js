@@ -41,6 +41,25 @@ export const RESERVED_ACTIONS = Object.freeze([]);
 
 export const TEXT_PREVIEW_LIMIT = 120;
 
+// The selection background each theme's ::selection rule paints, as one
+// straight-alpha src-over constant. This is the single value the browser's
+// settle frame and the Lua-drawn drag overlay must share: if they disagree,
+// the highlight visibly changes color the instant the mouse is released.
+// Must stay equal to --selection-bg in renderer/assets/preview-dark.css /
+// preview-light.css; tests/node/selection-tint.test.js measures the captured
+// pixels and fails if the CSS and this constant drift apart.
+export const SELECTION_TINT = Object.freeze({
+  dark: Object.freeze({ r: 220, g: 220, b: 220, a: 0.3 }),
+  light: Object.freeze({ r: 128, g: 128, b: 128, a: 0.3 }),
+});
+
+// Hard ceiling on selection rectangles reported per frame. A viewport-clipped
+// selection produces one rect per visible line box (~40-80 on a full preview;
+// dense tables can double that), so this is far above any real frame; if it is
+// ever exceeded the result says so via rectsTruncated and Lua falls back to a
+// captured frame rather than drawing a highlight with missing pieces.
+export const MAX_SELECTION_RECTS = 256;
+
 // A find_set response over NDJSON must stay bounded: DOM highlighting marks
 // every match regardless (that is a correctness requirement), but a document
 // with thousands of hits for a common word must not serialize thousands of
@@ -247,6 +266,23 @@ export function validateEnvelope(params) {
     throw createInteractError("INVALID_INTERACTION", "cellWidthPx and cellHeightPx must not be negative");
   }
 
+  // Ask for the solid tint-sheet PNG the Lua overlay places crops of. Sent
+  // only until kitty_raw's upload cache is warm, so the ~KB payload is not on
+  // every drag frame. Dimensions are device pixels (the base image's own).
+  let overlaySheet = null;
+  if (envelope.overlaySheet !== undefined && envelope.overlaySheet !== null) {
+    const sheet = envelope.overlaySheet;
+    if (typeof sheet !== "object" || Array.isArray(sheet)) {
+      throw createInteractError("INVALID_INTERACTION", "overlaySheet must be an object of {widthPx, heightPx}");
+    }
+    const widthPx = requireFiniteNumber(sheet.widthPx, "overlaySheet.widthPx");
+    const heightPx = requireFiniteNumber(sheet.heightPx, "overlaySheet.heightPx");
+    if (widthPx <= 0 || heightPx <= 0) {
+      throw createInteractError("INVALID_INTERACTION", "overlaySheet dimensions must be positive");
+    }
+    overlaySheet = { widthPx, heightPx };
+  }
+
   return {
     documentId: envelope.documentId,
     contentRevision: envelope.contentRevision,
@@ -266,12 +302,20 @@ export function validateEnvelope(params) {
     scrollY,
     cellWidthPx,
     cellHeightPx,
+    overlaySheet,
     viewportWidthPx,
     viewportHeightPx,
     // An action that mutates visible state always captures. Anything else may
     // opt in, which is how the same-queued-operation capture path is exercised
-    // before Part 6 ships the first mutating action.
-    capture: action.mutatesVisibleState || envelope.capture === true,
+    // before Part 6 ships the first mutating action. `capture: false` is the
+    // stage-4 opt-out: a moving drag-preview frame displays the selection as a
+    // Lua-drawn overlay built from this same operation's rect geometry, so no
+    // screenshot exists to take. §3.4's guarantee -- Lua never issues a
+    // follow-up capture for a frame it displays -- still holds: the one queued
+    // operation returns everything the displayed frame is made of.
+    capture: envelope.capture === false
+      ? false
+      : action.mutatesVisibleState || envelope.capture === true,
     // "css" (the cheap, slightly-soft scroll fast-frame scale) is opt-in
     // only; anything that doesn't explicitly ask for it renders sharp.
     captureScale: envelope.captureScale === "css" ? "css" : "device",
@@ -827,10 +871,228 @@ export function resolveSelectionInPage(input) {
   const selection = window.getSelection();
   applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
 
+  // Selection geometry for the stage-4 drag overlay: viewport-relative CSS
+  // rectangles matching the shape the browser itself paints. Read here, from
+  // the same applied Range in the same evaluate that produces `text`, so the
+  // picture on screen and the string a copy would produce can never come from
+  // two different requests.
+  //
+  // Three facts about Chromium's selection paint, all measured from real
+  // captures (tests/node/selection-tint.test.js re-measures them), drive the
+  // shape of this code:
+  //
+  //   1. Horizontally the paint is ragged per line -- it ends where the
+  //      line's text ends. `Range.getClientRects()` on the whole range also
+  //      reports the border box of every element fully inside it (a selected
+  //      two-line paragraph comes back as one full-width block), so quads are
+  //      collected per text node instead: a sub-range clipped to one text
+  //      node yields only text quads.
+  //   2. Vertically the paint spans the full LINE BOX, not the text quad: a
+  //      16px font in a 25px line paints 25px bands that tile with no gap
+  //      between consecutive lines, and a mixed-font line (prose + inline
+  //      code) paints ONE uniform band. The line box is not exposed by any
+  //      DOM API directly; a collapsed caret rect at the same point is, and
+  //      carries the line's selection height. Probed once per rendered line.
+  //   3. A selected blank line paints a stub roughly one character advance
+  //      wide, not nothing (and not a hairline): the width of a single
+  //      character measured from the same block.
+  const rects = [];
+  let rectsTruncated = false;
+  if (!selection.isCollapsed && selection.rangeCount > 0) {
+    const range = selection.getRangeAt(0);
+    const quads = [];
+    const blankLineQuads = [];
+
+    const scope = range.commonAncestorContainer;
+    const scopeElement = scope.nodeType === 3 ? scope.parentElement : scope;
+    if (scopeElement !== null) {
+      const walker = document.createTreeWalker(scopeElement, NodeFilter.SHOW_TEXT);
+      const sub = document.createRange();
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node.nodeValue.length > 0 && range.intersectsNode(node)) {
+          sub.selectNodeContents(node);
+          if (node === range.startContainer) sub.setStart(node, range.startOffset);
+          if (node === range.endContainer) sub.setEnd(node, range.endOffset);
+          if (!sub.collapsed) {
+            for (const rect of sub.getClientRects()) {
+              if (rect.height < 0.5) continue;
+              if (rect.width < 0.5) {
+                // A zero-width quad is a selected line break (the blank line
+                // inside a code block). Remember it with its source node so
+                // the stub width can be measured from a sibling character.
+                blankLineQuads.push({ left: rect.left, top: rect.top, bottom: rect.bottom, node });
+                continue;
+              }
+              quads.push({
+                left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom,
+                parent: node.parentElement,
+              });
+            }
+          }
+        }
+        node = walker.nextNode();
+      }
+      // Atomic inlines have no text: a selected image is painted over in
+      // full, so its border box stands in for the text quad it lacks.
+      for (const image of scopeElement.querySelectorAll("img")) {
+        if (range.intersectsNode(image)) {
+          const rect = image.getBoundingClientRect();
+          if (rect.width >= 0.5 && rect.height >= 0.5) {
+            quads.push({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, atomic: true });
+          }
+        }
+      }
+    }
+
+    // One character's advance in the block containing `node`, for blank-line
+    // stub widths. Measured, never guessed: fonts differ per block.
+    function characterAdvance(node) {
+      const block = node.parentElement === null ? null : node.parentElement.closest("pre, [data-source-start]");
+      if (block === null) return 8;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      const probe = document.createRange();
+      let candidate = walker.nextNode();
+      while (candidate !== null) {
+        if (candidate.nodeValue.length > 0 && candidate.nodeValue !== "\n") {
+          probe.setStart(candidate, 0);
+          probe.setEnd(candidate, 1);
+          const rect = probe.getBoundingClientRect();
+          if (rect.width > 0.5) return rect.width;
+        }
+        candidate = walker.nextNode();
+      }
+      return 8;
+    }
+
+    for (const blank of blankLineQuads) {
+      quads.push({
+        left: blank.left,
+        top: blank.top,
+        right: blank.left + characterAdvance(blank.node),
+        bottom: blank.bottom,
+        parent: blank.node.parentElement,
+      });
+    }
+
+    // Expand each quad's vertical extent from the text quad to the line box
+    // (fact 2): height = the containing BLOCK's computed line-height,
+    // centered on the quad. The block's line-height -- not the text's own
+    // inline parent's -- so the prose and inline-code fragments of one mixed
+    // line land in the same band and merge, exactly as the browser paints
+    // them. Centering is a ~1px approximation of Chromium's asymmetric
+    // half-leading (measured: quads sit 2.6px below / 4.4px above the real
+    // 25px band edges, centering puts them 3.5/3.5), which stays inside the
+    // equivalence gate's rect-edge tolerance; critically, consecutive lines
+    // of one block still tile with no gap and no overlap, because band tops
+    // advance by exactly the same line pitch the quads do.
+    const lineHeightCache = new Map();
+    function blockLineHeight(element) {
+      let node = element;
+      while (node !== null) {
+        const cached = lineHeightCache.get(node);
+        if (cached !== undefined) return cached;
+        const style = window.getComputedStyle(node);
+        const display = style.display || "";
+        const isBlock = display !== "inline" && display !== "inline-block" && display !== "contents";
+        if (isBlock) {
+          const parsed = parseFloat(style.lineHeight);
+          const value = Number.isFinite(parsed) ? parsed : null;
+          lineHeightCache.set(element, value);
+          lineHeightCache.set(node, value);
+          return value;
+        }
+        node = node.parentElement;
+      }
+      return null;
+    }
+
+    const banded = [];
+    for (const quad of quads) {
+      if (quad.atomic) {
+        banded.push({ left: quad.left, top: quad.top, right: quad.right, bottom: quad.bottom });
+        continue;
+      }
+      const height = quad.bottom - quad.top;
+      const lineHeight = quad.parent ? blockLineHeight(quad.parent) : null;
+      if (lineHeight !== null && lineHeight > height) {
+        const pad = (lineHeight - height) / 2;
+        banded.push({ left: quad.left, top: quad.top - pad, right: quad.right, bottom: quad.bottom + (lineHeight - height - pad) });
+      } else {
+        banded.push({ left: quad.left, top: quad.top, right: quad.right, bottom: quad.bottom });
+      }
+    }
+
+    // Clip to the viewport, then merge quads that sit on the same band:
+    // syntax highlighting fragments one code line into many per-token text
+    // nodes, and per-token rectangles would both bloat the set and risk
+    // hairline seams between placements. After band-snapping, the prose and
+    // inline-code fragments of a mixed line share one band and merge into
+    // one rectangle -- which is exactly how the browser paints them.
+    const clipped = [];
+    for (const quad of banded) {
+      const left = Math.max(0, quad.left);
+      const top = Math.max(0, quad.top);
+      const right = Math.min(window.innerWidth, quad.right);
+      const bottom = Math.min(window.innerHeight, quad.bottom);
+      if (right - left < 0.5 || bottom - top < 0.5) continue;
+      clipped.push({ left, top, right, bottom });
+    }
+    // Cluster into bands FIRST (tops within 2px are one rendered line --
+    // mixed-font fragments center to sub-pixel-different tops), normalize
+    // each quad to its band's extent, and only then sort left-to-right
+    // within the band. Sorting by raw top instead would interleave a
+    // mixed line's fragments out of horizontal order and the left-to-right
+    // merge below would skip over (and lose) the middle fragment.
+    clipped.sort((a, b) => a.top - b.top);
+    let band = null;
+    for (const quad of clipped) {
+      if (band === null || quad.top > band.anchor + 2) {
+        band = { anchor: quad.top, top: quad.top, bottom: quad.bottom, index: (band ? band.index + 1 : 0) };
+      }
+      band.top = Math.min(band.top, quad.top);
+      band.bottom = Math.max(band.bottom, quad.bottom);
+      quad.band = band;
+    }
+    for (const quad of clipped) {
+      quad.top = quad.band.top;
+      quad.bottom = quad.band.bottom;
+    }
+    clipped.sort((a, b) => (a.band.index - b.band.index) || (a.left - b.left));
+    for (const quad of clipped) {
+      const previous = rects[rects.length - 1];
+      // A horizontal gap up to 6px within one band is painted through by the
+      // browser too (an inline code span's side padding); table cells stay
+      // separate -- their padding is wider than that.
+      if (
+        previous
+        && previous.band === quad.band
+        && quad.left <= previous.right + 6
+      ) {
+        previous.right = Math.max(previous.right, quad.right);
+        continue;
+      }
+      rects.push({ left: quad.left, top: quad.top, right: quad.right, bottom: quad.bottom, band: quad.band });
+    }
+    for (const rect of rects) delete rect.band;
+    if (rects.length > input.maxRects) {
+      rects.length = input.maxRects;
+      rectsTruncated = true;
+    }
+  }
+  const rectList = rects.map((rect) => ({
+    x: rect.left,
+    y: rect.top,
+    width: rect.right - rect.left,
+    height: rect.bottom - rect.top,
+  }));
+
   return {
     ok: true,
     text: selection.toString(),
     collapsed: selection.isCollapsed,
+    rects: rectList,
+    rectsTruncated,
     anchor: { block: anchor.block, inline: anchor.inline },
     focus: { block: focus.block, inline: focus.inline },
   };
@@ -1404,6 +1666,11 @@ export function buildSelectionResult(raw, sourceMap) {
     ok: true,
     text: raw.text,
     collapsed: raw.collapsed,
+    // Selection geometry (CSS px, viewport-relative) for the drag overlay.
+    // Present only from selection_preview/selection_commit; word/paragraph
+    // select go through the captured-frame path and report an empty list.
+    rects: Array.isArray(raw.rects) ? raw.rects : [],
+    rectsTruncated: raw.rectsTruncated === true,
     anchorSourcePosition: resolveEndpoint(raw.anchor, sourceMap),
     focusSourcePosition: resolveEndpoint(raw.focus, sourceMap),
     hit: { anchor: raw.anchor ?? null, focus: raw.focus ?? null },

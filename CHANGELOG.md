@@ -7,6 +7,34 @@ All notable changes to this project will be documented here. The project uses
 
 ### Changed
 
+- Drag-to-highlight no longer re-photographs the page on every frame, on
+  iTerm2. While the mouse is down the highlight is drawn directly in the
+  terminal as translucent rectangles composited over the frame already on
+  screen — one small tint image is uploaded once, and each moving frame sends
+  only placement commands. A moving frame costs roughly 91-500 bytes instead of
+  about a megabyte of base64 PNG, and sends nothing at all when the selection
+  has not changed. Releasing the mouse still lands a real browser-rendered
+  frame, so the settled highlight is exactly what the page paints.
+
+  **Enabled only where it was validated by hand in a real terminal**, which
+  today means iTerm2 alone. WezTerm failed to render these placements and then
+  crashed outright under them, so it keeps the existing full-frame path
+  untouched; everywhere unvalidated does the same. `interaction.selection_overlay`
+  (`"auto"` / `"on"` / `"off"`) overrides that, and `"on"` is how you would try
+  another terminal — see the WezTerm caveat above before you do.
+
+  **Known limitation:** the rectangles drawn during a drag are taller than the
+  highlight the browser paints on release — inside a fenced code block adjacent
+  lines touch where the real selection leaves gaps. The highlight is correct the
+  moment you let go. A fix is in progress; see
+  `docs/cross-platform-implementation-status.md`.
+
+- The preview now pins its own selection colour per theme rather than inheriting
+  Chromium's default. Over the page background the settled highlight is the same
+  colour as before; over code blocks and table stripes it shifts by 2-7/255. The
+  change exists so the drag-time overlay and the browser's own paint cannot
+  disagree, and so text stays readable under an overlay that sits above it.
+
 - Capturing a preview frame is roughly 2.3-2.8x cheaper, pixel for pixel.
   Chromium now launches with `--disable-frame-rate-limit`, removing a fixed
   compositor wait that dominated the capture regardless of how much was being
@@ -24,6 +52,11 @@ All notable changes to this project will be documented here. The project uses
   `docs/cross-platform-implementation-status.md`.
 
 ### Added
+
+- `interaction.selection_overlay` (default `"auto"`) to control the drag
+  highlight path described above, and `overlay_frames`, `overlay_rect_count`,
+  `overlay_last_bytes` and friends in `:MdViewerDebug` and `:MdViewerHealth` so
+  it is visible whether the overlay is live and what a frame actually costs.
 
 - `browser.fast_png_encode` (default `true`) to turn the speed-optimised PNG
   encoding off, and `capture_encoder` in `:MdViewerDebug` reporting which of

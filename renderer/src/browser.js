@@ -6,8 +6,11 @@ import { chromium } from "playwright";
 import { collectBlockGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
+import { buildOverlaySheetPng } from "./overlay-sheet.js";
 import {
   MAX_FIND_MATCHES_REPORTED,
+  MAX_SELECTION_RECTS,
+  SELECTION_TINT,
   TEXT_PREVIEW_LIMIT,
   buildActionResult,
   buildFindClearResult,
@@ -468,6 +471,7 @@ export class BrowserRenderer {
       return this.page.evaluate(resolveSelectionInPage, {
         token, anchor: envelope.anchorCoordinates, focus: envelope.coordinates,
         cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
+        maxRects: MAX_SELECTION_RECTS,
       });
     }
     if (action === "selection_clear") return this.page.evaluate(clearSelectionInPage, { token });
@@ -561,6 +565,19 @@ export class BrowserRenderer {
     result.scrollY = scrollY;
     result.viewportHeightPx = record.height;
     result.documentHeightPx = documentHeight;
+    if (result.kind === "selection") {
+      // The one constant the Lua drag overlay may paint with. Sourced from the
+      // rendered document's own theme so Lua never hardcodes a color that the
+      // settle frame's ::selection rule could drift away from.
+      result.selectionTint = SELECTION_TINT[record.theme] ?? SELECTION_TINT.dark;
+      if (envelope.overlaySheet) {
+        result.overlaySheetPng = buildOverlaySheetPng(
+          envelope.overlaySheet.widthPx,
+          envelope.overlaySheet.heightPx,
+          result.selectionTint
+        ).toString("base64");
+      }
+    }
 
     // §4.4's "fragment -> scroll within the controlled Chromium document":
     // activate_at already classified the link, so resolve the anchor and

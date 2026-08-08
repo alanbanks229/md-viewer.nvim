@@ -170,6 +170,130 @@ return function(t)
   local invalid_ok = pcall(raw_backend.show, "not a png", placement)
   t.eq(false, invalid_ok, "an invalid PNG payload is rejected")
 
+  -- ---------------------------------------------------------------------
+  -- Stage-4 selection overlay.
+  -- ---------------------------------------------------------------------
+  local tint = { r = 220, g = 220, b = 220, a = 0.3 }
+
+  -- Gating: profile flag under "auto", explicit on/off overrides.
+  config.reset()
+  config.setup({ terminal = { profile = "wezterm" } })
+  local wez_supported, wez_reason = raw_backend.overlay_supported()
+  t.eq(false, wez_supported, "the wezterm profile refuses overlay placements (it crashed the probe)")
+  t.ok(wez_reason:match("not validated"), "the refusal names the profile gate")
+  config.reset()
+  config.setup({ terminal = { profile = "wezterm" }, interaction = { selection_overlay = "on" } })
+  t.eq(true, (raw_backend.overlay_supported()), "selection_overlay=on forces the overlay past the profile")
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" }, interaction = { selection_overlay = "off" } })
+  t.eq(false, (raw_backend.overlay_supported()), "selection_overlay=off wins over a validated profile")
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  t.eq(true, (raw_backend.overlay_supported()), "the iterm2 profile default enables the overlay")
+
+  -- Sheet lifecycle: an apply without the sheet says need_sheet and sends
+  -- nothing; supplying it uploads once and places crops.
+  reset_sequences()
+  local overlay_base = raw_backend.show(fake_png(), placement) -- 100x100 px over 10x10 cells
+  t.eq(true, raw_backend.overlay_needs_sheet(overlay_base), "no tint sheet is uploaded yet")
+  reset_sequences()
+  local viewport = { widthPx = 100, heightPx = 100 }
+  local rect = { x = 5.5, y = 7.25, width = 20, height = 10 }
+  local no_sheet_set, no_sheet_reason =
+    raw_backend.overlay_apply(nil, overlay_base, { rect }, viewport, tint, nil, placement)
+  t.eq(nil, no_sheet_set, "without the sheet the apply refuses")
+  t.eq("need_sheet", no_sheet_reason, "and reports the caller-actionable reason")
+  t.eq(0, #sequences, "a refused apply must not write anything to the terminal")
+
+  local set_id, stats = raw_backend.overlay_apply(nil, overlay_base, { rect }, viewport, tint, fake_png(), placement)
+  t.ok(set_id ~= nil, "supplying the sheet makes the apply succeed: " .. tostring(stats))
+  local overlay_output = output()
+  t.ok(overlay_output:find("a=t,f=100", 1, true) ~= nil, "the tint sheet uploads as a direct PNG transmission")
+  t.ok(overlay_output:find("x=0,y=0,w=20,h=10", 1, true) ~= nil, "the rect places as a crop of the sheet")
+  t.eq(nil, overlay_output:match(",c=%d"), "overlay placements never use cell scaling (c/r)")
+  t.eq("-1", overlay_output:match("w=20,h=10,z=(%-?%d+)"), "the overlay sits one layer above the -2 base, under text")
+  t.ok(overlay_output:find(",X=6,Y=7", 1, true) ~= nil, "sub-cell offsets carry the rect's pixel remainder")
+  t.eq(false, raw_backend.overlay_needs_sheet(overlay_base), "the sheet cache is warm after one upload")
+  t.eq(1, stats.placed, "one rectangle placed")
+
+  -- Diffing: an identical rect set writes nothing; a changed set emits the
+  -- replacement before the deletion it supersedes, in one write.
+  reset_sequences()
+  local same_set, same_stats = raw_backend.overlay_apply(set_id, overlay_base, { rect }, viewport, tint, nil, placement)
+  t.eq(set_id, same_set, "an unchanged rect set keeps its set id")
+  t.eq(0, #sequences, "an unchanged rect set writes nothing at all")
+  t.eq(1, same_stats.kept, "the placement is kept, not replaced")
+  reset_sequences()
+  local moved_set = raw_backend.overlay_apply(
+    set_id,
+    overlay_base,
+    { { x = 30, y = 7.25, width = 20, height = 10 } },
+    viewport,
+    tint,
+    nil,
+    placement
+  )
+  t.eq(set_id, moved_set, "a changed rect set still keeps its set id")
+  t.eq(1, #sequences, "a changed rect set is a single write")
+  local moved_overlay = output()
+  t.ok(
+    moved_overlay:find("\27_Ga=p", 1, true) < moved_overlay:find("a=d,d=i", 1, true),
+    "the new rectangle is emitted before the placement it supersedes is deleted"
+  )
+
+  -- Exclusions: a passive float's cut-out splits the rectangle, so the
+  -- overlay never paints across a notification.
+  local excluded_placement = {
+    row = 0,
+    col = 0,
+    width = 10,
+    height = 10,
+    exclusions = { { row = 0, col = 3, width = 2, height = 2 } },
+  }
+  reset_sequences()
+  raw_backend.overlay_apply(
+    set_id,
+    overlay_base,
+    { { x = 0, y = 0, width = 100, height = 10 } },
+    viewport,
+    tint,
+    nil,
+    excluded_placement
+  )
+  local cut_output = output()
+  local _, cut_placements = cut_output:gsub("\27_Ga=p", "")
+  t.eq(2, cut_placements, "a rect crossing a passive-float cut-out splits into two placements")
+
+  -- Calibration carry: the configured raw_cell_offset_px shifts the overlay
+  -- exactly as it shifts the base, carrying into the next cell when the sum
+  -- exceeds the cell.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" }, image = { raw_cell_offset_px = { x = 8, y = 0 } } })
+  reset_sequences()
+  raw_backend.overlay_apply(set_id, overlay_base, { rect }, viewport, tint, nil, placement)
+  local carry_output = output()
+  t.ok(carry_output:find("\27%[1;2H") ~= nil, "an offset past the cell edge advances the cursor cell")
+  t.ok(carry_output:find(",X=4,Y=7", 1, true) ~= nil, "and keeps the remainder as the sub-cell offset")
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+
+  -- Deletion: clearing the set removes every placement; clear_all also frees
+  -- the sheet.
+  local healthy = raw_backend.health()
+  t.eq(1, healthy.overlay_sets, "one overlay set is live")
+  t.ok(healthy.overlay_placements >= 1, "with at least one placement")
+  t.eq(1, healthy.overlay_sheets, "one tint sheet is cached")
+  reset_sequences()
+  t.eq(true, raw_backend.overlay_clear(set_id), "clearing an owned set succeeds")
+  t.ok(output():find("a=d,d=i", 1, true) ~= nil, "clearing deletes the placements")
+  t.eq(0, raw_backend.health().overlay_sets, "no sets remain after clear")
+  t.eq(1, raw_backend.health().overlay_sheets, "the sheet survives for the next gesture")
+  raw_backend.clear(overlay_base)
+  reset_sequences()
+  raw_backend.clear_all()
+  t.ok(output():find("a=d,d=I", 1, true) ~= nil, "clear_all frees the sheet image")
+  t.eq(0, raw_backend.health().overlay_sheets, "no sheets survive clear_all")
+
   vim.api.nvim_ui_send = original_ui_send
   config.reset()
 end

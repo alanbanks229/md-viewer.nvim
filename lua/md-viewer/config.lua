@@ -117,6 +117,18 @@ M.defaults = {
     -- pauses, and the commit frame after release is always device scale
     -- either way.
     fast_drag = false,
+    -- How moving drag-selection frames are displayed on the raw Kitty backend.
+    -- "auto" defers to the terminal profile: the highlight is drawn as
+    -- translucent overlay rectangles composited over the existing base image
+    -- (no screenshot, no PNG on the wire per frame) only where a human
+    -- validated that exact behavior in a live terminal session --
+    -- today that is iTerm2 alone. WezTerm crashed outright under this
+    -- workload (2026-08-07), so everywhere unvalidated keeps the full-frame
+    -- capture path. "on" forces the overlay regardless of profile (for
+    -- validating a new terminal); "off" disables it everywhere. The commit
+    -- frame after release is always a true browser-rendered capture with the
+    -- browser's own selection paint, whatever this is set to.
+    selection_overlay = "auto",
     settle_ms = 120,
     copy = true,
     -- Disabled by default: neither VS Code nor a browser copies on every
@@ -253,6 +265,12 @@ local function validate(cfg)
     "md-viewer: interaction.drag_debounce_ms must be non-negative"
   )
   assert(type(cfg.interaction.fast_drag) == "boolean", "md-viewer: interaction.fast_drag must be boolean")
+  assert(
+    cfg.interaction.selection_overlay == "auto"
+      or cfg.interaction.selection_overlay == "on"
+      or cfg.interaction.selection_overlay == "off",
+    "md-viewer: interaction.selection_overlay must be auto, on, or off"
+  )
   assert(
     type(cfg.interaction.settle_ms) == "number" and cfg.interaction.settle_ms >= 0,
     "md-viewer: interaction.settle_ms must be non-negative"

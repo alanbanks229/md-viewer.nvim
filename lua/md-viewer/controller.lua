@@ -38,7 +38,23 @@ local function current_session(buf)
     or state.visible_in_tab()
 end
 
+---Remove the drag-selection overlay rectangles, if any are on screen. Cheap
+---no-op otherwise. Every path that invalidates the overlay's geometry funnels
+---through here: a new base frame (apply_image -- scroll, render, settle), the
+---image leaving the screen (clear_image), a placement move under a passive
+---float (reconcile_placement), and interaction.forget_selection.
+local function clear_selection_overlay(session)
+  local set = session.overlay_set
+  if not set then return end
+  session.overlay_set = nil
+  session.overlay_rect_count = 0
+  if session.backend and session.backend.overlay_clear then pcall(session.backend.overlay_clear, set) end
+end
+
+function M.clear_selection_overlay(session) clear_selection_overlay(session) end
+
 local function clear_image(session)
+  clear_selection_overlay(session)
   if session.image_id and session.backend then session.backend.clear(session.image_id) end
   session.image_id = nil
   session.last_placement = nil
@@ -111,6 +127,73 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- Any full frame supersedes the drag overlay: a settle frame has the
+  -- highlight baked in by the browser, and a scroll/render frame moves the
+  -- geometry the overlay rectangles were computed against. Cleared *after*
+  -- the new frame was placed, never before -- deleting first would blank the
+  -- highlight for the gap between the two writes (the M.move hazard).
+  clear_selection_overlay(session)
+  return true
+end
+
+---Display the drag-selection overlay a no-capture `selection_preview` result
+---describes: translucent rectangles composited over the base image already on
+---screen, in place of the full re-captured frame that used to carry every
+---moving selection. The base image stays exactly what it was -- it remains
+---authoritative for hit-testing and diagnostics; only backend overlay
+---placements change.
+---
+---Refuses (returns false) whenever the result's geometry cannot be proven to
+---match the frame on screen: wrong content revision, wrong scroll position,
+---no base image, or a backend without overlay support. The caller falls back
+---to the captured-frame path -- correct and slow beats fast and wrong.
+function M.display_selection_overlay(session, result)
+  if not valid(session) or session.backend.name == "cells" then return false end
+  local backend = session.backend
+  if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
+  if not (session.image_id and session.last_placement) then return false end
+  if type(result) ~= "table" or type(result.rects) ~= "table" then return false end
+  if result.rectsTruncated then return false end
+  if result.contentRevision ~= session.renderer_revision then return false end
+  -- The rects were measured at the page scroll the renderer reports; the base
+  -- image on screen shows `applied_scroll_y`. Any disagreement means the
+  -- highlight would land on the wrong text.
+  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then
+    return false
+  end
+  if update_occlusion(session) then
+    clear_image(session)
+    session.refresh_deferred = true
+    return false
+  end
+  local started = vim.uv.hrtime()
+  local sheet_png = nil
+  if type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
+    local ok, decoded = pcall(vim.base64.decode, result.overlaySheetPng)
+    if ok then sheet_png = decoded end
+  end
+  local ok, set_id, stats = pcall(
+    backend.overlay_apply,
+    session.overlay_set,
+    session.image_id,
+    result.rects,
+    { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px },
+    result.selectionTint,
+    sheet_png,
+    session.last_placement
+  )
+  if not ok or not set_id then
+    -- "need_sheet" is expected once per color (the next request asks for the
+    -- sheet); anything else disables the overlay for this gesture upstream.
+    session.overlay_last_error = ok and stats or tostring(set_id)
+    return false, session.overlay_last_error
+  end
+  session.overlay_set = set_id
+  session.overlay_rect_count = type(stats) == "table" and stats.rects or #result.rects
+  session.overlay_frames = (session.overlay_frames or 0) + 1
+  session.overlay_last_bytes = type(stats) == "table" and stats.bytes or nil
+  session.overlay_last_ms = (vim.uv.hrtime() - started) / 1000000
+  session.overlay_last_error = nil
   return true
 end
 
@@ -681,6 +764,11 @@ local function reconcile_placement(session, force)
       notify_error(err or "failed to update image placement")
       return
     end
+    -- The base just moved or re-cropped (a float opened or closed over it);
+    -- overlay rectangles computed against the old placement are wrong now.
+    -- Cleared after the move rather than re-derived: the next drag frame
+    -- repaints them against the new placement within one round trip.
+    clear_selection_overlay(session)
   end
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.

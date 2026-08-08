@@ -80,6 +80,16 @@ function M.snapshot()
       interaction_request_count = session.interaction_request_count or 0,
       interaction_stale_count = session.interaction_stale_count or 0,
       coalesced_drag_events = session.coalesced_drag_events or 0,
+      -- Stage-4 drag overlay: whether rectangles are on screen right now, and
+      -- what the last overlay frame cost. `overlay_last_bytes` is the byte
+      -- count actually written to the terminal for that frame -- the number
+      -- that replaced ~1MB of base64 PNG per moving frame.
+      overlay_active = session.overlay_set ~= nil,
+      overlay_rect_count = session.overlay_rect_count or 0,
+      overlay_frames = session.overlay_frames or 0,
+      overlay_last_bytes = session.overlay_last_bytes,
+      overlay_last_ms = session.overlay_last_ms,
+      overlay_last_error = session.overlay_last_error,
     }
   end
   return {
