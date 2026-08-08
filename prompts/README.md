@@ -50,9 +50,10 @@ stopping point is coherent.
 | # | Prompt | Objective | Plan / implement model | Status | Commit |
 |---|--------|-----------|------------------------|--------|--------|
 | f1 | [Stage 1 — fast frames](drag_highlight_stage_1_fast_frames.md) | Measure the frame budget; remove the trailing debounce | **Opus 5** / **Opus 5** | done (capture-scale half reverted by `c44e22f`) | 2bcee86 |
-| f2 | Round 2 — sharp frames | Revert the blurry moving frame; keep selecting when a drag leaves the window | **Opus 5** / **Opus 5** | done | c44e22f |
+| f2 | [Round 2 — sharp frames](drag_highlight_round_2_sharp_frames.md) | Revert the blurry moving frame; keep selecting when a drag leaves the window | **Opus 5** / **Opus 5** | done | c44e22f |
 | f3 | [Stage 2 — make a sharp frame cheap](drag_highlight_stage_2_transport.md) | Remove the compositor frame-rate cap and the PNG encode cost, pixel-for-pixel | **Opus 5** / **Opus 5** | done — 2.8x faster renderer, **no felt change** | 742d746 |
-| f4 | [Stage 3 — stop sending a whole screen per frame](drag_highlight_stage_3_damage_band.md) | Damage-band capture and placement; the terminal's own decode is the measured bottleneck | **Opus 5** / **Opus 5** | not started | — |
+| f4 | [Stage 3 — damage band](drag_highlight_stage_3_damage_band.md) | Capture and place only the strip that changed; ~10-30x fewer pixels per frame | **Opus 5** / **Opus 5** | **fallback** — use if f5's step 1 shows the terminals cannot alpha-composite | — |
+| f5 | [Stage 4 — overlay the selection](drag_highlight_stage_4_overlay_selection.md) | Stop screenshotting during a drag entirely; re-place one tiny translucent image over the selection rects | Fable 5 / **Opus 5** | not started — **try this first** | — |
 
 **Release checkpoints.** Part 2 completes a shippable `v0.2.0` — genuinely
 cross-terminal, with no interaction changes. Part 7 completes `v0.3.0`. Parts 3
