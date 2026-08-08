@@ -5267,3 +5267,195 @@ Two reports worth filing, neither yet filed:
   all along — grows WezTerm identically, 173 MB → 958 MB in four seconds. So
   this is WezTerm and placement churn, not anything stage 7 introduced, and the
   upstream repro does not need md-viewer's encoding at all.
+
+# Stage 8 — WezTerm: the memory finding, re-tested from scratch (2026-08-08)
+
+Stage 7 concluded that WezTerm "cannot safely sustain" the fast overlay because
+memory grows during high-frequency placement traffic. That conclusion was
+reached with md-viewer in the loop, from RSS sampled over a few seconds, and it
+named no mechanism. This stage set out to falsify it.
+
+It survives, but it was wrong about the important part. The trigger is not
+frequency, not md-viewer's identifier strategy, and not deletion. It is
+**placing a Kitty image onto cells that already hold another image placement**.
+
+## What the previous analysis got right
+
+* Resident memory really does grow, dramatically, and the growth is real rather
+  than an artefact of how it was sampled.
+* It is not caused by anything stage 7 introduced. Both encodings do it.
+* Nothing is retained on md-viewer's side.
+* Shipping `selection_overlay = false` for WezTerm was the right call, and
+  remains right for a reason stronger than the one originally given.
+
+## What it got wrong or overstated
+
+* **"High-frequency movement" is not the trigger.** Placements re-issued at
+  *identical* coordinates grow memory just as fast (46.8 MB/frame against
+  53.3 MB/frame for moving ones). Rate is not what matters; count of placements
+  is.
+* **It is not a leak in the Kitty protocol layer.** WezTerm's own trace
+  (`WEZTERM_LOG=wezterm_term::terminalstate::kitty=trace`) shows its bookkeeping
+  is exactly correct throughout: 2 images, at most 16 live placements,
+  `used_memory` constant at 11 854 080 bytes for the whole run. Every delete
+  md-viewer sends is honoured.
+* **Growth is not linear, and "unbounded" understates it.** It accelerates. In
+  the minimal repro the cumulative excess goes +6, +16, +65, +220, +779 MB over
+  eighteen frames — each frame costs more than the last, which is the signature
+  of a per-paint quad count that grows with the number of placements applied,
+  not of a fixed per-placement cost.
+* **The previous "four rectangles" framing was misleading.** One rectangle per
+  frame is enough. Four is not a small number here; one is.
+
+## What md-viewer does per overlay update
+
+Read off `lua/md-viewer/backends/kitty_raw.lua`, confirmed against the golden
+byte stream in `tests/lua/cases/backend_kitty.lua`:
+
+| | |
+|---|---|
+| retransmits image pixels | **no** — the tint sheet is uploaded once per (colour, margin, size) |
+| new image id | **no** — stable for the life of the sheet |
+| new placement id | **yes** — one per changed rectangle per frame |
+| deletes the previous placement | **yes** — `a=d,d=i,i=<sheet>,p=<old>`, in the same write, after the replacement |
+| deletes image data | **no**, except when a sheet is superseded |
+| uses shared memory (`t=s`) | **no** — `t=d`, base64 direct |
+
+So md-viewer is case B below. It is *not* using `kitty_img_place`'s
+same-`(image_id, placement_id)` replacement path, because its placement ids are
+fresh each frame — but that turns out not to matter (case A).
+
+## The cases
+
+Standalone probe, no Neovim and no md-viewer: `scripts/wezterm-memory/repro.mjs`
+drives the protocol directly from inside the terminal and samples the terminal
+process. 4 rectangles, 40fps, a full-screen base image underneath, nightly
+`20260805-104032-4b1c3c15`.
+
+| case | what it varies | MB/frame | outcome |
+|---|---|---|---|
+| A | stable image id + stable placement ids, replaced in place | 56.9 | unbounded |
+| B | stable image id, fresh placement id, previous deleted (md-viewer) | 53.3 | unbounded |
+| B2 | as B but the previous placement is never deleted | 73.2 | unbounded |
+| C | fresh image id + fresh placement id each frame, old image deleted | 44.0 | unbounded |
+| D | stable ids, image data retransmitted every frame | 40.2 | unbounded |
+| E | no graphics; same rate, comparable byte volume of text | 0.05 | flat |
+| F | base image left on screen, one character toggled per frame | 0.00 | flat |
+
+**A ≈ B ≈ B2 ≈ C ≈ D.** Every identifier strategy costs the same. Deletion
+works — B2, which deletes nothing, is only ~35% worse. F is the important
+control: a screen containing a full-size image, repainted forty times a second,
+costs nothing at all. It is the placement command, not the repaint.
+
+## The variable that decides it
+
+Everything else held identical, only the row the overlay is aimed at changes:
+
+| overlay lands on | MB/frame | after 40 frames |
+|---|---|---|
+| cells the base image already covers | 33.3 | aborted at 400 MB, still climbing |
+| cells with no image on them | **1.25** | 217 MB, flat through idle, delete and clear |
+
+With no base image at all, the same workload plateaus at 229 MB after ~40
+frames and stays there — through idle, `a=d,d=A`, and a screen clear.
+
+## Ruled out, by measurement
+
+* md-viewer's identifier strategy (cases A–D).
+* Movement (static placements grow identically).
+* Missing deletes (B2).
+* WezTerm's render caches: `line_quad_cache_size`, `line_state_cache_size` and
+  `line_to_ele_shape_cache_size` set to 8 or to 8192 change nothing.
+* Frame rate: `max_fps=5` changes nothing.
+* Window visibility: raised and occluded runs agree.
+* The base placement's crop keys: `x/y/w/h` alongside `c/r` versus `c/r` alone
+  makes no difference.
+* Kitty shared-memory transmission — md-viewer does not use it (`t=d`).
+* The terminal's Kitty bookkeeping, per its own trace.
+
+## Where it actually lives
+
+`vmmap` at the same point in the climb, dirty pages, baseline → mid-climb:
+
+```
+shared memory              1 →  57 MB      (115 MB after teardown)
+VM_ALLOCATE                0 → 100 MB
+MALLOC_SMALL              14 →  62 MB
+MALLOC_LARGE (empty)       0 →  54 MB
+IOAccelerator (graphics)   6 →  46 MB
+IOSurface                 32 →  32 MB      (unchanged)
+```
+
+`sample` during the climb puts the main thread in
+`paint_impl → paint_pass → render_screen_line → populate_image_quad →
+GlyphCache::cached_image`, in cache *hits*. So the CPU is spent walking image
+quads, and the memory is GPU-side buffers plus heap — below the Kitty model, in
+the renderer.
+
+`wezterm-gui/src/termwindow/render/screen_line.rs` emits one quad per cell per
+image attached to that cell:
+
+```rust
+for glyph_idx in 0..info.pos.num_cells as usize {
+    for img in &images {
+        if img.z_index() < 0 {
+            self.populate_image_quad(&img, gl_state, layers, 0, ...)?;
+```
+
+That is quadratic in exactly the way the measurements are, if the per-cell image
+set grows as placements are applied.
+
+## This is upstream, and partly already reported
+
+**wezterm#7953** (open, 2026-07-19) reports the crash end of the same mechanism:
+repeated `a=p` repositioning driving the per-paint quad count to ~10.48 million,
+a failed vertex buffer allocation, and an `.unwrap()` at
+`wezterm-gui/src/termwindow/render/draw.rs:258` that aborts the process. Stage
+7's own run hit "Failed to allocate 23962752 quads" and that same unwrap. The
+memory growth measured here is the sub-lethal form of it. Related, unfixed:
+#5892, #4995, #2422.
+
+Both supported builds behave identically — stable
+`20240203-110809-5046fc22` reaches 705 MB in 30 frames, nightly
+`20260805-104032-4b1c3c15` reaches 901 MB in 18. Nothing was fixed between them.
+
+**kitty 0.43 and Ghostty 1.2 run the identical byte stream flat**: 200 frames,
+0.00 and 0.03 MB/frame, returning to baseline afterwards — kitty with a
+*larger* base image (2912×1525) than WezTerm was given. So this is not the
+protocol being misused.
+
+## Minimal reproduction
+
+`scripts/wezterm-memory/minimal-repro.py`. Two images transmitted once, one
+placement per frame, no Neovim, no md-viewer, ~140 lines of stdlib Python. The
+`--clear` flag changes only which row the overlay is aimed at:
+
+```
+overlapping the base image   122 MB → 901 MB in 18 frames, accelerating
+--clear (bare rows)          122 MB → 129 MB in 40 frames, flat
+```
+
+## What this changes for md-viewer
+
+Nothing, and that is the finding. There is no update strategy that avoids this:
+a selection highlight is by definition drawn over the preview, and every
+identifier strategy costs the same. The only way to not stack a placement on the
+base image is to not use a second placement — which is the full-frame capture
+path WezTerm already takes. `selection_overlay` stays `false` for WezTerm, now
+for a mechanism rather than a symptom.
+
+If wezterm#7953 is fixed, the `sheet-margin` encoding and the enable are already
+in the tree and tested; the change would be one flag and a re-run of
+`scripts/wezterm-memory/matrix.sh`.
+
+## What is still not known
+
+* The exact allocation site. `MallocStackLogging` is stripped from a
+  hardened-runtime signed app, so `malloc_history` cannot attach, and no
+  instrumented build was made.
+* Whether the per-cell image set genuinely grows per placement. It is the
+  reading most consistent with every measurement here and with #7953's quad
+  count, but it was inferred, not observed — a screenshot test that would have
+  shown tint accumulating directly was attempted and gave contaminated pixels.
+* Whether this is macOS-specific or specific to the OpenGL backend this machine
+  selects (`_NSOpenGLViewBackingLayer` appears in the stacks).
