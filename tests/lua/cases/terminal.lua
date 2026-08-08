@@ -96,7 +96,7 @@ return function(t)
     iterm2 = { overlay = true, encoding = "sub-cell-offset" },
     ghostty = { overlay = true, encoding = "sub-cell-offset" },
     kitty = { overlay = true, encoding = "sub-cell-offset" },
-    wezterm = { overlay = true, encoding = "sheet-margin" },
+    wezterm = { overlay = false, encoding = "sheet-margin" },
     warp = { overlay = false, encoding = "sub-cell-offset" },
     generic_kitty = { overlay = false, encoding = "sub-cell-offset" },
     unknown = { overlay = false, encoding = "sub-cell-offset" },
@@ -113,16 +113,18 @@ return function(t)
     t.eq(-2, capability.default_raw_zindex, ("%s leaves -1 free for the overlay"):format(profile))
   end
 
-  -- The flag and the evidence are different grades, and the flag must never
-  -- silently upgrade the evidence. WezTerm was enabled on photographs, not on
-  -- anyone's eyes, and its `validation` string has to keep saying so until
-  -- someone has actually dragged in it.
+  -- The flag and the evidence are different grades, and neither may stand in
+  -- for the other. WezTerm's geometry was photographed and is correct; its cost
+  -- is not, so the encoding ships and the flag does not. The validation string
+  -- has to carry both halves rather than rounding to "unsupported".
   local wez = terminal.capability({ profile = "wezterm" }, {})
-  t.ok(wez.validation:match("pixel%-verified"), "the wezterm validation string records how it was checked")
+  t.eq(false, wez.selection_overlay, "wezterm does not send the overlay workload")
+  t.eq("sheet-margin", wez.overlay_encoding, "but it keeps the encoding that was proven correct")
+  t.ok(wez.validation:match("pixel%-verified"), "the wezterm validation string records what was checked")
   t.ok(wez.validation:match("20240203%-110809"), "and names the old stable build it was checked on")
   t.ok(wez.validation:match("20260805%-104032"), "and the current build too")
-  t.ok(wez.validation:match("operator confirmation pending"), "and does not claim an operator has looked")
-  t.eq(nil, wez.validation:match("operator%-validated"), "specifically, it never says operator-validated")
+  t.ok(wez.validation:match("memory without bound"), "and names the reason the flag is off")
+  t.eq(nil, wez.validation:match("operator%-validated"), "it never claims an operator validated it")
   for _, seen in ipairs({ "iterm2", "ghostty", "kitty" }) do
     local capability = terminal.capability({ profile = seen }, {})
     t.ok(

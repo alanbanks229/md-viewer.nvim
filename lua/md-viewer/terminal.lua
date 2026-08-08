@@ -124,10 +124,23 @@ M.profiles = {
     -- reason, and `overlay_placement_sequence` in backends/kitty_raw.lua for
     -- the encoding.
     overlay_encoding = "sheet-margin",
-    selection_overlay = true,
+    -- The geometry is solved and photographed; the cost is not. Sustained
+    -- placement traffic grows WezTerm's resident memory without bound -- 172 MB
+    -- to 786 MB in four seconds with as few as four rectangles being replaced
+    -- at 40fps, on both builds, while md-viewer's own live-placement count
+    -- stays flat at four. A control that places the base image and then sends
+    -- nothing holds steady at 173 MB for the same duration, so it is the
+    -- placement churn and not the environment. A drag would exhaust a laptop's
+    -- memory in seconds; this measurement cost one, twice.
+    --
+    -- So the encoding stays (it is correct, and it is what a future fix would
+    -- use) and the flag stays off. WezTerm keeps the full-frame capture path,
+    -- which is correct and merely slower.
+    selection_overlay = false,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "pixel-verified by automated screenshot on 20240203-110809-5046fc22 and "
-      .. "20260805-104032-4b1c3c15 (2026-08-08); operator confirmation pending",
+    validation = "geometry pixel-verified by automated screenshot on 20240203-110809-5046fc22 and "
+      .. "20260805-104032-4b1c3c15 (2026-08-08); overlay disabled -- placement churn grows the "
+      .. "terminal's memory without bound",
     caveats = {
       "WezTerm implements the Kitty graphics protocol -- z-indices, crop keys, natural-size "
         .. "placements without c/r, sub-cell X/Y offsets, placement ids and by-id deletion -- "
@@ -141,10 +154,16 @@ M.profiles = {
       "Both builds behave identically here: 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15 "
         .. "were driven through the same checks and passed the same 36 of 36. There is no version "
         .. "boundary and md-viewer does not look for one.",
+      "Sustained placement traffic grows WezTerm's memory without bound, which is why the overlay "
+        .. "is off: 172 MB to 786 MB in four seconds with four rectangles replaced at 40fps, and to "
+        .. "6.5 GB with seventy, on both builds. md-viewer's own live-placement count stays flat "
+        .. "throughout, and an idle control holds at 173 MB, so it is the churn itself. One earlier "
+        .. "run died on 'Failed to allocate 23962752 quads' and an unwrap in draw.rs.",
       "Each placement rewrites every cell it covers and bumps the line sequence number, and each "
-        .. "deletion walks those rows again, so an overlay frame costs O(rows x cols) cell writes "
-        .. "twice over -- against a GPU placement on iTerm2 and Ghostty. Rect-set diffing is what "
-        .. "keeps that affordable: a moving frame re-places only the rectangles that changed.",
+        .. "deletion walks those rows again -- an overlay frame is O(rows x cols) cell writes twice "
+        .. "over, against one GPU placement on iTerm2 and Ghostty. That cost model is the likely "
+        .. "shape of the growth, but the growth is per-frame rather than per-cell, so it is not "
+        .. "explained by it.",
       "Upstream issue #6344's divide-by-zero panics are unreachable from md-viewer: the cell must "
         .. "floor to at least one pixel and every crop must be at least one pixel and wholly "
         .. "inside its image before anything is emitted.",
