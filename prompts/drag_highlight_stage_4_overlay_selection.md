@@ -10,7 +10,7 @@ model: Fable 5 (or Opus 5 at max reasoning for the placement work)
 depends_on: 2bcee86 (stage 1), c44e22f (round 2), 742d746 (stage 2)
 supersedes: prompts/drag_highlight_stage_3_damage_band.md, which becomes the
   fallback if step 1 shows the terminals cannot alpha-composite
-commit:
+commit: 319f37e
 ---
 
 # Drag-to-Highlight, Stage 4 — Overlay the Selection Instead of Re-Photographing the Page
