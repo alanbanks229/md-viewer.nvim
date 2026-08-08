@@ -40,19 +40,70 @@ Assume any change here is wrong until a test says otherwise.
 
 ## Measurements from stage 1
 
-> Stage 1 fills this in. If it is still a placeholder, re-read the precondition
-> above.
+Two throwaway benchmark scripts (not committed), both driving the real
+renderer subprocess and real Chromium, no stubbing: a Node-side script
+modeled on `tests/node/interact.test.js`'s subprocess harness, and a
+Lua-side script modeled on `tests/lua/cases/process.lua`'s real
+(non-stubbed) subprocess usage. Both ran the same 20-frame simulated drag
+sweep over the same document (`kitchen-sink.md` + 60 filler paragraphs,
+5,400 characters, 90 layout blocks) on the same machine. Full method and a
+third pacing/starvation measurement are in
+`docs/cross-platform-implementation-status.md`'s "Post-Part-7 follow-up:
+drag-highlight responsiveness, stage 1" section — this is the condensed
+version for this file.
+
+Per-frame, `captureScale: "device"` vs `"css"` (averages over 20 frames):
 
 ```
-(pending — per-frame wall clock, split by phase; coalesced vs sent;
- PNG bytes at css vs device; capture_ms vs image_update_ms)
+                 device        css
+Node  wallMs      68.40       33.23
+Node  rehydrateMs  1.11        1.04
+Node  captureMs   64.88       30.07
+Node  totalMs     67.95       32.85
+Node  pngBytes  86822.9    38397.0
+
+Lua   wall_ms     67.90       32.52   (dispatch + IPC + renderer round trip)
+Lua   pngBytes  86823        38397
+Lua   fs_read_ms  0.108        0.094  (real, blocking, headless-safe)
+Lua   base64_ms   0.060        0.027  (real, pure Lua, headless-safe)
+```
+
+`captureMs` (the `page.screenshot()` call) accounts for ~95% of `totalMs` at
+both scales. Node- and Lua-observed wall-clock agree closely (68.4 vs 67.9,
+33.2 vs 32.5), meaning nothing meaningful is being lost or added between the
+renderer's own numbers and what Lua actually experiences.
+
+Debounce/pacing, same machine:
+
+```
+first-dispatch latency (single on_drag call):
+  drag_debounce_ms=40 (old default): 37.71 ms before the request is sent
+  drag_debounce_ms=0  (new default):  0.01 ms
+
+requests actually sent over a continuous 300ms drag (new point every 15ms):
+  drag_debounce_ms=40 (old default): 1 request for the whole gesture
+  drag_debounce_ms=0  (new default): 11 requests, coalesced_drag_events=19
 ```
 
 Exonerated by stage 1's measurements:
 
 ```
-(pending)
+- page.evaluate's selection-resolve step (rehydrateMs): ~1ms either way,
+  ~1.5-3% of totalMs at either capture scale. Not a meaningful lever.
+- The Lua-side PNG read (fs_read) and base64 encode: both sub-millisecond
+  (~0.03-0.1ms) at either scale. Neither needed optimizing.
+- Suspect 5 (applyScroll running unconditionally per interact) is plausible
+  only as noise inside rehydrateMs above -- not measured directly, since it
+  was out of stage 1's scope, but the ~1ms rehydrateMs total leaves little
+  room for it to matter on its own.
 ```
+
+Not exonerated, and still this stage's territory: suspects 1 (temp-file
+`fs_read` blocking the main loop), 2 (full PNG re-upload per frame), 3
+(anchor re-resolution), and 4 (`page.evaluate` re-serialization) were not
+measured at all here -- they are transport/protocol-level, not
+capture-scale/pacing, and stage 1 did not touch the files that would let
+them be measured in isolation.
 
 ---
 
