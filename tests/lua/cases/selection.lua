@@ -1079,6 +1079,45 @@ return function(t)
     callbacks[3]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
     interaction.forget_selection(session)
 
+    -- A second gesture starting on top of a committed selection. The frame on
+    -- screen has the FIRST selection painted into it by the browser, and
+    -- overlay rectangles composite over it -- they add a highlight, they
+    -- cannot remove one. Without a clean base the first selection stays
+    -- visible for the whole second drag, which is what the operator reported
+    -- on 2026-08-08 (highlight one code block, release, then drag in another).
+    local original_restore = controller.restore_clean_base
+    local restores = 0
+    needs_sheet = false
+    session = overlay_session()
+    session.base_selection_painted = true
+    controller.restore_clean_base = function(s)
+      restores = restores + 1
+      s.base_selection_painted = false
+      return true
+    end
+    fresh_gesture(session)
+    t.eq(1, restores, "a drag over a painted base restores a selection-free frame first")
+    t.eq(false, requests[1].capture, "and then runs on the overlay path as usual")
+    overlay_result.applied = true
+    overlay_result.reason = nil
+    callbacks[1]({ kind = "selection", ok = true, text = "abc", collapsed = false, rects = {} }, nil)
+    t.eq(1, #overlay_displays, "the overlay draws over the clean base")
+    interaction.forget_selection(session)
+
+    -- No cached clean frame to go back to (the page was scrolled while the
+    -- selection was up, say). Refusing is the honest answer: the gesture runs
+    -- on captured frames, which repaint the whole preview and cannot inherit a
+    -- stale highlight.
+    session = overlay_session()
+    session.base_selection_painted = true
+    controller.restore_clean_base = function() return false end
+    fresh_gesture(session)
+    t.eq(true, session.pointer.overlay_fallback, "an unrestorable base falls back for the gesture")
+    t.eq(nil, requests[1].capture, "and captures the frame instead of overlaying it")
+    callbacks[1]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
+    interaction.forget_selection(session)
+    controller.restore_clean_base = original_restore
+
     controller.display_selection_overlay = original_overlay_display
     process.request = original_request
   end

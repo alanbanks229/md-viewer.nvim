@@ -44,6 +44,18 @@ All notable changes to this project will be documented here. The project uses
   over rather than drawing rectangles it cannot size. `:MdViewerHealth` reports
   the measurement as `cell_pixels`.
 
+- Fixed: a highlight could survive into the next drag. Selecting some text,
+  releasing, and then dragging out a new selection elsewhere left the first
+  highlight on screen for the whole second drag.
+
+  The frame underneath a drag is the browser's own capture, and after a
+  selection settles it has that selection painted into it. Drag rectangles
+  composite *over* that frame, so they can add a highlight but never remove one.
+  A drag that starts on a frame like that now puts the cached selection-free
+  frame back first — a local redraw, not another round trip to the browser — and
+  falls back to full captured frames when there is no cached frame it can prove
+  still matches what is on screen.
+
 - The preview now pins its own selection colour per theme rather than inheriting
   Chromium's default. Over the page background the settled highlight is the same
   colour as before; over code blocks and table stripes it shifts by 2-7/255. The

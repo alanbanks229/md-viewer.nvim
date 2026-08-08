@@ -128,12 +128,45 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- Whether this frame has a browser-painted selection baked into it. Any
+  -- capture taken while a DOM selection exists does, and `selection_active` is
+  -- always updated before the frame is applied (interaction.lua sets it in the
+  -- request callback, ahead of display).
+  --
+  -- The drag overlay composites *over* this frame, so it can only ever add a
+  -- highlight -- never remove one. Starting a second gesture on top of a frame
+  -- that still shows the first gesture's highlight leaves that highlight on
+  -- screen for the whole drag, which is exactly what the operator reported on
+  -- 2026-08-08. `M.restore_clean_base` is how a gesture gets out of it.
+  session.base_selection_painted = session.selection_active == true
   -- Any full frame supersedes the drag overlay: a settle frame has the
   -- highlight baked in by the browser, and a scroll/render frame moves the
   -- geometry the overlay rectangles were computed against. Cleared *after*
   -- the new frame was placed, never before -- deleting first would blank the
   -- highlight for the gap between the two writes (the M.move hazard).
   clear_selection_overlay(session)
+  return true
+end
+
+---Put a selection-free frame back on screen so drag-overlay rectangles have a
+---clean base to composite over, using the cached PNG rather than a renderer
+---round trip -- this runs on the first frame of a drag and must not cost one.
+---
+---Returns false when there is no cached frame that is known to be both
+---selection-free and taken at the scroll position now displayed, which is the
+---honest answer whenever the page was scrolled while a selection was up. The
+---caller falls back to captured frames for that gesture.
+function M.restore_clean_base(session)
+  if not session.base_selection_painted then return true end
+  if not valid(session) or session.backend.name == "cells" then return false end
+  if not session.clean_image_bytes then return false end
+  if math.abs((session.clean_image_scroll_y or 0) - (session.applied_scroll_y or 0)) > 0.5 then return false end
+  if session.clean_image_revision ~= session.renderer_revision then return false end
+  -- `selection_active` is still true (the DOM selection this frame predates is
+  -- what the new gesture is replacing), so apply_image would re-mark the base
+  -- as painted. It is not: this frame is the cached selection-free one.
+  if not apply_image(session, session.clean_image_bytes, session.clean_image_scale) then return false end
+  session.base_selection_painted = false
   return true
 end
 
@@ -332,6 +365,20 @@ function M.refresh(session, render_options)
     session.viewport_height_render_px = result.viewport.heightPx
     session.viewport_calibration_tier = result.viewport.tier
     session.last_image_bytes = result.image
+    -- The newest frame known to carry no browser-painted selection, kept so a
+    -- drag starting on top of an earlier selection can get a clean base back
+    -- without a renderer round trip (see `M.restore_clean_base`). Interact
+    -- frames never reach here at all, so the only way this picks up a painted
+    -- selection is a render or scroll capture taken while one was live --
+    -- which is exactly when `selection_active` is true.
+    if session.selection_active then
+      session.clean_image_bytes = nil
+    else
+      session.clean_image_bytes = result.image
+      session.clean_image_scroll_y = result.scrollY or session.applied_scroll_y or 0
+      session.clean_image_revision = session.renderer_revision
+      session.clean_image_scale = meta.captureScale
+    end
     if update_occlusion(session) then
       clear_image(session)
       finish()
@@ -421,6 +468,7 @@ local function close_session(session)
   preview.stop_loading(session)
   clear_image(session)
   session.last_image_bytes = nil
+  session.clean_image_bytes = nil
   state.remove(session.source_buf)
   if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
     pcall(vim.api.nvim_win_close, session.preview_win, true)
@@ -507,6 +555,7 @@ function M.retarget(session, new_buf, record)
   session.scroll_y, session.applied_scroll_y = 0, 0
   session.last_source_block = nil
   session.last_image_bytes = nil
+  session.clean_image_bytes = nil
   session.manual_scroll_until = 0
   session.refresh_deferred = false
   if record ~= false then M.history_push(session, new_buf) end

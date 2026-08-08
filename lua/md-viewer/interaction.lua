@@ -237,6 +237,18 @@ local function overlay_ready(session, pointer)
   if not (backend and backend.overlay_apply and backend.overlay_supported) then return false end
   if not backend.overlay_supported() then return false end
   if not (session.image_id and session.last_placement) then return false end
+  -- The frame on screen may still have the *previous* gesture's highlight
+  -- painted into it by the browser, and overlay rectangles composite over it:
+  -- they can add a highlight, never remove one. Put the cached selection-free
+  -- frame back first -- a local re-upload, not a renderer round trip. Failing
+  -- that there is no clean base to draw on, so this gesture runs on captured
+  -- frames, which repaint the whole preview and are therefore always right.
+  if session.base_selection_painted then
+    if not require("md-viewer.controller").restore_clean_base(session) then
+      pointer.overlay_fallback = true
+      return false
+    end
+  end
   return true
 end
 

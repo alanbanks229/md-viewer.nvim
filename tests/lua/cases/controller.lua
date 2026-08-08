@@ -390,6 +390,26 @@ return function(t)
     controller.clear_selection_overlay(session)
     t.eq(1, #cleared, "a second clear is a no-op, not a double delete")
 
+    -- restore_clean_base's preconditions. It runs on the first frame of a drag
+    -- and puts a cached selection-free frame back so overlay rectangles have
+    -- something clean to composite over; every way of not knowing that the
+    -- cached frame still matches what is on screen has to refuse rather than
+    -- place a frame from the wrong scroll position or the wrong document.
+    session.base_selection_painted = false
+    t.eq(true, controller.restore_clean_base(session), "an already-clean base needs no work")
+    session.base_selection_painted = true
+    session.clean_image_bytes = nil
+    t.eq(false, controller.restore_clean_base(session), "no cached selection-free frame means no restore")
+    session.clean_image_bytes = "png"
+    session.clean_image_revision = session.renderer_revision
+    session.applied_scroll_y = 0
+    session.clean_image_scroll_y = 240
+    t.eq(false, controller.restore_clean_base(session), "a frame cached at another scroll position is refused")
+    session.clean_image_scroll_y = 0
+    session.clean_image_revision = "not-the-current-revision"
+    t.eq(false, controller.restore_clean_base(session), "a frame cached against other content is refused")
+    t.eq(true, session.base_selection_painted, "a refusal leaves the base marked painted")
+
     controller.close(source)
     pcall(vim.api.nvim_set_current_win, entry_win)
   end

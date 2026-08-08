@@ -4865,6 +4865,38 @@ not a capability judgement — and the captured-frame path takes over.
 Verified on the operator's terminal: `ioctl` reports `208x55 cells,
 2912x1760 px` → 14.00 × 32.00 px per cell, exactly.
 
+**Operator validation, 2026-08-08 (second pass).** "REALLY REALLY CLOSE now and
+basically really good." Measured from the operator's during/done screenshot
+pair: band height identical (110 px both), width 346 vs 345 px. The geometry is
+correct to within one pixel; what remains visible is the tint compositing above
+glyphs during a drag versus under them after, plus the end-of-line stubs the
+overlay still skips.
+
+### Stale highlight surviving into the next gesture
+
+Reported in the same pass: select a code block, release, then drag out a new
+selection elsewhere, and the first highlight stays on screen for the whole
+second drag.
+
+The frame under a drag is the browser's own capture, and after a selection
+settles that capture has the selection painted into it. Overlay rectangles
+composite *over* it, so they can add a highlight and never remove one — a second
+gesture inherits the first one's paint.
+
+`apply_image` now records `base_selection_painted` for every frame it places
+(true exactly when a DOM selection was live at capture time — `selection_active`
+is always updated before the frame is displayed). `overlay_ready` refuses a
+painted base and calls `controller.restore_clean_base`, which re-places the
+newest cached selection-free capture. That is a local re-upload measured at
+~1.4 ms on the operator's terminal, not a renderer round trip, so it can run on
+a drag's first frame. It refuses — and the gesture drops to captured frames for
+its duration — whenever the cached frame cannot be proven to match what is on
+screen: no cache, a different scroll position, or a different content revision.
+Interact frames never populate that cache (they are the ones that carry
+selection paint), so the only way it could go stale is a render or scroll
+capture taken while a selection was live, which is exactly the case the
+`selection_active` guard drops.
+
 ### Safe stopping point and first next action
 
 Stage 4 is committed. The tree is coherent: the overlay path is live on iTerm2
