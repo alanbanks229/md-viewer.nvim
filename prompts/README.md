@@ -54,7 +54,7 @@ stopping point is coherent.
 | f3 | [Stage 2 — make a sharp frame cheap](drag_highlight_stage_2_transport.md) | Remove the compositor frame-rate cap and the PNG encode cost, pixel-for-pixel | **Opus 5** / **Opus 5** | done — 2.8x faster renderer, **no felt change** | 742d746 |
 | f4 | [Stage 3 — damage band](drag_highlight_stage_3_damage_band.md) | Capture and place only the strip that changed; ~10-30x fewer pixels per frame | **Opus 5** / **Opus 5** | **shelved** — step 1's probe split the terminals: iTerm2 passed everything, so stage 4 shipped there instead; remains the candidate if WezTerm drags ever need improving | — |
 | f5 | [Stage 4 — overlay the selection](drag_highlight_stage_4_overlay_selection.md) | Stop screenshotting during a drag entirely; place crops of one translucent tint sheet over the selection rects | Fable 5 / **Opus 5** | done, **iTerm2 only** (per-profile gate; WezTerm crashed the step-1 probe) — operator confirmed it is fast; rectangles are too tall, fixed in f6 | 319f37e |
-| f6 | [Stage 5 — match the browser's band](drag_highlight_stage_5_band_geometry.md) | Stop expanding selection quads to the CSS line-height; paint the band Chromium actually paints, plus its end-of-line stubs | **Opus 5** / **Opus 5** | in progress | — |
+| f6 | Stage 5 — size the overlay in drawn pixels | Measure the terminal's cell with `TIOCGWINSZ` and size selection rectangles against the box the base image is *drawn* into, not the one it was *captured* at | **Opus 5** / **Opus 5** | awaiting operator validation | — |
 
 **Release checkpoints.** Part 2 completes a shippable `v0.2.0` — genuinely
 cross-terminal, with no interaction changes. Part 7 completes `v0.3.0`. Parts 3

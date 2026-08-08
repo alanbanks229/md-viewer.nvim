@@ -1,6 +1,22 @@
 return function(t)
   local config = require("md-viewer.config")
   local raw_backend = require("md-viewer.backends.kitty_raw")
+  local cellpixels = require("md-viewer.cellpixels")
+
+  -- A headless Neovim has no terminal on stdout, so the real TIOCGWINSZ
+  -- measurement is unavailable here by construction. Stand in for it: 10x10 px
+  -- against the 10x10-cell placement below makes the drawn box exactly the
+  -- 100x100 fake capture, which is the degenerate case where the pre-2026-08-08
+  -- capture-relative arithmetic and the drawn-relative arithmetic agree. The
+  -- case where they *disagree* is asserted separately further down.
+  local real_measure = cellpixels.measure
+  local function stub_cell(width, height, cols, rows)
+    cellpixels.measure = function()
+      if not width then return nil, "stubbed unavailable" end
+      return { width = width, height = height, cols = cols or 10, rows = rows or 10 }
+    end
+  end
+  stub_cell(10, 10)
 
   local original_ui_send = vim.api.nvim_ui_send
   local sequences
@@ -294,6 +310,88 @@ return function(t)
   t.ok(output():find("a=d,d=I", 1, true) ~= nil, "clear_all frees the sheet image")
   t.eq(0, raw_backend.health().overlay_sheets, "no sheets survive clear_all")
 
+  -- ---------------------------------------------------------------------
+  -- Rectangles are sized in the pixels the base image is DRAWN at, not the
+  -- pixels it was CAPTURED at.
+  --
+  -- This is the 2026-08-08 defect. The base is placed with c/r, so the
+  -- terminal scales it to fill placement.width x placement.height cells;
+  -- overlay crops carry no c/r and display at natural pixel size. When the
+  -- render viewport mis-estimated the cell -- 10x20 CSS px guessed against a
+  -- real 7x16 -- the capture is drawn smaller than it was taken, and a
+  -- rectangle sized against the capture comes out too big while still sitting
+  -- at the right place. Every number below differs from the capture-relative
+  -- answer, which is the point.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(7, 16) -- real cell; the 100x100 capture over 10x10 cells implies 10x10
+  reset_sequences()
+  local drawn_base = raw_backend.show(fake_png(), placement) -- 100x100 px over 10x10 cells
+  -- Drawn box is 10*7 x 10*16 = 70x160. The sheet must cover the taller of the
+  -- two boxes (160 > 100), so a sheet sized only to the capture is refused.
+  t.eq(
+    true,
+    raw_backend.overlay_needs_sheet(drawn_base, nil, placement),
+    "a sheet must cover the drawn box, not just the capture"
+  )
+  local small_sheet_set, small_sheet_reason = raw_backend.overlay_apply(
+    nil,
+    drawn_base,
+    { { x = 0, y = 0, width = 10, height = 10 } },
+    {
+      widthPx = 100,
+      heightPx = 100,
+    },
+    tint,
+    fake_png(),
+    placement
+  )
+  t.eq(nil, small_sheet_set, "a sheet smaller than the drawn box is refused")
+  t.ok(small_sheet_reason:match("must cover"), "and says what it failed to cover: " .. tostring(small_sheet_reason))
+
+  -- 200x200 sheet covers both boxes. A rect at CSS (10,10) sized 20x25 in a
+  -- 100x100 viewport scales by 70/100 and 160/100:
+  --   x: 10*0.7 = 7        w: round(30*0.7) - 7 = 21 - 7 = 14
+  --   y: 10*1.6 = 16       h: round(35*1.6) - 16 = 56 - 16 = 40
+  -- The capture-relative arithmetic would have said 20x25 at (10,10).
+  local big_sheet = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\200\0\0\0\200"
+  reset_sequences()
+  local drawn_set = raw_backend.overlay_apply(
+    nil,
+    drawn_base,
+    { { x = 10, y = 10, width = 20, height = 25 } },
+    { widthPx = 100, heightPx = 100 },
+    tint,
+    big_sheet,
+    placement
+  )
+  t.ok(drawn_set ~= nil, "the apply succeeds once the sheet covers the drawn box")
+  local drawn_output = output()
+  t.ok(
+    drawn_output:find("x=0,y=0,w=14,h=40", 1, true) ~= nil,
+    "the crop is sized in drawn pixels, not captured pixels: " .. drawn_output:gsub("%c", "."):sub(1, 400)
+  )
+  -- Position stays exact either way, because cells are: x=7 is cell 1 + 0 px
+  -- (cell is 7 wide), y=16 is cell 1 + 0 px (cell is 16 tall).
+  t.eq(nil, drawn_output:match(",X=%d"), "a rect landing on a cell boundary needs no sub-cell offset")
+  raw_backend.clear_all()
+
+  -- Without a measured cell there is no way to know what a pixel is worth on
+  -- screen, so the overlay refuses -- and "on" cannot override a correctness
+  -- precondition the way it overrides a capability judgement.
+  stub_cell(nil)
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  local blind_ok, blind_reason = raw_backend.overlay_supported()
+  t.eq(false, blind_ok, "an unmeasurable cell disables the overlay on a validated profile")
+  t.ok(blind_reason:match("pixel cell size is unknown"), "and says why: " .. tostring(blind_reason))
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" }, interaction = { selection_overlay = "on" } })
+  t.eq(false, (raw_backend.overlay_supported()), "selection_overlay=on cannot force it without a measured cell")
+  t.ok(raw_backend.health().cell_pixels:match("unmeasured"), "health reports the cell as unmeasured")
+
+  cellpixels.measure = real_measure
   vim.api.nvim_ui_send = original_ui_send
   config.reset()
 end

@@ -4816,6 +4816,55 @@ was green:
    are qualified instead via `interaction.selection_overlay = "on"`, which
    already bypasses the per-profile gate.
 
+### Stage 5 — the rectangles were sized in the wrong pixels
+
+The stage-4 defect above was diagnosed twice, wrongly the first time. Both
+dead ends are recorded because each was a plausible reading of real evidence.
+
+**First hypothesis, killed by measurement.** The overlay bands measured exactly
+the block's CSS `line-height` while Chromium's measured ~0.83 of that, so
+`interact.js` looked like it was over-expanding text quads to the line box. A
+harness driving real Chromium against the real preview CSS says otherwise:
+
+| element | CSS `line-height` | Chromium's painted band |
+|---|---|---|
+| `h1` | 40.0 | 40.00 |
+| `h2` | 30.0 | 30.00 |
+| `h3` | 25.0 | 25.00 |
+| `li`, `blockquote`, `td` | 25.0 | 25.00 |
+
+Chromium paints the full line box to the hundredth of a pixel. `interact.js` is
+correct, the `tiled >= 2` assertion is correct, and the gate passed because
+there was nothing renderer-side to catch.
+
+**Second hypothesis, confirmed.** `coordinates.viewport`'s "estimated" tier
+guesses a 10×20 CSS px cell (`config.lua`'s `estimated_cell_width_px` and
+`cell_aspect_ratio` defaults) and, as its own comment says, "lets the terminal
+scale the PNG". Everything else addresses the preview in **cells**, so a wrong
+guess is invisible — the image is squeezed into the right cell box either way,
+and only sharpness pays. Overlay crops carry no `c`/`r` keys and therefore
+display at natural **pixel** size, making them the first thing in the plugin
+whose correctness depends on the guess being right.
+
+Measured on the operator's iTerm2: real cell 14×32 physical px against a
+guessed 20×40, so a 1980×2040 capture is drawn into 1386×1632. `overlay_apply`
+scaled rects by `item.width_px / viewport.widthPx` = 2.0 where the drawn scale
+is 1.4 — 1.43× too wide and 1.25× too tall. Measured from the operator's
+screenshots: **1.40× and ~1.24×**. Positions were unaffected throughout because
+they resolve to cells.
+
+**The fix.** `lua/md-viewer/cellpixels.lua` measures the cell from
+`TIOCGWINSZ`'s `ws_xpixel`/`ws_ypixel` via LuaJIT FFI — no escape sequence and
+nothing to read back, which is what made this unobtainable before (Neovim owns
+terminal input and cannot read a CSI reply). `overlay_apply` now scales against
+`placement.width × cell.width`, the box the image is drawn into. Where the cell
+cannot be measured the overlay refuses — a precondition `selection_overlay =
+"on"` deliberately cannot override, since it is a correctness requirement and
+not a capability judgement — and the captured-frame path takes over.
+
+Verified on the operator's terminal: `ioctl` reports `208x55 cells,
+2912x1760 px` → 14.00 × 32.00 px per cell, exactly.
+
 ### Safe stopping point and first next action
 
 Stage 4 is committed. The tree is coherent: the overlay path is live on iTerm2
@@ -4824,26 +4873,32 @@ settled highlight after release is the browser's own paint in every case — so
 the known geometry defect is confined to the moving frames of a drag and
 corrects itself the instant the mouse comes up.
 
-First next action: correct the band rule in `renderer/src/interact.js`. The
-order matters and is deliberate — the last two rounds each shipped a change
-that passed every automated gate and altered nothing the operator could see:
+The stage-5 fix above is in the working tree, uncommitted, awaiting the
+operator's eyes in a real iTerm2 — headless Lua stubs the transport and never
+reaches a terminal, so no automated result can speak to this.
 
-1. **Measure first, with no production code.** Render a fixture that spans
-   several different `line-height`s (`h1`-`h3` at `1.25`, body `p` at `25px`,
-   `pre` at `1.55`, `li`, `td`, `blockquote`), select it, and for every rendered
-   line record the reported rect, the raw text quad before expansion, the
-   computed `line-height` and `font-size`, and **Chromium's painted band
-   measured from the captured pixels**. The last column is ground truth. The
-   leading hypothesis — Chromium paints the font content box, not the line box
-   — is a hypothesis, not a finding.
-2. **Find out why the gate passed.** A 10-device-px over-extension should not
-   have survived a comparison that masks only 3 device px around each rect
-   edge. Until that is understood, a green suite means nothing here.
-3. Then change the `banded` loop, and add the end-of-line continuation stubs
-   the overlay currently skips.
-4. Replace `tiled >= 2` and the loose `height >= 15 && < 30` bounds with a
-   per-line assertion that the reported rect matches Chromium's painted band
-   within ~1 CSS px, on a fixture with at least three different line-heights. A
-   single-line-height fixture structurally cannot catch a per-block error. The
-   new assertion must fail against today's `interact.js` before it passes
-   against the fix.
+First next action, in order:
+
+1. **Operator validates the rectangle geometry.** Drag across a fenced code
+   block (adjacent lines must have visible gaps and must not touch), a heading,
+   prose, a list, a table, and a line mixing prose with `inline code` (one band,
+   not two). Release and watch the transition: the highlight must not change
+   size or colour as the settle frame replaces the overlay.
+2. **Confirm the overlay is still on**, via `:MdViewerHealth` →
+   `cell_pixels`. A terminal or multiplexer that does not fill in
+   `ws_xpixel`/`ws_ypixel` now disables the overlay by design; the reason says
+   so verbatim.
+3. Then commit, and record the hash in `prompts/README.md` row f6.
+
+Two things are deliberately **not** done, and are the natural next stage:
+
+- **The preview is still resampled.** With the "estimated" tier the capture is
+  1980×2040 drawn into 1386×1632 — a ~30% downscale on every frame, paid for at
+  full render cost. `cellpixels` now knows the exact number that would make it
+  1:1; feeding it into `coordinates.viewport` as a "measured" calibration tier
+  (the slot its own comment reserves) would make the preview pixel-perfect and
+  render text at true size. It is a visible change to how much document fits on
+  screen, so it wants the operator's eye and its own commit.
+- **End-of-line continuation stubs.** Chromium paints ~4.8 CSS px past the last
+  glyph of a soft-broken line; the overlay skips it. The operator asked for
+  parity. Deferred so the geometry fix could be validated on its own.

@@ -1,4 +1,5 @@
 local backends = require("md-viewer.backends")
+local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local preview = require("md-viewer.preview")
@@ -927,6 +928,10 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
     group = group,
     callback = function()
+      -- A terminal font-size change moves the pixel cell without changing
+      -- anything Neovim reports except the grid, so the measurement has to be
+      -- retaken here or overlay rectangles keep the old cell's scale.
+      cellpixels.invalidate()
       each_session(function(session)
         if not update_occlusion(session) then M.schedule(session, 80, "resize_timer") end
       end)

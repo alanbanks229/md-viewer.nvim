@@ -124,10 +124,22 @@ M.defaults = {
     -- validated that exact behavior in a live terminal session --
     -- today that is iTerm2 alone. WezTerm crashed outright under this
     -- workload (2026-08-07), so everywhere unvalidated keeps the full-frame
-    -- capture path. "on" forces the overlay regardless of profile (for
-    -- validating a new terminal); "off" disables it everywhere. The commit
-    -- frame after release is always a true browser-rendered capture with the
-    -- browser's own selection paint, whatever this is set to.
+    -- capture path. "on" forces the overlay regardless of profile -- this is
+    -- how you qualify a new terminal: set it, drag, and look. Be aware that
+    -- WezTerm did not merely fail here, it crashed, so a terminal that cannot
+    -- do this may take itself down rather than degrade. "off" disables it
+    -- everywhere.
+    --
+    -- One precondition no setting can override: the terminal must report its
+    -- pixel cell size (`cellpixels.lua`). Overlay rectangles are sized in
+    -- pixels, and without it there is no way to know what a pixel is worth on
+    -- screen -- getting that wrong misdraws the highlight rather than
+    -- degrading it. `:MdViewerHealth`'s `cell_pixels` says whether it is
+    -- known. Multiplexers that do not propagate `ws_xpixel` are the usual
+    -- reason it is not.
+    --
+    -- The commit frame after release is always a true browser-rendered capture
+    -- with the browser's own selection paint, whatever this is set to.
     selection_overlay = "auto",
     settle_ms = 120,
     copy = true,

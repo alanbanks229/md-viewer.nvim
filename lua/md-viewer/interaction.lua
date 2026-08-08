@@ -1,3 +1,4 @@
+local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
@@ -239,14 +240,28 @@ local function overlay_ready(session, pointer)
   return true
 end
 
----Dimensions for the tint-sheet PNG request: the largest base image this
----session can produce (device-scale capture of the render viewport), so one
----sheet covers every frame regardless of the scale the last capture used.
+---Dimensions for the tint-sheet PNG request: large enough to crop any
+---rectangle out of, whichever frame this session produces.
+---
+---That is the larger of two boxes. A device-scale capture of the render
+---viewport is one; the box the base image is *drawn* into -- the placement's
+---cells times the terminal's real cell -- is the other, and it is the one
+---overlay crops are actually measured in (see `kitty_raw`'s `overlay_apply`).
+---Either can be the bigger, depending on which way `coordinates.viewport`
+---mis-estimated the cell, so one sheet has to cover both.
 local function sheet_dims(session)
   local scale = config.get().render.device_scale_factor or 1
+  local width = (session.viewport_width_px or 0) * scale
+  local height = (session.viewport_height_render_px or 0) * scale
+  local cell = cellpixels.measure()
+  local placement = session.last_placement
+  if cell and placement and placement.width and placement.height then
+    width = math.max(width, placement.width * cell.width)
+    height = math.max(height, placement.height * cell.height)
+  end
   return {
-    widthPx = math.max(1, math.floor((session.viewport_width_px or 0) * scale + 0.5)),
-    heightPx = math.max(1, math.floor((session.viewport_height_render_px or 0) * scale + 0.5)),
+    widthPx = math.max(1, math.floor(width + 0.5)),
+    heightPx = math.max(1, math.floor(height + 0.5)),
   }
 end
 
@@ -293,7 +308,10 @@ local function attempt_selection_preview(session, pointer, force_device)
   local overlay_opts = nil
   if overlay then
     local want_sheet = pointer.overlay_want_sheet
-      or (session.backend.overlay_needs_sheet and session.backend.overlay_needs_sheet(session.image_id))
+      or (
+        session.backend.overlay_needs_sheet
+        and session.backend.overlay_needs_sheet(session.image_id, nil, session.last_placement)
+      )
     overlay_opts = { overlay = true, sheet = want_sheet and sheet_dims(session) or nil }
   end
   M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)

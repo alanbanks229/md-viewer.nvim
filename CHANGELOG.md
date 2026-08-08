@@ -23,11 +23,26 @@ All notable changes to this project will be documented here. The project uses
   (`"auto"` / `"on"` / `"off"`) overrides that, and `"on"` is how you would try
   another terminal — see the WezTerm caveat above before you do.
 
-  **Known limitation:** the rectangles drawn during a drag are taller than the
-  highlight the browser paints on release — inside a fenced code block adjacent
-  lines touch where the real selection leaves gaps. The highlight is correct the
-  moment you let go. A fix is in progress; see
-  `docs/cross-platform-implementation-status.md`.
+- Fixed: those drag rectangles were drawn too large — noticeably wider than the
+  text and tall enough that adjacent lines in a code block touched, where the
+  real selection leaves gaps.
+
+  md-viewer places the preview over a rectangle of terminal *cells* and lets the
+  terminal scale the image to fit, so when its estimate of your cell size is
+  wrong the picture is simply squeezed to the right box and only sharpness
+  suffers. The drag overlay was the first thing ever placed in **pixels**, and
+  pixels only mean something against the size the image is actually drawn at. It
+  was sizing rectangles against the size the image was *captured* at instead.
+  On a terminal whose cell is 7×16 while the estimate said 10×20, that is 1.41×
+  too wide and 1.24× too tall — at exactly the right position, because positions
+  were always in cells.
+
+  The terminal's real cell size now comes from the operating system
+  (`TIOCGWINSZ`), which needs no escape sequence and nothing read back — the
+  reason md-viewer could not ask for it before. Where a terminal does not report
+  it, the drag overlay switches itself off and the captured-frame path takes
+  over rather than drawing rectangles it cannot size. `:MdViewerHealth` reports
+  the measurement as `cell_pixels`.
 
 - The preview now pins its own selection colour per theme rather than inheriting
   Chromium's default. Over the page background the settled highlight is the same

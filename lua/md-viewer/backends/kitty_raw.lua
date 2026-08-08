@@ -2,6 +2,7 @@ local M = { name = "kitty_raw" }
 local owned = {}
 local config = require("md-viewer.config")
 local terminal = require("md-viewer.terminal")
+local cellpixels = require("md-viewer.cellpixels")
 local next_id = 0x4d000000 + (vim.uv.os_getpid() % 0xffff) * 256
 local next_placement_id = 0x5d000000 + (vim.uv.os_getpid() % 0xffff) * 256
 
@@ -202,9 +203,21 @@ local next_overlay_set = 0
 ---Whether this terminal may be driven with overlay placements at all.
 ---`interaction.selection_overlay` "on"/"off" overrides; "auto" defers to the
 ---profile's probe-validated `selection_overlay` flag.
+---
+---Knowing the terminal's cell in physical pixels is a precondition that even
+---"on" cannot override, because it is a correctness requirement rather than a
+---capability judgement: overlay crops carry no `c`/`r` keys and therefore
+---display at natural pixel size, and without the real cell there is no way to
+---know what a pixel is worth on screen. Getting that wrong does not degrade
+---the highlight, it misdraws it -- see `cellpixels.lua`.
 function M.overlay_supported()
   local mode = config.get().interaction.selection_overlay
   if mode == "off" then return false, "interaction.selection_overlay=off (explicit override)" end
+  local cell, cell_reason = cellpixels.measure()
+  if not cell then
+    return false,
+      ("the terminal's pixel cell size is unknown (%s), and overlay rectangles are sized in pixels"):format(cell_reason)
+  end
   if mode == "on" then return true, "interaction.selection_overlay=on (explicit override)" end
   local profile, profile_id = active_profile()
   if profile.selection_overlay == true then return true, ("profile default (%s)"):format(profile_id) end
@@ -230,15 +243,31 @@ local function sheet_for(tint, min_width, min_height)
   return nil
 end
 
+---How large the tint sheet must be to cover any rectangle this base image can
+---produce. Crops are taken in *drawn* pixels (`placement` cells times the real
+---cell), which is smaller than the captured image whenever the render viewport
+---over-estimated the cell and larger whenever it under-estimated it -- so the
+---sheet has to cover whichever is bigger.
+local function required_sheet_size(item, placement)
+  local width, height = item.width_px, item.height_px
+  local cell = cellpixels.measure()
+  if cell and placement and placement.width and placement.height then
+    width = math.max(width, math.ceil(placement.width * cell.width))
+    height = math.max(height, math.ceil(placement.height * cell.height))
+  end
+  return width, height
+end
+
 ---True when `M.overlay_apply` for this base image would need `sheet_png`
 ---supplied. With `tint` nil it answers conservatively for any color, which is
 ---what the caller knows before the first selection result arrives.
-function M.overlay_needs_sheet(base_image_id, tint)
+function M.overlay_needs_sheet(base_image_id, tint, placement)
   local item = owned[base_image_id]
   if not item then return false end
-  if tint then return sheet_for(tint, item.width_px, item.height_px) == nil end
+  local width, height = required_sheet_size(item, placement)
+  if tint then return sheet_for(tint, width, height) == nil end
   for _, sheet in pairs(sheets) do
-    if sheet.width_px >= item.width_px and sheet.height_px >= item.height_px then return false end
+    if sheet.width_px >= width and sheet.height_px >= height then return false end
   end
   return true
 end
@@ -308,20 +337,19 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
     return nil, "overlay requires the base placement rectangle"
   end
 
+  local cell, cell_reason = cellpixels.measure()
+  if not cell then return nil, cell_reason end
+
+  local need_w, need_h = required_sheet_size(item, placement)
   local key = tint_key(tint)
-  local sheet = sheet_for(tint, item.width_px, item.height_px)
+  local sheet = sheet_for(tint, need_w, need_h)
   if not sheet then
     if type(sheet_png) ~= "string" then return nil, "need_sheet" end
     local width_px, height_px = png_dimensions(sheet_png)
     if not width_px then return nil, "overlay sheet is not a valid PNG" end
-    if width_px < item.width_px or height_px < item.height_px then
+    if width_px < need_w or height_px < need_h then
       return nil,
-        ("overlay sheet %dx%d is smaller than the base image %dx%d"):format(
-          width_px,
-          height_px,
-          item.width_px,
-          item.height_px
-        )
+        ("overlay sheet %dx%d is smaller than the %dx%d it must cover"):format(width_px, height_px, need_w, need_h)
     end
     local previous = sheets[key]
     next_id = next_id + 1
@@ -354,10 +382,27 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
     overlays[set_id] = set
   end
 
-  local scale_x = item.width_px / viewport.widthPx
-  local scale_y = item.height_px / viewport.heightPx
-  local cell_w = item.width_px / placement.width
-  local cell_h = item.height_px / placement.height
+  -- The base image is placed with c/r keys, so the terminal scales it to fill
+  -- exactly placement.width x placement.height cells. Overlay crops carry no
+  -- c/r and display at natural pixel size, so a rectangle has to be expressed
+  -- in the pixels the base image is *drawn* at -- not the pixels it was
+  -- *captured* at, which is all `item.width_px` knows.
+  --
+  -- Those two differ by however much the render viewport mis-estimated the
+  -- cell: with `coordinates.viewport`'s "estimated" tier guessing 10x20 CSS px
+  -- against a real 7x16, a 1980x2040 capture is drawn into 1386x1632, and
+  -- rectangles sized against the capture come out 1.41x too wide and 1.24x too
+  -- tall while still sitting at the right place (cells being exact either
+  -- way). That is precisely the defect the operator reported on 2026-08-08.
+  --
+  -- Deriving both the scale and the cell from the measured cell keeps this
+  -- correct whatever the capture size is, including when the render viewport
+  -- is exact and the two agree.
+  local cell_w, cell_h = cell.width, cell.height
+  local drawn_w = placement.width * cell_w
+  local drawn_h = placement.height * cell_h
+  local scale_x = drawn_w / viewport.widthPx
+  local scale_y = drawn_h / viewport.heightPx
   local offset_cfg = config.get().image.raw_cell_offset_px or {}
   local calibration = {
     x = math.max(0, math.floor(tonumber(offset_cfg.x) or 0)),
@@ -382,10 +427,8 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   for _, rect in ipairs(rects or {}) do
     local x0 = math.max(0, math.floor((tonumber(rect.x) or 0) * scale_x + 0.5))
     local y0 = math.max(0, math.floor((tonumber(rect.y) or 0) * scale_y + 0.5))
-    local x1 =
-      math.min(item.width_px, math.floor(((tonumber(rect.x) or 0) + (tonumber(rect.width) or 0)) * scale_x + 0.5))
-    local y1 =
-      math.min(item.height_px, math.floor(((tonumber(rect.y) or 0) + (tonumber(rect.height) or 0)) * scale_y + 0.5))
+    local x1 = math.min(drawn_w, math.floor(((tonumber(rect.x) or 0) + (tonumber(rect.width) or 0)) * scale_x + 0.5))
+    local y1 = math.min(drawn_h, math.floor(((tonumber(rect.y) or 0) + (tonumber(rect.height) or 0)) * scale_y + 0.5))
     if x1 > x0 and y1 > y0 then
       local pieces = { { x = x0, y = y0, width = x1 - x0, height = y1 - y0 } }
       for _, cut in ipairs(cuts) do
@@ -577,6 +620,9 @@ function M.health()
   return {
     overlay_supported = overlay_supported,
     overlay_reason = overlay_reason,
+    -- What a pixel is worth on screen. Overlay rectangles are sized in these,
+    -- so "unmeasured" here is exactly why the overlay is off.
+    cell_pixels = cellpixels.describe(),
     overlay_zindex = math.min(-1, zindex_value + 1),
     overlay_sheets = vim.tbl_count(sheets),
     overlay_sets = overlay_sets,
