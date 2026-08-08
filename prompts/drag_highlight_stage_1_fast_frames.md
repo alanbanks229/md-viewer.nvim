@@ -5,7 +5,7 @@ status: done
 model: Sonnet 5 (high)
 depends_on: parts 3-7 (all done)
 next: prompts/drag_highlight_stage_2_transport.md (only if this is not enough)
-commit: (recorded in a follow-up doc-only commit)
+commit: 2bcee86
 ---
 
 # Drag-to-Highlight Responsiveness — Stage 1
