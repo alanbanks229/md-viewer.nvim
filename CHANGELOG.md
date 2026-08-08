@@ -5,6 +5,18 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- The terminal cell size is measured fresh instead of being remembered. It was
+  read once and cached, and re-checked only against the row and column counts —
+  which a terminal can leave alone while changing its pixel geometry
+  underneath. WezTerm does exactly that on every launch: it sizes its pty at
+  half scale and corrects it about two seconds later, with the grid identical
+  either side. A preview opened in that window kept a half-scale cell for the
+  rest of the session and drew every drag-highlight rectangle at half size. A
+  terminal font-size change did the same thing more slowly. This affected every
+  terminal, not just WezTerm.
+
 ### Changed
 
 - Drag-to-highlight no longer re-photographs the page on every frame, on
@@ -17,12 +29,23 @@ All notable changes to this project will be documented here. The project uses
   frame, so the settled highlight is exactly what the page paints.
 
   **Enabled only where it was validated by hand in a real terminal**, which
-  today means iTerm2, Ghostty and Kitty. WezTerm failed to render these
-  placements and then crashed outright under them, so it keeps the existing
-  full-frame path untouched; everywhere else does the same, and the drag stays
-  correct there — merely slower. `interaction.selection_overlay`
-  (`"auto"` / `"on"` / `"off"`) overrides that, and `"on"` is how you would try
-  another terminal — see the WezTerm caveat above before you do.
+  today means iTerm2, Ghostty and Kitty. Everywhere else the drag keeps the
+  full-frame path, which stays correct — merely slower.
+  `interaction.selection_overlay` (`"auto"` / `"on"` / `"off"`) overrides that,
+  and `"on"` is how you would try another terminal.
+
+  **WezTerm is off deliberately, and not for the reason first recorded.** The
+  2026-08 investigation photographed a real window on both
+  `20240203-110809-5046fc22` and a current build and found two things. Its
+  geometry is fixable: WezTerm applies the protocol's sub-cell offset to every
+  cell of a placement rather than the first, and as an inset, so a highlight bar
+  draws as a comb of stripes — md-viewer now has an encoding that sends WezTerm
+  no offset keys at all, and it draws correctly on both builds. What is not
+  fixable from here is the cost: sustained placement traffic grows WezTerm's
+  memory without bound, 172 MB to 786 MB in four seconds with four rectangles,
+  with either encoding. Do not set `selection_overlay = "on"` in WezTerm; it
+  will look right and exhaust your memory. Details and photographs in
+  `docs/cross-platform-implementation-status.md`.
 
 - Fixed: on Ghostty the instant highlight worked once per session and then
   silently stopped, so every drag after the first behaved like the old
