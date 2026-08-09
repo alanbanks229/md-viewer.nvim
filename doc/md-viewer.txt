@@ -109,24 +109,24 @@ COMMANDS                                                 *md-viewer-commands*
         than opening a second one, and never closes one, which is exactly
         where it differs from :MdViewerToggle.
 
-                                                         *:MdViewerRefresh*
-:MdViewerRefresh
-        Force a fresh render of the active preview.
-
                                                             *:MdViewerCopy*
 :MdViewerCopy
         Copy the current preview selection to the unnamed register, and to
         the system clipboard register when one is configured. A clean
         notification, not an error, when nothing is selected.
 
-                                                 *:MdViewerClearSelection*
-:MdViewerClearSelection
-        Clear the current preview selection without clicking.
-
                                                             *:MdViewerFind*
 :MdViewerFind [query]
-        Search the rendered preview for `query`. Prompts for a query via
-        |vim.ui.input()| when none is given.
+        Search the rendered preview for `query`. Prompts for one via
+        |vim.ui.input()| when none is given, also bound to `/` with the
+        preview focused.
+
+        The prompt always opens empty -- the previous query is never
+        prefilled -- and dismissing it without a query clears both the
+        active search and any selection. That is the clearing gesture:
+        :MdViewerFindClear and :MdViewerClearSelection existed to do
+        exactly those two things and are gone. `<Esc>` with the preview
+        focused still clears the same two, one press at a time.
 
                                                         *:MdViewerFindNext*
 :MdViewerFindNext
@@ -135,10 +135,6 @@ COMMANDS                                                 *md-viewer-commands*
                                                     *:MdViewerFindPrevious*
 :MdViewerFindPrevious
         Jump to the previous search match.
-
-                                                       *:MdViewerFindClear*
-:MdViewerFindClear
-        Clear the active search and its highlighting.
 
                                                             *:MdViewerBack*
 :MdViewerBack

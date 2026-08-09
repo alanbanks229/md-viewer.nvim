@@ -80,9 +80,9 @@ All notable changes to this project will be documented here. The project uses
 - Copying the current selection (`y` / `:MdViewerCopy`) to the unnamed
   register and, when available, the system clipboard.
 - In-preview search (`:MdViewerFind`, `/`) with next/previous stepping
-  (`:MdViewerFindNext`/`:MdViewerFindPrevious`, `n`/`N`) and clearing
-  (`:MdViewerFindClear`).
-- `:MdViewerClearSelection` to clear a selection without clicking.
+  (`:MdViewerFindNext`/`:MdViewerFindPrevious`, `n`/`N`). The prompt always
+  opens empty, and dismissing it without a query clears both the active search
+  and any selection.
 - Preview history: `H`/`L` in the preview window, or
   `:MdViewerBack`/`:MdViewerForward` from anywhere, move the preview (and the
   source window with it) through the documents a reader has followed links
@@ -368,6 +368,17 @@ All notable changes to this project will be documented here. The project uses
   whether they scrolled a moment earlier.
 
 ### Removed
+
+- `:MdViewerRefresh`, `:MdViewerClearSelection` and `:MdViewerFindClear`.
+
+  Refreshing is already automatic — the preview re-renders on buffer changes,
+  and `controller.refresh()` remains the Lua API for the rare case that is not
+  enough. The other two each existed to do one thing that the search prompt now
+  expresses by being closed: `:MdViewerFind` (and `/`) always opens empty, and
+  dismissing it with Escape or an empty line clears the active search and any
+  selection. `<Esc>` with the preview focused still clears the same two, one
+  press at a time, and `controller.clear_selection()` / `controller.find_clear()`
+  remain callable from Lua.
 
 - `:MdViewerOpen` and `:MdViewerClose`. One command now owns whether a preview
   is showing: `:MdViewerToggle`, which still takes the same optional position.

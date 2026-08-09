@@ -125,7 +125,6 @@ installation.
   ft = "markdown",
   cmd = {
     "MdViewerToggle",
-    "MdViewerRefresh",
     "MdViewerHealth",
     "MdViewerDebug",
   },
@@ -378,13 +377,10 @@ Open a Markdown buffer, then use:
 | Command | Action |
 |---|---|
 | `:MdViewerToggle [right\|left\|below\|above]` | Open or close the preview |
-| `:MdViewerRefresh` | Force a fresh render |
 | `:MdViewerCopy` | Copy the current selection (also `y` with the preview focused) |
-| `:MdViewerClearSelection` | Clear the current selection without clicking |
-| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given (also `/`) |
+| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given (also `/`). The prompt always opens empty, and dismissing it without a query clears the search and any selection |
 | `:MdViewerFindNext` | Jump to the next match (also `n`) |
 | `:MdViewerFindPrevious` | Jump to the previous match (also `N`) |
-| `:MdViewerFindClear` | Clear the active search |
 | `:MdViewerHealth` | Show a short status summary: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Show the full diagnostic — environment, capabilities, per-preview state, and the event log. This is what to attach to a bug report |
 | `:checkhealth md-viewer` | Run Neovim health checks |

@@ -935,6 +935,38 @@ function M.find_clear()
   interaction.find_clear(session)
 end
 
+---Open the find prompt for `session`, or for the current preview.
+---
+---The prompt always opens empty; the previous query is never prefilled, so
+---every search starts from nothing rather than from whatever was typed last.
+---Dismissing it without a query -- Escape, or an empty line -- clears both the
+---active search and any selection.
+---
+---That dismissal is deliberately the clearing gesture. `:MdViewerFindClear` and
+---`:MdViewerClearSelection` existed to do exactly these two things and nothing
+---else, which is two commands to remember for something the search prompt can
+---express by being closed. `<Esc>` in the preview window still clears the same
+---two, one press at a time, via interaction.escape().
+---
+---Both clears are guarded on the session actually having that state, so
+---dismissing an empty prompt with nothing active costs no round trip.
+function M.find_prompt(session)
+  session = session or current_session()
+  if not valid(session) then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return
+  end
+  vim.ui.input({ prompt = "md-viewer find: " }, function(input)
+    if not valid(session) then return end
+    if input and input ~= "" then
+      interaction.find_set(session, input)
+      return
+    end
+    if session.find_active then interaction.find_clear(session) end
+    if session.selection_active then interaction.clear_selection(session) end
+  end)
+end
+
 function M.setup_autocmds()
   -- Session-level selection/find display state is not tied to any specific
   -- in-flight request (unlike process.lua's own deliver_error, which already

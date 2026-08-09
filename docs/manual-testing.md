@@ -82,7 +82,7 @@ not tell you (see §5).
 | Word / paragraph | Double-click; triple-click | The word, then the enclosing block. |
 | Click-to-deselect | Click once with a selection active | The highlight clears. The **source cursor does not move** — under any gesture. |
 | Copy | `y` or `:MdViewerCopy` | Unnamed register, and the system clipboard where available. Nothing is copied automatically. |
-| Search | `/` or `:MdViewerFind`, then `n`/`N`, then `:MdViewerFindClear` | Matches highlight, stepping wraps, clearing removes them. |
+| Search | `/` or `:MdViewerFind`, then `n`/`N`, then `/` again dismissed with Escape | Matches highlight, stepping wraps, dismissing the empty prompt removes them. |
 | Multibyte columns | Ctrl/Cmd-click on `café`, `日本語`, an emoji, in `provenance-comprehensive.md` | `:MdViewerDebug` reports an exact byte column that lands inside the line it names. |
 
 ### Links and history

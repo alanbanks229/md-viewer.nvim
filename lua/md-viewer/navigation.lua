@@ -33,13 +33,14 @@ local function interaction_mappings()
       { "y", function(session) interaction.copy_selection(session, false) end, "Copy preview selection" }
   end
   if cfg.find then
+    -- Same entry point as `:MdViewerFind` with no argument, so the prompt
+    -- behaves identically from either: always empty, and clearing the search
+    -- and selection when it is dismissed without a query. `controller` is
+    -- required at call time, not at the top of the file: it requires this
+    -- module.
     list[#list + 1] = {
       "/",
-      function(session)
-        vim.ui.input({ prompt = "md-viewer find: " }, function(input)
-          if input and input ~= "" then interaction.find_set(session, input) end
-        end)
-      end,
+      function(session) require("md-viewer.controller").find_prompt(session) end,
       "Search rendered preview",
     }
     list[#list + 1] = { "n", function(session) interaction.find_next(session) end, "Next search match" }
