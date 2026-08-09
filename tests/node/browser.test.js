@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { BrowserRenderer } from "../../renderer/src/browser.js";
+import { BrowserRenderer, CHROMIUM_LAUNCH_ARGS } from "../../renderer/src/browser.js";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 import { resolveSelectionInPage } from "../../renderer/src/interact.js";
 
@@ -353,4 +353,62 @@ test("browser.fast_png_encode = false keeps Playwright's encoder", async (t) => 
   );
   assert.equal(on.captureEncoder, "cdp_fast_png");
   assert.equal(renderer.fastPngEncode, true);
+});
+
+// Both of the following run without a browser: they are about what the
+// renderer refuses to do to one.
+
+test("Chromium is never asked to disable the compositor's frame-rate limit", () => {
+  // `--disable-frame-rate-limit` shaved ~12ms off a capture on Linux and made
+  // Page.captureScreenshot never answer at all on macOS -- 0 of 12 launches
+  // produced a frame with it set, 12 of 12 without, on two macOS versions and
+  // two Chrome builds. Since the launch args are otherwise unobservable from a
+  // test, assert on the exported list so the flag cannot come back on the
+  // strength of the benchmark alone.
+  assert.deepEqual(CHROMIUM_LAUNCH_ARGS, [
+    "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check",
+  ]);
+  assert.equal(
+    CHROMIUM_LAUNCH_ARGS.filter((arg) => /frame-rate|frame_rate/.test(arg)).length, 0,
+    "no launch argument may alter Chromium's frame-rate limiting -- Page.captureScreenshot waits on it"
+  );
+});
+
+test("a capture that never answers degrades to the Playwright path instead of hanging", async (t) => {
+  // Neither `CDPSession.send` nor `page.evaluate` has a timeout of its own, so
+  // without a bound of ours a wedged compositor stalls the serial request queue
+  // forever -- which is precisely what the frame-rate flag caused, and what a
+  // future Chromium regression could cause again.
+  const forever = () => new Promise(() => {});
+  const cases = [
+    { name: "the CDP capture stalls", evaluateStalls: false },
+    { name: "the scroll-origin evaluate stalls", evaluateStalls: true },
+  ];
+  for (const { name, evaluateStalls } of cases) {
+    const renderer = new BrowserRenderer({ assetsDir });
+    t.after(() => renderer.close());
+    renderer.cdpCaptureTimeoutMs = 50;
+    renderer.viewport = { width: 640, height: 480 };
+    renderer.deviceScaleFactor = 2;
+    renderer.cdp = { send: evaluateStalls ? async () => ({ data: "" }) : forever };
+    let playwrightScreenshots = 0;
+    renderer.page = {
+      evaluate: evaluateStalls ? forever : async () => ({ x: 0, y: 0 }),
+      screenshot: async ({ path: target }) => { playwrightScreenshots += 1; fs.writeFileSync(target, "png"); },
+    };
+
+    const pngPath = path.join(renderer.tempDir, "stall.png");
+    const encoder = await renderer.captureViewportPng(pngPath, "device");
+    assert.equal(encoder, "playwright_png", `${name}: expected the fallback capture path`);
+    assert.equal(playwrightScreenshots, 1, `${name}: the fallback must actually take the picture`);
+    assert.match(
+      renderer.cdpCaptureUnavailable ?? "", /did not respond within 50ms/,
+      `${name}: the stall must be recorded so later frames skip the fast path`
+    );
+
+    // Latched, so one stall costs one failed round trip rather than one per frame.
+    const again = await renderer.captureViewportPng(pngPath, "device");
+    assert.equal(again, "playwright_png", `${name}: the fast path must stay disabled`);
+    assert.equal(playwrightScreenshots, 2, `${name}: the second frame still gets captured`);
+  }
 });

@@ -34,8 +34,46 @@ import {
 
 const MAX_DOCUMENT_FRAMES = 64;
 
+// How long the raw CDP capture may take before it is treated as unavailable.
+// A frame that takes this long is already useless to a preview; the number only
+// has to be far above a real capture (tens of milliseconds) and far below any
+// wait a person would sit through.
+const CDP_CAPTURE_TIMEOUT_MS = 10000;
+
+/// The complete Chromium command line, exported so a test can assert what is
+/// *not* on it.
+///
+/// Deliberately no `--disable-frame-rate-limit`. It was here to skip the
+/// compositor's refresh-rate-paced wait that Page.captureScreenshot blocks on
+/// -- a fixed ~12ms per frame, unrelated to how much is being captured. On some
+/// macOS hosts it does not remove that wait, it removes the frame: with the flag
+/// set, the very first Page.captureScreenshot never answers at all. Measured on
+/// GitHub's macOS runners, 0 of 12 launches captured a frame with the flag and
+/// 12 of 12 without it, on both macOS 15 and macOS 26 and with both Google
+/// Chrome and Chrome for Testing. Twelve milliseconds is not worth a preview
+/// that can silently stop producing frames.
+export const CHROMIUM_LAUNCH_ARGS = [
+  "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check",
+];
+
 function round(value) {
   return Math.round(value * 100) / 100;
+}
+
+/// Bound a CDP round trip.
+///
+/// `CDPSession.send` has no timeout of its own, so a compositor that never
+/// commits a frame -- which is exactly what Page.captureScreenshot waits for --
+/// leaves the returned promise pending forever. Unbounded, that is not a slow
+/// preview but a dead one: the renderer's request queue is serial, so the stuck
+/// capture blocks every later request behind it and nothing ever reports why.
+/// Losing the fast path is a 12ms regression per frame; hanging is permanent.
+function withTimeout(promise, ms, what) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not respond within ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
 }
 
 export class BrowserRenderer {
@@ -71,6 +109,9 @@ export class BrowserRenderer {
     // than one on every frame.
     this.cdpCaptureUnavailable = null;
     this.fastPngEncode = true;
+    // A field rather than a constant so a test can prove the stall path without
+    // waiting out the real budget.
+    this.cdpCaptureTimeoutMs = CDP_CAPTURE_TIMEOUT_MS;
   }
 
   resolveExecutable(options = {}) {
@@ -88,18 +129,7 @@ export class BrowserRenderer {
       const executablePath = this.resolveExecutable(options);
       this.browser = await chromium.launch({
         executablePath, headless: true, timeout: options.launch_timeout_ms ?? 10000,
-        args: [
-          "--disable-extensions", "--disable-component-update", "--no-first-run", "--no-default-browser-check",
-          // Page.captureScreenshot waits for the compositor to commit a fresh
-          // frame, and headless caps that at the display refresh rate. The wait
-          // is a fixed cost with nothing to do with how much is being captured:
-          // a 1x1-pixel clip measured 32.3ms, exactly what a full 1980x2040
-          // device-scale frame costs before its encode. Removing the cap
-          // measured 32.3ms -> 19.8ms with byte-identical PNG output, and made
-          // no difference to idle CPU (0.4% of one core either way) -- which
-          // matters because this browser is persistent and mostly idle.
-          "--disable-frame-rate-limit",
-        ],
+        args: CHROMIUM_LAUNCH_ARGS,
       });
     }
     if (this.context && this.deviceScaleFactor === scale && this.networkEnabled === network) return;
@@ -203,25 +233,37 @@ export class BrowserRenderer {
         // `active.scrollY`: a find match or a fragment jump moves the page from
         // inside the document, and the picture must follow the page, not the
         // bookkeeping.
-        const origin = await this.page.evaluate(() => {
-          const visual = window.visualViewport;
-          return {
-            x: visual ? visual.pageLeft : window.scrollX,
-            y: visual ? visual.pageTop : window.scrollY,
-          };
-        });
-        const { data } = await this.cdp.send("Page.captureScreenshot", {
-          format: "png",
-          optimizeForSpeed: true,
-          captureBeyondViewport: false,
-          clip: {
-            x: origin.x,
-            y: origin.y,
-            width: this.viewport.width,
-            height: this.viewport.height,
-            scale: scale === "css" ? 1 : this.deviceScaleFactor,
-          },
-        });
+        //
+        // Bounded for the same reason the capture below is: `page.evaluate` has
+        // no timeout of its own either, and a renderer that has stopped
+        // answering must degrade to the Playwright path, not stall the queue.
+        const origin = await withTimeout(
+          this.page.evaluate(() => {
+            const visual = window.visualViewport;
+            return {
+              x: visual ? visual.pageLeft : window.scrollX,
+              y: visual ? visual.pageTop : window.scrollY,
+            };
+          }),
+          this.cdpCaptureTimeoutMs,
+          "scroll-origin evaluate",
+        );
+        const { data } = await withTimeout(
+          this.cdp.send("Page.captureScreenshot", {
+            format: "png",
+            optimizeForSpeed: true,
+            captureBeyondViewport: false,
+            clip: {
+              x: origin.x,
+              y: origin.y,
+              width: this.viewport.width,
+              height: this.viewport.height,
+              scale: scale === "css" ? 1 : this.deviceScaleFactor,
+            },
+          }),
+          this.cdpCaptureTimeoutMs,
+          "Page.captureScreenshot",
+        );
         fs.writeFileSync(pngPath, Buffer.from(data, "base64"));
         return "cdp_fast_png";
       } catch (error) {

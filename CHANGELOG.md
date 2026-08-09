@@ -97,15 +97,12 @@ All notable changes to this project will be documented here. The project uses
   colour as before; over code blocks and table stripes it shifts by 2-7/255. The
   change exists so the drag-time overlay and the browser's own paint cannot
   disagree, and so text stays readable under an overlay that sits above it.
-- Capturing a preview frame is roughly 2.3-2.8x cheaper, pixel for pixel.
-  Chromium now launches with `--disable-frame-rate-limit`, removing a fixed
-  compositor wait that dominated the capture regardless of how much was being
-  captured (a 1x1-pixel screenshot measured the same 32ms as a full frame), and
-  frames are encoded through Chromium's speed-optimised PNG path. PNG is
+- Capturing a preview frame is roughly 1.7-2x cheaper, pixel for pixel: frames
+  are encoded through Chromium's speed-optimised PNG path. PNG is
   lossless either way and the decoded pixels are identical; frames are about
   40-60% larger, which costs a fraction of a millisecond to reach the terminal.
-  Measured in a real iTerm2 session, capture time per drag frame fell from
-  103.2ms to 36.5ms. **On its own this does not make drag-to-highlight feel
+  Measured directly, encoding a 990x1020@2 frame fell from 84ms to 50ms.
+  **On its own this does not make drag-to-highlight feel
   faster** — the cost that governs how the drag feels is downstream of Neovim,
   in the terminal decoding and compositing a fresh full-viewport image every
   frame, which is what the overlay above addresses.
@@ -190,6 +187,17 @@ All notable changes to this project will be documented here. The project uses
   throttling back.
 
 ### Fixed
+
+- The preview no longer stops producing frames on macOS. Chromium was launched
+  with `--disable-frame-rate-limit`, which skipped a fixed ~12ms compositor wait
+  on Linux but, on some macOS hosts, stopped frames being committed at all — so
+  the screenshot request that waits for one simply never came back. Measured on
+  GitHub's macOS runners, 0 of 12 launches captured a frame with the flag set
+  and 12 of 12 without it, on both macOS 15 and macOS 26 and with both Google
+  Chrome and Chrome for Testing. The flag is gone, and both halves of the fast
+  capture path are now bounded, so a browser that stops answering costs one slow
+  frame and falls back to the ordinary capture instead of wedging the renderer's
+  request queue for good.
 
 - The terminal cell size is measured fresh instead of being remembered. It was
   read once and cached, and re-checked only against the row and column counts —

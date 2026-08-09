@@ -30,45 +30,11 @@ jobs:
       - name: Check Lua formatting
         run: stylua --check lua/ plugin/ tests/lua/
 
-  # TEMPORARY: isolates which browser build / launch argument wedges on the
-  # macOS runners. Removed once the macos-latest hang is understood.
-  diagnose:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, macos-15]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: renderer/package-lock.json
-
-      - name: Install locked renderer dependencies
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-        run: npm ci --ignore-scripts --prefix renderer
-
-      - name: Report installed browsers
-        run: |
-          sw_vers
-          uname -m
-          ls -d /Applications/*.app
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version || true
-          "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing" --version || true
-
-      - name: Chromium launch diagnostic
-        run: node renderer/scripts/chromium-launch-diagnostic.mjs
-
   test:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest]
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
