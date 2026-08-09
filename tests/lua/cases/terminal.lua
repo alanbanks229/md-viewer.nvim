@@ -60,9 +60,34 @@ return function(t)
   t.eq("tmux", muxed.multiplexer, "capability report includes multiplexer state")
   local mentions_tmux = false
   for _, caveat in ipairs(muxed.caveats) do
-    if caveat:match("tmux") then mentions_tmux = true end
+    -- Specifically kind "warn": a multiplexer can actually misplace the image,
+    -- which is the distinction that keeps it out of the notes pile and in the
+    -- concise health report where someone will read it.
+    if caveat.kind == "warn" and caveat.text:match("tmux") then mentions_tmux = true end
   end
   t.ok(mentions_tmux, "multiplexer presence is warned about in caveats")
+
+  -- Every static profile caveat is classified, and the classification is not
+  -- vacuous: the terminals md-viewer has actually validated carry no warnings
+  -- at all, so a warning in the concise report always means something.
+  for id, profile in pairs(terminal.profiles) do
+    for _, caveat in ipairs(profile.caveats or {}) do
+      t.ok(caveat.kind == "warn" or caveat.kind == "note", ("%s: every caveat declares a kind"):format(id))
+      t.ok(type(caveat.text) == "string" and #caveat.text > 0, ("%s: every caveat carries text"):format(id))
+    end
+  end
+  for _, id in ipairs({ "iterm2", "kitty", "ghostty", "wezterm" }) do
+    for _, caveat in ipairs(terminal.profiles[id].caveats) do
+      t.eq("note", caveat.kind, ("%s: a validated profile states provenance, it does not warn"):format(id))
+    end
+  end
+  for _, id in ipairs({ "warp", "generic_kitty", "unknown" }) do
+    local has_warning = false
+    for _, caveat in ipairs(terminal.profiles[id].caveats) do
+      if caveat.kind == "warn" then has_warning = true end
+    end
+    t.ok(has_warning, ("%s: an unvalidated profile warns"):format(id))
+  end
 
   -- Capability confidence is never "verified" from environment variables alone,
   -- across every profile this module can produce.

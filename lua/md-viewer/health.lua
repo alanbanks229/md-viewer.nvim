@@ -267,7 +267,10 @@ local function format_field(output, key, value)
   if key == "graphics_caveats" and type(value) == "table" then
     output[#output + 1] = ("%-36s %s"):format("graphics caveats:", #value > 0 and "" or "none")
     for _, caveat in ipairs(value) do
-      output[#output + 1] = "  - " .. caveat
+      -- The kind is the whole point of the concise/verbose split, so verbose
+      -- shows which of these two things each line is rather than flattening
+      -- them back together.
+      output[#output + 1] = ("  [%s] %s"):format(caveat.kind or "note", caveat.text or tostring(caveat))
     end
     return
   end
@@ -376,6 +379,7 @@ end
 ---repeat the same diagnosis across a caveat, a reason, and a warning.
 local function build_warnings(report, status, status_reason)
   local warnings = {}
+  local network_blocked = report.network_blocked ~= false
   if status ~= "healthy" then
     -- status_reason can be a multi-paragraph Playwright launch-failure
     -- message; keep the full text, just split so no single buffer line
@@ -387,8 +391,13 @@ local function build_warnings(report, status, status_reason)
       detail = #reason_lines > 1 and vim.list_slice(reason_lines, 2) or nil,
     }
   end
+  -- Only the caveats a reader could act on. The rest describe how md-viewer
+  -- knows what it knows -- how the terminal was identified, what was
+  -- photographed and when -- and are recorded in verbose output instead. A
+  -- validation record is evidence that something works; listing it here taught
+  -- readers that this list is noise.
   for _, caveat in ipairs(report.graphics_caveats or {}) do
-    warnings[#warnings + 1] = { text = caveat, severity = "warn" }
+    if caveat.kind == "warn" then warnings[#warnings + 1] = { text = caveat.text, severity = "warn" } end
   end
   if report.document_root_excludes_current then
     warnings[#warnings + 1] = {
@@ -402,22 +411,42 @@ local function build_warnings(report, status, status_reason)
           .. "or adjust security.document_root_markers.",
       },
     }
-  elseif report.document_root_unbounded then
+  elseif report.document_root_unbounded and not network_blocked then
+    -- An unbounded root is a stated configuration, not a fault, so on its own
+    -- it is a note (see build_notes). Combined with network access it stops
+    -- being just a wider read scope: a document can then reach a file and send
+    -- what it read, which is the one combination worth flagging.
     warnings[#warnings + 1] = {
-      text = 'document root is "/" -- local links and images are not confined to a project',
+      text = 'security.document_root is "/" and network access is enabled',
       severity = "warn",
       detail = {
-        "Deliberate and supported: the preview opens whatever Neovim would open.",
-        report.network_blocked and "Network is blocked, so a document can read a local image but cannot send it."
-          or "Network is ENABLED as well; narrow security.document_root or re-block the network.",
+        "A rendered document can read any path on this filesystem and make network requests.",
+        "Set security.document_root, or set security.network = false.",
       },
     }
   end
-  if report.network_blocked == false then
-    warnings[#warnings + 1] = { text = "network access is explicitly enabled", severity = "warn" }
+  if not network_blocked and not report.document_root_unbounded then
+    warnings[#warnings + 1] =
+      { text = "security.network is enabled: rendered documents can make network requests", severity = "warn" }
   end
   if not report.tui_attached then warnings[#warnings + 1] = { text = "no TUI attached", severity = "warn" } end
   return warnings
+end
+
+---Statements of fact about how this session is configured: true, worth
+---knowing, and nothing to fix. Kept separate from warnings so that a warning
+---always means "something here may not work", and deliberately short -- a note
+---that needs a paragraph of justification belongs in the documentation, not in
+---a health report arguing with the reader about their own configuration.
+local function build_notes(report)
+  local notes = {}
+  if report.document_root_unbounded and report.network_blocked ~= false then
+    notes[#notes + 1] = {
+      text = 'security.document_root is "/": local links and images resolve to any path on this filesystem',
+      detail = { "Network access is blocked, so a document can read a local file but cannot send it." },
+    }
+  end
+  return notes
 end
 
 ---Collapse the flat `report` into the structure both concise renderers
@@ -433,6 +462,7 @@ local function diagnose(report, cfg)
     status_reason = status_reason,
     sections = build_sections(report, cfg),
     warnings = build_warnings(report, status, status_reason),
+    notes = build_notes(report),
   }
 end
 
@@ -469,6 +499,16 @@ local function render_concise_text(diagnosis)
       end
     end
   end
+  if #diagnosis.notes > 0 then
+    output[#output + 1] = ""
+    output[#output + 1] = "Notes"
+    for _, note in ipairs(diagnosis.notes) do
+      output[#output + 1] = "  - " .. note.text
+      for _, detail in ipairs(note.detail or {}) do
+        output[#output + 1] = "    " .. detail
+      end
+    end
+  end
   output[#output + 1] = ""
   output[#output + 1] = "Run :MdViewerHealth verbose for full diagnostic detail."
   return output
@@ -492,6 +532,9 @@ local function render_healthlib(diagnosis)
     for _, warning in ipairs(diagnosis.warnings) do
       vim.health[warning.severity](warning.text, warning.detail)
     end
+  end
+  for _, note in ipairs(diagnosis.notes) do
+    vim.health.info(note.text, note.detail)
   end
   -- `:checkhealth` cannot await the renderer subprocess (see M.collect's own
   -- comment), so which document Chromium currently holds is only ever known

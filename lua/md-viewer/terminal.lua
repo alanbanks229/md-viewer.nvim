@@ -76,6 +76,14 @@ local function default_env() return vim.fn.environ() end
 -- identically for the base -- both are under text and over the cell background
 -- -- so this costs nothing on profiles that never draw an overlay, and it
 -- means turning one on later is a one-line change rather than a layer audit.
+
+-- Every caveat carries a `kind`, and the distinction is load-bearing rather
+-- than decorative: `warn` means something may actually misbehave and the
+-- reader can do something about it, `note` means this is how md-viewer knows
+-- what it knows. Only `warn` reaches the concise `:MdViewerHealth` warnings
+-- list; notes are recorded and shown in verbose. A validation record ("this
+-- was photographed working on 2026-08-07") is evidence, not a warning, and
+-- listing it under one taught readers to ignore the list.
 M.profiles = {
   iterm2 = {
     id = "iterm2",
@@ -91,10 +99,16 @@ M.profiles = {
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (drag-highlight overlay, 2026-08-07)",
     caveats = {
-      "iTerm2 advertises the Kitty graphics protocol, but md-viewer does not run a "
-        .. "synchronous response probe (Neovim owns terminal input), so this remains inferred.",
-      "Selection-overlay placements (alpha compositing, sub-cell offsets, placement churn) "
-        .. "were validated by the operator in a live iTerm2 session on 2026-08-07.",
+      {
+        kind = "note",
+        text = "iTerm2 advertises the Kitty graphics protocol, but md-viewer does not run a "
+          .. "synchronous response probe (Neovim owns terminal input), so this remains inferred.",
+      },
+      {
+        kind = "note",
+        text = "Selection-overlay placements (alpha compositing, sub-cell offsets, placement churn) "
+          .. "were validated by the operator in a live iTerm2 session on 2026-08-07.",
+      },
     },
   },
   kitty = {
@@ -106,12 +120,18 @@ M.profiles = {
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (2026-08-08)",
     caveats = {
-      "Kitty is the reference implementation of the graphics protocol this backend uses: the "
-        .. "sub-cell X/Y offsets, natural-size crops and same-z image-id ordering the selection "
-        .. "overlay depends on are defined by its own specification.",
-      "Selection-overlay placements were confirmed by the operator on 2026-08-08 across repeated "
-        .. "drags -- the case that matters, since the defect this profile was enabled after gave "
-        .. "one correct highlight and then none.",
+      {
+        kind = "note",
+        text = "Kitty is the reference implementation of the graphics protocol this backend uses: the "
+          .. "sub-cell X/Y offsets, natural-size crops and same-z image-id ordering the selection "
+          .. "overlay depends on are defined by its own specification.",
+      },
+      {
+        kind = "note",
+        text = "Selection-overlay placements were confirmed by the operator on 2026-08-08 across repeated "
+          .. "drags -- the case that matters, since the defect this profile was enabled after gave "
+          .. "one correct highlight and then none.",
+      },
     },
   },
   wezterm = {
@@ -152,31 +172,49 @@ M.profiles = {
       .. "20260805-104032-4b1c3c15 (2026-08-08); overlay disabled -- placement churn grows the "
       .. "terminal's memory without bound",
     caveats = {
-      "WezTerm implements the Kitty graphics protocol -- z-indices, crop keys, natural-size "
-        .. "placements without c/r, sub-cell X/Y offsets, placement ids and by-id deletion -- "
-        .. "and reports pty pixel geometry, so md-viewer can measure its cell.",
-      "WezTerm applies the X/Y sub-cell offset to every cell of a placement instead of only the "
-        .. "first as the protocol specifies, and applies it as an inset: each cell paints "
-        .. "cell-minus-X pixels wide. A 960px bar at X=3 was photographed as 60 separate 13px "
-        .. "runs. md-viewer therefore sends WezTerm no X/Y keys at all and expresses the offset "
-        .. "in the tint sheet instead (overlay_encoding = sheet-margin), which was photographed "
-        .. "as one solid bar on both builds.",
-      "Both builds behave identically here: 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15 "
-        .. "were driven through the same checks and passed the same 36 of 36. There is no version "
-        .. "boundary and md-viewer does not look for one.",
-      "Sustained placement traffic grows WezTerm's memory without bound, which is why the overlay "
-        .. "is off: 172 MB to 786 MB in four seconds with four rectangles replaced at 40fps, and to "
-        .. "6.5 GB with seventy, on both builds. md-viewer's own live-placement count stays flat "
-        .. "throughout, and an idle control holds at 173 MB, so it is the churn itself. One earlier "
-        .. "run died on 'Failed to allocate 23962752 quads' and an unwrap in draw.rs.",
-      "The growth is an upstream defect, not a cost model: WezTerm's assign_image_to_cells writes "
-        .. "a cell that already holds its image attachments back through a merging set_cell, so "
-        .. "each repeat placement over an already-covered cell duplicates the attachment list and "
-        .. "the renderer emits a quad per attachment. Reported as wezterm/wezterm#7953; a fix is "
-        .. "proposed in wezterm/wezterm#8035. Re-qualify with scripts/overlay/ once it ships.",
-      "Upstream issue #6344's divide-by-zero panics are unreachable from md-viewer: the cell must "
-        .. "floor to at least one pixel and every crop must be at least one pixel and wholly "
-        .. "inside its image before anything is emitted.",
+      {
+        kind = "note",
+        text = "WezTerm implements the Kitty graphics protocol -- z-indices, crop keys, natural-size "
+          .. "placements without c/r, sub-cell X/Y offsets, placement ids and by-id deletion -- "
+          .. "and reports pty pixel geometry, so md-viewer can measure its cell.",
+      },
+      {
+        kind = "note",
+        text = "WezTerm applies the X/Y sub-cell offset to every cell of a placement instead of only the "
+          .. "first as the protocol specifies, and applies it as an inset: each cell paints "
+          .. "cell-minus-X pixels wide. A 960px bar at X=3 was photographed as 60 separate 13px "
+          .. "runs. md-viewer therefore sends WezTerm no X/Y keys at all and expresses the offset "
+          .. "in the tint sheet instead (overlay_encoding = sheet-margin), which was photographed "
+          .. "as one solid bar on both builds.",
+      },
+      {
+        kind = "note",
+        text = "Both builds behave identically here: 20240203-110809-5046fc22 and 20260805-104032-4b1c3c15 "
+          .. "were driven through the same checks and passed the same 36 of 36. There is no version "
+          .. "boundary and md-viewer does not look for one.",
+      },
+      {
+        kind = "note",
+        text = "Sustained placement traffic grows WezTerm's memory without bound, which is why the overlay "
+          .. "is off: 172 MB to 786 MB in four seconds with four rectangles replaced at 40fps, and to "
+          .. "6.5 GB with seventy, on both builds. md-viewer's own live-placement count stays flat "
+          .. "throughout, and an idle control holds at 173 MB, so it is the churn itself. One earlier "
+          .. "run died on 'Failed to allocate 23962752 quads' and an unwrap in draw.rs.",
+      },
+      {
+        kind = "note",
+        text = "The growth is an upstream defect, not a cost model: WezTerm's assign_image_to_cells writes "
+          .. "a cell that already holds its image attachments back through a merging set_cell, so "
+          .. "each repeat placement over an already-covered cell duplicates the attachment list and "
+          .. "the renderer emits a quad per attachment. Reported as wezterm/wezterm#7953; a fix is "
+          .. "proposed in wezterm/wezterm#8035. Re-qualify with scripts/overlay/ once it ships.",
+      },
+      {
+        kind = "note",
+        text = "Upstream issue #6344's divide-by-zero panics are unreachable from md-viewer: the cell must "
+          .. "floor to at least one pixel and every crop must be at least one pixel and wholly "
+          .. "inside its image before anything is emitted.",
+      },
     },
   },
   ghostty = {
@@ -194,11 +232,17 @@ M.profiles = {
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (2026-08-08)",
     caveats = {
-      "Ghostty implements the Kitty graphics protocol, including the sub-cell X/Y placement "
-        .. "offsets, natural-size crops (no c/r keys) and negative z-indices the selection "
-        .. "overlay is built on.",
-      "Ghostty breaks a z-index tie by image id (lower id draws underneath), so the base image "
-        .. "and the selection overlay must never share a layer; md-viewer keeps them one apart.",
+      {
+        kind = "note",
+        text = "Ghostty implements the Kitty graphics protocol, including the sub-cell X/Y placement "
+          .. "offsets, natural-size crops (no c/r keys) and negative z-indices the selection "
+          .. "overlay is built on.",
+      },
+      {
+        kind = "note",
+        text = "Ghostty breaks a z-index tie by image id (lower id draws underneath), so the base image "
+          .. "and the selection overlay must never share a layer; md-viewer keeps them one apart.",
+      },
     },
   },
   warp = {
@@ -209,8 +253,11 @@ M.profiles = {
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
-      "Warp's Kitty graphics support has been inconsistent across releases; "
-        .. "placement and deletion behavior is unverified.",
+      {
+        kind = "warn",
+        text = "Warp's Kitty graphics support has been inconsistent across releases; "
+          .. "placement and deletion behavior is unverified.",
+      },
     },
   },
   generic_kitty = {
@@ -221,8 +268,11 @@ M.profiles = {
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
     caveats = {
-      "Only the TERM variable advertises Kitty graphics; no terminal-specific marker was "
-        .. "found. This is the weakest signal md-viewer accepts automatically.",
+      {
+        kind = "warn",
+        text = "Only the TERM variable advertises Kitty graphics; no terminal-specific marker was "
+          .. "found. This is the weakest signal md-viewer accepts automatically.",
+      },
     },
   },
   unknown = {
@@ -236,7 +286,9 @@ M.profiles = {
     default_double_buffer = true,
     placement = { deletion = "unsupported", crop = "unsupported" },
     validation = "not-attempted",
-    caveats = { "No evidence of Kitty graphics protocol support was found." },
+    caveats = {
+      { kind = "warn", text = "No evidence of Kitty graphics protocol support was found." },
+    },
   },
 }
 
@@ -348,10 +400,13 @@ function M.capability(cfg, env)
   local mux, mux_evidence = M.multiplexer(env)
   local caveats = vim.deepcopy(profile.caveats or {})
   if mux ~= "none" then
-    caveats[#caveats + 1] = (
-      "Running inside %s (%s); md-viewer does not adjust placement for "
-      .. "multiplexers and image position may be wrong."
-    ):format(mux, mux_evidence)
+    caveats[#caveats + 1] = {
+      kind = "warn",
+      text = (
+        "Running inside %s (%s); md-viewer does not adjust placement for "
+        .. "multiplexers and image position may be wrong."
+      ):format(mux, mux_evidence),
+    }
   end
 
   return {

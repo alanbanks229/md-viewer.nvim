@@ -48,6 +48,15 @@ All notable changes to this project will be documented here. The project uses
   reported: a terminal drawing the highlight underneath the preview looked
   exactly like one falling back to full frames.
 
+  A warning in the concise report now means one thing: something here may not
+  work, and you can do something about it. How md-viewer identified your
+  terminal, and what was photographed working on which date, are provenance
+  rather than problems — they moved to the verbose report, which tags each one
+  so nothing is lost. A `security.document_root` of `"/"` is likewise reported
+  under Notes as the stated configuration it is, not argued with; it becomes a
+  warning only when combined with network access, since that pairing is what
+  lets a document both read a file and send what it read.
+
 - Mouse interaction over the preview, forwarded to the live Chromium DOM: a
   new `interact` NDJSON method alongside `render`/`capture`, with its own
   staleness lane so a burst of pointer input can never cancel a render.

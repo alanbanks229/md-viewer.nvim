@@ -130,6 +130,62 @@ return function(t)
     t.ok(broken_playwright.status ~= degraded.status, "broken and degraded are visibly distinct statuses")
   end
 
+  -- What may go into "Warnings". The rule is one sentence -- a warning means
+  -- something here may not work and you can do something about it -- and these
+  -- assert the two ways it used to be broken: provenance filed as a warning,
+  -- and a stated configuration argued with as if it were a fault.
+  do
+    local auto_cfg = { image = { backend = "auto" } }
+
+    local noisy = base_report()
+    noisy.graphics_caveats = {
+      { kind = "note", text = "Selection-overlay placements were validated by the operator on 2026-08-07." },
+      { kind = "note", text = "Kitty graphics support is inferred, not probed." },
+      { kind = "warn", text = "Running inside tmux; image position may be wrong." },
+    }
+    local filtered = health._diagnose(noisy, auto_cfg)
+    t.eq(1, #filtered.warnings, "only actionable caveats become warnings")
+    t.ok(warning_texts(filtered):match("tmux"), "the actionable caveat is the one kept")
+    t.ok(not warning_texts(filtered):match("validated"), "a validation record is evidence, never a warning")
+    t.ok(not warning_texts(filtered):match("inferred"), "how the terminal was identified is not a warning")
+
+    -- An unbounded document root on its own is a stated choice reported as a
+    -- note; it becomes a warning only in combination with network access,
+    -- which is the pairing that lets a document both read a file and send it.
+    local wide = base_report()
+    wide.document_root_unbounded = true
+    wide.local_image_root = "/"
+    local wide_diagnosis = health._diagnose(wide, auto_cfg)
+    t.eq(0, #wide_diagnosis.warnings, 'document_root="/" with the network blocked is not a warning')
+    t.eq(1, #wide_diagnosis.notes, 'document_root="/" is reported as a note')
+    t.ok(wide_diagnosis.notes[1].text:match("document_root"), "the note names the setting it is about")
+    t.ok(
+      not (wide_diagnosis.notes[1].text .. table.concat(wide_diagnosis.notes[1].detail or {}, " ")):match(
+          "[Dd]eliberate"
+        ),
+      "a note states what is true; it does not defend the user's configuration to them"
+    )
+
+    local wide_and_online = base_report()
+    wide_and_online.document_root_unbounded = true
+    wide_and_online.network_blocked = false
+    local online_diagnosis = health._diagnose(wide_and_online, auto_cfg)
+    t.eq(1, #online_diagnosis.warnings, "an unbounded root plus network access is a single combined warning")
+    t.ok(warning_texts(online_diagnosis):match("network"), "the combined warning names the network")
+    t.eq(0, #online_diagnosis.notes, "the warning replaces the note rather than duplicating it")
+
+    -- The genuinely broken case is unchanged: a document outside a configured
+    -- root has every local link and image refused, and that is an error.
+    local excluded = base_report()
+    excluded.document_root_excludes_current = true
+    local excluded_diagnosis = health._diagnose(excluded, auto_cfg)
+    t.eq("error", excluded_diagnosis.warnings[1].severity, "a document outside its configured root is an error")
+
+    local clean = health._diagnose(base_report(), auto_cfg)
+    t.eq(0, #clean.warnings, "a healthy, conventionally configured session warns about nothing")
+    t.eq(0, #clean.notes, "and has nothing to note either")
+  end
+
   -- End-to-end: the concise default and the verbose opt-in both render from
   -- the same collected state, without embedded newlines (nvim_buf_set_lines
   -- rejects those) and without losing any detail field in verbose mode.
@@ -166,9 +222,11 @@ return function(t)
 
   local found_multiplexer_caveat = false
   for _, line in ipairs(verbose_lines) do
-    if line:match("^  %- ") and line:match("tmux") then found_multiplexer_caveat = true end
+    -- Verbose keeps every caveat and shows which kind each one is, so the
+    -- material the concise report filters out is still one command away.
+    if line:match("^  %[warn%] ") and line:match("tmux") then found_multiplexer_caveat = true end
   end
-  t.ok(found_multiplexer_caveat, "multi-entry caveats render as separate indented lines in verbose mode")
+  t.ok(found_multiplexer_caveat, "multi-entry caveats render as separate kind-tagged lines in verbose mode")
 
   -- Part 7 §7.4: interaction enabled state and which document Chromium
   -- currently holds active must both be visible in the report -- the
