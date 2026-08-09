@@ -1,6 +1,7 @@
 # Troubleshooting
 
-Start with `:MdViewerHealth`, which separates terminal detection, Kitty protocol
+Start with `:MdViewerHealth` for the overall status, selected backend, and any
+warnings. `:MdViewerHealth verbose` separates terminal detection, Kitty protocol
 advertisement, actual probe status, `vim.ui.img` presence, and a successful image
 render. `TERM_PROGRAM=iTerm.app` alone is never treated as proof.
 
@@ -73,7 +74,7 @@ iTerm2 to scale the whole screenshot down. Lower
 
 ## Image overlaps UI or survives close
 
-For `kitty_raw`, confirm `:MdViewerHealth` reports raw z-index `-1` and
+For `kitty_raw`, confirm `:MdViewerHealth verbose` reports raw z-index `-1` and
 `:MdViewerDebug` reports `occluded = true` while an overlapping float is visible.
 The overlap guard removes the image only for focusable UI. Non-focusable
 notifications create cropped placement cutouts, exposing their actual background
@@ -96,7 +97,7 @@ own -- its rectangle has to be cut out of the placement, and that cut has to
 actually reach the terminal. If you see the rendered Markdown showing through
 a notification instead of the notification's own background:
 
-- Confirm you are running a build that includes the fix (`:MdViewerHealth`
+- Confirm you are running a build that includes the fix (`:MdViewerHealth verbose`
   reports `raw_graphics_overlay_bleed_cells`; if that field is absent, the
   build predates it).
 - Confirm `:MdViewerDebug` reports a nonzero `passive_cutouts` while the
@@ -143,10 +144,10 @@ tabpage.
 
 ## Clicking, dragging, searching, or copying does nothing
 
-Confirm `:MdViewerHealth` reports `interaction enabled: true` and that the
-relevant `interaction.*` flag (`selection`, `word_select`, `paragraph_select`,
+Confirm `:MdViewerHealth verbose` reports `interaction enabled: true` and that
+the relevant `interaction.*` flag (`selection`, `word_select`, `paragraph_select`,
 `find`, `copy`, `links`) is not disabled. Interaction is unavailable outright
-for the `cells` backend (`:MdViewerHealth`'s `selected_backend` must not be
+for the `cells` backend (`:MdViewerHealth`'s Backend row must not read
 `cells`) -- there is no DOM to hit-test against without a graphical backend.
 `:MdViewerDebug`'s `interaction_request_count` and `interaction_stale_count`
 distinguish "nothing is being sent at all" (both stay at zero -- check the
@@ -169,7 +170,7 @@ during a scroll-only capture).
 
 ## A click lands on the wrong character, or link activation resolves the wrong content
 
-Confirm the active `viewport_calibration_tier` (`:MdViewerHealth`) is
+Confirm the active `viewport_calibration_tier` (`:MdViewerHealth verbose`) is
 `explicit`, not `estimated` -- an estimated cell size is a real source of
 click-position error on a terminal/font combination the estimate doesn't
 match well. Set `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (see
@@ -196,11 +197,11 @@ project is rooted at its own directory instead, so a link to a sibling directory
 is genuinely outside it. Either set `security.document_root` explicitly, or add
 a marker to `security.document_root_markers`.
 
-`:MdViewerHealth` shows both the resolved root and where it came from
-(`document root source`), and warns outright when a **configured**
-`security.document_root` does not contain the document being previewed --
-the case where every local link and image in that document is refused and
-nothing else says why.
+`:MdViewerHealth` warns outright when a **configured** `security.document_root`
+does not contain the document being previewed -- the case where every local
+link and image in that document is refused and nothing else says why.
+`:MdViewerHealth verbose` shows both the resolved root and where it came from
+(`document root source`).
 
 This is worth checking first if links fail in one project but work in another:
 a `security.document_root` set once, globally, in your Neovim config pins every
@@ -247,8 +248,9 @@ Neovim's global `'mousemoveevent'` is left alone as a result.
 
 ## Wrong terminal profile detected
 
-`:MdViewerHealth`'s `terminal_profile` and `terminal_profile_evidence` fields
-show exactly what was detected and why -- never trust `TERM_PROGRAM` alone
+`:MdViewerHealth`'s Terminal/Profile row names what was detected;
+`:MdViewerHealth verbose`'s `terminal_profile_evidence` field shows exactly
+why -- never trust `TERM_PROGRAM` alone
 (policy: detection evidence is not validation). If the profile is wrong,
 override it explicitly with `terminal.profile` rather than relying on
 `"auto"`; `terminal.kitty_graphics` and `terminal.probe` are the finer-grained

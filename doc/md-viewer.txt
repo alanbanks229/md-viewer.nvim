@@ -148,10 +148,16 @@ COMMANDS                                                 *md-viewer-commands*
 
                                                           *:MdViewerHealth*
 :MdViewerHealth
-        Open detailed environment, backend, renderer, and security status.
-        Round-trips to the renderer subprocess, so this is also the only
-        command that can report which document Chromium currently holds
-        active and how many document frames it has cached.
+        Open a concise health summary: overall status (healthy/degraded/
+        broken), the selected rendering backend, and any actionable
+        warnings. Round-trips to the renderer subprocess.
+
+:MdViewerHealth verbose
+        Open the full field-by-field diagnostic report -- raw graphics
+        geometry, terminal-profile evidence, and Chromium session state
+        (which document is currently active, cached document/frame
+        counts) -- useful for bug reports and troubleshooting. See
+        |md-viewer-health|.
 
                                                            *:MdViewerDebug*
 :MdViewerDebug
@@ -272,12 +278,12 @@ section of docs/cross-platform-implementation-status.md. Everywhere else the
 drag falls back to full captured frames -- always correct, merely slower. Set
 `interaction.selection_overlay` to "on" (see |md-viewer-setup|) to qualify
 your own terminal, after reading that option's notes in lua/md-viewer/
-config.lua. :MdViewerHealth (see |md-viewer-health|) reports whether the
-overlay is in use, why, and the layer it draws on.
+config.lua. :MdViewerHealth verbose (see |md-viewer-health|) reports whether
+the overlay is in use, why, and the layer it draws on.
 
 tmux, screen, and Zellij are not supported: no escape-sequence passthrough
 is implemented for any of them. :MdViewerHealth detects a multiplexer and
-reports it so the failure is diagnosable.
+surfaces it as a warning so the failure is diagnosable.
 
 =============================================================================
 SECURITY                                                 *md-viewer-security*
@@ -304,8 +310,15 @@ Run: >vim
 
     :checkhealth md-viewer
     :MdViewerHealth
+    :MdViewerHealth verbose
     :MdViewerDebug
 <
+`:checkhealth md-viewer` and the default `:MdViewerHealth` both give a
+concise summary -- an overall status (healthy/degraded/broken), the
+selected backend, and any warnings. `:MdViewerHealth verbose` adds the
+full field-by-field diagnostic detail (raw graphics geometry, terminal
+evidence, Chromium session state) without changing what was collected.
+
 Graphical pixel correctness, click accuracy, and interaction behavior still
 require direct interactive terminal testing; a headless health check cannot
 validate terminal rendering, real mouse input, or flicker.
