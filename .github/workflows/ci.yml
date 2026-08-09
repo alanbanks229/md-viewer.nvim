@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NVIM_VERSION: v0.12.4
+
 jobs:
   test:
     strategy:
@@ -25,13 +28,23 @@ jobs:
           cache-dependency-path: renderer/package-lock.json
       - name: Install Neovim (macOS)
         if: runner.os == 'macOS'
-        run: brew install neovim stylua
+        run: |
+          case "$(uname -m)" in
+            arm64) asset=nvim-macos-arm64.tar.gz ;;
+            *) asset=nvim-macos-x86_64.tar.gz ;;
+          esac
+          curl -fsSL -o nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/${asset}"
+          tar xzf nvim.tar.gz
+          echo "$PWD/${asset%.tar.gz}/bin" >> "$GITHUB_PATH"
+          brew install stylua
       - name: Install Neovim (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo add-apt-repository -y ppa:neovim-ppa/unstable
-          sudo apt-get update
-          sudo apt-get install -y neovim
+          curl -fsSL -o nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          tar xzf nvim.tar.gz
+          echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: Install stylua (Linux)
         if: runner.os == 'Linux'
         run: |

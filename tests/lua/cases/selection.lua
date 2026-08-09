@@ -49,6 +49,31 @@ return function(t)
 
   local function point(row, col, winid) return { screenrow = row, screencol = col, winid = winid or PREVIEW_WIN } end
 
+  -- The '+' register is provider-backed with no storage of its own: without
+  -- a real clipboard utility (xclip/xsel/wl-copy on Linux CI), every
+  -- setreg/getreg("+") silently no-ops regardless of has('clipboard'). Stub
+  -- it with an in-memory register so these tests exercise interaction.lua's
+  -- logic rather than the host's clipboard availability.
+  local function fake_plus_register()
+    local value = ""
+    local original_setreg, original_getreg = vim.fn.setreg, vim.fn.getreg
+    vim.fn.setreg = function(name, ...)
+      if name == "+" then
+        value = select(1, ...)
+        return 0
+      end
+      return original_setreg(name, ...)
+    end
+    vim.fn.getreg = function(name, ...)
+      if name == "+" then return value end
+      return original_getreg(name, ...)
+    end
+    return function()
+      vim.fn.setreg = original_setreg
+      vim.fn.getreg = original_getreg
+    end
+  end
+
   -- Stub out the actual backend display: these tests are about the
   -- request/backpressure/state machinery in interaction.lua, not image
   -- rendering, which controller.lua's own tests already cover.
@@ -576,6 +601,7 @@ return function(t)
     local original_request = process.request
     local original_has = vim.fn.has
     local original_notify = vim.notify
+    local restore_plus_register = fake_plus_register()
     local notified = {}
     vim.notify = function(message, level) notified[#notified + 1] = { message = message, level = level } end
     vim.fn.has = function(feature)
@@ -601,6 +627,7 @@ return function(t)
     t.eq("md-viewer: copied 11 characters", notified[1].message, "the notification is length-only, no register summary")
     t.eq(nil, notified[1].message:match("copied text"), "the notification never includes the selected text itself")
 
+    restore_plus_register()
     vim.fn.has = original_has
     vim.notify = original_notify
     process.request = original_request
@@ -613,6 +640,7 @@ return function(t)
     local session = fake_session()
     local original_request = process.request
     local original_has = vim.fn.has
+    local restore_plus_register = fake_plus_register()
     vim.fn.has = function(feature)
       if feature == "clipboard" then return 0 end
       return original_has(feature)
@@ -625,6 +653,7 @@ return function(t)
     t.eq("no clipboard here", vim.fn.getreg('"'), "the unnamed register is always written")
     t.eq("unchanged", vim.fn.getreg("+"), "+ is never written when has('clipboard') is false")
 
+    restore_plus_register()
     vim.fn.has = original_has
     process.request = original_request
   end
@@ -662,6 +691,7 @@ return function(t)
     local session = fake_session()
     local original_request = process.request
     local original_notify = vim.notify
+    local restore_plus_register = fake_plus_register()
     local notified = {}
     vim.notify = function(message, level) notified[#notified + 1] = { message = message, level = level } end
     process.request = function(method, params, callback)
@@ -683,6 +713,7 @@ return function(t)
     interaction.copy_selection(empty_session, false)
     t.eq(1, #notified, "copying with no rendered content at all still notifies cleanly")
 
+    restore_plus_register()
     vim.notify = original_notify
     process.request = original_request
   end

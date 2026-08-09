@@ -136,8 +136,11 @@ return function(t)
   local original_tmux = vim.env.TMUX
   vim.env.TMUX = "/tmp/tmux-501/default,1234,0" -- forces a second, multi-entry caveat
 
+  -- The renderer subprocess has to spin up and launch a real Chromium for
+  -- this round-trip; a cold launch on a loaded CI runner can take well
+  -- longer than it does on a warm local machine.
   health.show()
-  vim.wait(8000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
+  vim.wait(30000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
   t.eq("md-viewer-health", vim.bo.filetype, "MdViewerHealth renders its report buffer")
   local concise_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   for _, line in ipairs(concise_lines) do
@@ -151,7 +154,7 @@ return function(t)
   vim.cmd("bwipeout!")
 
   health.show("verbose")
-  vim.wait(8000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
+  vim.wait(30000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
   t.eq("md-viewer-health", vim.bo.filetype, "MdViewerHealth verbose renders its report buffer")
   local verbose_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   local has_embedded_newline = false
