@@ -15,11 +15,7 @@ function M.setup()
     { nargs = "?", complete = function() return { "right", "left", "below", "above" } end }
   )
   vim.api.nvim_create_user_command("MdViewerRefresh", function() controller.refresh() end, {})
-  vim.api.nvim_create_user_command(
-    "MdViewerHealth",
-    function(args) require("md-viewer.health").show(args.args ~= "" and args.args or nil) end,
-    { nargs = "?", complete = function() return { "verbose" } end }
-  )
+  vim.api.nvim_create_user_command("MdViewerHealth", function() require("md-viewer.health").show() end, {})
   vim.api.nvim_create_user_command("MdViewerDebug", function() require("md-viewer.debug").show() end, {})
   vim.api.nvim_create_user_command("MdViewerCopy", function() controller.copy() end, {})
   vim.api.nvim_create_user_command("MdViewerClearSelection", function() controller.clear_selection() end, {})

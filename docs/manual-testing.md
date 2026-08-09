@@ -99,7 +99,7 @@ not tell you (see §5).
 ### Drag-highlight overlay
 
 Only on a terminal where `selection_overlay` resolves on — confirm with
-`:MdViewerHealth verbose` (`raw graphics overlay supported`).
+`:MdViewerDebug` (`raw graphics overlay supported`).
 
 | Check | How | Expect |
 |---|---|---|

@@ -1,9 +1,10 @@
 # Troubleshooting
 
 Start with `:MdViewerHealth` for the overall status, selected backend, and any
-warnings. `:MdViewerHealth verbose` separates terminal detection, Kitty protocol
-advertisement, actual probe status, `vim.ui.img` presence, and a successful image
-render. `TERM_PROGRAM=iTerm.app` alone is never treated as proof.
+warnings. `:MdViewerDebug` is the full diagnostic in one buffer -- the environment and
+capability detail, then what each open preview is actually doing -- and is what
+to attach to a bug report. It separates terminal detection, `vim.ui.img`
+presence, and a successful image render. `TERM_PROGRAM=iTerm.app` alone is never treated as proof.
 
 ## Preview uses styled text instead of a PNG
 
@@ -74,7 +75,7 @@ the terminal to scale the whole screenshot down. Lower
 
 ## Image overlaps UI or survives close
 
-For `kitty_raw`, confirm `:MdViewerHealth verbose` reports a negative raw
+For `kitty_raw`, confirm `:MdViewerDebug` reports a negative raw
 z-index (`-2` by default) and
 `:MdViewerDebug` reports `occluded = true` while an overlapping float is visible.
 The overlap guard removes the image only for focusable UI. Non-focusable
@@ -98,7 +99,7 @@ own -- its rectangle has to be cut out of the placement, and that cut has to
 actually reach the terminal. If you see the rendered Markdown showing through
 a notification instead of the notification's own background:
 
-- Confirm you are running a build that includes the fix (`:MdViewerHealth verbose`
+- Confirm you are running a build that includes the fix (`:MdViewerDebug`
   reports `raw graphics overlay bleed cells`; if that field is absent, the
   build predates it).
 - Confirm `:MdViewerDebug` reports a nonzero `passive_cutouts` while the
@@ -145,7 +146,7 @@ tabpage.
 
 ## Clicking, dragging, searching, or copying does nothing
 
-Confirm `:MdViewerHealth verbose` reports `interaction enabled: true` and that
+Confirm `:MdViewerDebug` reports `interaction enabled: yes` and that
 the relevant `interaction.*` flag (`selection`, `word_select`, `paragraph_select`,
 `find`, `copy`, `links`) is not disabled. Interaction is unavailable outright
 for the `cells` backend (`:MdViewerHealth`'s Backend row must not read
@@ -171,7 +172,7 @@ during a scroll-only capture).
 
 ## A click lands on the wrong character, or link activation resolves the wrong content
 
-Confirm the active `viewport_calibration_tier` (`:MdViewerHealth verbose`) is
+Confirm the active `viewport calibration` tier (`:MdViewerDebug`) is
 `explicit`, not `estimated` -- an estimated cell size is a real source of
 click-position error on a terminal/font combination the estimate doesn't
 match well. Set `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (see
@@ -201,8 +202,8 @@ a marker to `security.document_root_markers`.
 `:MdViewerHealth` warns outright when a **configured** `security.document_root`
 does not contain the document being previewed -- the case where every local
 link and image in that document is refused and nothing else says why.
-`:MdViewerHealth verbose` shows both the resolved root and where it came from
-(`document root source`).
+`:MdViewerDebug` shows both the resolved root and where it came from
+(the `document root` line names both).
 
 This is worth checking first if links fail in one project but work in another:
 a `security.document_root` set once, globally, in your Neovim config pins every
@@ -250,7 +251,7 @@ Neovim's global `'mousemoveevent'` is left alone as a result.
 ## Wrong terminal profile detected
 
 `:MdViewerHealth`'s Terminal/Profile row names what was detected;
-`:MdViewerHealth verbose`'s `terminal_profile_evidence` field shows exactly
+`:MdViewerDebug`'s `identified by` field shows exactly
 why -- never trust `TERM_PROGRAM` alone
 (policy: detection evidence is not validation). If the profile is wrong,
 override it explicitly with `terminal.profile` rather than relying on

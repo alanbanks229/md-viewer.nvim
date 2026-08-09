@@ -39,14 +39,19 @@ All notable changes to this project will be documented here. The project uses
   `overlay_last_bytes` and friends in `:MdViewerDebug` and `:MdViewerHealth` so
   it is visible whether the overlay is live and what a frame actually costs.
 
-- `:MdViewerHealth` now takes an optional `verbose` argument. Without it the
-  report is a short status summary; with it, the full diagnostic detail. The
-  verbose report says whether the drag highlight is being drawn as overlay
-  rectangles and why, the layer it draws on beside the preview's own, and the
-  terminal's measured cell size (`raw graphics cell pixels`). The Ghostty bug
-  below was invisible from the outside precisely because none of this was
-  reported: a terminal drawing the highlight underneath the preview looked
-  exactly like one falling back to full frames.
+- Two diagnostics, split by the question they answer rather than by how much
+  they print. `:MdViewerHealth` is short and answers *can this work here* — an
+  overall status, the selected backend, and anything actionable. It is what to
+  read. `:MdViewerDebug` answers *what did it just do*: the same environment
+  detail field by field, plus per-preview session state, timings, placements
+  and the event log, in one buffer. It is what to attach to a bug report.
+
+  `:MdViewerDebug` now reports whether the drag highlight is being drawn as
+  overlay rectangles and why, the layer it draws on beside the preview's own,
+  and the terminal's measured cell size. The Ghostty bug below was invisible
+  from the outside precisely because none of this was reported: a terminal
+  drawing the highlight underneath the preview looked exactly like one falling
+  back to full frames.
 
   A warning now means one thing: something here may not work, and you can do
   something about it. What md-viewer photographed working on which date is a
@@ -57,7 +62,7 @@ All notable changes to this project will be documented here. The project uses
   with; it becomes a warning only when combined with network access, since that
   pairing is what lets a document both read a file and send what it read.
 
-  The verbose report went from about 50 field lines to 26, by merging fields
+  The environment report went from about 50 field lines to 26, by merging fields
   that only restated each other (four lines said "iTerm2"; the reason the
   overlay is off was printed twice) and dropping ones that could not inform a
   decision: a Kitty-protocol probe result that is hardcoded false because this
@@ -272,7 +277,7 @@ All notable changes to this project will be documented here. The project uses
   (`TIOCGWINSZ`), which needs no escape sequence and nothing read back — the
   reason md-viewer could not ask for it before. Where a terminal does not report
   it, the drag overlay switches itself off and the captured-frame path takes
-  over rather than drawing rectangles it cannot size. `:MdViewerHealth verbose`
+  over rather than drawing rectangles it cannot size. `:MdViewerDebug`
   reports the measurement as `raw graphics cell pixels`.
 
 - A highlight could survive into the next drag. Selecting some text, releasing,

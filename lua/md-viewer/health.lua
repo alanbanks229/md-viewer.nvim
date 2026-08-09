@@ -344,8 +344,12 @@ local function verbose_chromium(report)
   }
 end
 
-local function render_verbose_text(report)
-  local output = { "md-viewer.nvim health (verbose)", ("="):rep(31) }
+---The full environment dump, rendered for `:MdViewerDebug`. It lives here
+---rather than in debug.lua because this module already owns the vocabulary
+---for describing a machine's capabilities; debug.lua owns what the running
+---preview is doing with them.
+function M.environment_lines(report)
+  local output = {}
   local sections = {
     { title = "Environment", rows = verbose_environment(report) },
     { title = "Terminal & Graphics", rows = verbose_terminal(report) },
@@ -604,7 +608,7 @@ local function render_concise_text(diagnosis)
     end
   end
   output[#output + 1] = ""
-  output[#output + 1] = "Run :MdViewerHealth verbose for full diagnostic detail."
+  output[#output + 1] = "Run :MdViewerDebug for the full diagnostic."
   return output
 end
 
@@ -638,7 +642,12 @@ end
 
 ---@param mode? string "verbose" for the full field-by-field dump; anything
 ---else (including nil) renders the concise, status-led summary.
-function M.show(mode)
+---The short, human-readable report: is this machine set up to work, and if
+---not, what about it. Deliberately the only thing this command prints. What
+---the preview is doing right now, and the full field-by-field environment
+---behind these answers, is `:MdViewerDebug` -- one artifact, for pasting into
+---an issue, rather than a third view splitting the same diagnosis in half.
+function M.show()
   process.request("health", { browser = config.get().browser }, function(result, err)
     vim.cmd("botright new")
     local buf = vim.api.nvim_get_current_buf()
@@ -647,8 +656,7 @@ function M.show(mode)
     vim.bo[buf].bufhidden = "wipe"
     vim.bo[buf].swapfile = false
     local report = M.collect(result, err)
-    local out = mode == "verbose" and render_verbose_text(report) or render_concise_text(diagnose(report, config.get()))
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, out)
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, render_concise_text(diagnose(report, config.get())))
     vim.bo[buf].modifiable = false
     vim.bo[buf].filetype = "md-viewer-health"
   end)

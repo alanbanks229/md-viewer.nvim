@@ -207,66 +207,12 @@ return function(t)
   t.ok(concise_text:match("Warnings"), "the concise report has a single Warnings section")
   t.ok(not concise_text:match("raw graphics zindex:"), "raw graphics geometry is not in the concise report")
   t.ok(not concise_text:match("chromium active document:"), "Chromium session state is not in the concise report")
+  -- The full environment dump is :MdViewerDebug's job now, and this command
+  -- takes no arguments at all: a `verbose` view sitting between the two split
+  -- one diagnosis across two commands, so every bug report arrived with half.
+  t.ok(not concise_text:match("cell offset"), "field-by-field detail belongs to :MdViewerDebug")
   vim.cmd("bwipeout!")
 
-  health.show("verbose")
-  vim.wait(30000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
-  t.eq("md-viewer-health", vim.bo.filetype, "MdViewerHealth verbose renders its report buffer")
-  local verbose_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  local has_embedded_newline = false
-  for _, line in ipairs(verbose_lines) do
-    if line:find("\n", 1, true) then has_embedded_newline = true end
-  end
-  t.eq(false, has_embedded_newline, "no verbose report line contains an embedded newline")
-  local verbose_text = table.concat(verbose_lines, "\n")
-
-  local found_multiplexer_caveat = false
-  for _, line in ipairs(verbose_lines) do
-    if line:match("^caveat:") and line:match("tmux") then found_multiplexer_caveat = true end
-  end
-  t.ok(found_multiplexer_caveat, "an actionable terminal caveat is reported in verbose mode")
-
-  -- Verbose is a diagnostic, not a record of this project's testing. Which
-  -- terminal was photographed working on which date says nothing about the
-  -- session in front of the reader, and a field that can only ever hold one
-  -- value (kitty_graphics_probe_succeeded is hardcoded false -- this module
-  -- never probes) reads like a failure on every machine that runs it.
-  t.ok(not verbose_text:match("operator%-validated"), "verbose does not report this project's validation history")
-  t.ok(not verbose_text:match("[Vv]alidated by the operator"), "nor a validation record as a caveat")
-  t.ok(not verbose_text:match("probe succeeded"), "nor a probe result that is hardcoded and never true")
-  t.ok(not verbose_text:match("document root unbounded"), "nor a field derivable from the line above it")
-
-  -- Part 7 §7.4: interaction enabled state and which document Chromium
-  -- currently holds active must both be visible in the report -- the
-  -- renderer subprocess was actually queried above (health.show() always
-  -- round-trips through process.request("health", ...)), so this is real
-  -- reported state, not a placeholder. Now verbose-only after the concise
-  -- redesign.
-  t.ok(verbose_text:match("interaction enabled:%s+yes"), "the verbose report states whether interaction is enabled")
-  t.ok(verbose_text:match("Chromium Session State"), "the verbose report describes Chromium's session")
-
-  -- The drag-highlight overlay's own diagnostics. Without these, a terminal
-  -- silently drawing the highlight underneath the base image looks identical
-  -- to one falling back to full captures -- which is exactly how the
-  -- 2026-08-08 Ghostty defect presented, and why it took source-reading to
-  -- find. When the overlay is on, both z-indices must appear together on the
-  -- one line: equal numbers mean the base and the highlight are ordered by
-  -- image id rather than by layer. When it is off there is no overlay
-  -- placement to have a layer, so the line carries the refusal reason instead.
-  t.ok(verbose_text:match("overlay:%s+%S"), "the verbose report states whether the overlay is in use")
-  t.ok(verbose_text:match("cell pixels:"), "and what a pixel is worth on screen")
-  t.ok(verbose_text:match("base layer:%s+%-?%d+"), "and which layer the preview itself is drawn on")
-  local overlay_z, base_z = verbose_text:match("overlay:%s+on, layer (%-?%d+) over base (%-?%d+)")
-  if overlay_z and base_z then
-    t.eq(tonumber(base_z) + 1, tonumber(overlay_z), "the overlay sits exactly one layer above the base, never on it")
-  else
-    t.ok(
-      verbose_text:match("overlay:%s+off %-%-%s+%S"),
-      "an overlay that is off says why, so the refusal is actionable"
-    )
-  end
-
-  vim.cmd("bwipeout!")
   vim.env.TMUX = original_tmux
   require("md-viewer.process").stop()
   vim.wait(5000, function() return not require("md-viewer.process").status().running end, 20)

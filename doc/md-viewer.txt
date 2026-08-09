@@ -148,23 +148,23 @@ COMMANDS                                                 *md-viewer-commands*
 
                                                           *:MdViewerHealth*
 :MdViewerHealth
-        Open a concise health summary: overall status (healthy/degraded/
+        Open a short health summary: overall status (healthy/degraded/
         broken), the selected rendering backend, and any actionable
-        warnings. Round-trips to the renderer subprocess.
-
-:MdViewerHealth verbose
-        Open the full field-by-field diagnostic report -- raw graphics
-        geometry, terminal-profile evidence, and Chromium session state
-        (which document is currently active, cached document/frame
-        counts) -- useful for bug reports and troubleshooting. See
-        |md-viewer-health|.
+        warnings. Takes no arguments. Round-trips to the renderer
+        subprocess.
 
                                                            *:MdViewerDebug*
 :MdViewerDebug
-        Open session, renderer, timing, selection/search, and placement
-        diagnostics. Selection and search state is reported as lengths and
-        counts only -- the selected text and search query content are
-        never printed here.
+        Open the full diagnostic in one buffer: the environment and
+        capability detail (raw graphics geometry, terminal-profile
+        evidence, Chromium discovery and launch, security roots) followed
+        by per-preview session, timing and placement state and the event
+        log. This is what to attach to a bug report. Also round-trips to
+        the renderer subprocess.
+
+        Selection and search state is reported as lengths and counts only
+        -- the selected text and search query content are never printed
+        here.
 
 =============================================================================
 PREVIEW NAVIGATION                                   *md-viewer-navigation*
@@ -279,7 +279,7 @@ released build, do not force the overlay on there. Everywhere else the drag
 falls back to full captured frames -- always correct, merely slower. Set
 `interaction.selection_overlay` to "on" (see |md-viewer-setup|) to qualify
 your own terminal, after reading that option's notes in lua/md-viewer/
-config.lua. :MdViewerHealth verbose (see |md-viewer-health|) reports whether
+config.lua. :MdViewerDebug (see |md-viewer-health|) reports whether
 the overlay is in use, why, and the layer it draws on.
 
 tmux, screen, and Zellij are not supported: no escape-sequence passthrough
@@ -311,14 +311,16 @@ Run: >vim
 
     :checkhealth md-viewer
     :MdViewerHealth
-    :MdViewerHealth verbose
     :MdViewerDebug
 <
-`:checkhealth md-viewer` and the default `:MdViewerHealth` both give a
-concise summary -- an overall status (healthy/degraded/broken), the
-selected backend, and any warnings. `:MdViewerHealth verbose` adds the
-full field-by-field diagnostic detail (raw graphics geometry, terminal
-evidence, Chromium session state) without changing what was collected.
+`:checkhealth md-viewer` and `:MdViewerHealth` both give a short summary --
+an overall status (healthy/degraded/broken), the selected backend, and any
+warnings. They answer "is this set up to work here".
+
+`:MdViewerDebug` is the full diagnostic and answers "what did it just do":
+the same environment detail field by field, plus per-preview session state,
+timings, placements and the event log. Both halves are in the one buffer
+because explaining a real report almost always needs both.
 
 Graphical pixel correctness, click accuracy, and interaction behavior still
 require direct interactive terminal testing; a headless health check cannot

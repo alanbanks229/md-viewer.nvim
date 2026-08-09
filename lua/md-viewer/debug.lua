@@ -1,7 +1,5 @@
 local state = require("md-viewer.state")
 local process = require("md-viewer.process")
-local backends = require("md-viewer.backends")
-local terminal = require("md-viewer.terminal")
 local config = require("md-viewer.config")
 
 local M = { events = {} }
@@ -92,31 +90,48 @@ function M.snapshot()
       overlay_last_error = session.overlay_last_error,
     }
   end
+  -- `renderer`, `backends` and `terminal` used to be dumped here as well.
+  -- They are the machine's capabilities, not this preview's behaviour, and
+  -- health.environment_lines() now renders exactly the same data above the
+  -- snapshot -- reporting a fact twice in one buffer only invites the reader
+  -- to wonder which copy is stale.
   return {
     sessions = sessions,
-    interaction_enabled = config.get().interaction.enabled,
     -- The last link md-viewer handed to the operating system, and what came
     -- back. This is the difference between "the click never reached the
     -- plugin" and "the plugin ran the handler and the OS declined".
     last_external_open = require("md-viewer.interaction").last_external or "none",
-    renderer = process.status(),
-    backends = backends.health(),
-    terminal = terminal.detect(),
     events = M.events,
   }
 end
 
+---The one complete diagnostic artifact: what this machine can do, followed by
+---what the running previews are actually doing with it.
+---
+---Both halves are needed to explain almost any real report, and while they
+---lived in two commands (`:MdViewerHealth verbose` and this one) every bug
+---report arrived with one of them. Round-trips to the renderer for the same
+---reason `:MdViewerHealth` does: the Chromium path and launch result are only
+---trustworthy when the subprocess itself answers for them.
 function M.show()
-  local lines = vim.split(vim.inspect(M.snapshot()), "\n", { plain = true })
-  vim.cmd("botright new")
-  local buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_set_name(buf, "md-viewer://debug")
-  vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].swapfile = false
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  vim.bo[buf].filetype = "lua"
+  local health = require("md-viewer.health")
+  process.request("health", { browser = config.get().browser }, function(result, err)
+    local lines = { "md-viewer.nvim debug", ("="):rep(20) }
+    vim.list_extend(lines, health.environment_lines(health.collect(result, err)))
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "-- Sessions & Events --"
+    vim.list_extend(lines, vim.split(vim.inspect(M.snapshot()), "\n", { plain = true }))
+
+    vim.cmd("botright new")
+    local buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_buf_set_name(buf, "md-viewer://debug")
+    vim.bo[buf].buftype = "nofile"
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].swapfile = false
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].filetype = "md-viewer-debug"
+  end)
 end
 
 return M

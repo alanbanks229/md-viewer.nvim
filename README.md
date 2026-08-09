@@ -367,7 +367,7 @@ leftover:
   notification over the preview and compare the x of the image's edge with the x
   of the notification's edge. Set `x` to the difference (10 for a 20px cell on
   iTerm2's defaults). When it works, the gap closes completely and you can drop
-  `raw_overlay_bleed_cells` to `0`. `:MdViewerHealth verbose` reports both values.
+  `raw_overlay_bleed_cells` to `0`. `:MdViewerDebug` reports both values.
 
 If a notification over the preview bothers you at all, positioning it elsewhere
 (for `snacks.nvim`, `Snacks.notifier`'s placement options) avoids the overlap
@@ -389,8 +389,8 @@ Open a Markdown buffer, then use:
 | `:MdViewerFindNext` | Jump to the next match (also `n`) |
 | `:MdViewerFindPrevious` | Jump to the previous match (also `N`) |
 | `:MdViewerFindClear` | Clear the active search |
-| `:MdViewerHealth [verbose]` | Show a concise status summary; `verbose` adds full diagnostic detail |
-| `:MdViewerDebug` | Show session, timing, and placement diagnostics |
+| `:MdViewerHealth` | Show a short status summary: is this set up to work, and if not, why |
+| `:MdViewerDebug` | Show the full diagnostic — environment, capabilities, per-preview state, and the event log. This is what to attach to a bug report |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
 When the preview has focus, `j`/`k`, arrow keys, Ctrl-e/Ctrl-y,
