@@ -37,41 +37,31 @@ itself.
 
 ### Terminal support
 
-md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp. Only
+md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, and Ghostty. Only
 iTerm2, Ghostty, Kitty and WezTerm have ever actually been launched and
-looked at on real hardware. Most of what has been watched working there is
-image rendering and the drag-to-highlight overlay; the other interaction
-features (click, search, copy, link activation) still have **no graphical
-confirmation on any terminal**. `Protocol-compatible` is an honest, real
-status, not a lesser form of "supported" — it means the terminal advertises
-what md-viewer needs and nothing has been found broken, not that someone
-watched it work.
+looked at on real hardware. Most of what has been looked over is image
+rendering and the drag-to-highlight overlay, as well as other interaction
+features such as ctrl+click (to navigate to dependent documents / links),
+and the searching/copying of texts.
 
-The instant drag highlight — the selection painted as translucent overlay
-rectangles instead of re-photographing the page for every frame — is enabled
-on **iTerm2, Ghostty and Kitty**, each of which an operator drove by hand and
-watched across repeated drags.
+The instant drag highlight that is visible is the selection painted as a
+translucent overlay of rectangles instead of re-photographing the headless
+chromium page for every frame.
+- This overlay highlighting is not enabled for WezTerm yet due to a known
+  memory leak issue with WezTerm with Kitty Graphics Protocol.
+  [Related issue link here](https://github.com/wezterm/wezterm/issues/7953)
+- `interaction.selection_overlay = "on"` forces the overlay highlighting on
+   if you want to qualify your own terminal — read the option's notes first,
+   and note that on WezTerm it will draw correctly and eat your memory.
 
-It is off on **WezTerm**, and the reason is cost rather than correctness. Its
-geometry was settled in 2026-08 by photographing a real window on both
-`20240203-110809-5046fc22` and a current build: WezTerm applies the protocol's
-sub-cell offset to every cell of a placement instead of the first, and as an
-inset, so a highlight bar draws as a comb of stripes. md-viewer has an encoding
-that avoids it — it sends WezTerm no offset keys at all — and that draws
-correctly on both builds. What stops it is memory: sustained placement traffic
-grows WezTerm's resident size without bound, 172 MB to 786 MB in four seconds
-with four rectangles, enough to exhaust a laptop during one drag. So WezTerm
-keeps the full captured-frame path, which is always correct and merely slower,
-and the same is true of every other terminal.
-`interaction.selection_overlay = "on"` forces it on if you want to qualify your
-own terminal — read that option's notes first, and note that on WezTerm it will
-draw correctly and eat your memory.
+There are three (previously four) labels this project uses
+- `Supported`
+- `Experimental`
+- (No longer needed) `Protocol-compatible but unvalidated`
+- `Unsupported`
 
-The full, terminal-by-terminal scenario matrix — with the four honest labels
-this project uses (`Supported`, `Experimental`, `Protocol-compatible but
-unvalidated`, `Unsupported`) — lives in
-[docs/manual-testing.md](docs/manual-testing.md). Read it before reporting a
-graphical bug or claiming a terminal works.
+All which live in [docs/manual-testing.md](docs/manual-testing.md).
+Read it before reporting a graphical bug or claiming a terminal works.
 
 tmux, screen, and Zellij are **not supported and not advertised**: no
 escape-sequence passthrough is implemented for any of them.
