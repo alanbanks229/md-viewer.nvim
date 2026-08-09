@@ -80,10 +80,12 @@ local function default_env() return vim.fn.environ() end
 -- Every caveat carries a `kind`, and the distinction is load-bearing rather
 -- than decorative: `warn` means something may actually misbehave and the
 -- reader can do something about it, `note` means this is how md-viewer knows
--- what it knows. Only `warn` reaches the concise `:MdViewerHealth` warnings
--- list; notes are recorded and shown in verbose. A validation record ("this
--- was photographed working on 2026-08-07") is evidence, not a warning, and
--- listing it under one taught readers to ignore the list.
+-- what it knows. Only `warn` is reported by `:MdViewerHealth`, concise or
+-- verbose. Notes live here, where they explain why the code does what it does;
+-- the reader-facing per-terminal status is docs/manual-testing.md. A validation
+-- record ("this was photographed working on 2026-08-07") describes this
+-- project's testing, not the session in front of the user, and putting it in a
+-- diagnostic taught readers to skim past everything else in it.
 M.profiles = {
   iterm2 = {
     id = "iterm2",

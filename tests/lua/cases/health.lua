@@ -218,15 +218,23 @@ return function(t)
     if line:find("\n", 1, true) then has_embedded_newline = true end
   end
   t.eq(false, has_embedded_newline, "no verbose report line contains an embedded newline")
-  t.ok(#verbose_lines > 40, "verbose report retains the full field-by-field detail")
+  local verbose_text = table.concat(verbose_lines, "\n")
 
   local found_multiplexer_caveat = false
   for _, line in ipairs(verbose_lines) do
-    -- Verbose keeps every caveat and shows which kind each one is, so the
-    -- material the concise report filters out is still one command away.
-    if line:match("^  %[warn%] ") and line:match("tmux") then found_multiplexer_caveat = true end
+    if line:match("^caveat:") and line:match("tmux") then found_multiplexer_caveat = true end
   end
-  t.ok(found_multiplexer_caveat, "multi-entry caveats render as separate kind-tagged lines in verbose mode")
+  t.ok(found_multiplexer_caveat, "an actionable terminal caveat is reported in verbose mode")
+
+  -- Verbose is a diagnostic, not a record of this project's testing. Which
+  -- terminal was photographed working on which date says nothing about the
+  -- session in front of the reader, and a field that can only ever hold one
+  -- value (kitty_graphics_probe_succeeded is hardcoded false -- this module
+  -- never probes) reads like a failure on every machine that runs it.
+  t.ok(not verbose_text:match("operator%-validated"), "verbose does not report this project's validation history")
+  t.ok(not verbose_text:match("[Vv]alidated by the operator"), "nor a validation record as a caveat")
+  t.ok(not verbose_text:match("probe succeeded"), "nor a probe result that is hardcoded and never true")
+  t.ok(not verbose_text:match("document root unbounded"), "nor a field derivable from the line above it")
 
   -- Part 7 §7.4: interaction enabled state and which document Chromium
   -- currently holds active must both be visible in the report -- the
@@ -234,25 +242,28 @@ return function(t)
   -- round-trips through process.request("health", ...)), so this is real
   -- reported state, not a placeholder. Now verbose-only after the concise
   -- redesign.
-  local verbose_text = table.concat(verbose_lines, "\n")
-  t.ok(verbose_text:match("interaction enabled:%s+true"), "the verbose report states whether interaction is enabled")
-  t.ok(verbose_text:match("chromium active document:"), "the verbose report states which document Chromium holds")
-  t.ok(verbose_text:match("chromium cached document frames:"), "the verbose report states cached frame counts")
+  t.ok(verbose_text:match("interaction enabled:%s+yes"), "the verbose report states whether interaction is enabled")
+  t.ok(verbose_text:match("Chromium Session State"), "the verbose report describes Chromium's session")
 
   -- The drag-highlight overlay's own diagnostics. Without these, a terminal
   -- silently drawing the highlight underneath the base image looks identical
   -- to one falling back to full captures -- which is exactly how the
   -- 2026-08-08 Ghostty defect presented, and why it took source-reading to
-  -- find. The two z-indices must be reported together: equal numbers mean the
-  -- base and the highlight are ordered by image id rather than by layer.
-  t.ok(verbose_text:match("raw graphics overlay supported:"), "the verbose report states if the overlay is in use")
-  t.ok(verbose_text:match("raw graphics overlay reason:"), "and why, so a refusal is actionable")
-  t.ok(verbose_text:match("raw graphics overlay zindex:"), "the overlay's layer is reported beside the base's")
-  t.ok(verbose_text:match("raw graphics cell pixels:"), "and what a pixel is worth on screen")
-  local base_z = tonumber(verbose_text:match("raw graphics zindex:%s+(%-?%d+)"))
-  local overlay_z = tonumber(verbose_text:match("raw graphics overlay zindex:%s+(%-?%d+)"))
-  if base_z and overlay_z then
-    t.eq(base_z + 1, overlay_z, "the overlay sits exactly one layer above the base, never on it")
+  -- find. When the overlay is on, both z-indices must appear together on the
+  -- one line: equal numbers mean the base and the highlight are ordered by
+  -- image id rather than by layer. When it is off there is no overlay
+  -- placement to have a layer, so the line carries the refusal reason instead.
+  t.ok(verbose_text:match("overlay:%s+%S"), "the verbose report states whether the overlay is in use")
+  t.ok(verbose_text:match("cell pixels:"), "and what a pixel is worth on screen")
+  t.ok(verbose_text:match("base layer:%s+%-?%d+"), "and which layer the preview itself is drawn on")
+  local overlay_z, base_z = verbose_text:match("overlay:%s+on, layer (%-?%d+) over base (%-?%d+)")
+  if overlay_z and base_z then
+    t.eq(tonumber(base_z) + 1, tonumber(overlay_z), "the overlay sits exactly one layer above the base, never on it")
+  else
+    t.ok(
+      verbose_text:match("overlay:%s+off %-%-%s+%S"),
+      "an overlay that is off says why, so the refusal is actionable"
+    )
   end
 
   vim.cmd("bwipeout!")

@@ -169,82 +169,6 @@ function M.collect(renderer_result, renderer_error)
   }
 end
 
--- Named groups of `M.collect()`'s keys, in verbose display order. Every key
--- collected above must appear exactly once here -- verbose mode is the
--- guarantee that nothing the concise/checkhealth views omit is actually lost.
-local verbose_sections = {
-  { title = "Environment", keys = { "neovim", "vim_ui_img", "tui_attached", "terminal_program", "iterm2_version" } },
-  {
-    title = "Terminal & Graphics",
-    keys = {
-      "platform",
-      "multiplexer",
-      "terminal_profile",
-      "terminal_profile_evidence",
-      "graphics_confidence",
-      "graphics_decision_reason",
-      "graphics_validation",
-      "graphics_caveats",
-    },
-  },
-  {
-    title = "Backend Selection",
-    keys = { "kitty_graphics_probe_succeeded", "vim_ui_img_render_succeeded", "selected_backend", "backend_decision" },
-  },
-  {
-    title = "Raw Graphics (kitty_raw)",
-    keys = {
-      "raw_graphics_zindex",
-      "raw_graphics_zindex_source",
-      "raw_graphics_overlay_supported",
-      "raw_graphics_overlay_reason",
-      "raw_graphics_overlay_zindex",
-      "raw_graphics_cell_pixels",
-      "raw_graphics_double_buffer",
-      "raw_graphics_double_buffer_source",
-      "raw_graphics_cell_offset_px",
-      "raw_graphics_overlay_bleed_cells",
-      "raw_graphics_owned_images",
-      "raw_graphics_owned_placements",
-    },
-  },
-  {
-    title = "Renderer Process",
-    keys = {
-      "node_version",
-      "playwright_package",
-      "chromium_executable",
-      "chromium_discovery",
-      "chromium_launch",
-      "temporary_directory_writable",
-      "renderer_process",
-    },
-  },
-  {
-    title = "Security",
-    keys = {
-      "network_blocked",
-      "raw_html",
-      "local_image_root",
-      "document_root_source",
-      "document_root_excludes_current",
-      "document_root_unbounded",
-      "security_overrides",
-    },
-  },
-  { title = "Interaction & Coordinates", keys = { "viewport_calibration_tier", "interaction_enabled" } },
-  {
-    title = "Chromium Session State",
-    keys = {
-      "chromium_active_document",
-      "chromium_cached_document_frames",
-      "chromium_cached_documents",
-      "chromium_lane_documents",
-      "chromium_interaction_documents",
-    },
-  },
-}
-
 -- nvim_buf_set_lines rejects any item containing a newline. Most collected
 -- fields are short and deterministic, but chromium_launch/renderer_process's
 -- last_error come straight from a live Playwright/Chromium failure, and
@@ -263,31 +187,201 @@ local function split_lines(text)
   return lines
 end
 
-local function format_field(output, key, value)
-  if key == "graphics_caveats" and type(value) == "table" then
-    output[#output + 1] = ("%-36s %s"):format("graphics caveats:", #value > 0 and "" or "none")
-    for _, caveat in ipairs(value) do
-      -- The kind is the whole point of the concise/verbose split, so verbose
-      -- shows which of these two things each line is rather than flattening
-      -- them back together.
-      output[#output + 1] = ("  [%s] %s"):format(caveat.kind or "note", caveat.text or tostring(caveat))
-    end
+-- Verbose display. Every fact `M.collect()` gathers is reachable from here,
+-- but not necessarily on a line of its own: a field that only ever restates
+-- another one is merged into it, and a field that can only ever hold one value
+-- is not a diagnostic at all. What is deliberately absent is provenance about
+-- *this project's* testing -- which terminal was photographed working on which
+-- date. That belongs in docs/manual-testing.md; it says nothing about the
+-- session in front of the reader, and printing it beside real diagnostics
+-- teaches them to skim.
+local VERBOSE_LABEL_WIDTH = 26
+local VERBOSE_WIDTH = 88
+
+---Emit `label: value`, wrapping the value under itself rather than truncating
+---it. Playwright launch failures are multi-paragraph, so this has to cope with
+---real prose, and a truncated reason is a reason nobody can act on.
+local function verbose_row(output, label, value)
+  local text = table.concat(split_lines(value == nil and "unknown" or value), " ")
+  local indent = (" "):rep(VERBOSE_LABEL_WIDTH)
+  local budget = VERBOSE_WIDTH - VERBOSE_LABEL_WIDTH
+  local prefix = ("%-" .. VERBOSE_LABEL_WIDTH .. "s"):format(label .. ":")
+  if text == "" then
+    output[#output + 1] = prefix
     return
   end
-  -- vim.inspect() emits multi-line output for any non-trivial table.
-  if type(value) == "table" then value = vim.inspect(value, { newline = " ", indent = "" }) end
-  local lines = split_lines(value)
-  local first = #lines > 1 and (lines[1] .. " …") or lines[1]
-  output[#output + 1] = ("%-36s %s"):format(key:gsub("_", " ") .. ":", first)
+  local line = nil
+  for word in text:gmatch("%S+") do
+    if not line then
+      line = word
+    elseif #line + 1 + #word <= budget then
+      line = line .. " " .. word
+    else
+      output[#output + 1] = prefix .. line
+      prefix, line = indent, word
+    end
+  end
+  if line then output[#output + 1] = prefix .. line end
+end
+
+local function yes_no(value) return value and "yes" or "no" end
+
+local function verbose_environment(report)
+  local rows = {
+    { "neovim", report.neovim },
+    {
+      "terminal",
+      report.iterm2_version ~= "not detected" and ("%s %s"):format(report.terminal_program, report.iterm2_version)
+        or report.terminal_program,
+    },
+    { "TUI attached", yes_no(report.tui_attached) },
+  }
+  -- Two collected fields, one question: is the experimental API there, and did
+  -- it work when it was tried?
+  local ui_img = "absent"
+  if report.vim_ui_img then
+    ui_img = report.vim_ui_img_render_succeeded and "present, render succeeded" or "present, render did not succeed"
+  end
+  rows[#rows + 1] = { "vim.ui.img", ui_img }
+  return rows
+end
+
+local function verbose_terminal(report)
+  -- terminal_profile, graphics_confidence, graphics_decision_reason and
+  -- terminal_profile_evidence were four lines restating one conclusion.
+  return {
+    { "platform", report.platform },
+    { "multiplexer", report.multiplexer },
+    { "terminal profile", ("%s -- graphics %s"):format(report.terminal_profile, report.graphics_confidence) },
+    { "identified by", report.terminal_profile_evidence },
+  }
+end
+
+local function verbose_backend(report)
+  -- kitty_graphics_probe_succeeded is not reported: this module never runs a
+  -- protocol probe (Neovim owns terminal input), so the field is hardcoded
+  -- false and read like a failure on every machine that ever ran it.
+  return {
+    { "selected backend", report.selected_backend },
+    { "decision", report.backend_decision },
+  }
+end
+
+local function verbose_raw_graphics(report)
+  local overlay = report.raw_graphics_overlay_supported
+      and ("on, layer %s over base %s"):format(report.raw_graphics_overlay_zindex, report.raw_graphics_zindex)
+    or ("off -- %s"):format(report.raw_graphics_overlay_reason or "reason not reported")
+  -- The overlay line above already carries the "why" whenever the cell size is
+  -- the cause, so this does not repeat the same parenthetical verbatim.
+  local cell_pixels = tostring(report.raw_graphics_cell_pixels)
+  if cell_pixels:match("^unmeasured") then cell_pixels = "unmeasured" end
+  return {
+    { "overlay", overlay },
+    { "cell pixels", cell_pixels },
+    { "base layer", ("%s (%s)"):format(report.raw_graphics_zindex, report.raw_graphics_zindex_source) },
+    {
+      "double buffer",
+      ("%s (%s)"):format(yes_no(report.raw_graphics_double_buffer), report.raw_graphics_double_buffer_source),
+    },
+    {
+      "cell offset / bleed",
+      ("%s / %s cell(s)"):format(report.raw_graphics_cell_offset_px, report.raw_graphics_overlay_bleed_cells),
+    },
+    {
+      "owned",
+      ("%s image(s), %s placement(s)"):format(report.raw_graphics_owned_images, report.raw_graphics_owned_placements),
+    },
+  }
+end
+
+local function verbose_renderer(report)
+  local process = report.renderer_process or {}
+  local process_text = process.running and ("running (pid %s)"):format(process.pid or "unknown")
+    or (process.last_error and ("not running -- " .. process.last_error) or "not running")
+  if process.running and process.stderr and process.stderr ~= "" then
+    process_text = process_text .. "; stderr: " .. process.stderr
+  end
+  return {
+    { "node", report.node_version },
+    { "playwright", report.playwright_package },
+    { "chromium", ("%s (%s)"):format(report.chromium_executable, report.chromium_discovery) },
+    { "chromium launch", report.chromium_launch },
+    { "temp dir writable", yes_no(report.temporary_directory_writable) },
+    { "process", process_text },
+  }
+end
+
+local function verbose_security(report)
+  -- document_root_unbounded is not reported: it is true exactly when the
+  -- document root on the line above is "/".
+  local rows = {
+    { "network", report.network_blocked == false and "ENABLED" or "blocked" },
+    { "raw html", yes_no(report.raw_html) },
+    { "document root", ("%s (%s)"):format(report.local_image_root, report.document_root_source) },
+  }
+  if report.document_root_excludes_current then
+    rows[#rows + 1] = { "current document", "OUTSIDE the document root -- every local link and image is refused" }
+  end
+  rows[#rows + 1] = { "overrides", report.security_overrides }
+  return rows
+end
+
+local function verbose_chromium(report)
+  -- Collapsed while nothing is loaded: five counters reading "none" and "0"
+  -- say only "no preview is open", and say it five times.
+  if report.chromium_active_document == "not queried" then
+    return { { "session", "not queried (:checkhealth does not round-trip to the renderer)" } }
+  end
+  if report.chromium_active_document == "none" then return { { "session", "no document loaded" } } end
+  return {
+    { "active document", report.chromium_active_document },
+    { "cached frames", report.chromium_cached_document_frames },
+    { "cached documents", report.chromium_cached_documents },
+    {
+      "lane / interaction",
+      ("%s / %s"):format(report.chromium_lane_documents, report.chromium_interaction_documents),
+    },
+  }
 end
 
 local function render_verbose_text(report)
-  local output = { "md-viewer.nvim health (verbose)", string.rep("=", 31) }
-  for _, section in ipairs(verbose_sections) do
+  local output = { "md-viewer.nvim health (verbose)", ("="):rep(31) }
+  local sections = {
+    { title = "Environment", rows = verbose_environment(report) },
+    { title = "Terminal & Graphics", rows = verbose_terminal(report) },
+    { title = "Backend Selection", rows = verbose_backend(report) },
+    { title = "Raw Graphics (kitty_raw)", rows = verbose_raw_graphics(report) },
+    { title = "Renderer Process", rows = verbose_renderer(report) },
+    { title = "Security", rows = verbose_security(report) },
+    {
+      title = "Interaction & Coordinates",
+      rows = {
+        { "interaction enabled", yes_no(report.interaction_enabled) },
+        { "viewport calibration", report.viewport_calibration_tier },
+      },
+    },
+    { title = "Chromium Session State", rows = verbose_chromium(report) },
+  }
+  for _, section in ipairs(sections) do
     output[#output + 1] = ""
     output[#output + 1] = "-- " .. section.title .. " --"
-    for _, key in ipairs(section.keys) do
-      format_field(output, key, report[key])
+    for _, row in ipairs(section.rows) do
+      verbose_row(output, row[1], row[2])
+    end
+  end
+
+  -- Only the caveats that say something may not work. The rest describe how
+  -- md-viewer identified this terminal and what was validated when, which is
+  -- documentation rather than diagnosis.
+  local actionable = {}
+  for _, caveat in ipairs(report.graphics_caveats or {}) do
+    if caveat.kind == "warn" then actionable[#actionable + 1] = caveat.text end
+  end
+  if #actionable > 0 then
+    output[#output + 1] = ""
+    output[#output + 1] = "-- Terminal caveats --"
+    for _, text in ipairs(actionable) do
+      verbose_row(output, "caveat", text)
     end
   end
   return output

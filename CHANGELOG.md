@@ -48,14 +48,24 @@ All notable changes to this project will be documented here. The project uses
   reported: a terminal drawing the highlight underneath the preview looked
   exactly like one falling back to full frames.
 
-  A warning in the concise report now means one thing: something here may not
-  work, and you can do something about it. How md-viewer identified your
-  terminal, and what was photographed working on which date, are provenance
-  rather than problems — they moved to the verbose report, which tags each one
-  so nothing is lost. A `security.document_root` of `"/"` is likewise reported
-  under Notes as the stated configuration it is, not argued with; it becomes a
-  warning only when combined with network access, since that pairing is what
-  lets a document both read a file and send what it read.
+  A warning now means one thing: something here may not work, and you can do
+  something about it. What md-viewer photographed working on which date is a
+  record of this project's testing rather than a fact about your session, so it
+  is gone from both reports — the per-terminal status lives in
+  [docs/manual-testing.md](docs/manual-testing.md). A `security.document_root`
+  of `"/"` is reported under Notes as the stated configuration it is, not argued
+  with; it becomes a warning only when combined with network access, since that
+  pairing is what lets a document both read a file and send what it read.
+
+  The verbose report went from about 50 field lines to 26, by merging fields
+  that only restated each other (four lines said "iTerm2"; the reason the
+  overlay is off was printed twice) and dropping ones that could not inform a
+  decision: a Kitty-protocol probe result that is hardcoded false because this
+  plugin deliberately never probes, and `document root unbounded`, which is true
+  exactly when the document root above it reads `/`. Long values now wrap
+  instead of being truncated with an ellipsis, so a multi-paragraph Chromium
+  launch failure is readable where it is reported. Nothing that can vary between
+  machines was removed.
 
 - Mouse interaction over the preview, forwarded to the live Chromium DOM: a
   new `interact` NDJSON method alongside `render`/`capture`, with its own
