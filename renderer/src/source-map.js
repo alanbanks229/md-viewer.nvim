@@ -4,7 +4,8 @@ import { registerBlockRegion, registerCodeRegion } from "./provenance.js";
 /// provenance `env` is supplied -- with an opaque per-render region id.
 ///
 /// `data-source-start`/`data-source-end` are untouched: `collectBlockGeometry()`
-/// below and source-to-preview scroll sync both key off them, and Part 5 adds to
+/// below and source-to-preview scroll sync both key off them, and exact
+/// provenance adds to
 /// them rather than replacing them. `data-md-source-id` goes on the same
 /// elements so a hit that lands on a block rather than an inline run still
 /// resolves through one lookup.

@@ -1,11 +1,11 @@
-// Render one churn run as a table. Kept separate from churn.sh so a run can be
-// re-read without re-running it.
+// Render one overlay stress run as a table. Kept separate from run.sh so a run
+// can be re-read without re-running it.
 import fs from "node:fs";
 import path from "node:path";
 
 const out = process.argv[2];
 if (!out) {
-  console.error("usage: churn-report.mjs <out-dir>");
+  console.error("usage: report.mjs <out-dir>");
   process.exit(2);
 }
 const run = JSON.parse(fs.readFileSync(path.join(out, "churn.json"), "utf8"));
@@ -48,13 +48,13 @@ if (cpu.length) {
   );
 }
 
-// The number that decides it: a drag frame has to fit inside the ~25ms budget
-// stage 2 established, and has to beat the path it replaces.
+// The number that decides it: a drag frame has to fit inside the ~25 ms a 40fps
+// drag allows, and has to beat the full-frame path it replaces.
 const drag = run.samples.find((s) => s.workload.startsWith("diff"));
 if (drag) {
   console.log(
     `\n  a real drag frame: ${Math.round(drag.bytes_per_frame)} B and ${drag.ms_mean.toFixed(2)} ms ` +
-      `(budget is ~25 ms at the 40fps stage 2 established)`
+      `(budget is ~25 ms per frame at 40fps)`
   );
 }
 console.log("");

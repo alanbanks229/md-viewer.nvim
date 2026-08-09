@@ -26,7 +26,7 @@
      reasoning. Chromium's light default measured as rgba(189,189,189,0.576);
      this value composites to the same #d9d9d9 over the white page background
      (0.3*128 + 0.7*255 = 216.9) while staying translucent enough for the
-     stage-4 drag overlay that sits above the glyphs. Must stay equal to
+     drag overlay that sits above the glyphs. Must stay equal to
      SELECTION_TINT.light in renderer/src/interact.js. */
   --selection-bg: rgba(128, 128, 128, 0.3);
 }

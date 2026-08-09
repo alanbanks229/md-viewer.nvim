@@ -1,4 +1,4 @@
-# Part 5: Exact Source Provenance Test Suite
+# Source provenance stress document
 
 ## Basic Elements with Source Mapping
 

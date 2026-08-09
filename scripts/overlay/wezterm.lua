@@ -1,8 +1,8 @@
--- Stage-6 WezTerm qualification config. Not a config anyone should use: every
--- value here exists to make the window's pixel geometry predictable enough
--- that a screenshot can be asserted on.
+-- Throwaway WezTerm config shared by the geometry and stress harnesses. Not a
+-- config anyone should use: every value here exists to make the window's pixel
+-- geometry predictable enough that a screenshot can be asserted on. Passed with
+-- `--config-file`, so it never touches the operator's own config.
 --
--- Passed with `--config-file`, so it never touches the operator's own config.
 -- Deliberately a plain table rather than `wezterm.config_builder()`, because
 -- this has to load unchanged on both 20240203-110809-5046fc22 and a current
 -- nightly and the builder rejects keys the running build does not know.

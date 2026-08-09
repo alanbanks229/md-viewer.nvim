@@ -259,12 +259,12 @@ Nothing is sent, and the global 'mousemoveevent' is left alone.
 TERMINAL SUPPORT                                        *md-viewer-terminals*
 
 md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp by
-Kitty-graphics-protocol compatibility. Only iTerm2, Ghostty, Kitty and
-WezTerm have real historical, human-observed confirmation, and mostly for
-image rendering and the drag-to-highlight overlay; the other interaction
-features are graphically unvalidated on every terminal as of this writing.
-See docs/manual-testing.md for the full scenario matrix and the four honest
-status labels it uses.
+Kitty-graphics-protocol compatibility. Of those, iTerm2, Kitty, Ghostty and
+WezTerm have real human-observed confirmation -- mostly for image rendering
+and the drag-to-highlight overlay -- and Warp has never been launched. Most
+of the placement and occlusion fixes are covered by headless tests only.
+See docs/manual-testing.md for the per-terminal status and the four honest
+status labels this project uses.
 
 The instant drag highlight -- the selection drawn as translucent overlay
 rectangles rather than re-photographing the page each frame -- is enabled on
@@ -273,9 +273,10 @@ watched across repeated drags. It is off on WezTerm for cost rather than
 correctness: its geometry was photographed correct on both the 20240203
 stable and a current build, using an encoding md-viewer sends WezTerm alone,
 but sustained placement traffic grows the terminal's memory without bound --
-172 MB to 786 MB in four seconds with four rectangles. See the 2026-08-08
-section of docs/cross-platform-implementation-status.md. Everywhere else the
-drag falls back to full captured frames -- always correct, merely slower. Set
+172 MB to 786 MB in four seconds with four rectangles. That is an upstream
+defect (wezterm/wezterm#7953, fix proposed in #8035); until it ships in a
+released build, do not force the overlay on there. Everywhere else the drag
+falls back to full captured frames -- always correct, merely slower. Set
 `interaction.selection_overlay` to "on" (see |md-viewer-setup|) to qualify
 your own terminal, after reading that option's notes in lua/md-viewer/
 config.lua. :MdViewerHealth verbose (see |md-viewer-health|) reports whether

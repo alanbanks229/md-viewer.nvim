@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Security fixes are provided for the latest tagged beta release and `main`.
+Security fixes are provided for the latest tagged release and `main`.
 
 ## Reporting a vulnerability
 

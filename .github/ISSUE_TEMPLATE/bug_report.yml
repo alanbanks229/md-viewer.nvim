@@ -12,7 +12,7 @@ body:
   - type: textarea
     attributes:
       label: Environment
-      description: Include macOS, iTerm2, Neovim, Node.js, browser, backend, and tmux status.
+      description: Include the md-viewer.nvim version, OS, terminal name and version, Neovim, Node.js, browser, selected backend, and whether a multiplexer was in use.
     validations:
       required: true
   - type: textarea

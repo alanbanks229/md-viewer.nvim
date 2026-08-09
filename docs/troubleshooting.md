@@ -9,8 +9,8 @@ render. `TERM_PROGRAM=iTerm.app` alone is never treated as proof.
 
 `auto` selected the cell fallback because the installed build did not expose a
 usable `vim.ui.img` API. This is a build/API availability issue, not a Kitty.app
-dependency. Explicitly select `backend = "kitty_raw"` inside a direct iTerm2 TUI
-for the supported graphical path.
+dependency. Explicitly select `backend = "kitty_raw"` inside a direct TUI (no
+multiplexer) for the supported graphical path.
 
 ## Explicit backend reports unavailable
 
@@ -31,7 +31,7 @@ stderr and request serials are available through `:MdViewerDebug`.
 
 ## Image is stretched or soft
 
-Set the actual iTerm2 profile cell size, in pixels:
+Set the actual terminal profile cell size, in pixels:
 
 ```sh
 export MD_VIEWER_CELL_WIDTH_PX=10
@@ -68,13 +68,14 @@ discarded. If terminal transfer remains dominant, lower
 
 The browser CSS uses a 14 px system-font baseline. A visual size
 mismatch usually means the estimated terminal cell width is too large, causing
-iTerm2 to scale the whole screenshot down. Lower
+the terminal to scale the whole screenshot down. Lower
 `render.estimated_cell_width_px` gradually. Prefer exact `MD_VIEWER_CELL_WIDTH_PX` and
 `MD_VIEWER_CELL_HEIGHT_PX` values when available.
 
 ## Image overlaps UI or survives close
 
-For `kitty_raw`, confirm `:MdViewerHealth verbose` reports raw z-index `-1` and
+For `kitty_raw`, confirm `:MdViewerHealth verbose` reports a negative raw
+z-index (`-2` by default) and
 `:MdViewerDebug` reports `occluded = true` while an overlapping float is visible.
 The overlap guard removes the image only for focusable UI. Non-focusable
 notifications create cropped placement cutouts, exposing their actual background
@@ -90,15 +91,15 @@ retransmitting the PNG.
 ## A notification over the preview shows Markdown through its background
 
 This is the specific bug `image.raw_overlay_bleed_cells` and the atomic
-placement-swap fix (`kitty_raw.lua`'s `M.move`) exist for. `raw_zindex = -1`
-draws the image below terminal text glyphs but *above* cell background
-colors, so a passive (non-focusable) float does not occlude the image on its
+placement-swap fix (`kitty_raw.lua`'s `M.move`) exist for. A negative
+`raw_zindex` draws the image below terminal text glyphs but *above* cell
+background colors, so a passive (non-focusable) float does not occlude the image on its
 own -- its rectangle has to be cut out of the placement, and that cut has to
 actually reach the terminal. If you see the rendered Markdown showing through
 a notification instead of the notification's own background:
 
 - Confirm you are running a build that includes the fix (`:MdViewerHealth verbose`
-  reports `raw_graphics_overlay_bleed_cells`; if that field is absent, the
+  reports `raw graphics overlay bleed cells`; if that field is absent, the
   build predates it).
 - Confirm `:MdViewerDebug` reports a nonzero `passive_cutouts` while the
   notification is visible. Zero means the float wasn't recognized as a

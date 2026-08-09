@@ -1,4 +1,4 @@
-// Stage 4: the selection tint contract and the composite-equivalence gate.
+// The selection tint contract and the composite-equivalence gate.
 //
 // Three layers, weakest to strongest:
 //   1. Pure: envelope opt-out (`capture: false`), overlaySheet validation,

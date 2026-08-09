@@ -23,7 +23,7 @@ local function default_env() return vim.fn.environ() end
 -- verified reason to differ has somewhere to say so. `image.double_buffer`
 -- in user config always overrides it.
 
--- `selection_overlay` is the per-profile gate for the stage-4 drag-highlight
+-- `selection_overlay` is the per-profile gate for the drag-highlight
 -- overlay (translucent natural-size Kitty placements composited over the base
 -- image): alpha compositing image-over-image, crop placements without c/r,
 -- sub-cell X/Y offsets, z ordering between images, 40fps placement churn, and
@@ -89,7 +89,7 @@ M.profiles = {
     default_double_buffer = true,
     selection_overlay = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "operator-validated (stage-4 overlay probe, 2026-08-07)",
+    validation = "operator-validated (drag-highlight overlay, 2026-08-07)",
     caveats = {
       "iTerm2 advertises the Kitty graphics protocol, but md-viewer does not run a "
         .. "synchronous response probe (Neovim owns terminal input), so this remains inferred.",
@@ -133,9 +133,19 @@ M.profiles = {
     -- placement churn and not the environment. A drag would exhaust a laptop's
     -- memory in seconds; this measurement cost one, twice.
     --
-    -- So the encoding stays (it is correct, and it is what a future fix would
+    -- The cause is upstream and now identified: WezTerm's `assign_image_to_cells`
+    -- clones a cell (which already carries its image attachments), adds the new
+    -- placement, and writes it back through `Line::set_cell`, which merges the
+    -- old cell's attachments in again -- so every repeat placement over an
+    -- already-covered cell duplicates the attachment list, and the renderer
+    -- emits a quad per attachment. Reported as wezterm/wezterm#7953, with a fix
+    -- proposed in wezterm/wezterm#8035.
+    --
+    -- So the encoding stays (it is correct, and it is what a fixed build would
     -- use) and the flag stays off. WezTerm keeps the full-frame capture path,
-    -- which is correct and merely slower.
+    -- which is correct and merely slower. To re-open this once a released build
+    -- carries the fix: run scripts/overlay/geometry and scripts/overlay/stress
+    -- against it, and flip the flag only if both pass.
     selection_overlay = false,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "geometry pixel-verified by automated screenshot on 20240203-110809-5046fc22 and "
@@ -159,11 +169,11 @@ M.profiles = {
         .. "6.5 GB with seventy, on both builds. md-viewer's own live-placement count stays flat "
         .. "throughout, and an idle control holds at 173 MB, so it is the churn itself. One earlier "
         .. "run died on 'Failed to allocate 23962752 quads' and an unwrap in draw.rs.",
-      "Each placement rewrites every cell it covers and bumps the line sequence number, and each "
-        .. "deletion walks those rows again -- an overlay frame is O(rows x cols) cell writes twice "
-        .. "over, against one GPU placement on iTerm2 and Ghostty. That cost model is the likely "
-        .. "shape of the growth, but the growth is per-frame rather than per-cell, so it is not "
-        .. "explained by it.",
+      "The growth is an upstream defect, not a cost model: WezTerm's assign_image_to_cells writes "
+        .. "a cell that already holds its image attachments back through a merging set_cell, so "
+        .. "each repeat placement over an already-covered cell duplicates the attachment list and "
+        .. "the renderer emits a quad per attachment. Reported as wezterm/wezterm#7953; a fix is "
+        .. "proposed in wezterm/wezterm#8035. Re-qualify with scripts/overlay/ once it ships.",
       "Upstream issue #6344's divide-by-zero panics are unreachable from md-viewer: the cell must "
         .. "floor to at least one pixel and every crop must be at least one pixel and wholly "
         .. "inside its image before anything is emitted.",
@@ -296,7 +306,7 @@ end
 --- probe); `env` is injectable for tests and defaults to the real process
 --- environment.
 ---
---- Resolution order (see prompts/part-1-foundations.md 1.2):
+--- Resolution order:
 --- 1. explicit `cfg.kitty_graphics` pins graphics availability outright.
 --- 2. (handled by callers) verified vim.ui.img support.
 --- 3. a safe asynchronous probe — unimplemented; `cfg.probe` stays "off".

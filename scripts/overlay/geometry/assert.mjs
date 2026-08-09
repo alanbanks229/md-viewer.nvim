@@ -1,17 +1,17 @@
-// Stage-6 WezTerm geometry assertions. Reads the screenshots run.sh took and
-// the expectations probe.lua computed, and answers the stage's question
-// numerically instead of by eye.
+// Overlay geometry assertions. Reads the screenshots run.sh took and the
+// expectations probe.lua computed, and answers in pixels instead of by eye.
 //
 //   node assert.mjs <out-dir>
 //
-// The question is prompt check 3's: does a highlight bar wider than one cell,
-// placed with a non-zero sub-cell X, draw as one solid rectangle, or as a comb
-// of stripes with a gap at every cell boundary? "Contiguity" below is the
+// The question it exists for: does a highlight bar wider than one cell, placed
+// with a non-zero sub-cell X, draw as one solid rectangle, or as a comb of
+// stripes with a gap at every cell boundary? "Contiguity" below is the
 // falsifiable form of that -- a comb has unpainted columns strictly inside the
-// bar's own bounding box, and a correct placement has none.
+// bar's own bounding box, and a correct placement has none. WezTerm draws the
+// comb under `sub-cell-offset`, which is why it is sent `sheet-margin` instead.
 import fs from "node:fs";
 import path from "node:path";
-import { decodePngPixels, pixelAt } from "../../tests/node/helpers/decode-png.mjs";
+import { decodePngPixels, pixelAt } from "../../../tests/node/helpers/decode-png.mjs";
 
 const out = process.argv[2];
 if (!out) {
@@ -253,7 +253,7 @@ console.log(
 );
 check(
   delta > 20,
-  "the overlay composites translucently over the base image (prompt check 2)",
+  "the overlay composites translucently over the base image",
   `only ${delta} of difference between the tinted and untinted base`
 );
 const threshold = untinted.r + delta / 2;
@@ -377,7 +377,7 @@ const afterDeletion = pixelAt(cleared, clearedSample.x, clearedSample.y);
 console.log("");
 check(
   residue === 0,
-  "every rectangle is gone after overlay_clear, with the base intact (prompt check 5)",
+  "every rectangle is gone after overlay_clear, with the base intact",
   `${residue} tinted pixels survived, first at content (${firstResidue?.x}, ${firstResidue?.y})`
 );
 check(

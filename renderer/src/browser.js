@@ -463,7 +463,7 @@ export class BrowserRenderer {
   /// Evaluate the in-page function for `action`. One dispatch point so the
   /// document-isolation guard, the ensureDocumentActive() call, and the
   /// same-queued-operation capture below apply uniformly to every action --
-  /// hit-testing and all nine of Part 6's actions alike -- rather than each
+  /// hit-testing and all nine interaction actions alike -- rather than each
   /// action reimplementing that plumbing.
   async evaluateAction(action, envelope, cached) {
     const token = this.active.token;

@@ -42,10 +42,10 @@ Whenever you bump a number, every number **to its right resets to zero**.
 Semantic Versioning has one important carve-out: **while the major version is
 `0`, all bets are off** — a `0.x` release is allowed to make breaking changes
 in a MINOR bump, because the whole `0.x` line is understood to be
-pre-stability. That's exactly this project's situation right now: Part 1
+pre-stability. That's exactly this project's situation right now: `v0.2.0`
 changed how `image.backend = "kitty_raw"` fails on unknown terminals
-(a real behavior change), and it went out as part of the `v0.2.0` MINOR
-bump, not a MAJOR one — that's correct, not a shortcut.
+(a real behavior change), and it went out as a MINOR bump, not a MAJOR one —
+that's correct, not a shortcut.
 
 Once this project ships `v1.0.0`, that carve-out goes away, and a breaking
 change afterward genuinely requires a MAJOR bump (`v1.4.0` → `v2.0.0`). This
@@ -83,8 +83,8 @@ Concrete examples from this project's own history and roadmap:
 | Fixed `:MdViewerHealth` crashing on multi-line values (`b2ceaf9`) | PATCH | Pure bugfix, no behavior anyone relied on changed. |
 | Fixed the command-line making the preview disappear (`8ad0623`) | PATCH | Bugfix — the old behavior was never the intended design. |
 | Raised the default preview font size, added a text-fallback notice (`0be91a6`) | MINOR | New, visible behavior (a UI notice that didn't exist before), even though nothing breaks. |
-| De-iTerm2'd the Kitty backend; added profile-driven z-index/geometry (Part 2) | MINOR | New capability (works on more terminals) plus one real, documented behavior change (forcing `kitty_raw` can now fail honestly instead of always "succeeding"). Allowed in a MINOR bump only because we're pre-`1.0`. |
-| Added text selection, search, link activation (Parts 3–6) | MINOR each | New features, additive. (Click-to-source was also added this way, then replaced by click-to-deselect in an out-of-band follow-up before v0.3.0 shipped — see CHANGELOG.md.) |
+| De-iTerm2'd the Kitty backend; added profile-driven z-index/geometry (`v0.2.0`) | MINOR | New capability (works on more terminals) plus one real, documented behavior change (forcing `kitty_raw` can now fail honestly instead of always "succeeding"). Allowed in a MINOR bump only because we're pre-`1.0`. |
+| Added text selection, search, link activation (`v0.3.0`) | MINOR | New features, additive. (Click-to-source was added this way and then replaced by click-to-deselect before `v0.3.0` shipped — see CHANGELOG.md.) |
 | Renamed `image.raw_zindex` to something else, or changed its default meaning in a way existing configs would silently misbehave under | MINOR now / MAJOR after 1.0 | This is exactly the kind of change the pre-1.0 carve-out exists for. |
 | Removed a Neovim version we used to support | MINOR now / MAJOR after 1.0 | Same reasoning. |
 
@@ -97,14 +97,13 @@ call it PATCH.
 
 ## This project's actual roadmap
 
-The phased implementation plan in `prompts/README.md` already commits to
-specific version checkpoints — this isn't hypothetical, it's the plan:
+Where this project has been, and the one checkpoint still ahead of it:
 
 | Tag | What it means | Status |
 |---|---|---|
 | `v0.1.0-beta` | First public release: iTerm2-only raw Kitty preview. | Shipped. |
-| `v0.2.0` | Parts 1–2 done: works on any Kitty-graphics terminal without hand-tuned config, honest capability reporting. No interaction changes. | Shipped. |
-| `v0.3.0` | Part 7 done: selection, search, link activation, and click-to-deselect (click-to-source was tried and then removed — it fought drag-to-select — before this shipped), hardened and documented, real compatibility matrix. | Ready to tag — Part 7 complete. |
+| `v0.2.0` | Works on any Kitty-graphics terminal without hand-tuned config, honest capability reporting. No interaction changes. | Shipped. |
+| `v0.3.0` | Mouse interaction: drag/word/paragraph selection, copy, in-preview search, link activation, preview history, and the instant drag-highlight overlay. Hardened, documented, with a real per-terminal status. | Ready to tag. |
 | `v1.0.0` | Whenever you decide the config surface and behavior have stopped needing to change, and you're confident enough to promise that in writing. | No target date — this is a judgment call, not a checklist item. |
 
 Nothing forces `v1.0.0` to happen right after `v0.3.0`, or ever on a
@@ -241,15 +240,15 @@ gh release create v0.3.0-rc.1 --title "v0.3.0-rc.1" --prerelease --notes "Releas
 
 ### A. Cutting the next real release (the situation you're in right now)
 
-You're on `feat/cross-platform-markdown-preview`, Parts 1–2 plus two
-follow-up fixes are done and tested on real terminals. This is a MINOR
+You're on a topic branch, the feature work plus two follow-up fixes are done
+and tested on real terminals. This is a MINOR
 bump (new capability, one documented behavior change, allowed pre-1.0):
 
 ```sh
 git checkout feat/cross-platform-markdown-preview
 # ... steps 3-5 above: bump versions, update CHANGELOG, commit ...
 git push origin feat/cross-platform-markdown-preview
-gh pr create --title "Cross-platform preview: v0.2.0" --body "Parts 1-2 of the cross-platform plan, plus two real-terminal fixes. See CHANGELOG.md."
+gh pr create --title "Cross-platform preview: v0.2.0" --body "Portable Kitty backend plus two real-terminal fixes. See CHANGELOG.md."
 # after merging the PR on GitHub:
 git checkout main && git pull origin main
 git tag -a v0.2.0 -m "v0.2.0: portable Kitty backend, honest capability reporting, larger default font, command-line visibility fix"
@@ -286,7 +285,7 @@ gh release create v0.2.1 --title "v0.2.1" --notes-file <(sed -n '/## \[0.2.1\]/,
 
 ### C. Testing before committing to a real tag
 
-You've finished Part 7 but want Kitty/Ghostty/Warp users to try it before
+You've finished the work but want Kitty/Ghostty/Warp users to try it before
 you call it `v0.3.0`:
 
 ```sh
@@ -306,9 +305,9 @@ There's no separate mechanical workflow for this — it's workflow A, with
 `1.0.0` as the version number, once you've decided (not "once a checklist
 says so") that the config surface, supported terminals, and behavior are
 stable enough to promise that in writing. A reasonable bar for *this*
-project specifically: all seven parts shipped, the compatibility matrix in
-`docs/manual-testing.md` has real (not `PENDING`) results for the terminals
-you care about, and you haven't needed a breaking change in a while.
+project specifically: `docs/manual-testing.md` records real, human-observed
+results for the terminals you care about, and you haven't needed a breaking
+change in a while.
 
 ---
 
@@ -328,8 +327,6 @@ as permanent and ship a new PATCH instead.
 Resolve in favor of whichever is actually higher — version bumps should
 only ever go up.
 
-**Where does the four-line "delete these and confirm it still renders"
-acceptance test fit in?** That's a manual gate before tagging a
-cross-platform-relevant release (`v0.2.0` and beyond), not a version-number
-decision by itself — see `docs/manual-testing.md` and
-`prompts/README.md`'s Dogfooding section.
+**Where does manual terminal testing fit in?** It's a gate before tagging any
+graphics-relevant release, not a version-number decision by itself — see
+`docs/manual-testing.md`.

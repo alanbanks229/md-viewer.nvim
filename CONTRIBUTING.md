@@ -14,8 +14,9 @@ focused test or explain why the behavior can only be verified interactively.
 3. Keep generated dependencies, browser binaries, logs, screenshots, and local
    machine configuration out of commits.
 4. Update user documentation and `CHANGELOG.md` when behavior changes.
-5. Describe the tested macOS, iTerm2, Neovim, Node.js, and browser versions for
-   graphical changes.
+5. For graphical changes, name the OS, terminal (and version), Neovim, Node.js,
+   and browser versions you tested on. See
+   [docs/manual-testing.md](docs/manual-testing.md) for what to check.
 
 By contributing, you agree that your contribution is licensed under the MIT
 License included in this repository.

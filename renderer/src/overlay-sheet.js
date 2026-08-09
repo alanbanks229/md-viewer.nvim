@@ -1,4 +1,4 @@
-// Solid-color RGBA PNG generation for the stage-4 selection overlay.
+// Solid-color RGBA PNG generation for the selection overlay.
 //
 // The Lua side draws the drag highlight by placing crops of one translucent
 // "tint sheet" through the Kitty graphics protocol -- a moving frame then

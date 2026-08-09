@@ -300,7 +300,7 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Stage-4 overlay display: display_selection_overlay refuses any result
+  -- Overlay display: display_selection_overlay refuses any result
   -- whose geometry cannot be proven to match the frame on screen, applies
   -- matching ones through the backend, and clear_selection_overlay releases
   -- the placements exactly once.

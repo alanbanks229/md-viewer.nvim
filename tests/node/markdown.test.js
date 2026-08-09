@@ -18,7 +18,7 @@ test("renders all version-one Markdown structures with source maps", () => {
   assert.doesNotMatch(html, /<script/);
   assert.doesNotMatch(html, /https:\/\/example\.invalid\/tracker\.png/);
 
-  // Part 5 filled `sourceMap` in. It is the provenance record for this render:
+  // `sourceMap` is the provenance record for this render:
   // the normalized source lines plus one entry per opaque id in the markup, and
   // it never leaves Node. See tests/node/source-provenance.test.js for what the
   // entries actually claim.

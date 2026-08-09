@@ -6,7 +6,7 @@
 // `a` is 0..1, matching buildOverlaySheetPng's straight-alpha contract.
 import fs from "node:fs";
 import path from "node:path";
-import { buildOverlaySheetPng } from "../../renderer/src/overlay-sheet.js";
+import { buildOverlaySheetPng } from "../../../renderer/src/overlay-sheet.js";
 
 const [width, height, r, g, b, a, out, marginX, marginY] = process.argv.slice(2);
 if (!out) {

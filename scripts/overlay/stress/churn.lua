@@ -1,6 +1,9 @@
--- Stage-6 churn measurement: prompt check 4. Runs under nvim inside a real
--- terminal and drives the production overlay path at drag rates, so the number
--- that comes out is the terminal's cost, not the renderer's.
+-- Overlay stress measurement. Runs under nvim inside a real terminal and drives
+-- the production overlay path at drag rates, so the number that comes out is
+-- the terminal's cost, not the renderer's. Run this alongside the geometry
+-- harness before enabling `selection_overlay` for a profile: drawing correctly
+-- and drawing affordably are separate questions, and WezTerm answered them
+-- differently.
 --
 -- WezTerm pays for placements differently from iTerm2 and Ghostty. Each
 -- placement rewrites every cell it covers and bumps the line's sequence
@@ -8,7 +11,8 @@
 -- (`assign_image_to_cells` and `kitty_remove_placement_from_model` in
 -- term/src/terminalstate). An overlay frame is O(rows x cols) cell mutations
 -- twice over, against one GPU placement elsewhere. Whether that is affordable
--- is a question for a stopwatch.
+-- is a question for a stopwatch -- and on WezTerm the answer is currently no,
+-- because of upstream wezterm/wezterm#7953 (fix proposed in #8035).
 --
 -- Two workloads, because they bracket what a real drag does:
 --
@@ -30,21 +34,21 @@
 -- workload the product cannot produce is not worth a machine.
 
 local repo = assert(vim.env.MD_VIEWER_REPO, "MD_VIEWER_REPO is required")
-local out = assert(vim.env.MD_VIEWER_STAGE6_OUT, "MD_VIEWER_STAGE6_OUT is required")
-local seconds = tonumber(vim.env.MD_VIEWER_STAGE6_SECONDS or "30")
+local out = assert(vim.env.MD_VIEWER_OVERLAY_OUT, "MD_VIEWER_OVERLAY_OUT is required")
+local seconds = tonumber(vim.env.MD_VIEWER_OVERLAY_SECONDS or "30")
 
 vim.opt.runtimepath:append(repo)
 local raw = require("md-viewer.backends.kitty_raw")
 local cellpixels = require("md-viewer.cellpixels")
 
 require("md-viewer.config").setup({
-  terminal = { profile = vim.env.MD_VIEWER_STAGE6_PROFILE or "wezterm" },
+  terminal = { profile = vim.env.MD_VIEWER_OVERLAY_PROFILE or "wezterm" },
   interaction = { selection_overlay = "on" },
 })
 
 local TINT = { r = 220, g = 220, b = 220, a = 0.3 }
 local BASE_RGB = { r = 64, g = 64, b = 64, a = 1 }
-local RECTS = tonumber(vim.env.MD_VIEWER_STAGE6_RECTS or "70")
+local RECTS = tonumber(vim.env.MD_VIEWER_OVERLAY_RECTS or "70")
 
 local function die(message)
   vim.fn.writefile({ message }, out .. "/error.txt")
@@ -55,7 +59,7 @@ local function png(width, height, colour, path, margin_x, margin_y)
   local result = vim
     .system({
       "node",
-      repo .. "/scripts/stage6-wezterm/make-png.mjs",
+      repo .. "/scripts/overlay/geometry/make-png.mjs",
       tostring(width),
       tostring(height),
       tostring(colour.r),
@@ -170,7 +174,7 @@ local function run_workload(label, moving)
       )
       vim.fn.writefile(trace, out .. "/trace.txt")
     end
-    -- ~40fps, the rate stage 2 established for a drag.
+    -- ~40fps, the rate a drag produces.
     vim.wait(25, function() return false end, 5)
   end
   raw.overlay_clear(set_id)
@@ -192,15 +196,15 @@ base_id = raw.show(base_png, placement)
 vim.fn.writefile({ "ready" }, out .. "/churn.ready")
 vim.wait(1500, function() return false end, 100)
 
-local only = vim.env.MD_VIEWER_STAGE6_WORKLOAD
+local only = vim.env.MD_VIEWER_OVERLAY_WORKLOAD
 if only ~= "churn" then run_workload("diff (2 of 70 rects move -- what a drag does)", 2) end
 if only ~= "diff" then run_workload("churn (70 of 70 rects move -- worst case)", RECTS) end
 
 
 vim.fn.writefile({
   vim.json.encode({
-    build = vim.env.MD_VIEWER_STAGE6_BUILD,
-    profile = vim.env.MD_VIEWER_STAGE6_PROFILE or "wezterm",
+    build = vim.env.MD_VIEWER_OVERLAY_BUILD,
+    profile = vim.env.MD_VIEWER_OVERLAY_PROFILE or "wezterm",
     encoding = margin and "sheet-margin" or "sub-cell-offset",
     grid = { cols = cols, rows = rows },
     cell = { width = cw, height = ch },

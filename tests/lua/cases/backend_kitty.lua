@@ -3,8 +3,8 @@
 -- placement id counters normalized to their order of first appearance. Nothing
 -- else in it is run-dependent. Regenerate with MD_VIEWER_DUMP_GOLDEN=1 only
 -- after establishing that the change was meant to alter what those three
--- terminals receive; the whole point of pinning it is that stage 6's WezTerm
--- work did not.
+-- terminals receive; the whole point of pinning it is that the WezTerm
+-- sheet-margin work did not.
 -- One line per complete operation: an upload, a cursor-framed placement, or a
 -- deletion. Read top to bottom it is the whole contract -- upload once, four
 -- cropped placements around a passive float, one tint sheet, two overlay crops
@@ -265,7 +265,7 @@ return function(t)
   t.eq(false, invalid_ok, "an invalid PNG payload is rejected")
 
   -- ---------------------------------------------------------------------
-  -- Stage-4 selection overlay.
+  -- Selection overlay.
   -- ---------------------------------------------------------------------
   local tint = { r = 220, g = 220, b = 220, a = 0.3 }
 

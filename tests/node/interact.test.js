@@ -100,10 +100,10 @@ test("envelope validation rejects malformed interactions before they reach the q
   }
 });
 
-test("no actions remain reserved after Part 6", () => {
+test("no interaction actions remain reserved", () => {
   // RESERVED_ACTIONS is kept as an empty array rather than removed: it is what
   // keeps validateEnvelope's reserved-vs-unknown branch structurally
-  // meaningful for whatever a later part reserves next.
+  // meaningful for whatever a later change reserves next.
   assert.deepEqual(RESERVED_ACTIONS, []);
   const unknown = "definitely-not-a-real-action";
   assert.throws(() => validateEnvelope({
@@ -116,7 +116,7 @@ test("no actions remain reserved after Part 6", () => {
   });
 });
 
-test("Part 6's nine actions are all registered with the correct flags", () => {
+test("all nine interaction actions are registered with the correct flags", () => {
   const expected = {
     selection_preview: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
     selection_commit: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
@@ -199,7 +199,7 @@ test("classifyLink separates safe schemes from unsafe ones", () => {
   assert.equal(classifyLink("mailto:someone@example.invalid").type, "mailto");
   assert.equal(classifyLink("./relative/notes.md").type, "local_file");
   assert.equal(classifyLink("file:///tmp/notes.md").type, "local_file");
-  // Part 4 owns the document-root check; Part 3 only reports the kind.
+  // The mouse layer owns the document-root check; interact only reports the kind.
   assert.equal(classifyLink("javascript:alert(1)").type, "unsafe");
   assert.equal(classifyLink("JaVaScRiPt:alert(1)").type, "unsafe");
   assert.equal(classifyLink("data:text/html,<b>x</b>").type, "unsafe");
@@ -225,7 +225,7 @@ test("source positions convert 0-based exclusive markdown-it maps to 1-based Neo
 });
 
 test("block-only resolution can never report exact precision", () => {
-  // Still true after Part 5, and still the point: a block carries no column, so
+  // Still true with exact provenance, and still the point: a block carries no column, so
   // resolution that has only a block to work from must not manufacture one. What
   // changed is that a hit can now *also* carry an inline region -- see
   // tests/node/source-provenance.test.js for what that resolves to.
@@ -355,7 +355,7 @@ test("an interaction for document A never resolves against document B's DOM", as
   assert.equal(hit.result.rehydrated, true, "document A should have been rehydrated");
   assert.equal(hit.result.documentId, "doc-a");
   assert.equal(hit.result.sourcePosition.line, 1);
-  // Part 5: the caret lands inside the heading's own text run, so the column is
+  // The caret lands inside the heading's own text run, so the column is
   // resolved against document A's source map -- which is the isolation claim
   // this test exists for, now made at column precision rather than line.
   assert.equal(hit.result.sourcePosition.precision, "exact");
@@ -416,8 +416,8 @@ test("an interaction for document A never resolves against document B's DOM", as
   assert.equal(bStillValid.ok, true, bStillValid.error);
   assert.match(bStillValid.result.hit.element.textPreview, /BRAVO-ONLY/);
 
-  // Per-document interaction state is tracked in Node memory (Part 6 fills in
-  // selection and find; Part 3 records the last hit), and never crosses a
+  // Per-document interaction state is tracked in Node memory (selection, find,
+  // and the last hit), and never crosses a
   // content revision: applying an old selection to new content would be silent
   // corruption in a copy operation.
   // The re-render of document A above changed its content, so A's state is
@@ -569,7 +569,7 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
   await t.test("headings, paragraphs, and inline formatting resolve to their own block", async () => {
     const heading = await hit(blockAt(0, 1));
     assert.equal(heading.sourcePosition.line, 1);
-    // Part 5: the caret is inside "Kitchen Sink", so the column is real. Before
+    // The caret is inside "Kitchen Sink", so the column is real. Before
     // it, this reported the block's line with column 0.
     assert.equal(heading.sourcePosition.precision, "exact");
     assert.ok(heading.sourcePosition.byteColumn >= 2, "resolved past the '# ' marker");
@@ -601,7 +601,7 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
       table: blockAt(46, 50),
       "table body row": blockAt(48, 49),
     };
-    // Part 5 upgraded the claim here. Every hit still has to land inside its own
+    // Exact provenance upgraded the claim here. Every hit still has to land inside its own
     // source range -- that is the containment property this test has always been
     // for -- but a hit that lands on real text now also carries a real column,
     // and the two content types that cannot carry one say so rather than
@@ -626,7 +626,7 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
         assert.notEqual(precision, "exact", `${label} claimed a precision it cannot support`);
         assert.equal(byteColumn, 0, `${label} invented a byte column`);
       } else {
-        assert.equal(precision, "exact", `${label} lost the column Part 5 should give it`);
+        assert.equal(precision, "exact", `${label} lost the column exact provenance should give it`);
         const text = fixture.split("\n")[line - 1];
         assert.ok(byteColumn >= 0 && byteColumn <= Buffer.byteLength(text, "utf8"),
           `${label} resolved to byte column ${byteColumn}, off the end of line ${line}`);
@@ -655,7 +655,7 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     assert.equal(found.link.type, "https");
     assert.equal(found.link.href, "https://example.invalid");
     // activate_at still carries a source position, so an unmodified click can
-    // navigate to source without a second round trip. Part 5 made that position
+    // navigate to source without a second round trip. Exact provenance made that position
     // the link *label's* -- which lives on source line 4, `[safe link](...)`,
     // not on line 3 where the paragraph starts.
     assert.equal(found.sourcePosition.line, 4);
@@ -829,7 +829,7 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     assert.equal(unknown.ok, false);
     assert.equal(unknown.code, "UNKNOWN_ACTION");
 
-    // Part 6 implemented every previously-reserved action; an incomplete
+    // Every previously-reserved action is now implemented; an incomplete
     // envelope for one of them is now a validation error, not "not built yet".
     const incomplete = await renderer.send("interact", renderer.interactParams("sink", "1:0", { x: 1, y: 1 },
       { action: "selection_preview" }));
@@ -860,12 +860,12 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
   });
 
   await t.test("exact precision is reported where the parser supports it, and only there", async () => {
-    // This assertion is the inverse of the one Parts 3 and 4 shipped ("no
-    // interaction reports exact precision"), and it is deliberately still a
-    // sweep over every block the fixture renders: the risk Part 5 introduces is
-    // a *confidently wrong* column, so the check is that every label is one of
-    // the four honest ones, that a claimed column is inside the line it names,
-    // and that most of the document really did gain one.
+    // This assertion is the inverse of the one that shipped before source
+    // provenance existed ("no interaction reports exact precision"), and it is
+    // deliberately still a sweep over every block the fixture renders: the risk
+    // exact provenance introduces is a *confidently wrong* column, so the check
+    // is that every label is one of the four honest ones, that a claimed column
+    // is inside the line it names, and that most of the document gained one.
     const sourceLines = fixture.split("\n");
     let exact = 0;
     for (const block of blocks) {

@@ -6,7 +6,7 @@
 ---makes a wrong cell size invisible -- the picture is squeezed or stretched to
 ---the right box either way, and only sharpness suffers.
 ---
----The stage-4 selection overlay is the one exception. Its rectangles are
+---The selection overlay is the one exception. Its rectangles are
 ---crops placed with no `c`/`r` keys, so they display at natural **pixel**
 ---size, and pixels are only meaningful against the size the base image is
 ---actually being drawn at. Without the real cell size those rectangles land
@@ -96,8 +96,8 @@ end
 ---seconds later, with the row and column counts identical throughout. A
 ---measurement taken in that window was cached for the rest of the session, and
 ---every overlay rectangle came out at half scale for it, which is the same
----defect stage 5 fixed arriving by a different route. A terminal font-size
----change does the same thing more slowly.
+---defect as the rectangles once sized in captured pixels, arriving by a
+---different route. A terminal font-size change does the same thing more slowly.
 ---
 ---The ioctl costs 0.16 us. The overlay path calls this a handful of times per
 ---drag frame, so the cache was saving microseconds and risking the one number

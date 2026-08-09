@@ -429,7 +429,7 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Part 6's new optional envelope fields (anchorCoordinates, query) follow
+  -- The optional envelope fields (anchorCoordinates, query) follow
   -- the same wire-encoding discipline the modifiers table above does: assert
   -- the *encoded* JSON shape, not the Lua table, since a Lua table can look
   -- correct and still encode wrong.

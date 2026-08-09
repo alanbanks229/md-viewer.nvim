@@ -5,8 +5,8 @@ returned.
 
 Run it inside the terminal under test:
 
-    python3 minimal-repro.py            # overlay on top of the base image
-    python3 minimal-repro.py --clear    # identical, but aimed at bare rows
+    python3 kitty-memory-repro.py            # overlay on top of the base image
+    python3 kitty-memory-repro.py --clear    # identical, but aimed at bare rows
 
 The only difference between the two modes is *where* the second placement is
 put. Everything else -- the images, the number of placements, the rate, the

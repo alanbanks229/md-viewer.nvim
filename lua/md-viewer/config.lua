@@ -87,9 +87,9 @@ M.defaults = {
     enabled = true,
     links = true,
     drag_threshold_cells = 1,
-    -- Gates installing the <2-LeftMouse> mapping at all. Part 6 hangs
-    -- word-select off that same binding; this lets it be turned off without
-    -- inventing new plumbing.
+    -- Gates installing the <2-LeftMouse> mapping at all. Word-select hangs
+    -- off that same binding; this lets it be turned off without inventing new
+    -- plumbing.
     double_click = true,
     selection = true,
     -- 0 fires each drag-preview frame immediately, using only the
@@ -122,16 +122,22 @@ M.defaults = {
     -- translucent overlay rectangles composited over the existing base image
     -- (no screenshot, no PNG on the wire per frame) only where a human
     -- validated that exact behavior in a live terminal session -- today
-    -- iTerm2, Ghostty and Kitty. WezTerm crashed outright under this workload
-    -- (2026-08-07, on a build since fixed upstream; see the profile's
-    -- caveats), so everywhere unvalidated keeps the full-frame capture path,
-    -- which stays correct and is merely slower. "on" forces
-    -- the overlay regardless of profile -- this is how you qualify a new
-    -- terminal: set it, drag, and look. Be aware that WezTerm did not merely
-    -- fail here, it crashed, so a terminal that cannot do this may take itself
-    -- down rather than degrade. "off" disables it everywhere, and is the only
-    -- setting that leaves an explicit `image.raw_zindex` of -1 alone (the
-    -- overlay otherwise needs -1 for itself and pushes the base to -2).
+    -- iTerm2, Ghostty and Kitty. Everywhere unvalidated keeps the full-frame
+    -- capture path, which stays correct and is merely slower. "on" forces the
+    -- overlay regardless of profile -- this is how you qualify a new terminal:
+    -- set it, drag, and look.
+    --
+    -- WezTerm is off for cost, not correctness. Its geometry was photographed
+    -- correct on two builds using the `sheet-margin` encoding md-viewer sends
+    -- it alone, but sustained placement traffic grows the terminal's memory
+    -- without bound -- an upstream defect, reported as wezterm/wezterm#7953
+    -- with a fix proposed in wezterm/wezterm#8035. Setting "on" there will draw
+    -- correctly and exhaust your memory within seconds of a drag. Treat that as
+    -- the general warning: a terminal that cannot do this may degrade badly
+    -- rather than gracefully, so qualify one on a machine you can afford to
+    -- lose. "off" disables it everywhere, and is the only setting that leaves
+    -- an explicit `image.raw_zindex` of -1 alone (the overlay otherwise needs
+    -- -1 for itself and pushes the base to -2).
     --
     -- One precondition no setting can override: the terminal must report its
     -- pixel cell size (`cellpixels.lua`). Overlay rectangles are sized in

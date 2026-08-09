@@ -3,8 +3,9 @@
 // SECURITY.md), and nothing here needs to survive a malicious PNG -- every
 // caller feeds it either a file this repo produced or a macOS screenshot.
 //
-// Lifted out of tests/node/selection-tint.test.js when scripts/stage6-wezterm
-// needed the same decoder to assert on screenshots of a real WezTerm window.
+// Lifted out of tests/node/selection-tint.test.js when the overlay geometry
+// harness (scripts/overlay/geometry) needed the same decoder to assert on
+// screenshots of a real terminal window.
 // tests/node/browser.test.js still carries its own copy for a different job.
 import zlib from "node:zlib";
 

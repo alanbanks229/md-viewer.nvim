@@ -220,9 +220,9 @@ end
 ---Deliberately a refusal and not a clamp. Silently shrinking an out-of-bounds
 ---crop would draw a subtly wrong rectangle, and a subtly wrong rectangle that
 ---nobody is told about is the exact shape of every defect this area has
----produced so far -- the stage-5 bars sized in captured rather than drawn
----pixels went unnoticed for a whole stage. A refusal is visible: the overlay
----drops to the captured-frame path for the gesture and says why.
+---produced so far -- the highlight bars once sized in captured rather than
+---drawn pixels went unnoticed for a whole release. A refusal is visible: the
+---overlay drops to the captured-frame path for the gesture and says why.
 local function crop_within(image_w, image_h, x, y, w, h)
   if not (tonumber(image_w) and tonumber(image_h) and tonumber(x) and tonumber(y)) then return nil end
   if not (tonumber(w) and tonumber(h)) then return nil end
@@ -317,7 +317,7 @@ local function place_regions(item, placement)
 end
 
 -- ---------------------------------------------------------------------------
--- Stage-4 selection overlay: the drag highlight as translucent rectangles
+-- Selection overlay: the drag highlight as translucent rectangles
 -- composited over the base image, so a moving selection frame ships a few
 -- hundred bytes of placement commands instead of a full re-captured PNG.
 --

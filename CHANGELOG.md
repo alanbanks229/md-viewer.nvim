@@ -3,25 +3,13 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-08-09
 
-### Fixed
+### Added
 
-- The terminal cell size is measured fresh instead of being remembered. It was
-  read once and cached, and re-checked only against the row and column counts —
-  which a terminal can leave alone while changing its pixel geometry
-  underneath. WezTerm does exactly that on every launch: it sizes its pty at
-  half scale and corrects it about two seconds later, with the grid identical
-  either side. A preview opened in that window kept a half-scale cell for the
-  rest of the session and drew every drag-highlight rectangle at half size. A
-  terminal font-size change did the same thing more slowly. This affected every
-  terminal, not just WezTerm.
-
-### Changed
-
-- Drag-to-highlight no longer re-photographs the page on every frame, on
-  iTerm2. While the mouse is down the highlight is drawn directly in the
-  terminal as translucent rectangles composited over the frame already on
+- **An instant drag highlight.** Drag-to-highlight no longer re-photographs the
+  page on every frame. While the mouse is down the highlight is drawn directly
+  in the terminal as translucent rectangles composited over the frame already on
   screen — one small tint image is uploaded once, and each moving frame sends
   only placement commands. A moving frame costs roughly 91-500 bytes instead of
   about a megabyte of base64 PNG, and sends nothing at all when the selection
@@ -34,130 +22,31 @@ All notable changes to this project will be documented here. The project uses
   `interaction.selection_overlay` (`"auto"` / `"on"` / `"off"`) overrides that,
   and `"on"` is how you would try another terminal.
 
-  **WezTerm is off deliberately, and not for the reason first recorded.** The
-  2026-08 investigation photographed a real window on both
-  `20240203-110809-5046fc22` and a current build and found two things. Its
-  geometry is fixable: WezTerm applies the protocol's sub-cell offset to every
-  cell of a placement rather than the first, and as an inset, so a highlight bar
-  draws as a comb of stripes — md-viewer now has an encoding that sends WezTerm
-  no offset keys at all, and it draws correctly on both builds. What is not
-  fixable from here is the cost: sustained placement traffic grows WezTerm's
-  memory without bound, 172 MB to 786 MB in four seconds with four rectangles,
-  with either encoding. Do not set `selection_overlay = "on"` in WezTerm; it
-  will look right and exhaust your memory. Details and photographs in
-  `docs/cross-platform-implementation-status.md`.
-
-- Fixed: on Ghostty the instant highlight worked once per session and then
-  silently stopped, so every drag after the first behaved like the old
-  re-photographed path. It was not falling back — the highlight was being drawn
-  *underneath* the preview image.
-
-  The Kitty graphics protocol breaks a tie between two images on the same layer
-  by image id: the lower id draws underneath. md-viewer drew the preview and the
-  highlight on the same layer and numbered them from the same counter, so the
-  highlight outranked the preview for exactly one drag, and the next full frame —
-  the one taken when you release the mouse — took the lead back and kept it.
-  iTerm2 resolves that tie by which placement was made most recently, which is
-  why it never showed there. Ghostty follows the specification.
-
-  The preview and the highlight now always sit one layer apart, and the tint
-  image is numbered from a range above every preview frame, so neither the layer
-  nor the tie-break can put the highlight underneath. If you had pinned
-  `image.raw_zindex = -1` to work around anything here, you no longer need to;
-  it is now handled for you, and `interaction.selection_overlay = "off"` is the
-  only setting that still leaves that value untouched.
-
-- Fixed: scrolling the preview while text was selected disabled the instant
-  highlight for every drag afterwards, until the preview happened to re-render
-  with nothing selected. Any frame that reaches the screen without a selection
-  painted into it now re-arms it — including the one a click-to-deselect
-  produces.
-
-### Added
-
-- `:MdViewerHealth` now reports whether the drag highlight is being drawn as
-  overlay rectangles and why, the layer it draws on beside the preview's own,
-  and the terminal's measured cell size. The Ghostty bug above was invisible
-  from the outside precisely because none of this was reported: a terminal
-  drawing the highlight underneath the preview looked exactly like one falling
-  back to full frames.
-
-- Fixed: those drag rectangles were drawn too large — noticeably wider than the
-  text and tall enough that adjacent lines in a code block touched, where the
-  real selection leaves gaps.
-
-  md-viewer places the preview over a rectangle of terminal *cells* and lets the
-  terminal scale the image to fit, so when its estimate of your cell size is
-  wrong the picture is simply squeezed to the right box and only sharpness
-  suffers. The drag overlay was the first thing ever placed in **pixels**, and
-  pixels only mean something against the size the image is actually drawn at. It
-  was sizing rectangles against the size the image was *captured* at instead.
-  On a terminal whose cell is 7×16 while the estimate said 10×20, that is 1.41×
-  too wide and 1.24× too tall — at exactly the right position, because positions
-  were always in cells.
-
-  The terminal's real cell size now comes from the operating system
-  (`TIOCGWINSZ`), which needs no escape sequence and nothing read back — the
-  reason md-viewer could not ask for it before. Where a terminal does not report
-  it, the drag overlay switches itself off and the captured-frame path takes
-  over rather than drawing rectangles it cannot size. `:MdViewerHealth` reports
-  the measurement as `cell_pixels`.
-
-- Fixed: a highlight could survive into the next drag. Selecting some text,
-  releasing, and then dragging out a new selection elsewhere left the first
-  highlight on screen for the whole second drag.
-
-  The frame underneath a drag is the browser's own capture, and after a
-  selection settles it has that selection painted into it. Drag rectangles
-  composite *over* that frame, so they can add a highlight but never remove one.
-  A drag that starts on a frame like that now puts the cached selection-free
-  frame back first — a local redraw, not another round trip to the browser — and
-  falls back to full captured frames when there is no cached frame it can prove
-  still matches what is on screen.
-
-- The preview now pins its own selection colour per theme rather than inheriting
-  Chromium's default. Over the page background the settled highlight is the same
-  colour as before; over code blocks and table stripes it shifts by 2-7/255. The
-  change exists so the drag-time overlay and the browser's own paint cannot
-  disagree, and so text stays readable under an overlay that sits above it.
-
-- Capturing a preview frame is roughly 2.3-2.8x cheaper, pixel for pixel.
-  Chromium now launches with `--disable-frame-rate-limit`, removing a fixed
-  compositor wait that dominated the capture regardless of how much was being
-  captured (a 1x1-pixel screenshot measured the same 32ms as a full frame), and
-  frames are encoded through Chromium's speed-optimised PNG path. PNG is
-  lossless either way and the decoded pixels are identical; frames are about
-  40-60% larger, which costs a fraction of a millisecond to reach the terminal.
-
-  **This is a renderer-side improvement and does not, on its own, make
-  drag-to-highlight feel faster.** Measured in a real iTerm2 session, capture
-  time per drag frame fell from 103.2ms to 36.5ms with no perceptible change to
-  the gesture, in both iTerm2 and WezTerm. The cost that governs how the drag
-  feels is downstream of Neovim — the terminal decoding and compositing a fresh
-  full-viewport image every frame — and is addressed separately. See
-  `docs/cross-platform-implementation-status.md`.
-
-### Added
+  **WezTerm is off deliberately, on cost rather than correctness.** Its geometry
+  is solved: WezTerm applies the protocol's sub-cell offset to every cell of a
+  placement rather than the first, and as an inset, so a highlight bar draws as
+  a comb of stripes — md-viewer sends WezTerm an encoding with no offset keys at
+  all, and it was photographed drawing correctly on both
+  `20240203-110809-5046fc22` and a current build. What is not solved here is the
+  cost: sustained placement traffic grows WezTerm's memory without bound, 172 MB
+  to 786 MB in four seconds with four rectangles. That is an upstream defect
+  ([wezterm#7953], with a fix proposed in [wezterm#8035]); until it ships in a
+  released build, do not set `selection_overlay = "on"` in WezTerm — it will
+  look right and exhaust your memory.
 
 - `interaction.selection_overlay` (default `"auto"`) to control the drag
   highlight path described above, and `overlay_frames`, `overlay_rect_count`,
   `overlay_last_bytes` and friends in `:MdViewerDebug` and `:MdViewerHealth` so
   it is visible whether the overlay is live and what a frame actually costs.
 
-- `browser.fast_png_encode` (default `true`) to turn the speed-optimised PNG
-  encoding off, and `capture_encoder` in `:MdViewerDebug` reporting which of
-  the two capture paths produced the last frame.
-
-### Fixed
-
-- A capture taken while the preview was scrolled could have screenshotted the
-  top of the document rather than what was on screen, had the new capture path
-  shipped without carrying the page's scroll offset. Caught before release and
-  covered by a regression test.
-
-## [0.3.0] - 2026-08-07
-
-### Added
+- `:MdViewerHealth` now takes an optional `verbose` argument. Without it the
+  report is a short status summary; with it, the full diagnostic detail. The
+  verbose report says whether the drag highlight is being drawn as overlay
+  rectangles and why, the layer it draws on beside the preview's own, and the
+  terminal's measured cell size (`raw graphics cell pixels`). The Ghostty bug
+  below was invisible from the outside precisely because none of this was
+  reported: a terminal drawing the highlight underneath the preview looked
+  exactly like one falling back to full frames.
 
 - Mouse interaction over the preview, forwarded to the live Chromium DOM: a
   new `interact` NDJSON method alongside `render`/`capture`, with its own
@@ -195,6 +84,31 @@ All notable changes to this project will be documented here. The project uses
   calibration for terminals (iTerm2 confirmed) that apply their window
   margin to text but not to graphics placements, keeping a notification's
   cut-out flush against the image.
+- `interaction.fast_drag` (default `false`) to let a moving drag frame capture
+  at CSS scale for a ~2.4x cheaper capture. Off by default and deliberately not
+  wired to `render.fast_scroll`: nobody reads text mid-scroll, so scrolling's
+  blur is invisible, but a drag is the one gesture where the reader's eye is on
+  the exact glyphs the pointer is crossing.
+- `browser.fast_png_encode` (default `true`) to turn the speed-optimised PNG
+  encoding off, and `capture_encoder` in `:MdViewerDebug` reporting which of
+  the two capture paths produced the last frame.
+- The preview now pins its own selection colour per theme rather than inheriting
+  Chromium's default. Over the page background the settled highlight is the same
+  colour as before; over code blocks and table stripes it shifts by 2-7/255. The
+  change exists so the drag-time overlay and the browser's own paint cannot
+  disagree, and so text stays readable under an overlay that sits above it.
+- Capturing a preview frame is roughly 2.3-2.8x cheaper, pixel for pixel.
+  Chromium now launches with `--disable-frame-rate-limit`, removing a fixed
+  compositor wait that dominated the capture regardless of how much was being
+  captured (a 1x1-pixel screenshot measured the same 32ms as a full frame), and
+  frames are encoded through Chromium's speed-optimised PNG path. PNG is
+  lossless either way and the decoded pixels are identical; frames are about
+  40-60% larger, which costs a fraction of a millisecond to reach the terminal.
+  Measured in a real iTerm2 session, capture time per drag frame fell from
+  103.2ms to 36.5ms. **On its own this does not make drag-to-highlight feel
+  faster** — the cost that governs how the drag feels is downstream of Neovim,
+  in the terminal decoding and compositing a fresh full-viewport image every
+  frame, which is what the overlay above addresses.
 - Substantially expanded `:MdViewerHealth`/`:MdViewerDebug` diagnostics:
   interaction-enabled state, which document Chromium currently holds
   active, interaction request/stale-interaction/coalesced-drag counters,
@@ -203,21 +117,6 @@ All notable changes to this project will be documented here. The project uses
 - A real (non-terminal-emulating) headless Lua/Node test suite covering the
   interaction transport, source provenance, selection, search, and every
   raw-image placement fix below.
-
-### Fixed
-
-- A link could be impossible to click at all. `hitTestInPage` resolved the
-  clicked cell horizontally but collapsed it to a single row vertically, and on
-  the estimated calibration tier a cell covers 20 CSS px while a rendered line
-  is 25 and an inline link's box about 18 — so a link can fall entirely between
-  two cell-row centres and become unreachable from every cell in the window, at
-  any click position. Enlarging the terminal font changed nothing but the
-  alignment, and made the same link work again, which is how it was reported.
-  The cell is now probed in both axes, still bounded by that one cell, and a
-  link anywhere under the clicked cell wins over the prose beside it — the cell
-  is the resolution limit of the input device, so there is no finer answer to
-  give. `tests/node/hitbox.test.js` sweeps every alignment a full cell height
-  can take.
 
 ### Changed
 
@@ -254,8 +153,8 @@ All notable changes to this project will be documented here. The project uses
   placement again (`reconcile_placement` compares with the
   exclusion-aware `coordinates.same`) -- a notification over the preview
   now keeps its own opaque background instead of showing the rendered
-  Markdown through it, since `raw_zindex = -1` draws below text glyphs but
-  above cell backgrounds.
+  Markdown through it, since a negative `raw_zindex` draws below text glyphs
+  but above cell backgrounds.
 - The raw image placement is torn down whenever its window's *tabpage* is
   not the one currently displayed, not only when the window itself is
   hidden -- closes a gap where a plugin that opens its own tabpage
@@ -269,7 +168,129 @@ All notable changes to this project will be documented here. The project uses
   (`:split other.md`) no longer transiently steals tracking away from the
   window that is actually still showing the source buffer.
 
+- Moving drag frames stay sharp. The reduced-resolution capture that scrolling
+  uses (`render.fast_scroll`) is not shared with drag-to-select: the two
+  gestures look identical from the code's side and could not be less alike from
+  the reader's. Nobody reads text mid-scroll, so scrolling's blur is invisible;
+  a drag is the opposite — the eye is on the exact glyphs the pointer is
+  crossing, slowly, right up to the last one. The cheaper capture is available
+  as its own opt-in, `interaction.fast_drag` (default `false`), worth about
+  2.4x per moving frame; the commit frame after release is always device scale
+  either way.
+- `interaction.drag_debounce_ms` now defaults to `0` (was `40`). The old
+  default gated every drag-preview request behind a *trailing* debounce that
+  resets on every `<LeftDrag>` event, ahead of a pipeline that already has
+  its own one-in-flight backpressure (mirroring `controller.schedule_scroll`,
+  which has no such gate). Under continuous drag input faster than the
+  debounce interval this could starve dispatch far worse than adding 40ms of
+  latency: measured with a simulated 300ms continuous drag (a new point
+  every 15ms), the old default sent exactly **one** request for the whole
+  gesture, while immediate dispatch with in-flight coalescing sent eleven.
+  The knob still works if set above `0`, for anyone who wants deliberate
+  throttling back.
+
 ### Fixed
+
+- The terminal cell size is measured fresh instead of being remembered. It was
+  read once and cached, and re-checked only against the row and column counts —
+  which a terminal can leave alone while changing its pixel geometry
+  underneath. WezTerm does exactly that on every launch: it sizes its pty at
+  half scale and corrects it about two seconds later, with the grid identical
+  either side. A preview opened in that window kept a half-scale cell for the
+  rest of the session and drew every drag-highlight rectangle at half size. A
+  terminal font-size change did the same thing more slowly. This affected every
+  terminal, not just WezTerm.
+
+- On Ghostty the instant highlight worked once per session and then silently
+  stopped, so every drag after the first behaved like the old re-photographed
+  path. It was not falling back — the highlight was being drawn *underneath* the
+  preview image.
+
+  The Kitty graphics protocol breaks a tie between two images on the same layer
+  by image id: the lower id draws underneath. md-viewer drew the preview and the
+  highlight on the same layer and numbered them from the same counter, so the
+  highlight outranked the preview for exactly one drag, and the next full frame —
+  the one taken when you release the mouse — took the lead back and kept it.
+  iTerm2 resolves that tie by which placement was made most recently, which is
+  why it never showed there. Ghostty follows the specification.
+
+  The preview and the highlight now always sit one layer apart, and the tint
+  image is numbered from a range above every preview frame, so neither the layer
+  nor the tie-break can put the highlight underneath. If you had pinned
+  `image.raw_zindex = -1` to work around anything here, you no longer need to;
+  it is now handled for you, and `interaction.selection_overlay = "off"` is the
+  only setting that still leaves that value untouched.
+
+- Scrolling the preview while text was selected disabled the instant highlight
+  for every drag afterwards, until the preview happened to re-render with
+  nothing selected. Any frame that reaches the screen without a selection
+  painted into it now re-arms it — including the one a click-to-deselect
+  produces.
+
+- Drag rectangles were drawn too large — noticeably wider than the text and tall
+  enough that adjacent lines in a code block touched, where the real selection
+  leaves gaps.
+
+  md-viewer places the preview over a rectangle of terminal *cells* and lets the
+  terminal scale the image to fit, so when its estimate of your cell size is
+  wrong the picture is simply squeezed to the right box and only sharpness
+  suffers. The drag overlay was the first thing ever placed in **pixels**, and
+  pixels only mean something against the size the image is actually drawn at. It
+  was sizing rectangles against the size the image was *captured* at instead.
+  On a terminal whose cell is 7×16 while the estimate said 10×20, that is 1.41×
+  too wide and 1.24× too tall — at exactly the right position, because positions
+  were always in cells.
+
+  The terminal's real cell size now comes from the operating system
+  (`TIOCGWINSZ`), which needs no escape sequence and nothing read back — the
+  reason md-viewer could not ask for it before. Where a terminal does not report
+  it, the drag overlay switches itself off and the captured-frame path takes
+  over rather than drawing rectangles it cannot size. `:MdViewerHealth verbose`
+  reports the measurement as `raw graphics cell pixels`.
+
+- A highlight could survive into the next drag. Selecting some text, releasing,
+  and then dragging out a new selection elsewhere left the first highlight on
+  screen for the whole second drag.
+
+  The frame underneath a drag is the browser's own capture, and after a
+  selection settles it has that selection painted into it. Drag rectangles
+  composite *over* that frame, so they can add a highlight but never remove one.
+  A drag that starts on a frame like that now puts the cached selection-free
+  frame back first — a local redraw, not another round trip to the browser — and
+  falls back to full captured frames when there is no cached frame it can prove
+  still matches what is on screen.
+
+- A drag that left the preview window stopped selecting. The gesture now stays
+  owned by the session that started it until the button comes up, wherever the
+  pointer goes.
+
+- A moving drag frame was captured at `render.fast_scroll`'s reduced scale,
+  which softened the exact glyphs the pointer was crossing and was reported as
+  the preview going blurry for the whole gesture. Moving drag frames are sharp
+  by default; `interaction.fast_drag` trades that back for a cheaper capture.
+
+- A capture taken while the preview was scrolled could have screenshotted the
+  top of the document rather than what was on screen, had the new capture path
+  shipped without carrying the page's scroll offset. Caught before release and
+  covered by a regression test.
+
+- WezTerm's upstream issue #6344 (divide-by-zero panics in Kitty placement
+  handling) is now unreachable from md-viewer: the measured cell must floor to
+  at least one pixel, and every crop must be at least one pixel and wholly
+  inside its image, before anything is emitted.
+
+- A link could be impossible to click at all. `hitTestInPage` resolved the
+  clicked cell horizontally but collapsed it to a single row vertically, and on
+  the estimated calibration tier a cell covers 20 CSS px while a rendered line
+  is 25 and an inline link's box about 18 — so a link can fall entirely between
+  two cell-row centres and become unreachable from every cell in the window, at
+  any click position. Enlarging the terminal font changed nothing but the
+  alignment, and made the same link work again, which is how it was reported.
+  The cell is now probed in both axes, still bounded by that one cell, and a
+  link anywhere under the clicked cell wins over the prose beside it — the cell
+  is the resolution limit of the input device, so there is no finer answer to
+  give. `tests/node/hitbox.test.js` sweeps every alignment a full cell height
+  can take.
 
 - `:MdViewerHealth` now warns when a configured `security.document_root` does
   not contain the document being previewed. That combination refuses every
@@ -309,35 +330,17 @@ All notable changes to this project will be documented here. The project uses
 - `selection_clear`/`find_*`/copy actions now carry the session's real
   scroll position instead of silently resetting the shared page to the top
   as a side effect.
-- Drag-select and post-clear capture frames render at full (device) scale
-  instead of inheriting scroll's low-resolution fast-frame default.
+- Interaction capture frames no longer silently inherit whatever scale a recent
+  scroll had cached. A settled selection and a post-clear frame are always
+  device scale, so what the reader is left looking at does not depend on
+  whether they scrolled a moment earlier.
 
-### Changed
+### Removed
 
-- Drag-to-select's moving preview frame now captures at `render.fast_scroll`'s
-  cheap scale (`"css"` by default) instead of always `"device"`, the same
-  moving/settled split scrolling already uses. This is a deliberate,
-  narrower reuse of the earlier "post-clear capture frames render at full
-  (device) scale" fix above, not a reversion of it: that fix stopped
-  *every* interact capture (including the settled commit) from silently
-  inheriting whatever scale a recent scroll had cached. Only the drag
-  *preview* frame changes here -- `M.settle_selection`'s commit, fired on
-  release, is still always `"device"`, so what the reader is left looking
-  at is unchanged. Measured on this machine: a real per-frame screenshot at
-  device scale averaged ~65-68ms and ~87KB; at CSS scale, ~30-33ms and
-  ~38KB -- the capture step, not IPC or the Lua-side PNG read/encode,
-  dominates per-frame cost.
-- `interaction.drag_debounce_ms` now defaults to `0` (was `40`). The old
-  default gated every drag-preview request behind a *trailing* debounce that
-  resets on every `<LeftDrag>` event, ahead of a pipeline that already has
-  its own one-in-flight backpressure (mirroring `controller.schedule_scroll`,
-  which has no such gate). Under continuous drag input faster than the
-  debounce interval this could starve dispatch far worse than adding 40ms of
-  latency: measured with a simulated 300ms continuous drag (a new point
-  every 15ms), the old default sent exactly **one** request for the whole
-  gesture, while immediate dispatch with in-flight coalescing sent eleven.
-  The knob still works if set above `0`, for anyone who wants deliberate
-  throttling back.
+- The `vim.ui.img` feasibility spike and its `:MdViewerSpikeStart`/
+  `:MdViewerSpikeReplace`/`:MdViewerSpikeStop` commands. They were only ever
+  reachable by launching Neovim with a dedicated init file, and the
+  `nvim_img` backend they were written to explore is unaffected.
 
 ## [0.2.0] - 2026-08-06
 
@@ -372,6 +375,9 @@ All notable changes to this project will be documented here. The project uses
 - Persistent local Node.js/Chromium renderer over stdin/stdout
 - Default-deny runtime network policy and confined local-image loading
 - Health, debug, automated, and manual verification tooling
+
+[wezterm#7953]: https://github.com/wezterm/wezterm/issues/7953
+[wezterm#8035]: https://github.com/wezterm/wezterm/pull/8035
 
 [0.3.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0

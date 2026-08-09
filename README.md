@@ -2,7 +2,7 @@
 
 ## Browser-quality Markdown previews inside terminal Neovim.
 
-<img width="1470" height="892" alt="v0.1.0-beta" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
+<img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
 
 > [!IMPORTANT]
 > The preview is still a browser-rendered PNG surface. Mouse and keyboard
@@ -37,31 +37,33 @@ itself.
 
 ### Terminal support
 
-md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, and Ghostty. Only
-iTerm2, Ghostty, Kitty and WezTerm have ever actually been launched and
-looked at on real hardware. Most of what has been looked over is image
-rendering and the drag-to-highlight overlay, as well as other interaction
-features such as ctrl+click (to navigate to dependent documents / links),
-and the searching/copying of texts.
+md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp. Of those,
+iTerm2, Kitty, Ghostty and WezTerm have actually been launched and looked at on
+real hardware; Warp has not.
 
-The instant drag highlight that is visible is the selection painted as a
-translucent overlay of rectangles instead of re-photographing the headless
-chromium page for every frame.
-- This overlay highlighting is not enabled for WezTerm yet due to a known
-  memory leak issue with WezTerm with Kitty Graphics Protocol.
-  [Related issue link here](https://github.com/wezterm/wezterm/issues/7953)
-- `interaction.selection_overlay = "on"` forces the overlay highlighting on
-   if you want to qualify your own terminal — read the option's notes first,
-   and note that on WezTerm it will draw correctly and eat your memory.
+The instant drag highlight paints the selection as a translucent overlay of
+rectangles instead of re-photographing the headless Chromium page for every
+frame. It is enabled only where a human confirmed it in a live terminal —
+today **iTerm2, Kitty and Ghostty**. Everywhere else a drag keeps the
+full-frame capture path, which stays correct and is merely slower.
 
-There are three (previously four) labels this project uses
-- `Supported`
-- `Experimental`
-- (No longer needed) `Protocol-compatible but unvalidated`
-- `Unsupported`
+- **WezTerm is deliberately excluded.** The highlight draws correctly there, but
+  sustained placement traffic grows WezTerm's memory without bound. That is an
+  upstream defect ([wezterm#7953](https://github.com/wezterm/wezterm/issues/7953)),
+  with a fix proposed in
+  [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035). Until it ships
+  in a released build, do not force the overlay on in WezTerm: it will look
+  right and exhaust your memory.
+- `interaction.selection_overlay = "on"` forces it on if you want to qualify
+  your own terminal. Read the option's notes in `lua/md-viewer/config.lua`
+  first, and do it on a machine you can afford to lose.
 
-All which live in [docs/manual-testing.md](docs/manual-testing.md).
-Read it before reporting a graphical bug or claiming a terminal works.
+This project labels every terminal claim with exactly one of four statuses —
+`Supported`, `Experimental`, `Protocol-compatible but unvalidated`, or
+`Unsupported` — and never promotes one on the strength of an environment
+variable matching. The definitions and the current per-terminal status live in
+[docs/manual-testing.md](docs/manual-testing.md). Read it before reporting a
+graphical bug or claiming a terminal works.
 
 tmux, screen, and Zellij are **not supported and not advertised**: no
 escape-sequence passthrough is implemented for any of them.
@@ -137,7 +139,7 @@ installation.
 }
 ```
 
-The explicit `kitty_raw` selection is intentional for iTerm2. Automatic mode
+The explicit `kitty_raw` selection is intentional. Automatic mode
 will not assume raw-protocol support from `TERM_PROGRAM` alone.
 
 ### Native `vim.pack`
@@ -227,10 +229,15 @@ require("md-viewer").setup({
     fast_png_encode = true,
   },
   image = {
-    backend = "kitty_raw", -- "auto", "nvim_img", "kitty_raw", or "cells"
+    -- "auto", "nvim_img", "kitty_raw", or "cells". Default is "auto"; the
+    -- installation examples above set "kitty_raw" explicitly on purpose.
+    backend = "auto",
     zindex = 20,
-    double_buffer = true,
-    raw_zindex = -1,
+    -- Both default to nil, meaning "let the detected terminal profile decide".
+    -- Set either one to override that profile. raw_zindex resolves to -2 on
+    -- every Kitty-graphics profile, leaving -1 free for the selection overlay.
+    double_buffer = nil,
+    raw_zindex = nil,
     raw_statusline_guard_cells = 1,
     -- Extra columns cut out past the trailing edge of a notification sitting
     -- over the preview. See "Notifications over the preview" below.
@@ -271,7 +278,15 @@ require("md-viewer").setup({
     -- Gates installing the double/triple-click mappings at all.
     double_click = true,
     selection = true,
-    drag_debounce_ms = 40,
+    -- 0 dispatches every drag frame immediately, relying on the pipeline's own
+    -- one-in-flight backpressure. Set above 0 to throttle deliberately.
+    drag_debounce_ms = 0,
+    -- Whether a moving drag frame may capture at CSS scale. Off: a drag is the
+    -- one gesture where the reader is looking at the exact glyphs being
+    -- crossed, so the blur is visible in a way scroll's never is.
+    fast_drag = false,
+    -- "auto" (per terminal profile), "on", or "off". See "Terminal support".
+    selection_overlay = "auto",
     settle_ms = 120,
     copy = true,
     -- A plain click clears an existing selection; it never moves the source
@@ -312,8 +327,8 @@ Measure the active terminal profile rather than copying the example values.
 
 ### Backends
 
-- `kitty_raw`: the supported graphical path for the initial iTerm2 release;
-  explicit opt-in is required.
+- `kitty_raw`: the supported graphical path, on any terminal advertising the
+  Kitty graphics protocol; explicit opt-in is required.
 - `nvim_img`: uses Neovim's experimental `vim.ui.img` API when the installed
   build exposes `set` and `del`.
 - `auto`: prefers a verified `vim.ui.img` API and otherwise uses `cells`; it
@@ -322,9 +337,9 @@ Measure the active terminal profile rather than copying the example values.
 
 ### Notifications over the preview
 
-With `kitty_raw`, the image is drawn by the terminal, not by Neovim, and
-`raw_zindex = -1` puts it below text glyphs but *above* cell background colours.
-A notification floating over the preview would therefore lose its own background
+With `kitty_raw`, the image is drawn by the terminal, not by Neovim, and its
+negative `raw_zindex` puts it below text glyphs but *above* cell background
+colours. A notification floating over the preview would therefore lose its background
 and show the Markdown through it, so md-viewer cuts the notification's rectangle
 out of the image.
 
@@ -484,7 +499,7 @@ Enabling `security.network` or `render.raw_html` relaxes the default policy and
 is reported by the health command. Review [SECURITY.md](SECURITY.md) before
 changing those options.
 
-## Known beta limitations
+## Known limitations
 
 - The rendered preview is a PNG surface, not native terminal text or a real
   embedded webview — see the note at the top of this document. Interaction
@@ -493,11 +508,15 @@ changing those options.
 - Source-position precision degrades honestly (exact byte column → line →
   block → none) depending on what the Markdown parser can establish for a
   given piece of content; it is never guessed or interpolated.
-- Only iTerm2 and WezTerm have real historical confirmation, and only for
-  basic image rendering — every interaction feature and every raw-image
-  placement fix is graphically unvalidated on every terminal. See
+- Graphical confirmation is partial. Image rendering and the drag-highlight
+  overlay have been watched on real hardware; most of the placement and
+  occlusion fixes (the notification cut-out, the roll/blink swap, the tabpage
+  teardown) are covered by headless tests only. See
   [Terminal support](#terminal-support) and
-  [docs/manual-testing.md](docs/manual-testing.md).
+  [docs/manual-testing.md](docs/manual-testing.md) for the per-terminal status.
+- The drag-highlight overlay is off on WezTerm pending an upstream fix
+  ([wezterm#8035](https://github.com/wezterm/wezterm/pull/8035)); drags there
+  fall back to the slower full-frame path.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.

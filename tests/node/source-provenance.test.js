@@ -353,7 +353,7 @@ test("an ambiguous line alignment maps to nothing rather than to a plausible gue
 });
 
 test("block-only resolution still cannot report exact precision", () => {
-  // Unchanged from Part 3: without a region there is no column to report, and a
+  // Without a region there is no column to report, and a
   // block never becomes one.
   for (let start = 0; start < 40; start += 1) {
     for (let span = 1; span < 12; span += 1) {
@@ -439,7 +439,7 @@ test("every fixture region points at a real position in the real document", () =
 });
 
 test("deriveSpan is a usable seam for a future span-aware linkify", () => {
-  // Nothing calls this in Part 5; it exists so span-aware linkification is an
+  // Nothing calls this yet; it exists so span-aware linkification is an
   // addition rather than a redesign. Tested so it is a real seam, not a comment.
   const md = new MarkdownIt({ html: false, linkify: false });
   md.use(provenancePlugin);
@@ -628,7 +628,7 @@ test("clicking a known character in a real browser yields its exact source colum
     // Still bounded: a cell entirely inside the padding finds nothing across
     // its whole width and is still reported honestly rather than snapped to the
     // nearest text. This is the property that keeps it from being the blanket
-    // clamping Part 3 refused.
+    // clamping the transport refused.
     const deepInPadding = await interactAt(
       { x: Math.max(1, located.textLeft - located.paddingLeft * 3), absoluteY: located.absoluteY, cellWidthPx: 2 },
       "auto");

@@ -1,18 +1,23 @@
--- Stage-4 live drive: spawn a real Neovim server, drive a drag-to-select
--- through the real input layer (nvim_input_mouse -> <LeftMouse>/<LeftDrag>/
--- <LeftRelease> mappings -> getmousepos() -> gesture dispatch), against the
--- real renderer and real Chromium. Asserts the overlay path end to end:
--- moving frames opt out of capture and are drawn as overlay placements, the
--- release settles with a true captured frame, and every overlay placement is
--- deleted after settle. Also invokes :MdViewerDebug and :MdViewerHealth --
--- the exact user commands, per policy section 5 -- since their output grew
--- overlay fields in this stage.
+-- End-to-end regression for the drag-highlight overlay. Spawns a real Neovim
+-- server and drives a drag-to-select through the real input layer
+-- (nvim_input_mouse -> <LeftMouse>/<LeftDrag>/<LeftRelease> mappings ->
+-- getmousepos() -> gesture dispatch), against the real renderer and real
+-- Chromium. Asserts the overlay path end to end: moving frames opt out of
+-- capture and are drawn as overlay placements, the release settles with a true
+-- captured frame, and every overlay placement is deleted after settle. Also
+-- invokes :MdViewerDebug and :MdViewerHealth -- the exact user commands --
+-- since both report overlay fields.
 --
--- Run with:  nvim --headless -u NONE -i NONE -l scripts/stage4-live/drive.lua
--- Untracked throwaway; do not commit.
+-- This is the only check that covers the whole gesture lifecycle against real
+-- input and a real browser; the headless suites cover the pieces, not the
+-- chain. Needs a Chrome/Chromium install and `npm ci --prefix renderer`, so it
+-- is not wired into CI.
+--
+-- Run with:  nvim --headless -u NONE -i NONE -l scripts/overlay/live/drive.lua
+-- Exits non-zero on any failed assertion.
 
 local script = debug.getinfo(1, "S").source:sub(2)
-local repo = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(script)))
+local repo = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(script))))
 local sock = vim.fn.tempname() .. ".sock"
 
 local failures = {}
@@ -38,7 +43,7 @@ local server = vim.system({
   "--cmd",
   ("set runtimepath+=%s"):format(repo),
   "-c",
-  ("luafile %s/scripts/stage4-live/setup.lua"):format(repo),
+  ("luafile %s/scripts/overlay/live/setup.lua"):format(repo),
 }, { env = { MD_VIEWER_REPO = repo, PATH = vim.env.PATH, HOME = vim.env.HOME } })
 
 local deadline = vim.uv.now() + 15000
@@ -70,7 +75,7 @@ local SESSION = [[
   if not session then return nil end
 ]]
 
-io.write("== stage-4 live drive ==\n")
+io.write("== live overlay drive ==\n")
 rx(([[vim.cmd.edit(%q); vim.cmd("MdViewerOpen")]]):format(repo .. "/tests/fixtures/kitchen-sink.md"))
 
 io.write("waiting for the first real render+capture (Chromium launch included)...\n")
@@ -182,7 +187,7 @@ check(sheets >= 1 and sheets <= 2, ("the tint sheet was requested once, not per 
 check(commits == 1, ("release produced exactly one settle commit (%d)"):format(commits))
 check(commits_no_capture == 0, "the commit frame captured a real browser frame")
 
--- The exact user commands whose output changed this stage (policy section 5).
+-- The exact user commands a user would run, since both report overlay fields.
 local debug_lines = rx([[
   vim.cmd("MdViewerDebug")
   local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)

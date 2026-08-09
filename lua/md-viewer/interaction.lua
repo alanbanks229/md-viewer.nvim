@@ -226,7 +226,7 @@ function M.on_drag(session, mouse)
 end
 
 ---Whether this gesture's moving frames may be displayed as backend overlay
----rectangles (stage 4) instead of full captured frames. Requires a backend
+---rectangles instead of full captured frames. Requires a backend
 ---that implements and currently allows the overlay (kitty_raw consults the
 ---terminal profile and `interaction.selection_overlay`), a base image on
 ---screen for the rectangles to composite over, and no earlier failure this
@@ -297,7 +297,7 @@ end
 ---`config.lua` for why that is its own knob rather than `render.fast_scroll`,
 ---and why it defaults off).
 ---
----On the overlay path (stage 4) the request opts out of capturing entirely:
+---On the overlay path the request opts out of capturing entirely:
 ---the renderer answers with selection rectangles from the same evaluate that
 ---applied the selection, and `controller.display_selection_overlay` draws
 ---them over the base image already on screen. A frame the overlay cannot
@@ -426,7 +426,7 @@ end
 ---`request_hit`'s `modifiers` table follows -- so nothing here can degrade
 ---into an unexpected JSON shape.
 ---
----`opts.overlay` marks a stage-4 overlay frame: the renderer skips the
+---`opts.overlay` marks an overlay frame: the renderer skips the
 ---screenshot (`capture = false`) and answers with selection rectangles
 ---instead; `opts.sheet` additionally asks for the tint-sheet PNG at the given
 ---device-pixel dimensions (sent only until the backend's upload cache is
@@ -859,7 +859,7 @@ function M.activate_link(session, result)
   end
 end
 
----Resolve `point` against the Part 3 `interact` transport. Always uses
+---Resolve `point` against the `interact` transport. Always uses
 ---`activate_at`, which reports a link when the point is over one and source
 ---semantics otherwise. The only remaining caller is the ctrl/cmd-click
 ---gesture (`M.activate`) -- a plain click no longer navigates to source at
@@ -874,7 +874,7 @@ function M.request_hit(session, point, modifiers, click_count, callback)
     callback(nil, "md-viewer: no rendered viewport to interact with yet")
     return
   end
-  -- Part 3's contract (see docs/cross-platform-implementation-status.md):
+  -- The `interact` transport's contract:
   -- send the scrollY currently on screen, not the position a debounced
   -- scroll has already moved on to wanting. `session.scroll_y` can be ahead
   -- of what the visible image actually shows; `applied_scroll_y` is what the

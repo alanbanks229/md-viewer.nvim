@@ -817,7 +817,7 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Cleanup on preview close: forget_selection resets all Part 6 state and
+  -- Cleanup on preview close: forget_selection resets all selection state and
   -- closes its debounce timers.
   -- ---------------------------------------------------------------------
   do
@@ -970,7 +970,7 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Stage-4 overlay path: a moving preview frame on an overlay-capable
+  -- Overlay path: a moving preview frame on an overlay-capable
   -- backend opts out of capture and is displayed through
   -- display_selection_overlay; every failure mode falls back to the
   -- captured path (sticky for the gesture), except a missing tint sheet,

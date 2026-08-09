@@ -52,8 +52,9 @@ the spinner before calculating Kitty placements; a renderer failure removes it
 before emitting the actionable notification. Its timer is owned by the buffer
 session and is closed on every preview shutdown path.
 
-The raw backend uses z-index `-1`, which keeps the image below terminal text
-while remaining visible above the Neovim backgrounds painted by iTerm2. It
+The raw backend uses a negative z-index (`-2` on every Kitty-graphics profile,
+leaving `-1` free for the selection overlay), which keeps the image below
+terminal text while remaining visible above the Neovim cell backgrounds. It
 reserves a one-cell bottom guard when Neovim reports a statusline. Visible
 floating-window rectangles are discovered through
 `nvim_tabpage_list_wins()`, `nvim_win_get_config()`, and screen coordinates. An
@@ -62,8 +63,8 @@ cached PNG without another browser capture. Non-focusable passive overlays are
 tracked as exclusion rectangles on the placement, which `interaction.locate`
 uses to refuse a click that lands on one, and which `kitty_raw.lua` subtracts
 from the placement as cropped source-image placements. That subtraction is what
-gives a passive float an opaque interior: z-index `-1` is above the cell
-background, so without it the image composites straight through a
+gives a passive float an opaque interior: a negative z-index is still above the
+cell background, so without it the image composites straight through a
 notification's background and only the notification's glyphs and border
 characters survive. `kitty_raw.move` writes the replacement placements and the
 deletion of the ones they supersede in a single write, new first — deleting
@@ -133,7 +134,7 @@ does not issue another render.
 Navigation allows one capture in flight and retains only the newest pending
 position. Every completed frame is displayed, with no fixed FPS throttle. The
 preview mappings never move the source cursor; preview-to-source movement is
-disabled in the bundled iTerm2 configuration.
+disabled by default (`sync.preview_to_source = false`).
 
 The browser page includes a viewport-relative bottom spacer by default. Its
 height is one viewport minus a rendered line, matching editor scroll-past-end
@@ -279,9 +280,7 @@ session even if the pointer later leaves the window before the button comes
 up. A plain click (no drag) clears an active selection and never moves the
 source cursor under any gesture -- an earlier, removed behavior did move the
 cursor on click, which fought the drag-to-select gesture (dismissing a
-highlight by clicking elsewhere also relocated the editor cursor); see
-`docs/cross-platform-implementation-status.md`'s "click-to-source removed"
-follow-up.
+highlight by clicking elsewhere also relocated the editor cursor).
 
 ## Lifecycle
 

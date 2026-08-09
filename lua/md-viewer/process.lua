@@ -5,7 +5,7 @@ local instance
 -- Process-lifetime, registered once at plugin setup, like an augroup: nothing
 -- ever needs to unregister one. In-flight requests already error correctly
 -- through deliver_error() below; these listeners exist for session-level Lua
--- state (Part 6's cached selection/find display flags) that is not tied to any
+-- state (the cached selection/find display flags) that is not tied to any
 -- specific in-flight request and would otherwise go stale silently across a
 -- renderer restart.
 local exit_listeners = {}

@@ -1,5 +1,5 @@
--- Stage-6 WezTerm geometry probe. Runs as `nvim -c luafile` *inside* a real
--- WezTerm window, driven by run.sh.
+-- Overlay geometry probe. Runs as `nvim -c luafile` *inside* a real terminal
+-- window, driven by run.sh.
 --
 -- It draws through the production code path -- `kitty_raw.show` for the base
 -- frame and `kitty_raw.overlay_apply` for the highlight rectangles -- rather
@@ -21,7 +21,7 @@
 --   <out>/phase-N.done  ->  probe advances.
 
 local repo = assert(vim.env.MD_VIEWER_REPO, "MD_VIEWER_REPO is required")
-local out = assert(vim.env.MD_VIEWER_STAGE6_OUT, "MD_VIEWER_STAGE6_OUT is required")
+local out = assert(vim.env.MD_VIEWER_OVERLAY_OUT, "MD_VIEWER_OVERLAY_OUT is required")
 
 vim.opt.runtimepath:append(repo)
 
@@ -35,7 +35,7 @@ local cellpixels = require("md-viewer.cellpixels")
 -- do: it does not override the cell-size or floored-cell preconditions below,
 -- because those are correctness and safety, not a capability judgement.
 require("md-viewer.config").setup({
-  terminal = { profile = vim.env.MD_VIEWER_STAGE6_PROFILE or "wezterm" },
+  terminal = { profile = vim.env.MD_VIEWER_OVERLAY_PROFILE or "wezterm" },
   interaction = { selection_overlay = "on" },
 })
 
@@ -59,7 +59,7 @@ local function png(width, height, colour, path, margin_x, margin_y)
   local result = vim
     .system({
       "node",
-      repo .. "/scripts/stage6-wezterm/make-png.mjs",
+      repo .. "/scripts/overlay/geometry/make-png.mjs",
       tostring(width),
       tostring(height),
       tostring(colour.r),
@@ -126,13 +126,13 @@ vim.api.nvim_buf_set_lines(buf, 0, -1, false, blank)
 
 -- The fiducials are Neovim's own highlights rather than raw escapes, so a
 -- redraw reproduces them instead of erasing them.
-vim.api.nvim_set_hl(0, "Stage6Fiducial", { bg = FIDUCIAL })
-local ns = vim.api.nvim_create_namespace("md-viewer-stage6")
-vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { end_col = cols, hl_group = "Stage6Fiducial" })
+vim.api.nvim_set_hl(0, "OverlayProbeFiducial", { bg = FIDUCIAL })
+local ns = vim.api.nvim_create_namespace("md-viewer-overlay-probe")
+vim.api.nvim_buf_set_extmark(buf, ns, 0, 0, { end_col = cols, hl_group = "OverlayProbeFiducial" })
 -- Buffer line N shows at screen row N-1; the last screen row is the cmdline,
 -- so the far corner mark goes one row above it.
 local corner_row = rows - 2
-vim.api.nvim_buf_set_extmark(buf, ns, corner_row, cols - 1, { end_col = cols, hl_group = "Stage6Fiducial" })
+vim.api.nvim_buf_set_extmark(buf, ns, corner_row, cols - 1, { end_col = cols, hl_group = "OverlayProbeFiducial" })
 vim.api.nvim_win_set_cursor(0, { corner_row + 1, 0 })
 vim.cmd("redraw")
 
@@ -190,7 +190,7 @@ local cases = {
 }
 
 local expectations = {
-  wezterm = vim.env.MD_VIEWER_STAGE6_BUILD,
+  wezterm = vim.env.MD_VIEWER_OVERLAY_BUILD,
   columns = cols,
   rows = rows,
   fiducial = FIDUCIAL,

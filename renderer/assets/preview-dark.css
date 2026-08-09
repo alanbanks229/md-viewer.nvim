@@ -24,7 +24,7 @@
   --find-mark-active-bg: rgba(255, 152, 0, 0.65);
   /* Selection background, pinned. With no ::selection rule Chromium's dark
      default painted the equivalent of rgba(97,97,97,0.846) (measured by
-     tests/node/selection-tint.test.js's method); at that opacity the stage-4
+     tests/node/selection-tint.test.js's method); at that opacity the
      drag overlay -- which sits *above* the glyphs during a drag, unlike the
      browser's own paint, which sits below them -- would wash the text out.
      This value composites to the exact same #575757 over the page background

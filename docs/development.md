@@ -12,6 +12,10 @@
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`: headless Neovim tests
 - `tests/node/`: renderer, protocol, browser, and security tests
+- `tests/fixtures/`: Markdown documents the suites and the manual checklist use
+- `scripts/overlay/`: harnesses that need a real browser or a real terminal
+  window; see `scripts/README.md`
+- `docs/`: architecture, security, troubleshooting, and release testing
 
 ## Bootstrap
 
@@ -29,6 +33,7 @@ does not require npm network access.
 ## Automated tests
 
 ```sh
+stylua --check lua/ plugin/ tests/lua/
 NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
 npm test --prefix renderer
 ```
@@ -56,22 +61,16 @@ the following with a bug report:
 - relevant statusline, winbar, split, and floating-window configuration
 - minimal Markdown and configuration needed to reproduce the behavior
 
-The optional `vim.ui.img` feasibility spike can be launched from the repository
-root:
-
-```sh
-nvim -u scripts/feasibility_init.lua README.md
-```
-
-Use `:MdViewerSpikeReplace` and `:MdViewerSpikeStop` to exercise targeted image
-replacement and cleanup on builds exposing `vim.ui.img.set` and
-`vim.ui.img.del`. A missing API is a supported negative result; never infer API
-availability from the Neovim version alone.
+Three harnesses under `scripts/overlay/` cover what the headless suites cannot:
+an end-to-end drag regression against a real browser, a pixel-asserting geometry
+rig, and an overlay stress rig. See [../scripts/README.md](../scripts/README.md)
+for what each proves and when to run it.
 
 ## Release checklist
 
 1. Run the Lua and Node.js suites from a clean checkout.
-2. Complete the interactive iTerm2 checklist.
+2. Work through the checklist in [manual-testing.md](manual-testing.md) on at
+   least one real terminal.
 3. Confirm `renderer/package.json`, `renderer/package-lock.json`,
    `lua/md-viewer/init.lua`, and `CHANGELOG.md` agree on the release version.
 4. Confirm no browser binary, `node_modules`, log, screenshot, or local profile

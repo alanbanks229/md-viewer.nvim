@@ -125,8 +125,8 @@ export function classifyLink(href) {
 ///   - no block at all means `none`, with no position guessed.
 ///
 /// `inline` and `sourceMap` are optional: called with a block alone -- which is
-/// what a document rendered before Part 5, or one whose markup was supplied
-/// directly, produces -- this behaves exactly as it did in Parts 3 and 4.
+/// what a document rendered without a source map, or one whose markup was
+/// supplied directly, produces -- this degrades to block-level precision.
 export function resolveSourcePosition(block, inline, sourceMap) {
   const region = resolveRegionPosition(sourceMap, inline?.sourceId, inline?.offset);
   if (region) {
@@ -323,8 +323,8 @@ export function validateEnvelope(params) {
     viewportHeightPx,
     // An action that mutates visible state always captures. Anything else may
     // opt in, which is how the same-queued-operation capture path is exercised
-    // before Part 6 ships the first mutating action. `capture: false` is the
-    // stage-4 opt-out: a moving drag-preview frame displays the selection as a
+    // for actions that mutate visible state. `capture: false` is the
+    // Overlay opt-out: a moving drag-preview frame displays the selection as a
     // Lua-drawn overlay built from this same operation's rect geometry, so no
     // screenshot exists to take. §3.4's guarantee -- Lua never issues a
     // follow-up capture for a frame it displays -- still holds: the one queued
@@ -393,7 +393,7 @@ export function hitTestInPage(input) {
   //
   // So probe outward from the centre in both axes, bounded by the cell the user
   // actually clicked, and take the nearest content. This is not the clamping
-  // Part 3 refused: it never reaches beyond half a cell, so a click in the
+  // an earlier version refused: it never reached beyond half a cell, so a click in the
   // middle of the scroll-past-end padding still finds nothing across the whole
   // cell and still honestly reports "none". Reaching half a cell vertically can
   // only ever touch a line that same cell already covers.
@@ -567,7 +567,7 @@ export function hitTestInPage(input) {
       textLength: runLength,
     },
     // DOM node identity never crosses the process boundary. This descriptor is
-    // for diagnostics and tests; Part 6 hit-tests both selection endpoints
+    // for diagnostics and tests; selection hit-tests both endpoints
     // inside a single evaluate, so it never needs to round-trip a node.
     node: caretNode === null ? null : { nodeType: caretNode.nodeType, nodeName: caretNode.nodeName },
     offset: caretOffset,
@@ -616,7 +616,7 @@ export function buildActionResult(action, hit) {
 }
 
 // ---------------------------------------------------------------------------
-// Part 6 -- selection and search.
+// Selection and search.
 //
 // Each `*InPage` function below is a second, independent `page.evaluate` body,
 // self-contained for the same reason `hitTestInPage` is: `page.evaluate`
@@ -887,7 +887,7 @@ export function resolveSelectionInPage(input) {
   const selection = window.getSelection();
   applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
 
-  // Selection geometry for the stage-4 drag overlay: viewport-relative CSS
+  // Selection geometry for the drag overlay: viewport-relative CSS
   // rectangles matching the shape the browser itself paints. Read here, from
   // the same applied Range in the same evaluate that produces `text`, so the
   // picture on screen and the string a copy would produce can never come from
@@ -1505,7 +1505,7 @@ export function paragraphSelectInPage(input) {
 /// so HTML and regex metacharacters are inert by construction) and wraps each
 /// match in a programmatically created `<span data-md-viewer-find-mark>` via
 /// `Text.splitText` -- never `innerHTML`, which both would be an injection
-/// vector and would destroy the source IDs Part 5's provenance depends on.
+/// vector and would destroy the source IDs exact provenance depends on.
 ///
 /// `unwrapFindMarksInPage` is declared inside this function and duplicated
 /// again inside `clearFindInPage` below -- see resolveSelectionInPage's

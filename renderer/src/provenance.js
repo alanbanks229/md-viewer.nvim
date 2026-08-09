@@ -136,7 +136,7 @@ function mergeSpans(from, into) {
 /// ones whose contents are slices of the original at offsets it already knows.
 /// A future replacement for that rule can call this to give each new token a
 /// real span rather than letting it fall back to line precision. Nothing calls
-/// it today, deliberately: Part 5's decision was to degrade honestly for
+/// it today, deliberately: the decision was to degrade honestly for
 /// auto-linkified bare URLs rather than carry a second copy of a markdown-it
 /// rule. Explicit `[label](url)` links are unaffected either way -- they never
 /// go through the linkify rule at all.
@@ -498,7 +498,7 @@ export function registerCodeRegion(env, token, docLines) {
 ///
 /// `line` is a **0-based** document line index; the single conversion to
 /// Neovim's 1-based lines lives in `interact.js:resolveSourcePosition()`, where
-/// the block conversion has lived since Part 3. `byteColumn` is a 0-based UTF-8
+/// the block conversion has always lived. `byteColumn` is a 0-based UTF-8
 /// byte offset, which is what `nvim_win_set_cursor()` takes.
 ///
 /// A region with no caret offset resolves to its own line with `line`

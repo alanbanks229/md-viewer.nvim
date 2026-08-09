@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
-# Stage-6 WezTerm geometry run. Launches one WezTerm window with a pinned
+# Overlay geometry qualification. Launches one WezTerm window with a pinned
 # config, lets probe.lua draw through md-viewer's real placement path, and
-# screenshots the display at each phase.
+# screenshots the display at each phase, so assert.mjs can check in pixels that
+# overlay rectangles land where the arithmetic says.
+#
+# Run this before enabling `selection_overlay` for a terminal profile, or after
+# changing `overlay_encoding`, `raw_cell_offset_px`, or the placement encoder.
+# It is written around WezTerm because that is where the geometry defect was
+# found, but nothing in probe.lua or assert.mjs is WezTerm-specific: point it at
+# another terminal's launcher to qualify that one.
 #
 #   ./run.sh <path-to-WezTerm.app> [label]
 #
@@ -16,10 +23,10 @@ gui="$app/Contents/MacOS/wezterm-gui"
 cli="$app/Contents/MacOS/wezterm"
 [ -x "$gui" ] || { echo "no wezterm-gui at $gui" >&2; exit 2; }
 
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 build="$("$cli" --version | awk '{print $2}')"
 label="${2:-$build}"
-out="$repo/tmp/stage6/$label"
+out="$repo/tmp/overlay/$label"
 
 rm -rf "$out"; mkdir -p "$out"
 echo "build:  $build"
@@ -29,13 +36,13 @@ echo "out:    $out"
 # --always-new-process so this never attaches to a WezTerm the operator has
 # open with their own config; -n on nvim's side is not enough on its own.
 MD_VIEWER_REPO="$repo" \
-MD_VIEWER_STAGE6_OUT="$out" \
-MD_VIEWER_STAGE6_BUILD="$build" \
-MD_VIEWER_STAGE6_PROFILE="${MD_VIEWER_STAGE6_PROFILE:-wezterm}" \
-"$gui" --config-file "$repo/scripts/stage6-wezterm/wezterm.lua" \
+MD_VIEWER_OVERLAY_OUT="$out" \
+MD_VIEWER_OVERLAY_BUILD="$build" \
+MD_VIEWER_OVERLAY_PROFILE="${MD_VIEWER_OVERLAY_PROFILE:-wezterm}" \
+"$gui" --config-file "$repo/scripts/overlay/wezterm.lua" \
   start --always-new-process -- \
   nvim -u NONE -i NONE --cmd "set runtimepath+=$repo" \
-    -c "luafile $repo/scripts/stage6-wezterm/probe.lua" \
+    -c "luafile $repo/scripts/overlay/geometry/probe.lua" \
   >"$out/wezterm.log" 2>&1 &
 wez_pid=$!
 
@@ -80,4 +87,4 @@ done
 wait "$wez_pid" 2>/dev/null || true
 trap - EXIT
 echo
-node "$repo/scripts/stage6-wezterm/assert.mjs" "$out"
+node "$repo/scripts/overlay/geometry/assert.mjs" "$out"

@@ -165,7 +165,7 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(response.result.collapsed, false, "a real drag must not collapse");
     // Not anchored to the literal first character: a click a few CSS pixels
     // into a block can land the caret just past it (the same terminal-cell
-    // edge behavior documented for click-to-source in Part 5), which is a
+    // edge behavior documented for source-position reporting), which is a
     // real, honest browser caret position, not a bug in selection itself.
     // "beta gamma" is safely inside the line, away from either edge.
     assert.match(response.result.text, /beta gamma/, "the selection should cover most of the paragraph");
@@ -416,7 +416,7 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(health1.result.interactionDocuments >= 1, true);
 
     // A genuinely new render (different content, not just a revision bump)
-    // drops the document's interaction state entirely -- Part 3's
+    // drops the document's interaction state entirely -- the transport's
     // interactionStateFor() replaces rather than migrates it.
     await render(t, renderer, "sel-doc", `${DOC}\n\nA new paragraph appended for revision 2.\n`, "2:0");
     const afterEdit = await renderer.send("interact", renderer.interactParams("sel-doc", "2:0", { action: "selection_text" }));
@@ -455,7 +455,7 @@ test("cross-document selection isolation: one document's selection never leaks i
   assert.doesNotMatch(JSON.stringify(bText.result), /Alpha/);
 
   // Rehydrating A back into the shared page is a real page.setContent() reload
-  // (Part 3's single-shared-page architecture; no page-per-document), which
+  // (a single shared page; no page-per-document), which
   // destroys any live window.getSelection() state that referenced A's old DOM
   // nodes -- there is nothing left for the browser to have kept selected. This
   // is architecturally honest, not a leak: A's *old* selection is gone rather
@@ -508,7 +508,7 @@ test("stale selection-preview frames never replace a newer one", async (t) => {
   }
   // The final read of the live DOM selection must reflect the last request
   // this test issued (x: 700), not an earlier one -- the interact lane's
-  // strict serialization is what guarantees this without any Part 6 code.
+  // strict serialization is what guarantees this without any selection-side code.
   const finalText = await renderer.send("interact", renderer.interactParams("drag-sel", "1:0", { action: "selection_text" }));
   assert.equal(finalText.ok, true, finalText.error);
   assert.notEqual(finalText.result.text, "", "the last preview in the burst should have produced a real selection");

@@ -12,7 +12,8 @@ return function(t)
   -- re-validate it against `vim.o.columns`/`vim.o.lines`, which never move --
   -- so a preview opened in that window kept a half-scale cell for the rest of
   -- the session, and every overlay rectangle was drawn at half size. That is
-  -- the defect stage 5 fixed, arriving by a different route.
+  -- the same defect as the rectangles once sized in captured pixels, arriving
+  -- by a different route.
   --
   -- The reader is substituted rather than the whole of `measure`, so the
   -- caching behaviour under test is the real one.
@@ -60,8 +61,8 @@ return function(t)
     reading.xpixel = grid_cols * 16
     t.eq(16, (cellpixels.measure() or {}).width, "and that refusal is not sticky either")
 
-    -- A fractional cell survives unrounded: rounding here is what stage 5's
-    -- defect was made of.
+    -- A fractional cell survives unrounded: rounding here is what the
+    -- mis-sized-rectangle defect was made of.
     reading.xpixel, reading.ypixel = grid_cols * 16 - 1, grid_rows * 35
     t.eq(
       16 - 1 / grid_cols,
