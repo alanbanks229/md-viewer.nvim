@@ -10,22 +10,44 @@ permissions:
 
 env:
   NVIM_VERSION: v0.12.4
+  STYLUA_VERSION: v2.5.2
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stylua
+        run: |
+          curl -fsSL -o stylua.zip \
+            "https://github.com/JohnnyMorganz/StyLua/releases/download/${STYLUA_VERSION}/stylua-linux-x86_64.zip"
+          unzip -o stylua.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/stylua
+          rm stylua.zip
+
+      - name: Check Lua formatting
+        run: stylua --check lua/ plugin/ tests/lua/
+
   test:
     strategy:
       fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
+
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: npm
           cache-dependency-path: renderer/package-lock.json
+
       - name: Install Neovim (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -37,7 +59,7 @@ jobs:
             "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/${asset}"
           tar xzf nvim.tar.gz
           echo "$PWD/${asset%.tar.gz}/bin" >> "$GITHUB_PATH"
-          brew install stylua
+
       - name: Install Neovim (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -45,23 +67,17 @@ jobs:
             "https://github.com/neovim/neovim/releases/download/${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
           tar xzf nvim.tar.gz
           echo "$PWD/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
-      - name: Install stylua (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          curl -fsSL -o stylua.zip \
-            https://github.com/JohnnyMorganz/StyLua/releases/latest/download/stylua-linux-x86_64.zip
-          unzip -o stylua.zip -d /usr/local/bin
-          chmod +x /usr/local/bin/stylua
-          rm stylua.zip
+
       - name: Install locked renderer dependencies
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: npm ci --ignore-scripts --prefix renderer
+
       - name: Check Neovim version
         run: nvim --version
-      - name: Check Lua formatting
-        run: stylua --check lua/ plugin/ tests/lua/
+
       - name: Run Lua tests
         run: NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
+
       - name: Run Node.js tests
         run: npm test --prefix renderer
