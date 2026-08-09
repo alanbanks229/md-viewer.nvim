@@ -67,7 +67,7 @@ not tell you (see §5).
 
 | Check | How | Expect |
 |---|---|---|
-| Image renders | `:MdViewerOpen` | A rendered page filling the split, at the right size and position, with no hand-tuned `render.*` config. |
+| Image renders | `:MdViewerToggle` | A rendered page filling the split, at the right size and position, with no hand-tuned `render.*` config. |
 | Live preview | Edit the buffer without `:w` | The preview follows within the debounce interval. |
 | Cursor follow | Move the cursor through the source | The preview scrolls to match. |
 | Scrolling | `j`/`k`, `Ctrl-d`/`u`, `Ctrl-f`/`b`, `gg`/`G`, mouse wheel over the preview | Smooth movement, no flicker, no stray image left behind. Wheel does nothing when the pointer is outside the preview. |

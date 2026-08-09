@@ -3,12 +3,10 @@ local controller = require("md-viewer.controller")
 local M = {}
 
 function M.setup()
-  vim.api.nvim_create_user_command(
-    "MdViewerOpen",
-    function(args) controller.open(args.args ~= "" and args.args or nil) end,
-    { nargs = "?", complete = function() return { "right", "left", "below", "above" } end }
-  )
-  vim.api.nvim_create_user_command("MdViewerClose", function() controller.close() end, {})
+  -- One command for the preview's visibility, not three. `controller.open()`
+  -- and `controller.close()` remain the Lua API and are what to call from an
+  -- autocmd or another plugin: `open()` is idempotent and never closes an
+  -- existing preview, which `MdViewerToggle` deliberately does.
   vim.api.nvim_create_user_command(
     "MdViewerToggle",
     function(args) controller.toggle(args.args ~= "" and args.args or nil) end,

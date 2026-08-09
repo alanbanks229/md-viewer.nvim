@@ -93,17 +93,21 @@ and docs/manual-testing.md for the per-terminal alignment matrix.
 =============================================================================
 COMMANDS                                                 *md-viewer-commands*
 
-                                                            *:MdViewerOpen*
-:MdViewerOpen [position]
-        Open a preview. Position can be right, left, below, or above.
-
-                                                           *:MdViewerClose*
-:MdViewerClose
-        Close the active preview and remove its owned image.
-
                                                           *:MdViewerToggle*
 :MdViewerToggle [position]
-        Open or close the active preview.
+        Open or close the active preview. Position can be right, left,
+        below, or above. This is the only command that changes whether a
+        preview is showing.
+
+        To open or close one from an autocmd or another plugin, call the
+        Lua API rather than this command: >lua
+
+            require("md-viewer.controller").open("right")
+            require("md-viewer.controller").close()
+<
+        `open()` is idempotent -- it returns the existing preview rather
+        than opening a second one, and never closes one, which is exactly
+        where it differs from :MdViewerToggle.
 
                                                          *:MdViewerRefresh*
 :MdViewerRefresh

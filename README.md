@@ -124,8 +124,6 @@ installation.
   version = "v0.3.0",
   ft = "markdown",
   cmd = {
-    "MdViewerOpen",
-    "MdViewerClose",
     "MdViewerToggle",
     "MdViewerRefresh",
     "MdViewerHealth",
@@ -379,9 +377,7 @@ Open a Markdown buffer, then use:
 
 | Command | Action |
 |---|---|
-| `:MdViewerOpen [right\|left\|below\|above]` | Open a preview split |
-| `:MdViewerClose` | Close the active preview |
-| `:MdViewerToggle [position]` | Toggle a preview |
+| `:MdViewerToggle [right\|left\|below\|above]` | Open or close the preview |
 | `:MdViewerRefresh` | Force a fresh render |
 | `:MdViewerCopy` | Copy the current selection (also `y` with the preview focused) |
 | `:MdViewerClearSelection` | Clear the current selection without clicking |

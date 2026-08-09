@@ -262,5 +262,5 @@ whether the preview renders at all.
 
 Stop and record the exact backend, terminal/Neovim versions,
 statusline/winbar configuration, and reproduction in a bug report. Use
-`:MdViewerClose`; md-viewer deletes only IDs it owns. Do not use global
+`:MdViewerToggle` to close the preview; md-viewer deletes only IDs it owns. Do not use global
 image deletion because that can damage unrelated plugins.

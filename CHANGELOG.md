@@ -369,6 +369,13 @@ All notable changes to this project will be documented here. The project uses
 
 ### Removed
 
+- `:MdViewerOpen` and `:MdViewerClose`. One command now owns whether a preview
+  is showing: `:MdViewerToggle`, which still takes the same optional position.
+  `controller.open()` and `controller.close()` remain as the Lua API and are
+  what to call from an autocmd or another plugin — `open()` is idempotent, so
+  it returns an existing preview rather than opening a second one and never
+  closes one, which is exactly where it differs from the toggle.
+
 - The `vim.ui.img` feasibility spike and its `:MdViewerSpikeStart`/
   `:MdViewerSpikeReplace`/`:MdViewerSpikeStop` commands. They were only ever
   reachable by launching Neovim with a dedicated init file, and the
