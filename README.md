@@ -47,13 +47,24 @@ frame. It is enabled only where a human confirmed it in a live terminal —
 today **iTerm2, Kitty and Ghostty**. Everywhere else a drag keeps the
 full-frame capture path, which stays correct and is merely slower.
 
-- **WezTerm is deliberately excluded.** The highlight draws correctly there, but
-  sustained placement traffic grows WezTerm's memory without bound. That is an
-  upstream defect ([wezterm#7953](https://github.com/wezterm/wezterm/issues/7953)),
-  with a fix proposed in
-  [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035). Until it ships
-  in a released build, do not force the overlay on in WezTerm: it will look
-  right and exhaust your memory.
+- **WezTerm is deliberately excluded, and stays excluded until an upstream PR
+  merges and ships.** The highlight draws correctly there — its geometry was
+  photographed and verified on two builds — but sustained placement traffic
+  grows WezTerm's resident memory without bound: 172 MB to 786 MB in four
+  seconds, with as few as four rectangles being replaced at 40fps. That is an
+  upstream defect
+  ([wezterm#7953](https://github.com/wezterm/wezterm/issues/7953)); the fix is
+  proposed in
+  [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035), **still open and
+  unmerged as of 2026-08-09**. You need do nothing to be safe: WezTerm already
+  gets the slower full-frame capture path by default. Just do not force the
+  overlay on there — it will look right and exhaust your memory.
+
+  Re-qualifying WezTerm once #8035 merges is not automatic and is not a
+  version check. It needs a *released* build carrying the fix, then
+  `scripts/overlay/geometry` and `scripts/overlay/stress` run against it, and
+  the profile flag flipped only if both pass. Until then this is the only
+  terminal md-viewer refuses on cost rather than correctness.
 - `interaction.selection_overlay = "on"` forces it on if you want to qualify
   your own terminal. Read the option's notes in `lua/md-viewer/config.lua`
   first, and do it on a machine you can afford to lose.
@@ -514,9 +525,11 @@ changing those options.
   teardown) are covered by headless tests only. See
   [Terminal support](#terminal-support) and
   [docs/manual-testing.md](docs/manual-testing.md) for the per-terminal status.
-- The drag-highlight overlay is off on WezTerm pending an upstream fix
-  ([wezterm#8035](https://github.com/wezterm/wezterm/pull/8035)); drags there
-  fall back to the slower full-frame path.
+- The drag-highlight overlay is off on WezTerm pending an upstream fix that has
+  not merged yet ([wezterm#8035](https://github.com/wezterm/wezterm/pull/8035),
+  open as of 2026-08-09); drags there fall back to the slower full-frame path.
+  It stays off until that fix is in a released WezTerm build and md-viewer's
+  overlay scripts have been re-run against it.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
