@@ -97,6 +97,47 @@ function M.from_source_win(win)
   end
 end
 
+---The window `session`'s source document is displayed in right now, or nil.
+---
+---`from_source_win` above cannot answer this and deliberately does not try: a
+---window keeps its id when a different file is opened in it, so a preview
+---started on README.md kept matching the window SECURITY.md was later loaded
+---into, and scrolling SECURITY.md drove README's preview -- SECURITY.md's line
+---numbers looked up in README's source map. Callers reacting to something that
+---happened *in a window* (a scroll, a cursor line) must ask here. Callers that
+---mean "the window this preview is paired with" -- following a link, walking
+---the preview history -- want `session.source_win` itself and are right to keep
+---using it.
+---
+---Adopts a new window when the document has moved to one, so a preview whose
+---source buffer was reopened in a split keeps working, and refuses when two or
+---more windows show it. That refusal is the point rather than caution: during a
+---compound `:vsplit other.md` there is a moment when the new window and the one
+---it split from both show the source buffer, and taking either on that evidence
+---is exactly the mispairing md-viewer.controller's WinEnter handler defers a
+---tick to avoid. A scroll event cannot defer, since its whole job is to answer
+---now, so it declines instead; entering either window heals the pairing there.
+function M.source_window(session)
+  local win = session.source_win
+  if
+    type(win) == "number"
+    and vim.api.nvim_win_is_valid(win)
+    and vim.api.nvim_win_get_buf(win) == session.source_buf
+  then
+    return win
+  end
+  if not (session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)) then return nil end
+  local found
+  for _, candidate in ipairs(vim.api.nvim_tabpage_list_wins(vim.api.nvim_win_get_tabpage(session.preview_win))) do
+    if vim.api.nvim_win_get_buf(candidate) == session.source_buf then
+      if found then return nil end
+      found = candidate
+    end
+  end
+  if found then session.source_win = found end
+  return found
+end
+
 function M.visible_in_tab(tab)
   tab = tab or vim.api.nvim_get_current_tabpage()
   for _, session in pairs(sessions) do

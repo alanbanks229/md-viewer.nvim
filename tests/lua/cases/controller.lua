@@ -300,6 +300,95 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
+  -- Regression: a window keeps its id when its buffer changes. Opening a
+  -- second file in the window a preview was started from left WinScrolled's
+  -- `scrolled_win == session.source_win` test passing, so scrolling the new
+  -- file looked its line numbers up in the old file's source map and
+  -- scrolled the old file's preview -- the operator saw scrolling SECURITY.md
+  -- move a README.md preview.
+  -- ---------------------------------------------------------------------
+  do
+    local entry_win = vim.api.nvim_get_current_win()
+    local original_lines = vim.api.nvim_buf_get_lines(source, 0, -1, false)
+    local long = {}
+    for i = 1, 40 do
+      long[i] = "line " .. i
+    end
+    vim.api.nvim_buf_set_lines(source, 0, -1, false, long)
+    vim.api.nvim_set_current_buf(source)
+    local scrolled = assert(controller.open("right"))
+    local win = scrolled.source_win
+    -- A source map coarse enough that a line deep in either buffer lands well
+    -- outside the anchor tolerance, so the unfixed code moves `scroll_y` a long
+    -- way rather than declining to for some unrelated reason.
+    local function arm()
+      scrolled.latest_blocks = {
+        { sourceStart = 0, sourceEnd = 3, topPx = 0, bottomPx = 100 },
+        { sourceStart = 3, sourceEnd = 60, topPx = 100, bottomPx = 2000 },
+      }
+      scrolled.viewport_height_px, scrolled.document_height_px = 200, 2000
+      scrolled.scroll_y, scrolled.last_source_block = 0, nil
+    end
+    local function scroll(target)
+      vim.api.nvim_exec_autocmds("WinScrolled", { group = "md-viewer", pattern = tostring(target) })
+    end
+    -- The debounced follow-up would schedule real renders; every assertion here
+    -- is on `scroll_y`, which sync sets synchronously before calling back.
+    local original_schedule_scroll = controller.schedule_scroll
+    controller.schedule_scroll = function() end
+
+    local stranger = vim.api.nvim_create_buf(true, false)
+    vim.bo[stranger].filetype = "markdown"
+    vim.api.nvim_buf_set_lines(stranger, 0, -1, false, long)
+    vim.api.nvim_win_set_buf(win, stranger)
+    vim.api.nvim_win_set_cursor(win, { 30, 0 })
+    vim.wait(50)
+    arm()
+    scroll(win)
+    t.eq(0, scrolled.scroll_y, "scrolling another file in the preview's old source window leaves the preview alone")
+    t.eq(source, scrolled.source_buf, "...and the pinned preview goes on rendering its own document")
+
+    -- The source document reopened in a different window drives the preview
+    -- again. `source_win` is put back deliberately after the split settles: a
+    -- wheel over an unfocused window scrolls it without any WinEnter, so this
+    -- is the state the resolver has to recover from on its own.
+    vim.api.nvim_set_current_win(win)
+    vim.cmd("leftabove split")
+    local pane3 = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(pane3, source)
+    vim.api.nvim_win_set_cursor(pane3, { 30, 0 })
+    vim.api.nvim_set_current_win(win)
+    vim.wait(50)
+    scrolled.source_win = win
+    arm()
+    scroll(pane3)
+    t.ok(scrolled.scroll_y > 0, "the source document reopened in another window drives the preview again")
+    t.eq(pane3, scrolled.source_win, "...and that window is adopted as the source window")
+
+    -- Two windows showing one document is the transient state a compound
+    -- `:vsplit other.md` passes through, and the one the regression above is
+    -- about. There is no principled tiebreak, so nothing is adopted and the
+    -- WinEnter handler is left to settle it when the reader picks a window.
+    vim.api.nvim_win_set_buf(win, source)
+    scrolled.source_win = scrolled.preview_win
+    t.eq(nil, state.source_window(scrolled), "one document in two windows adopts neither")
+
+    -- The guard must not have simply switched cursor-follow off.
+    scrolled.source_win = win
+    vim.api.nvim_win_set_cursor(win, { 30, 0 })
+    arm()
+    scroll(win)
+    t.ok(scrolled.scroll_y > 0, "the window actually showing the source document still drives the preview")
+
+    controller.schedule_scroll = original_schedule_scroll
+    pcall(vim.api.nvim_win_close, pane3, true)
+    controller.close(source)
+    pcall(vim.api.nvim_buf_delete, stranger, { force = true })
+    vim.api.nvim_buf_set_lines(source, 0, -1, false, original_lines)
+    pcall(vim.api.nvim_set_current_win, entry_win)
+  end
+
+  -- ---------------------------------------------------------------------
   -- Overlay display: display_selection_overlay refuses any result
   -- whose geometry cannot be proven to match the frame on screen, applies
   -- matching ones through the backend, and clear_selection_overlay releases

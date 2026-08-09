@@ -93,6 +93,29 @@ return function(t)
     sync.suppress_echo(orphan, 999999)
     t.eq(nil, orphan.sync_echo, "an unresolvable window records no echo")
 
+    -- The mirror of the SECURITY.md-scrolls-README's-preview bug, and the
+    -- reason update_source_from_scroll resolves the window rather than trusting
+    -- `source_win`: a window keeps its id when a different file is opened in
+    -- it, so this would put *this* document's line number -- clamped against
+    -- *this* document's length -- into a file the preview is not rendering,
+    -- yanking the reader's cursor out from under them. This direction is off by
+    -- default (`sync.preview_to_source`), so no autocmd test can reach it.
+    local moved = fresh_session()
+    moved.preview_win = source_win
+    local stranger = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(stranger, 0, -1, false, { "a", "b", "c" })
+    vim.api.nvim_win_set_buf(source_win, stranger)
+    vim.api.nvim_win_set_cursor(source_win, { 3, 0 })
+    sync.update_source_from_scroll(moved, 0)
+    t.eq(
+      { 3, 0 },
+      vim.api.nvim_win_get_cursor(source_win),
+      "the preview never moves a cursor in a file it is not rendering"
+    )
+    t.eq(false, moved.sync_guard, "...and takes no guard it would then have to release")
+    vim.api.nvim_win_set_buf(source_win, source_buf)
+    vim.api.nvim_buf_delete(stranger, { force = true })
+
     vim.api.nvim_win_close(source_win, true)
   end
 end

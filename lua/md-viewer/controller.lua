@@ -1003,7 +1003,15 @@ function M.setup_autocmds()
     callback = function(args)
       local scrolled_win = tonumber(args.match)
       each_session(function(session)
-        if scrolled_win == session.source_win and config.get().sync.source_to_preview then
+        -- Compared against the window the source *buffer* is in, not against
+        -- `session.source_win` directly: a window keeps its id when its buffer
+        -- changes, so scrolling SECURITY.md after opening it in the window a
+        -- README.md preview was started from satisfied this test and scrolled
+        -- README's preview. The nil check is not decoration -- an unresolvable
+        -- source window and a non-numeric `args.match` would otherwise compare
+        -- equal and match every scroll in the editor.
+        local source_win = state.source_window(session)
+        if source_win and scrolled_win == source_win and config.get().sync.source_to_preview then
           local cfg = config.get().sync
           sync.source_cursor(
             session,
