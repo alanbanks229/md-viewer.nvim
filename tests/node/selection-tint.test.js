@@ -221,6 +221,15 @@ function composite(tint, bg) {
   });
 }
 
+// GPU-composited Chromium (a developer's desktop) and a software-rasterized
+// one (a GPU-less CI runner) round src-over's last bit differently -- a
+// real, environment-dependent rendering difference, not a color mistake in
+// the plugin. A wrong constant or wrong alpha misses by tens of levels, so a
+// 1-level tolerance costs nothing real.
+function channelsCloseEnough(actual, expected) {
+  return actual.every((value, i) => Math.abs(value - expected[i]) <= 1);
+}
+
 function renderParams(executable, theme, documentId) {
   return {
     documentId, markdown: DOC, contentRevision: "1:0",
@@ -304,7 +313,7 @@ for (const theme of ["dark", "light"]) {
           const at = (y * base.width + x) * base.channels;
           const r = sel.pixels[at], g = sel.pixels[at + 1], b = sel.pixels[at + 2];
           if (r === flat[0] && g === flat[1] && b === flat[2]) continue; // outside the selection
-          if (r === expected[0] && g === expected[1] && b === expected[2]) matching += 1;
+          if (channelsCloseEnough([r, g, b], expected)) matching += 1;
           else mismatching += 1;
         }
       }
@@ -491,7 +500,7 @@ test("composite equivalence: base + tint at reported rects reproduces the browse
       }
       if (flatMask[index] && !edgeBand[index]) flatChecked += 1;
       const s0 = settle.pixels[at], s1 = settle.pixels[at + 1], s2 = settle.pixels[at + 2];
-      const differs = s0 !== expected0 || s1 !== expected1 || s2 !== expected2;
+      const differs = !channelsCloseEnough([s0, s1, s2], [expected0, expected1, expected2]);
       checkedAll += 1;
       if (!differs) continue;
       if (edgeBand[index]) { edgeDiffs += 1; continue; }
@@ -513,7 +522,7 @@ test("composite equivalence: base + tint at reported rects reproduces the browse
       + `edge-band diffs ${edgeDiffs}; glyph-pixel diffs ${glyphDiffs} (of ${total} samples)`
   );
   assert.equal(flatMismatch, 0,
-    `every flat-background sample away from rect edges must match exactly; ${flatMismatch} did not. `
+    `every flat-background sample away from rect edges must match within 1 rounding level; ${flatMismatch} did not. `
       + `first samples: ${JSON.stringify(mismatchSamples)}`);
   assert.ok(flatChecked > 100000, "the fixture must actually exercise large flat regions");
   // Loose ceilings: these are the two known approximations, and they must

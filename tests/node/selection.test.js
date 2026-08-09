@@ -188,13 +188,18 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     const first = blockAt(blocks, 2);
     const second = blockAt(blocks, 4);
     const anchor = { x: 400, y: Math.round((first.topPx + first.bottomPx) / 2) };
-    const focus = { x: 100, y: Math.round((second.topPx + second.bottomPx) / 2) };
+    // Well past "Second paragraph" rather than mid-word: font metrics differ
+    // enough between environments (a GPU-less CI runner's font stack vs a
+    // developer's desktop) to land a caret a character early or late at a
+    // tight boundary, and this assertion only cares that the selection
+    // reached into the second block's own text at all.
+    const focus = { x: 250, y: Math.round((second.topPx + second.bottomPx) / 2) };
     const response = await selectionCommit(renderer, "sel-doc", "1:0", anchor, focus);
     assert.equal(response.ok, true, response.error);
     assert.equal(response.result.collapsed, false);
     // The selection must reach into the second paragraph's own text, not stop
     // at the end of the first.
-    assert.match(response.result.text, /Second pa/);
+    assert.match(response.result.text, /Second par/);
   });
 
   await t.test("selection crosses nested emphasis, strong, link, and inline code", async () => {
