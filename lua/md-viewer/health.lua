@@ -245,6 +245,24 @@ local verbose_sections = {
   },
 }
 
+-- nvim_buf_set_lines rejects any item containing a newline. Most collected
+-- fields are short and deterministic, but chromium_launch/renderer_process's
+-- last_error come straight from a live Playwright/Chromium failure, and
+-- Playwright's own launch-failure messages are multi-paragraph diagnostics
+-- (missing system deps, install hints, ASCII box art) -- exactly the kind of
+-- thing a CI environment hits and a local dev machine does not.
+local function split_lines(text)
+  text = tostring(text)
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = (line:gsub("\r$", ""))
+  end
+  while #lines > 1 and lines[#lines] == "" do
+    table.remove(lines)
+  end
+  return lines
+end
+
 local function format_field(output, key, value)
   if key == "graphics_caveats" and type(value) == "table" then
     output[#output + 1] = ("%-36s %s"):format("graphics caveats:", #value > 0 and "" or "none")
@@ -253,10 +271,11 @@ local function format_field(output, key, value)
     end
     return
   end
-  -- nvim_buf_set_lines rejects any item containing a newline, and
   -- vim.inspect() emits multi-line output for any non-trivial table.
   if type(value) == "table" then value = vim.inspect(value, { newline = " ", indent = "" }) end
-  output[#output + 1] = ("%-36s %s"):format(key:gsub("_", " ") .. ":", tostring(value))
+  local lines = split_lines(value)
+  local first = #lines > 1 and (lines[1] .. " …") or lines[1]
+  output[#output + 1] = ("%-36s %s"):format(key:gsub("_", " ") .. ":", first)
 end
 
 local function render_verbose_text(report)
@@ -319,7 +338,7 @@ end
 local function process_summary(process)
   process = process or {}
   if process.running then return "running" end
-  if process.last_error then return "stopped: " .. tostring(process.last_error) end
+  if process.last_error then return "stopped: " .. split_lines(process.last_error)[1] end
   return "not started yet"
 end
 
@@ -358,7 +377,15 @@ end
 local function build_warnings(report, status, status_reason)
   local warnings = {}
   if status ~= "healthy" then
-    warnings[#warnings + 1] = { text = status_reason, severity = status == "broken" and "error" or "warn" }
+    -- status_reason can be a multi-paragraph Playwright launch-failure
+    -- message; keep the full text, just split so no single buffer line
+    -- carries an embedded newline.
+    local reason_lines = split_lines(status_reason)
+    warnings[#warnings + 1] = {
+      text = reason_lines[1],
+      severity = status == "broken" and "error" or "warn",
+      detail = #reason_lines > 1 and vim.list_slice(reason_lines, 2) or nil,
+    }
   end
   for _, caveat in ipairs(report.graphics_caveats or {}) do
     warnings[#warnings + 1] = { text = caveat, severity = "warn" }
@@ -417,13 +444,17 @@ local function render_concise_text(diagnosis)
     "md-viewer.nvim health",
     string.rep("=", 22),
     "",
-    ("%s Status: %s — %s"):format(status_glyph[diagnosis.status], diagnosis.status:upper(), diagnosis.status_reason),
+    ("%s Status: %s — %s"):format(
+      status_glyph[diagnosis.status],
+      diagnosis.status:upper(),
+      split_lines(diagnosis.status_reason)[1]
+    ),
   }
   for _, section in ipairs(diagnosis.sections) do
     output[#output + 1] = ""
     output[#output + 1] = section.title
     for _, row in ipairs(section.rows) do
-      output[#output + 1] = ("  %-16s %s"):format(row.label .. ":", row.value)
+      output[#output + 1] = ("  %-16s %s"):format(row.label .. ":", split_lines(row.value)[1])
     end
   end
   output[#output + 1] = ""
@@ -446,12 +477,12 @@ end
 local function render_healthlib(diagnosis)
   vim.health.start("md-viewer.nvim")
   vim.health[status_health_level[diagnosis.status]](
-    ("Status: %s — %s"):format(diagnosis.status:upper(), diagnosis.status_reason)
+    ("Status: %s — %s"):format(diagnosis.status:upper(), split_lines(diagnosis.status_reason)[1])
   )
   for _, section in ipairs(diagnosis.sections) do
     vim.health.start("md-viewer.nvim: " .. section.title)
     for _, row in ipairs(section.rows) do
-      vim.health[row.level](("%s: %s"):format(row.label, row.value))
+      vim.health[row.level](("%s: %s"):format(row.label, split_lines(row.value)[1]))
     end
   end
   vim.health.start("md-viewer.nvim: Warnings")
