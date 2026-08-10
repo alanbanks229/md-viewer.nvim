@@ -3,7 +3,8 @@ import taskLists from "markdown-it-task-lists";
 import hljs from "highlight.js";
 import sanitizeHtml from "sanitize-html";
 import { attachSourceMaps } from "./source-map.js";
-import { localImageDataUri } from "./security.js";
+import { resolveLocalImage } from "./security.js";
+import { REMOTE_IMAGES, resolveRemoteImages } from "./remote-images.js";
 import {
   SOURCE_MAP_BUILDER,
   createSourceMapBuilder,
@@ -96,11 +97,18 @@ function createMarkdown(options) {
     const id = registerPointRegion(env, token);
     if (id) token.attrSet("data-md-source-id", id);
     const source = token.attrGet("src") ?? "";
-    const resolved = localImageDataUri(source, options);
-    if (!resolved) {
-      token.attrSet("src", "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiLz4=");
-      token.attrJoin("class", "md-viewer-image-blocked");
-    } else token.attrSet("src", resolved);
+    // Remote sources were resolved (fetched, validated, inlined -- or refused)
+    // before rendering began; the rule itself never awaits. A miss can only
+    // mean the source was not collected, which fails closed.
+    const result = /^https?:/i.test(source)
+      ? (env[REMOTE_IMAGES]?.get(source) ?? { ok: false, kind: "blocked", label: "remote images are disabled" })
+      : resolveLocalImage(source, options);
+    if (result.ok) token.attrSet("src", result.dataUri);
+    else {
+      token.attrSet("src", placeholderDataUri(result.kind, result.label, source));
+      token.attrJoin("class", result.kind === "blocked" ? "md-viewer-image-blocked" : "md-viewer-image-failed");
+      token.attrSet("title", `${result.label} — ${source}`.slice(0, 256));
+    }
     return defaultImage(tokens, index, ruleOptions, env, self);
   };
 
@@ -120,11 +128,52 @@ function createMarkdown(options) {
   return md;
 }
 
+function xmlEscape(text) {
+  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" }[c]));
+}
+
+// A placeholder must render with no network and no JavaScript, so everything
+// -- border, glyph, reason text -- is baked into an inline SVG data URI, the
+// same shape as the 1x1 blank it replaces. Base64 keeps the attribute inert
+// through the sanitizer. Neutral grays with opacity read on both themes;
+// blocked (policy) gets a dashed border, failed (attempted) a solid one.
+function placeholderDataUri(kind, label, source) {
+  const heading = kind === "blocked" ? "Image blocked" : "Image unavailable";
+  const detail = source.length > 64 ? `${source.slice(0, 61)}...` : source;
+  const dash = kind === "blocked" ? ' stroke-dasharray="7 5"' : "";
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="64" viewBox="0 0 480 64">'
+    + `<rect x="1" y="1" width="478" height="62" rx="6" fill="#808080" fill-opacity="0.09" stroke="#808080" stroke-opacity="0.5" stroke-width="1.5"${dash}/>`
+    + '<g stroke="#808080" stroke-opacity="0.85" stroke-width="1.6" fill="none">'
+    + '<rect x="15" y="20" width="26" height="22" rx="2.5"/>'
+    + '<circle cx="23" cy="28" r="2.6"/>'
+    + '<path d="M17 38l7-7 5 5 6-8 6 10"/>'
+    + "</g>"
+    + `<text x="54" y="29" font-family="system-ui, sans-serif" font-size="13" font-weight="600" fill="#808080">${xmlEscape(`${heading} — ${label}`)}</text>`
+    + `<text x="54" y="47" font-family="ui-monospace, monospace" font-size="11" fill="#808080" fill-opacity="0.85">${xmlEscape(detail)}</text>`
+    + "</svg>";
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
 const allowedTags = [
   "article", "h1", "h2", "h3", "h4", "h5", "h6", "p", "strong", "em", "s", "del",
   "ol", "ul", "li", "blockquote", "pre", "code", "hr", "table", "thead", "tbody", "tr",
   "th", "td", "a", "img", "input", "label", "br", "span", "div",
 ];
+
+// Image tokens live inside inline tokens' children (arbitrarily nested under
+// links). An image's own children are its alt text and render as plain text,
+// so a nested image source there is never emitted as an <img> and is not
+// collected.
+function collectRemoteImageSources(tokens, sources = []) {
+  for (const token of tokens) {
+    if (token.type === "image") {
+      const source = token.attrGet("src") ?? "";
+      if (/^https?:/i.test(source)) sources.push(source);
+    } else if (token.children) collectRemoteImageSources(token.children, sources);
+  }
+  return sources;
+}
 
 /// Returns `{ html, sourceMap }`.
 ///
@@ -132,11 +181,16 @@ const allowedTags = [
 /// source lines plus one entry per opaque `data-md-source-id`. It stays in
 /// trusted Node memory (`markdownCache` in `main.js` holds it beside the HTML)
 /// and is never sent to the page -- the DOM carries keys only.
-export function renderMarkdown(markdown, options) {
+///
+/// Async only for the remote-image prefetch between parse and render; the
+/// renderer rules themselves stay synchronous, so token mutation and
+/// provenance-id minting keep their exact relative order.
+export async function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);
   const builder = createSourceMapBuilder(markdown);
   const env = { [SOURCE_MAP_BUILDER]: builder };
   const tokens = attachSourceMaps(md.parse(markdown, env), env, builder.lines);
+  env[REMOTE_IMAGES] = await resolveRemoteImages(collectRemoteImageSources(tokens), options);
   let html = md.renderer.render(tokens, md.options, env);
   html = sanitizeHtml(html, {
     allowedTags,

@@ -1,362 +1,375 @@
 # Architecture
 
-> The preview is still a browser-rendered PNG surface. Mouse and keyboard
-> interactions are forwarded to the persistent Chromium DOM, which performs
-> hit-testing, selection, search, and link resolution before the viewport is
-> recaptured. This provides browser-like behavior but is not native terminal
-> text selection or a real embedded webview.
+How md-viewer is built, and which invariants a change must not break. Statements
+marked **Invariant** are load-bearing: each has a plausible-looking simplification
+that reintroduces a real defect.
+
+The preview is a browser-rendered PNG surface. Mouse and keyboard interactions
+are forwarded to a persistent Chromium DOM, which performs hit-testing,
+selection, search, and link resolution before the viewport is recaptured. That
+gives browser-like behavior; it is not native terminal text selection and not an
+embedded webview.
 
 ## Data flow
 
 The controller reads unsaved lines from each source buffer. All buffer-specific
-state—windows, backend, request serials, image ID, block geometry, scroll value,
-timers, and synchronization guard—lives in that buffer's session. Sessions share
-one `node` process per Neovim instance.
+state — windows, backend, request serials, image ID, block geometry, scroll
+value, timers, synchronization guard — lives in that buffer's session. Sessions
+share one `node` process per Neovim instance.
 
-Requests and responses are newline-delimited JSON with numeric IDs. The Node
-process keeps one headless Chromium browser, isolated context, and page alive.
-It parses Markdown with markdown-it, annotates tokens using `token.map`, applies
-bundled CSS and syntax highlighting, scrolls the page, and screenshots only the
-visible viewport. Lua reads the returned temporary PNG then unlinks it. Both
-sides reject/supersede stale work.
+Requests and responses are newline-delimited JSON with numeric IDs over the
+renderer's stdin/stdout. The Node process keeps one headless Chromium browser,
+isolated context, and page alive. It parses Markdown with markdown-it, annotates
+tokens using `token.map`, applies bundled CSS and highlighting, scrolls the page,
+and screenshots only the visible viewport. Lua reads the returned temporary PNG
+then unlinks it. Both sides reject or supersede stale work.
 
-Transport remains local NDJSON over the renderer process's stdin/stdout pipes.
-No WebSocket is used: the renderer is already persistent, no connection is
-re-established per edit, and adding WebSockets would require a listening
-HTTP/TCP endpoint while leaving browser layout, PNG capture, and terminal image
-transfer untouched. Scroll-only work instead reuses cached Markdown HTML, the
-live DOM, document geometry, and token source map, then performs only a page
-scroll and viewport screenshot.
+No WebSocket, deliberately: the renderer is already persistent, no connection is
+re-established per edit, and a WebSocket would require a listening HTTP/TCP
+endpoint while leaving browser layout, PNG capture, and terminal image transfer
+untouched. Scroll-only work reuses cached HTML, the live DOM, document geometry
+and the token source map, then performs a page scroll and viewport screenshot
+alone.
 
-Interactive scrolling uses a two-stage capture. The first image uses
-Playwright's CSS-pixel screenshot scale, avoiding the fourfold pixel area of a
-2× device-scale PNG. Once input settles, one device-scale screenshot restores
-Retina sharpness. Capture requests identify a cached document revision and omit
-the Markdown body entirely. Controller backpressure permits at most one moving
-capture plus one newest pending position, and each completed frame is shown.
-There is no fixed frame limiter; screenshot and terminal-transfer completion
-provide the natural pacing.
+Interactive scrolling uses a two-stage capture: a moving frame at Playwright's
+CSS-pixel scale, avoiding the fourfold pixel area of a 2× device-scale PNG, then
+one device-scale screenshot once input settles. Capture requests name a cached
+document revision and omit the Markdown body. Controller backpressure permits one
+moving capture plus one newest pending position, and every completed frame is
+shown — there is no fixed frame limiter, since screenshot and terminal-transfer
+completion provide the pacing.
+
+**Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
+allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
+route aborts every browser request that is not `data:`/`about:`
+(`renderer/src/security.js`) — all three unconditional, with nothing that
+relaxes them. Local files are validated (magic bytes, size cap, document root)
+and inlined during `renderMarkdown`. Remote images keep the same shape: when a
+host is allowlisted in `security.remote_images`, the Node process fetches over
+https between markdown-it's parse and render (`renderer/src/remote-images.js`),
+re-validates every redirect hop against the allowlist, enforces the size cap
+while streaming, sniffs the magic bytes, and inlines the result as another
+`data:` URI, cached by URL so live-preview re-renders do not refetch.
+**Invariant:** `security.remote_images` widens what the *Node process* may
+fetch and nothing else — the browser's route, CSP, and sanitizer never consult
+it, which is what keeps an allowlisted host limited to supplying image bytes.
+An image that is refused or fails renders as a visible placeholder with the
+reason baked into an inline SVG, so showing it needs no network and no script.
 
 ## Preview surface and coordinates
 
-`preview.lua` creates a normal read-only `nofile` scratch buffer, never a
-terminal. `coordinates.lua` uses `screenpos(win, topline, 1)` for the first
-visible buffer cell and Neovim's window width/height for the exact text grid. A
-winbar, statusline, tabline, global statusline, separator, and command line are
-therefore outside the placement rectangle. Resize and scroll events recalculate
-it. `screenpos()` answers with every field `0` when the position is not visible
-— which a horizontally scrolled window reaches on its own — so that result is
-tested for and falls back to `nvim_win_get_position` plus the winbar row.
+`preview.lua` creates a read-only `nofile` scratch buffer, never a terminal.
+`coordinates.lua` derives the placement rectangle from `screenpos(win, topline, 1)`
+plus the window's width and height, so a winbar, statusline, tabline, global
+statusline, separator and command line all fall outside it. Resize and scroll
+events recalculate it.
 
-The scratch buffer holds one line of spaces per placement row, each as wide as
-the placement (`preview.surface_size`, re-asserted by `preview.reset_surface`
-before every frame). It holds no document text and is not what the reader
-navigates: it exists so Neovim's cursor has somewhere legal to sit, so the
-window cannot scroll under the image, and so a terminal without overlay support
-still has a cursor on the right cell. Real spaces rather than empty lines plus
-`virtualedit`: virtual space lets the cursor push `leftcol` past zero, which is
-precisely the not-visible case above.
+**Invariant.** The scratch buffer holds real spaces — one line per placement row,
+each as wide as the placement (`preview.surface_size`, re-asserted by
+`preview.reset_surface` before every frame) — not empty lines plus `virtualedit`.
+Virtual space lets the cursor push `leftcol` past zero, and `screenpos()` reports
+every field as `0` for a position that is not visible. The fallback to
+`nvim_win_get_position` plus the winbar row must therefore test the returned
+**value**, not its type: `0` is truthy in Lua, so a `tonumber(x) or fallback`
+guard is dead code and places the image at the terminal's origin.
 
-The caret itself is a *position in the rendered document*, owned by the renderer
-(`caret_move` in `interact.js`) and held in `caret.lua` as the **glyph box** the
-renderer measured for it. Two properties follow, and both are the point rather
-than side effects: a caret only ever sits on a real character -- never in the
-page margin or the blank space beside a short heading -- and it is drawn the
-size of the character it is on, through the same `overlay_apply` path as the
-drag highlight, in its own rect set and with its own heavier tint (`CARET_TINT`).
-Neovim's cursor is hidden while a preview with a drawable caret is focused
-(`preview.hide_cursor`, a global `guicursor` swap) and shadows the caret
-underneath via `coordinates.css_to_cell`.
+The buffer holds no document text and is not what the reader navigates. It exists
+so Neovim's cursor has somewhere legal to sit, so the window cannot scroll under
+the image, and so a terminal without overlay support still has a cursor on the
+right cell.
+
+### The caret
+
+The caret is a position in the rendered document, owned by the renderer
+(`caret_move` in `interact.js`) and held in `caret.lua` as the glyph box the
+renderer measured. Two properties follow, and both are the point: the caret only
+ever sits on a real character — never in the page margin or beside a short
+heading — and it is drawn the size of that character, through the same
+`overlay_apply` path as the drag highlight, in its own rect set with its own tint
+(`CARET_TINT`). Neovim's cursor is hidden while a preview with a drawable caret
+is focused (`preview.hide_cursor`, a global `guicursor` swap) and shadows the
+caret underneath via `coordinates.css_to_cell`.
+
+**Invariant.** Caret identity is renderer-owned and carried as a character index
+(`caretIndex`), never reconstructed from geometry. `caretPositionFromPoint`
+answers with the nearest boundary *between* two characters, and a glyph's middle
+is equidistant from the boundaries either side of it; the tie comes down to
+rounding the glyph's advance to a LayoutUnit, so it is stable per glyph and
+differs between glyphs. The box is how the caret is *drawn*; the index is what it
+*is*, and a motion continuing from the caret sends the index rather than a point.
+The index is checked, not trusted — the renderer rebuilds that character space
+from the DOM per request, and an index that no longer names a character falls
+back to the point. Two granularities withhold it deliberately: `"none"`, the
+snap-only case meaning "the character nearest here", and a click, which is asking
+for a point to be resolved.
+
+**Invariant.** `caret_move` is read-only. A motion in visual mode must *extend*
+the selection without disturbing it, which rules out `Selection.modify` — the
+obvious primitive — because that can only move a caret by moving the selection's
+own focus.
+
+**Invariant.** Character motion is line-aware: `h` and `l` compare the candidate
+glyph's box against the current one and refuse to leave the rendered row, as
+Vim's do under the default `whichwrap`. Word motion crosses rows and blocks, but
+the flat character space must insert a separator between blocks: the whitespace
+between two of them lives in their container and is never walked, and without one
+`Intl.Segmenter` reads the end of one block and the start of the next as a single
+word.
 
 The box is stored with the scroll it was measured at, so an ordinary scroll
-re-places the caret locally with no round trip, and a caret scrolled out of the
-viewport is simply not drawn. Motions cost one `interact` round trip each,
-because only the renderer knows where the characters are; a keystroke arrives at
-reading speed, so that is about what the scroll frame these keys already sent
-used to cost.
+re-places the caret locally with no round trip and a caret scrolled out of view is
+simply not drawn. Motions cost one `interact` round trip each, because only the
+renderer knows where the characters are.
 
-The box is how the caret is *drawn*; it is not what the caret *is*. That is the
-index the renderer reports beside it (`caretIndex` on the way back out), and a
-motion continuing from the caret sends that index rather than a point. Asking the
-renderer to re-find the caret from its own geometry does not work, and the
-failure is not subtle: `caretPositionFromPoint` answers with the nearest boundary
-*between* two characters, and a glyph's middle is equidistant from the boundaries
-either side of it. Which one Blink returns comes down to rounding the glyph's
-advance to a LayoutUnit, so it is stable per glyph and differs from glyph to
-glyph -- on the ones that broke rightward the renderer placed the caret one
-character past where it was drawn, `h` stepped back onto the glyph it started on
-and stayed there, and `l` skipped one. The index is checked, not trusted: the
-renderer rebuilds that character space from the DOM per request, so an index that
-no longer names a character falls back to the point. Two granularities withhold
-it deliberately -- `"none"`, the snap-only case that means "the character nearest
-here", and a click, which is asking for a point to be resolved.
+### Raw placement and occlusion
 
-Character motion is line-aware, like `0` and `$` and unlike a raw index step:
-`h` and `l` compare the candidate glyph's box against the current one and refuse
-to leave the rendered row, which is what Vim's `h`/`l` do under the default
-`whichwrap`. Word motion still crosses rows and blocks, as Vim's `w` crosses
-lines -- but the flat character space the renderer builds puts a separator
-between blocks, because the whitespace between two of them lives in their
-container and is never walked, and without one `Intl.Segmenter` reads the end of
-one block and the start of the next as a single word.
+**Invariant.** The base image and the selection overlay must never share a
+z-layer — `-2` and `-1` on every Kitty-graphics profile. The protocol breaks a
+z-index tie by image id (lower draws underneath) and md-viewer re-uploads the
+base on every full frame, so a base sharing the overlay's layer climbs above it
+and stays there. The symptom is one correct drag per session and then a highlight
+drawn silently *underneath* the preview, with every placement still reporting
+success.
 
-During the initial persistent-renderer and Chromium startup, `preview.lua`
-centers a one-line non-focusable spinner float relative to the preview window.
-A successful first frame removes
-the spinner before calculating Kitty placements; a renderer failure removes it
-before emitting the actionable notification. Its timer is owned by the buffer
-session and is closed on every preview shutdown path.
+**Invariant.** A negative z-index keeps the image below text glyphs but *above*
+cell background colours, so a passive (non-focusable) float does not occlude it —
+its rectangle has to be cut out of the placement, or the image composites through
+the notification's background and only its glyphs and border survive.
 
-The raw backend uses a negative z-index (`-2` on every Kitty-graphics profile,
-leaving `-1` free for the selection overlay), which keeps the image below
-terminal text while remaining visible above the Neovim cell backgrounds. It
-reserves a one-cell bottom guard when Neovim reports a statusline. Visible
-floating-window rectangles are discovered through
-`nvim_tabpage_list_wins()`, `nvim_win_get_config()`, and screen coordinates. An
-overlapping focusable float suppresses the placement and closing it restores the
-cached PNG without another browser capture. Non-focusable passive overlays are
-tracked as exclusion rectangles on the placement, which `interaction.locate`
-uses to refuse a click that lands on one, and which `kitty_raw.lua` subtracts
-from the placement as cropped source-image placements. That subtraction is what
-gives a passive float an opaque interior: a negative z-index is still above the
-cell background, so without it the image composites straight through a
-notification's background and only the notification's glyphs and border
-characters survive. `kitty_raw.move` writes the replacement placements and the
-deletion of the ones they supersede in a single write, new first — deleting
-first left the terminal with nothing to composite in between, which was visible
-as the image blinking and rolling by about a row.
+Floating-window rectangles are discovered through `nvim_tabpage_list_wins()`,
+`nvim_win_get_config()` and screen coordinates. An overlapping *focusable* float
+suppresses the placement, and closing it restores the cached PNG without another
+capture. Passive overlays become exclusion rectangles, which `interaction.locate`
+uses to refuse a click landing on one and which `kitty_raw.lua` subtracts from the
+placement as cropped source-image placements. A one-cell bottom guard is reserved
+when Neovim reports a statusline.
 
-That subtraction is exact in cells, but the image's own origin need not be. A
-terminal that applies its horizontal window margin to text while placing
+**Invariant.** `kitty_raw.move` writes the replacement placements and the deletion
+of the ones they supersede in a single write, new first. Deleting first leaves the
+terminal nothing to composite in between, visible as the image blinking and
+rolling by about a row. `tests/lua/cases/backend_kitty.lua` asserts the ordering
+at the byte level.
+
+**Invariant.** The cut-out is exact in cells, but the image's origin need not be:
+a terminal that applies its horizontal window margin to text while placing
 graphics without it composites the image a fraction of a cell toward the origin
-— measured at ~10px of a 20px cell on iTerm2, constant across columns 0, 28 and
-88, and with the vertical origin exact. The cut-out inherits that shift, so the
-image overhangs the overlay's trailing edge. `coordinates.passive_overlays`
-widens each rectangle by `image.raw_overlay_bleed_cells` columns on that edge
-only, clipped to the placement: a window margin is never negative, so the image
-can be offset left but never right, and widening the leading edge would only
-double the gap on the other side. `image.raw_cell_offset_px` addresses the cause
-instead, emitting the protocol's `X`/`Y` placement keys so the image starts that
-many pixels into its first cell; it is zero by default, which emits no `X`/`Y`
-at all, because whether a given terminal implements those keys is not
-discoverable.
+(measured on iTerm2). `coordinates.passive_overlays` widens each rectangle by
+`image.raw_overlay_bleed_cells` on the **trailing edge only**, clipped to the
+placement — a window margin is never negative, so the image can be offset left but
+never right, and widening the leading edge would double the gap on the other side.
+`image.raw_cell_offset_px` addresses the cause instead by emitting the protocol's
+`X`/`Y` keys; it is zero by default, emitting no `X`/`Y` at all, because whether a
+terminal implements them is not discoverable.
 
-Because a raw placement is absolute screen coordinates the terminal keeps
-compositing on its own, it must be deleted whenever the preview window stops
-being displayed — including when the preview's *tabpage* is no longer the one
-on screen, which no window API reports (`coordinates.window_is_displayed`).
+**Invariant.** A raw placement is absolute screen coordinates the terminal keeps
+compositing on its own, so it must be deleted whenever the preview window stops
+being displayed — including when its *tabpage* is no longer the one on screen,
+which no window API reports (`coordinates.window_is_displayed`).
 
-Raw sessions perform a small periodic geometry check in addition to Neovim
-window events. Some asynchronous UI providers create floats with
-`noautocmd=true`; polling the current tab's window metadata catches those
-without any dependency on the provider.
+Raw sessions also run a small periodic geometry check alongside window events,
+because some asynchronous UI providers create floats with `noautocmd = true`.
 
-Pixel calibration is explicit when `MD_VIEWER_CELL_WIDTH_PX` and
-`MD_VIEWER_CELL_HEIGHT_PX` exist. Otherwise the renderer chooses a bounded high-DPI
-viewport using `estimated_cell_width_px` and the configured cell aspect ratio;
-the terminal scales that image to cells. Screenshots are capped at 1920×1440
-logical pixels, a device scale of
-at most 3, and 32 MiB on the Lua boundary.
+### Pixels versus cells
+
+Everything above places images in terminal *cells* and lets the terminal scale to
+fit, so a wrong cell-size estimate costs only sharpness. The selection overlay is
+the one part of md-viewer that thinks in device pixels.
+
+**Invariant.** Overlay rectangles must be sized against the size the image is
+actually *drawn* at, from the OS-reported cell size (`TIOCGWINSZ`,
+`cellpixels.lua`), measured fresh rather than cached — a terminal can keep its row
+and column counts identical while changing its pixel geometry underneath, which
+WezTerm does on every launch and any terminal does on a font-size change. Sizing
+against the *capture* size instead draws every rectangle at the ratio between the
+two. Where no cell size is reported the overlay disables itself and the full-frame
+path takes over, rather than drawing rectangles it cannot size; `:MdViewerDebug`
+reports the measurement as `raw graphics cell pixels`.
+
+WezTerm's upstream issue #6344 (divide-by-zero panics in Kitty placement handling)
+is unreachable as a consequence: a cell must floor to at least one pixel, and
+every crop must be at least one pixel and wholly inside its image, before anything
+is emitted.
+
+Viewport calibration is explicit when `MD_VIEWER_CELL_WIDTH_PX` and
+`MD_VIEWER_CELL_HEIGHT_PX` exist; otherwise the renderer chooses a bounded
+high-DPI viewport from `estimated_cell_width_px` and the cell aspect ratio.
+Screenshots are capped at 1920×1440 logical pixels, a device scale of at most 3,
+and 32 MiB on the Lua boundary.
 
 ## Backends
 
 All image implementations expose `detect`, `show`, `update`, `move`, `clear`,
-`clear_all`, and `health`.
+`clear_all` and `health`.
 
 - `nvim_img` wraps only `vim.ui.img`; replacement creates the new image before
   deleting the old owned ID. It never performs wildcard deletion.
 - `kitty_raw` contains the minimal direct protocol encoder: PNG/base64 chunks,
-  static cell placement, cursor preservation, quiet mode, movement, and targeted
+  static cell placement, cursor preservation, quiet mode, movement and targeted
   deletion. It writes only through `nvim_ui_send`. Because Neovim owns terminal
-  input, its response probe is not falsely reported as successful and auto mode
+  input, its response probe cannot be falsely reported as successful, and `auto`
   does not select it in this build.
-- `cells` writes readable Markdown-like text and extmark highlights into the
-  preview buffer when graphics are unavailable.
+- `cells` writes Markdown-like text and extmark highlights into the preview
+  buffer when graphics are unavailable.
 
 ## Scroll synchronization
 
-The graphical preview buffer holds blank cells, never document text; it does not
-pretend that browser pixels are editable buffer lines. Buffer-local Vim motions
-move the caret across those cells and update browser `scrollY` directly when the
-caret reaches an edge: line, half-page, page, top, and bottom movements. Source
-lines map to browser blocks through markdown-it token ranges and measured DOM
-geometry. A per-session guard prevents preview/source feedback. The most specific token
-range containing the cursor wins over enclosing lists, tables, and blockquotes.
-Its relative source-line position is aligned to the cursor's actual screen row,
-with hysteresis and a short debounce so walking adjacent lines does not produce
-a screenshot on every keypress. Cursor movement within the same mapped block
-does not issue another render.
+The preview buffer holds blank cells, never document text; it does not pretend
+browser pixels are editable lines. Buffer-local motions move the caret across
+those cells and update browser `scrollY` when the caret reaches an edge.
 
-Navigation allows one capture in flight and retains only the newest pending
-position. Every completed frame is displayed, with no fixed FPS throttle. The
-preview mappings never move the source cursor; preview-to-source movement is
-disabled by default (`sync.preview_to_source = false`).
+Source lines map to browser blocks through markdown-it token ranges and measured
+DOM geometry, the most specific range containing the cursor winning over
+enclosing lists, tables and blockquotes. Its relative source-line position is
+aligned to the cursor's screen row, with hysteresis and a short debounce so
+walking adjacent lines does not screenshot per keypress; movement within the same
+mapped block issues no render. A per-session guard prevents preview/source
+feedback, and preview mappings never move the source cursor —
+`sync.preview_to_source` is off by default.
 
-The browser page includes a viewport-relative bottom spacer by default. Its
-height is one viewport minus a rendered line, matching editor scroll-past-end
-behavior so the final Markdown block can reach the preview's top region. This
-is real browser scroll range, not synthetic scratch-buffer lines.
+The page includes a viewport-relative bottom spacer, one viewport minus a
+rendered line, matching editor scroll-past-end behavior so the final block can
+reach the preview's top region. That is real browser scroll range, not synthetic
+buffer lines.
 
-Mouse-wheel mappings are installed only while a graphical preview exists. The
-pointer's actual Neovim window ID selects the session; events outside an md-viewer
-window fall through to the original Neovim wheel behavior. The mappings and any
-previous user mappings are restored after the last graphical preview closes.
+Mouse-wheel mappings exist only while a graphical preview does. The pointer's
+actual window ID selects the session; events outside an md-viewer window fall
+through to Neovim's own wheel behavior, and any previous user mappings are
+restored after the last graphical preview closes.
 
 ## Interaction
 
-Mouse gestures reach the renderer through a second NDJSON method, `interact`,
-alongside `render`/`capture` on the same persistent process and the same
-serial queue over the one shared Chromium page -- there is no second
-transport and no second process.
+Gestures reach the renderer through a second NDJSON method, `interact`, alongside
+`render`/`capture` on the same persistent process, the same serial queue and the
+same shared page. There is no second transport and no second process.
 
 **Staleness lanes.** `renderer/src/lanes.js` tracks a per-document, per-lane
-admission serial (`content`, `capture`, `interact`, `settle`) plus a
-content-epoch counter. A newer request in the same lane supersedes an older
-one; a new `content` render bumps the epoch and invalidates every downstream
-lane. Critically, an `interact` admission can never invalidate `content` or
-`capture` -- there is no code path from it to `contentEpoch` -- so a burst of
-drag updates cannot starve or cancel a legitimate render. A superseded
-request fails its own staleness check (checked at admission and again after
-the expensive work) and returns without touching the page.
+admission serial (`content`, `capture`, `interact`, `settle`) plus a content-epoch
+counter. A newer request in the same lane supersedes an older one; a new `content`
+render bumps the epoch and invalidates every downstream lane. **Invariant:** an
+`interact` admission can never invalidate `content` or `capture` — there is no
+code path from it to `contentEpoch` — so a burst of drag updates cannot starve a
+legitimate render. A superseded request fails its own staleness check, at
+admission and again after the expensive work, and returns without touching the
+page.
 
-**Document isolation.** `renderer/src/browser.js` keeps exactly one
-authoritative record, `this.active`, of which document (and content
-revision) the single shared page currently holds, cleared before every
-`setContent()` and repopulated only after the new document's geometry has
-been recollected -- no caller can observe a half-loaded document.
+**Document isolation.** `browser.js` keeps one authoritative record, `this.active`,
+of which document and content revision the shared page holds; it is cleared before
+every `setContent()` and repopulated only after the new document's geometry has
+been recollected, so no caller observes a half-loaded document.
 `ensureDocumentActive()` is the only door into the DOM for an interaction: it
-refuses (`INTERACT_CACHE_MISS`) a document/revision it cannot rebuild
-byte-for-byte from its own cached record, and rehydrates (replays the exact
-same HTML/theme/font/viewport that produced the original screenshot) rather
-than approximating. A fresh, opaque per-load token is stamped on the
-document root and checked by every in-page action before it touches the DOM
-(`DOCUMENT_MISMATCH` on a mismatch) -- the actual isolation guarantee is that
-nothing can swap the page between that check and the caller's own
-`page.evaluate`, since both run inside the same serial queue.
+refuses (`INTERACT_CACHE_MISS`) any document/revision it cannot rebuild
+byte-for-byte from its cached record, and rehydrates by replaying the exact HTML,
+theme, font and viewport that produced the original screenshot rather than
+approximating. A fresh, opaque per-load token is stamped on the document root and
+checked by every in-page action (`DOCUMENT_MISMATCH`). **Invariant:** the
+isolation guarantee comes from the serial queue — nothing can swap the page
+between that check and the caller's `page.evaluate`, because both run inside it.
 
-**Hit-testing and source-position precision.** A click resolves through
-`elementFromPoint`, refined by caret-range APIs when the hit lands on real
-text; source position is recovered from markdown-it's own parse state
-(`token.map` for block tokens, an instrumented inline parser for inline
-runs -- see `renderer/src/provenance.js`) rather than by searching rendered
-text for a match, which would collide silently whenever a block contains the
-same word twice. Precision degrades honestly through four levels and is
-never guessed past what the parser can actually establish:
+**Hit-testing and source precision.** A click resolves through `elementFromPoint`,
+refined by caret-range APIs on real text. Source position comes from markdown-it's
+own parse state (`token.map` for block tokens, an instrumented inline parser for
+inline runs — `renderer/src/provenance.js`) rather than by searching rendered text
+for a match, which would collide silently whenever a block contains the same word
+twice. Precision degrades through `exact` (line and UTF-8 byte column), `line`,
+`block` and `none`, and is never guessed past what the parser establishes.
 
-    exact    A precise line and UTF-8 byte column.
-    line     A line, but not a column (e.g. a highlighted code span whose
-             internal structure the parser does not track per-character).
-    block    A containing block only (e.g. a table cell, or content the
-             renderer re-emits as raw HTML, like a task-list item).
-    none     No position at all -- padding, whitespace, or an out-of-bounds
-             point. Reported honestly rather than resolved to the nearest
-             plausible guess.
+**Invariant.** The terminal reports which *cell* was clicked, never a sub-cell
+position, and a cell is neither as wide as a rendered character nor as tall as a
+rendered line. `hitTestInPage` probes outward from the cell's centre in **both**
+axes, bounded by that one cell and ordered nearest-first in cell fractions so a
+tall cell does not make every vertical probe lose to every horizontal one.
+Collapsing either axis makes real content permanently unclickable: on the
+estimated calibration tier a cell is 20 CSS px while a rendered line is 25 and an
+inline link's box about 18, so a link can fall entirely between two cell-row
+centres at some alignments. `tests/node/hitbox.test.js` sweeps every alignment a
+full cell height can take rather than sampling one. Within that cell a link wins
+over prose — the cell is the resolution limit of the input device, so there is no
+finer answer — but bounded by the same cell: two cells away is still prose.
 
-The terminal reports which *cell* was clicked, never a sub-cell position, so
-a click covers a whole cell -- and a cell is neither as wide as a rendered
-character nor as tall as a rendered line. `hitTestInPage` therefore probes
-outward from the cell's centre in **both** axes, bounded by that one cell and
-ordered nearest-first in cell fractions (so a cell twice as tall as it is wide
-does not make every vertical probe lose to every horizontal one), rather than
-collapsing to the centre alone. Both axes have produced a reported bug:
-collapsing horizontally made the cell holding a line's first character, which
-is mostly left padding, permanently unclickable; collapsing vertically made an
-inline link permanently unclickable at some alignments, because on the
-estimated calibration tier a cell is 20 CSS px while a line is 25 and a link's
-box about 18 -- so the link can fall entirely between two cell-row centres.
-That one is measured, not reasoned, and `tests/node/hitbox.test.js` sweeps
-every alignment a full cell height can take rather than sampling one.
+**Selection, search and copy.** Drag-to-select, double/triple-click and search all
+produce a real `Selection`/`Range` (`setBaseAndExtent`, `Text.splitText`) or
+`window.find`-equivalent matching. **Invariant:** never `innerHTML`, so a query or
+selection containing literal HTML is matched or copied character-for-character
+rather than interpreted as markup. Every mutating interaction captures its own
+screenshot in the same queued operation that performed the mutation, so Lua never
+follows up with a second render to see the result.
 
-Within that cell, a link wins over prose. The cell is the resolution limit of
-the whole input device -- there is no finer answer available -- so a link
-anywhere under the clicked cell is what the reader was pointing at, and prose
-is the answer only when the cell holds no link at all. Bounded by the same one
-cell: two cells away is still prose.
+**Invariant.** Per-document interaction state — the current selection, the current
+search's match set — lives in trusted Node memory (`main.js`'s `interactionState`,
+not the page, which `setContent` destroys on every document switch) and is
+**replaced, never migrated**, across a content-revision change. Applying an old
+selection to new content would be silent corruption in a copy.
 
-**Selection, search, and copy.** Drag-to-select, double/triple-click, and
-search all produce a real Chromium `Selection`/`Range` (`setBaseAndExtent`,
-`Text.splitText`) or use `window.find`-equivalent text matching -- never
-`innerHTML`, so a search query or a selection containing literal HTML is
-matched or copied character-for-character, not interpreted as markup. Every
-mutating interaction (a selection change, a search step) captures its own
-screenshot in the same queued operation that performed the mutation, so Lua
-never has to follow up with a second render just to see the result.
-Per-document interaction state (the current selection, the current search's
-match set) lives in trusted Node memory (`main.js`'s `interactionState`, not
-the page, which `setContent` destroys on every document switch) and is
-replaced, never migrated, across a content-revision change -- applying an old
-selection to new content would be silent corruption in a copy operation.
+**Invariant.** A selection that scrolls pins its anchor to the live DOM node
+(`anchorPinned` on the `interact` envelope), not to viewport coordinates. Viewport
+coordinates move under a scrolling page: the anchor drifts onto whatever text
+scrolls into those pixels, and once it scrolls out of view the point is refused
+and the frame dropped. Relatedly, while the page is moving the highlight uses the
+full captured-frame path rather than the overlay, because overlay rectangles
+composite over the frame already on screen — the pre-scroll one.
 
-**Preview history.** Following a local link retargets the preview onto another
-document (`controller.retarget`), and `preview.pinned` deliberately stops the
-preview following an ordinary buffer switch -- so the reader could reach a
-document but not return to the one they came from as anything but text. Each
-session therefore carries the list of documents it has been retargeted through
-and an index into it. `:MdViewerBack`/`:MdViewerForward` walk the index without
-appending (appending there would make "back" oscillate between the last two
-entries), and a `BufEnter` in the session's source window follows the preview to
-a buffer *already in that list* -- which is what makes `<C-o>` work without
-weakening `pinned` for anything else. Entries hold a buffer and a path, so one
-whose buffer has been wiped still reopens its file; navigating from the middle
-truncates the forward branch, the same rule a browser follows.
+Edge auto-scroll is timer-driven rather than event-driven, and has to be:
+`<LeftDrag>` fires only while the mouse moves, so a reader who drags to the edge
+and holds still generates no further events.
 
-**Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`)
-separates `http`/`https`/`mailto`/fragment/local-file candidates from
-anything unsafe (`javascript:`, `data:`, `vbscript:`, protocol-relative, or
-malformed) before Lua ever sees a decision to make. A `local_file`
-candidate's containment inside the document root is re-checked
-independently on the Lua side (`lua/md-viewer/security.lua`'s
-`resolve_local_link`/`is_inside`), the same symlink-resolved check image
-loading already uses -- the renderer's classification is a hint, not a
-grant. Ctrl/Cmd-click is the only gesture that can activate a link; a plain
-click never does, on any hit.
+**Preview history.** Following a local link retargets the preview
+(`controller.retarget`), and `preview.pinned` stops the preview following an
+ordinary buffer switch — so without history the reader could reach a document but
+not return to the one they came from as anything but text. Each session carries
+the documents it has been retargeted through and an index into them.
+**Invariant:** `:MdViewerBack`/`:MdViewerForward` walk the index without
+appending — appending makes "back" oscillate between the last two entries — and a
+`BufEnter` in the session's source window follows the preview to a buffer
+*already in that list*, which is what makes `<C-o>` work without weakening
+`pinned` for anything else. Entries hold a buffer and a path, so one whose buffer
+has been wiped still reopens its file; navigating from the middle truncates the
+forward branch, as a browser does.
 
-That root is the enclosing project, not the document's own directory. The
-narrower default refused every ordinary repo-relative link from a document in a
-subdirectory, and reported it as a security violation, which is both wrong and
-misleading -- the three distinct failures (escapes the root, does not exist,
-malformed) are now distinguished, with the out-of-root case decided lexically so
-the messages cannot be used to probe for files outside the root.
+**Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`) separates
+`http`/`https`/`mailto`/fragment/local-file candidates from anything unsafe
+(`javascript:`, `data:`, `vbscript:`, protocol-relative, malformed) before Lua
+sees a decision to make. **Invariant:** that classification is a hint, not a
+grant — a `local_file` candidate's containment is re-checked independently in
+`lua/md-viewer/security.lua` (`resolve_local_link`/`is_inside`), the same
+symlink-resolved check image loading uses. Ctrl/Cmd-click is the only gesture that
+can activate a link. [SECURITY.md](../SECURITY.md) states the policy these
+mechanics enforce.
 
-An activated local Markdown link is opened in Neovim rather than handed to the
-system, and the preview follows it: `controller.retarget` re-keys the existing
-session onto the new buffer and re-derives its `document_id`, reusing the
-preview window instead of tearing the split down and rebuilding it. The serial
-bump is what makes that safe -- every render or interact response still in
-flight for the old document fails its staleness check rather than being applied
-to the new one.
+An activated local Markdown link opens in Neovim and the preview follows:
+`controller.retarget` re-keys the existing session onto the new buffer and
+re-derives its `document_id`, reusing the preview window instead of rebuilding the
+split. The serial bump is what makes that safe — responses still in flight for the
+old document fail their staleness check rather than being applied to the new one.
 
-**Lua-side gesture dispatch.** `lua/md-viewer/mouse.lua` installs its
-mappings only once a graphical (non-`cells`) session exists, saving and
-later restoring whatever was mapped there before (`vim.fn.mapset`), across
-all of normal/insert/visual mode. Mouse capture is button-scoped, not
-window-scoped (`interaction.lua`'s module-local `captured` session): once a
-press lands on preview content, the matching drag/release belongs to that
-session even if the pointer later leaves the window before the button comes
-up. A plain click (no drag) clears an active selection and never moves the
-source cursor under any gesture -- an earlier, removed behavior did move the
-cursor on click, which fought the drag-to-select gesture (dismissing a
-highlight by clicking elsewhere also relocated the editor cursor).
+**Lua-side dispatch.** `mouse.lua` installs its mappings only once a graphical
+(non-`cells`) session exists, saving and restoring whatever was mapped there
+before (`vim.fn.mapset`) across normal, insert and visual mode. **Invariant:**
+mouse capture is button-scoped, not window-scoped (`interaction.lua`'s
+module-local `captured` session) — once a press lands on preview content, the
+matching drag and release belong to that session even if the pointer leaves the
+window first. A plain click clears an active selection and never moves the source
+cursor: moving it fought drag-to-select, since dismissing a highlight by clicking
+elsewhere also relocated the editor cursor.
 
 ## Lifecycle
 
 Text events debounce, resize events coalesce, focus stays in the source window,
-and tab/suspend events remove graphical placements. Close/wipe/exit invalidates
-outstanding serials, stops timers, deletes only owned images, removes files, and
-shuts the shared renderer down when the last session closes.
+and tab/suspend events remove graphical placements. Close, wipe and exit
+invalidate outstanding serials, stop timers, delete only owned images, remove
+files, and shut the shared renderer down when the last session closes. The
+startup spinner float's timer is owned by the buffer session and closed on every
+shutdown path.
 
-With `preview.pinned = true`, hiding the source buffer does not end its session.
-The source split can display another file while the preview split retains its
-Markdown image and source-labeled winbar. Wiping the source, replacing/wiping
-the preview buffer, explicitly closing the preview, or exiting Neovim still
-performs full cleanup.
+With `preview.pinned = true`, hiding the source buffer does not end its session:
+the source split can display another file while the preview retains its image and
+source-labeled winbar. Wiping the source, replacing or wiping the preview buffer,
+closing the preview, or exiting Neovim still performs full cleanup.
 
 ## Design references
 
 The pinned document identity, labeled preview surface, retained renderer state,
-stale-response guards, and manual-scroll precedence take focused inspiration
-from [Markdown Preview Enhanced's preview provider](https://github.com/shd101wyy/vscode-markdown-preview-enhanced/blob/master/src/preview-provider.ts)
+stale-response guards and manual-scroll precedence take focused inspiration from
+[Markdown Preview Enhanced's preview provider](https://github.com/shd101wyy/vscode-markdown-preview-enhanced/blob/master/src/preview-provider.ts)
 and its documented locked-preview workflow. md-viewer does not copy its webview,
-script execution, CDN, diagram, export, or interactive command features; those
-would conflict with a read-only raster surface and the version-one security
-boundary.
+script execution, CDN, diagram, export or interactive command features; those
+would conflict with a read-only raster surface and this security boundary.

@@ -87,7 +87,12 @@ th, td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
 th { background: var(--table-head); color: var(--heading); font-weight: 650; }
 tr:nth-child(even) td { background: var(--table-stripe); }
 img { display: block; max-width: 100%; height: auto; margin: 1em auto; }
-.md-viewer-image-blocked { display: none; }
+/* Blocked and failed images stay visible on purpose: the reason text is baked
+   into a generated SVG placeholder (markdown.js), so an image that cannot
+   render explains itself instead of silently collapsing. The classes --
+   .md-viewer-image-blocked (refused by policy) and .md-viewer-image-failed
+   (attempted and unusable) -- are styling hooks and need no rules of their
+   own; the base img rules above already lay the placeholder out. */
 /* The real DOM Selection is painted natively by Chromium and needs no CSS at
    all -- these wrapper spans exist only for find matches, which are not a
    Selection and therefore need a visible marker of their own. */

@@ -51,7 +51,7 @@ function startRenderer(t, executable) {
         baseDir: here, documentRoot: here,
         viewport: { widthPx: 800, heightPx: 900, deviceScaleFactor: 1 },
         scrollY: 0, theme: "dark", rawHtml: false, localImages: false,
-        maxLocalImageBytes: 1024, network: false,
+        maxLocalImageBytes: 1024,
         browser: { executable_path: executable, launch_timeout_ms: 10000 },
         ...overrides,
       };

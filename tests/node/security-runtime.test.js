@@ -34,7 +34,7 @@ test("javaScriptEnabled: false stops a <script> from running even if one reached
   const params = {
     documentId: "js-disabled", contentRevision: 1,
     viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
-    browser: { executable_path: executable }, theme: "dark", scrollY: 0, network: false,
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
     captureScale: "css", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
   };
   // renderMarkdown/sanitizeHtml would never let this through in the real
@@ -65,8 +65,12 @@ test("the hidden page cannot be navigated away from the generated document", asy
   const params = {
     documentId: "no-navigate", contentRevision: 1,
     viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
-    browser: { executable_path: executable }, theme: "dark", scrollY: 0, network: false,
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
     captureScale: "css", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
+    // Deliberately allowlists the very host the navigation below targets:
+    // `security.remote_images` governs what the Node process may fetch and
+    // must never reach, let alone relax, the browser's own network policy.
+    remoteImages: ["example.invalid"],
   };
   const html = '<p id="marker">the generated document</p>';
   await renderer.render(params, html, 1);

@@ -3,499 +3,232 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Opt-in remote images.** `security.remote_images` is a host allowlist
+  (empty by default — remote images stay off): a Markdown image whose https URL
+  matches it is fetched by the *renderer process*, validated exactly like a
+  local image (magic bytes, `max_local_image_bytes` enforced while streaming),
+  and inlined as a data URI. The browser still makes no network requests — its
+  route, CSP, and sanitizer are unchanged and unconditional. Redirects are
+  followed at most three hops with every hop re-checked against the allowlist;
+  `*.example.com` matches proper subdomains only, never the bare domain and
+  never `evil-example.com`. Fetches are cached in the renderer process so
+  live-preview re-renders do not refetch. See `:help md-viewer-remote-images`
+  and SECURITY.md.
+
+### Changed
+
+- **Images that cannot render are now visible.** A blocked or failed image
+  shows a placeholder naming the reason (dashed border for a policy refusal,
+  solid for an attempted fetch or read that failed, with the source in the
+  tooltip) instead of being silently hidden. Documents whose images were
+  previously collapsed to nothing now reserve layout space for the
+  placeholders, so previews of such documents lay out slightly differently
+  than before.
+- **Breaking: `security.network` was removed.** It had no effect on page
+  content — the page CSP already refused every remote subresource — and
+  `security.remote_images` supersedes it. Browser networking is now always
+  blocked with no configuration that relaxes it; a leftover `security.network`
+  key in your config is silently ignored. As a side effect, flipping network
+  policy no longer forces a browser-context restart; only a device-scale
+  change does.
+- **Breaking: `render.raw_html` moved to `security.raw_html`.** Raw-HTML
+  parsing is security-relevant in the same way `security.remote_images` and
+  `security.document_root` are, and now lives alongside them instead of under
+  `render`; `:MdViewerHealth` already reported it as a security override
+  before this move. Update `render.raw_html = true` to
+  `security.raw_html = true` in your config.
+
 ## [0.3.0] - 2026-08-09
 
 ### Added
 
-- **A real caret in the preview, and keyboard selection.** The preview buffer
-  was one blank line, so the cursor sat pinned at the top-left corner and every
-  key was a scroll command.
-
-  The caret is a **position in the rendered document**, not a terminal cell. It
-  only ever sits on an actual character, and it is drawn as a block the size of
-  the glyph it is on — through the same overlay mechanism as the drag highlight,
-  from a rectangle the renderer measures. A caret on an `# H1` is drawn big; a
-  caret on body text is drawn small; and it cannot be parked in the page margin
-  or in the empty space beside a short heading, because those are not places a
-  reader can be. Neovim's own cursor is hidden while that block is on screen and
-  follows along underneath, so focus and mappings keep working normally.
-
-  `h`/`l` move by a character, `j`/`k` by a rendered line, `0`/`$` to the ends
-  of one, `w`/`b`/`e` by a word, `{`/`}` by a block, `gg`/`G` to the ends of the
-  document — all with counts (`10j`, `5w`). `h` and `l` stay on the rendered
-  line they start on, the way Vim's do under the default `whichwrap`, and a
-  paragraph wrapped over several rendered lines is several lines here — the same
-  lines `j`, `k`, `0` and `$` work on. `w`, `b` and `e` do cross lines, as they
-  do in Vim. `j` and `k` hold their column through a sticky target, the way
-  Vim's `curswant` does, so a run down the document and back returns to the
-  character it started on; columns are matched on each glyph's left edge rather
-  than its centre, since centres do not survive a change of font size.
-  `Ctrl-d`/`Ctrl-u`/`Ctrl-f`/`Ctrl-b` are line motions with a count, as in Vim,
-  so the caret leads and the view follows; `Ctrl-e`/`Ctrl-y` scroll and leave
-  the caret where it is. The view scrolls whenever a motion would take the caret
-  out of it, so holding `j` still scrolls. `gg` and `G` are the ends of the
-  document and ignore a count: the lines a reader can see here are *rendered*
-  lines, and the one they would type is a *source* line — going to one is a real
-  feature and a separate one, not this keystroke wearing a count. Clicking moves
-  the caret too, snapped to the nearest real character.
-
-  `v` starts a selection anchored at the caret and any motion extends it —
-  `v3j`, `vw`, `vG` — with `V` line-wise, `o` to swap ends, and `y` to copy and
-  leave. It is not Neovim's visual mode (the preview buffer holds blank cells,
-  so a real visual selection over it would select spaces); Neovim stays in
-  normal mode, which is what keeps every motion and every mouse gesture working
-  unchanged, and the winbar shows `-- VISUAL --`. `interaction.visual = false`
-  unmaps it.
-
-  Motions are served by a new read-only `caret_move` interact action, because
-  only the renderer knows where the characters are — that is what buys both the
-  snapping and the glyph-sized caret. It answers with the glyph's box *and* with
-  which character that is, and a motion continuing from the caret sends that
-  index back rather than a point. The box is how the caret is drawn; the index is
-  where it is. Re-finding the caret from its own geometry cannot work:
-  `caretPositionFromPoint` answers with the nearest boundary *between* two
-  characters, and a glyph's middle is equidistant from the boundaries either side
-  of it — a tie broken by rounding the glyph's advance, so stable per glyph and
-  different from glyph to glyph. On the glyphs that broke rightward the renderer
-  put the caret one character past where it was drawn, which left `h` stepping
-  back onto the glyph it started on and staying there, and `l` skipping one.
-
-  Read-only is structural rather than incidental: a motion in visual mode has to
-  *extend* the selection, so it must not disturb it, which rules out
-  `Selection.modify` — the obvious primitive — since that can only move a caret
-  by moving the selection's own focus.
-
-  None of this is a second selection mechanism. The caret and the anchor are two
-  document points, exactly as a mouse drag's anchor and pointer are, so keyboard
-  selection resolves through the *same* request path to the same real DOM
-  selection — inheriting the instant overlay highlight, the settle frame, copy
-  and exact source-position reporting rather than reimplementing them.
-
-  On a terminal that cannot draw the overlay (WezTerm today) the caret falls
-  back to the terminal's own cursor: coarser, a fixed cell rather than the
-  glyph, but still on the character the caret is on.
-
+- **A real caret in the preview, with Vim motions and keyboard selection.** The
+  caret is a position in the rendered document rather than a terminal cell, drawn
+  as a block the size of the glyph it sits on. Character, line, word, block and
+  page motions all work, with counts; `v`/`V`/`o` start and steer a selection and
+  `y` copies it. See `:help md-viewer-navigation`.
+- **Mouse interaction over the preview**, forwarded to the live Chromium DOM
+  through a new `interact` NDJSON method with its own staleness lane, so a burst
+  of pointer input can never cancel a render. Drag-to-select, double-click word
+  selection and triple-click paragraph selection all produce a real DOM selection.
 - **Drag-select past the edge of the preview.** A drag held past the top or
-  bottom of the preview now keeps scrolling the document and keeps extending the
-  selection into what it reveals, the way a drag past the edge of any scrollable
-  view does — so a selection is no longer limited to what happens to be on
-  screen when it starts. It stops at the start or end of the document.
-
-  Scroll speed grows with how far past the edge the pointer is, capped by
-  `interaction.autoscroll_max_lines`. `interaction.autoscroll = false` restores
-  the previous behaviour (the highlight freezes at the edge), and
-  `interaction.autoscroll_interval_ms` paces the steps.
-
-  This is timer-driven rather than event-driven, and it has to be: `<LeftDrag>`
-  fires only while the mouse actually *moves*, so a reader who drags to the edge
-  and holds still — the ordinary way of saying "keep going" — generates no
-  further events at all.
-
-  Two things made this more than a loop. The renderer resolved a selection's
-  anchor from viewport coordinates on every frame, and viewport coordinates move
-  under a scrolling page: the anchor drifted onto whatever text scrolled into
-  those pixels, and once it scrolled out of view entirely the renderer refused
-  the point and dropped the whole frame. Selections that scroll now pin the
-  anchor to the live DOM node instead (`anchorPinned` on the `interact`
-  envelope), which is immune to scrolling. And while the page is moving the
-  highlight uses the full captured-frame path rather than the fast overlay,
-  since overlay rectangles composite over the pre-scroll frame.
-
-- **An instant drag highlight.** Drag-to-highlight no longer re-photographs the
-  page on every frame. While the mouse is down the highlight is drawn directly
-  in the terminal as translucent rectangles composited over the frame already on
-  screen — one small tint image is uploaded once, and each moving frame sends
-  only placement commands. A moving frame costs roughly 91-500 bytes instead of
-  about a megabyte of base64 PNG, and sends nothing at all when the selection
-  has not changed. Releasing the mouse still lands a real browser-rendered
-  frame, so the settled highlight is exactly what the page paints.
-
-  **Enabled only where it was validated by hand in a real terminal**, which
-  today means iTerm2, Ghostty and Kitty. Everywhere else the drag keeps the
-  full-frame path, which stays correct — merely slower.
-  `interaction.selection_overlay` (`"auto"` / `"on"` / `"off"`) overrides that,
-  and `"on"` is how you would try another terminal.
-
-  **WezTerm is off deliberately, on cost rather than correctness.** Its geometry
-  is solved: WezTerm applies the protocol's sub-cell offset to every cell of a
-  placement rather than the first, and as an inset, so a highlight bar draws as
-  a comb of stripes — md-viewer sends WezTerm an encoding with no offset keys at
-  all, and it was photographed drawing correctly on both
-  `20240203-110809-5046fc22` and a current build. What is not solved here is the
-  cost: sustained placement traffic grows WezTerm's memory without bound, 172 MB
-  to 786 MB in four seconds with four rectangles. That is an upstream defect
-  ([wezterm#7953], with a fix proposed in [wezterm#8035]); until it ships in a
-  released build, do not set `selection_overlay = "on"` in WezTerm — it will
-  look right and exhaust your memory.
-
-- `interaction.selection_overlay` (default `"auto"`) to control the drag
-  highlight path described above, and `overlay_frames`, `overlay_rect_count`,
-  `overlay_last_bytes` and friends in `:MdViewerDebug` and `:MdViewerHealth` so
-  it is visible whether the overlay is live and what a frame actually costs.
-
-- Two diagnostics, split by the question they answer rather than by how much
-  they print. `:MdViewerHealth` is short and answers *can this work here* — an
-  overall status, the selected backend, and anything actionable. It is what to
-  read. `:MdViewerDebug` answers *what did it just do*: the same environment
-  detail field by field, plus per-preview session state, timings, placements
-  and the event log, in one buffer. It is what to attach to a bug report.
-
-  `:MdViewerDebug` now reports whether the drag highlight is being drawn as
-  overlay rectangles and why, the layer it draws on beside the preview's own,
-  and the terminal's measured cell size. The Ghostty bug below was invisible
-  from the outside precisely because none of this was reported: a terminal
-  drawing the highlight underneath the preview looked exactly like one falling
-  back to full frames.
-
-  A warning now means one thing: something here may not work, and you can do
-  something about it. What md-viewer photographed working on which date is a
-  record of this project's testing rather than a fact about your session, so it
-  is gone from both reports — the per-terminal status lives in
-  [docs/manual-testing.md](docs/manual-testing.md). A `security.document_root`
-  of `"/"` is reported under Notes as the stated configuration it is, not argued
-  with; it becomes a warning only when combined with network access, since that
-  pairing is what lets a document both read a file and send what it read.
-
-  The environment report went from about 50 field lines to 26, by merging fields
-  that only restated each other (four lines said "iTerm2"; the reason the
-  overlay is off was printed twice) and dropping ones that could not inform a
-  decision: a Kitty-protocol probe result that is hardcoded false because this
-  plugin deliberately never probes, and `document root unbounded`, which is true
-  exactly when the document root above it reads `/`. Long values now wrap
-  instead of being truncated with an ellipsis, so a multi-paragraph Chromium
-  launch failure is readable where it is reported. Nothing that can vary between
-  machines was removed.
-
-- Mouse interaction over the preview, forwarded to the live Chromium DOM: a
-  new `interact` NDJSON method alongside `render`/`capture`, with its own
-  staleness lane so a burst of pointer input can never cancel a render.
-- Drag-to-select, double-click word selection, and triple-click paragraph
-  selection, all producing a real DOM selection.
-- Copying the current selection (`y` / `:MdViewerCopy`) to the unnamed
-  register and, when available, the system clipboard.
+  bottom keeps scrolling and keeps extending the selection into what it reveals,
+  stopping at the start or end of the document. Speed grows with distance past
+  the edge, capped by `interaction.autoscroll_max_lines`;
+  `interaction.autoscroll = false` restores the old freeze-at-the-edge
+  behaviour, and `interaction.autoscroll_interval_ms` paces the steps.
+- **An instant drag highlight.** While the mouse is down the highlight is drawn
+  in the terminal as translucent rectangles over the frame already on screen,
+  rather than re-photographing the page every frame. Releasing still lands a real
+  browser-rendered frame. Enabled only where it was validated by hand in a live
+  terminal — today iTerm2, Ghostty and Kitty; everywhere else a drag keeps the
+  correct, slower full-frame path. `interaction.selection_overlay` overrides
+  that. **WezTerm is off deliberately, on cost rather than correctness**, pending
+  an upstream fix ([wezterm#7953], proposed in [wezterm#8035]); do not force it
+  on there.
+- Copying the current selection (`y` / `:MdViewerCopy`) to the unnamed register
+  and, where available, the system clipboard. Manual by default;
+  `interaction.copy_on_select` opts in.
 - In-preview search (`:MdViewerFind`, `/`) with next/previous stepping
-  (`:MdViewerFindNext`/`:MdViewerFindPrevious`, `n`/`N`). The prompt always
-  opens empty, and dismissing it without a query clears both the active search
-  and any selection.
-- Preview history: `H`/`L` in the preview window, or
-  `:MdViewerBack`/`:MdViewerForward` from anywhere, move the preview (and the
-  source window with it) through the documents a reader has followed links
-  into, and `<C-o>` back into one of them brings the preview along on
-  its own. Without it, following a link left the document it came from
-  reachable only as text, because `preview.pinned` deliberately stops the
-  preview following an ordinary buffer switch. Bounded by
-  `interaction.history_limit`.
-- `security.document_root_markers`, and a project-aware default document
-  root.
-- Ctrl/Cmd-click link activation for `http(s)`, `mailto`, in-document-root
-  local files, and same-document `#fragment` links, each independently
-  re-checked against the document root and an unsafe-scheme denylist before
-  anything opens. A local Markdown link opens in Neovim, in the source
-  window, and the preview follows it; other filetypes still go to the system
-  handler.
-- Exact source-position reporting on interaction, recovered from
-  markdown-it's own parse state rather than by searching rendered text,
-  degrading honestly through exact/line/block/none precision levels.
-- `terminal.*` config: explicit terminal-profile and Kitty-graphics
-  capability overrides, plus an opt-in runtime capability probe.
-- `image.raw_cell_offset_px`/`image.raw_overlay_bleed_cells`: sub-cell
-  calibration for terminals (iTerm2 confirmed) that apply their window
-  margin to text but not to graphics placements, keeping a notification's
-  cut-out flush against the image.
-- `interaction.fast_drag` (default `false`) to let a moving drag frame capture
-  at CSS scale for a ~2.4x cheaper capture. Off by default and deliberately not
-  wired to `render.fast_scroll`: nobody reads text mid-scroll, so scrolling's
-  blur is invisible, but a drag is the one gesture where the reader's eye is on
-  the exact glyphs the pointer is crossing.
-- `browser.fast_png_encode` (default `true`) to turn the speed-optimised PNG
-  encoding off, and `capture_encoder` in `:MdViewerDebug` reporting which of
-  the two capture paths produced the last frame.
+  (`:MdViewerFindNext`/`:MdViewerFindPrevious`, `n`/`N`). The prompt always opens
+  empty, and dismissing it without a query clears both the search and any
+  selection.
+- Ctrl/Cmd-click link activation for `http(s)`, `mailto`, in-root local files and
+  same-document `#fragment` links, each re-checked against the document root and
+  an unsafe-scheme denylist before anything opens. A local Markdown link opens in
+  Neovim and the preview follows it; other filetypes go to the system handler.
+- Preview history: `H`/`L` in the preview, or `:MdViewerBack`/`:MdViewerForward`
+  from anywhere, move the preview and the source window through the documents a
+  reader has followed links into; `<C-o>` brings the preview along too. Bounded
+  by `interaction.history_limit`.
+- Exact source-position reporting on interaction, recovered from markdown-it's
+  own parse state rather than by searching rendered text, degrading honestly
+  through exact/line/block/none precision levels.
+- `security.document_root_markers`, and a project-aware default document root.
+- `terminal.*` config: explicit terminal-profile and Kitty-graphics capability
+  overrides, plus an opt-in runtime capability probe.
+- `image.raw_cell_offset_px` and `image.raw_overlay_bleed_cells`: sub-cell
+  calibration for terminals (iTerm2 confirmed) that apply their window margin to
+  text but not to graphics placements, keeping a notification's cut-out flush
+  against the image.
+- `interaction.fast_drag` (default `false`) to let a moving drag frame capture at
+  CSS scale for a cheaper capture.
+- `browser.fast_png_encode` (default `true`), making frame capture materially
+  cheaper via Chromium's speed-optimised PNG path. Lossless either way.
+- **Two diagnostics, split by the question they answer.** `:MdViewerHealth` is
+  short and answers *can this work here*; `:MdViewerDebug` answers *what did it
+  just do*, and is what to attach to a bug report. A warning now means one thing:
+  something may not work, and you can act on it. Per-terminal validation records
+  moved to [docs/terminal-support.md](docs/terminal-support.md).
+- Substantially expanded diagnostics: interaction state, the active document,
+  request/stale/coalesced counters, selection and search state (lengths and
+  counts only, never the underlying text), overlay counters, sub-cell offset and
+  bleed, the measured terminal cell size, and the last frame's capture path.
 - The preview now pins its own selection colour per theme rather than inheriting
-  Chromium's default. Over the page background the settled highlight is the same
-  colour as before; over code blocks and table stripes it shifts by 2-7/255. The
-  change exists so the drag-time overlay and the browser's own paint cannot
-  disagree, and so text stays readable under an overlay that sits above it.
-- Capturing a preview frame is roughly 1.7-2x cheaper, pixel for pixel: frames
-  are encoded through Chromium's speed-optimised PNG path. PNG is
-  lossless either way and the decoded pixels are identical; frames are about
-  40-60% larger, which costs a fraction of a millisecond to reach the terminal.
-  Measured directly, encoding a 990x1020@2 frame fell from 84ms to 50ms.
-  **On its own this does not make drag-to-highlight feel
-  faster** — the cost that governs how the drag feels is downstream of Neovim,
-  in the terminal decoding and compositing a fresh full-viewport image every
-  frame, which is what the overlay above addresses.
-- Substantially expanded `:MdViewerHealth`/`:MdViewerDebug` diagnostics:
-  interaction-enabled state, which document Chromium currently holds
-  active, interaction request/stale-interaction/coalesced-drag counters,
-  selection and search state (lengths and counts only, never the
-  underlying text), and the raw placement's sub-cell offset/overlay bleed.
-- A real (non-terminal-emulating) headless Lua/Node test suite covering the
-  interaction transport, source provenance, selection, search, and every
-  raw-image placement fix below.
+  Chromium's, so the drag-time overlay and the browser's own paint cannot
+  disagree.
+- A headless Lua and Node test suite covering the interaction transport, source
+  provenance, selection, search, and every raw-image placement fix below.
 
 ### Changed
 
-- Every way handing an external link to the operating system can fail is now
-  reported. `vim.ui.open` signals "no handler" by *returning* `nil` rather
-  than raising, and never waits, so a handler that failed after starting was
-  invisible too: both were discarded, which made an OS-level refusal
-  indistinguishable from md-viewer never having seen the click.
-  `:MdViewerDebug` records the last hand-off and its outcome
-  (`last_external_open`), and a ctrl/cmd-click whose hit test fails outright
-  now says so instead of going quiet (a lost race to a newer request stays
-  silent, as it should).
-
-- `security.document_root` now defaults to the **project** enclosing the
-  document (the nearest ancestor holding `.git`/`.hg`/`.svn`) rather than the
-  document's own directory, falling back to the old behaviour where no marker
-  is found. Rooting the boundary at the folder meant an ordinary
-  repo-relative link — `../README.md` from `docs/`, or a root-relative
-  `docs/other.md` — was always refused as a security violation. Containment
-  is unchanged: both the lexical and the symlink-resolved path are still
-  checked, so `../` and symlinks still cannot escape. Local images and local
-  links now also share one implementation of the root, which they previously
-  did not.
-- Clicking the preview no longer moves the source cursor under any gesture.
-  A plain click now only clears an active selection (matching VS Code's own
-  Markdown preview); Ctrl/Cmd-click still activates links. This replaces
-  click-to-source, which fought the drag-to-select gesture introduced in
-  the same body of work.
-- `kitty_raw.lua`'s placement `move()` now emits a replacement placement and
-  the deletion of the one it supersedes as a single write, new first,
-  instead of two separate writes -- fixes a roll/blink visible for as long
-  as a passive notification stayed open over the preview.
-- Passive-overlay (notification) exclusions are cut out of the raw image
-  placement again (`reconcile_placement` compares with the
-  exclusion-aware `coordinates.same`) -- a notification over the preview
-  now keeps its own opaque background instead of showing the rendered
-  Markdown through it, since a negative `raw_zindex` draws below text glyphs
-  but above cell backgrounds.
-- The raw image placement is torn down whenever its window's *tabpage* is
-  not the one currently displayed, not only when the window itself is
-  hidden -- closes a gap where a plugin that opens its own tabpage
-  (`:tabnew`-based UIs) left a stale image composited over it.
-- Any new window (not only floating ones) reconciles the raw placement on
-  `WinNew`, closing a gap where a plugin's plain, editor-relative splits
-  could resize the preview without the image following.
-- `session.source_win` reassignment (used for cursor-follow and session
-  lookup) is now deferred by one event-loop tick, so a compound command
-  that splits a window and then loads an unrelated file into it
-  (`:split other.md`) no longer transiently steals tracking away from the
-  window that is actually still showing the source buffer.
-
-- Moving drag frames stay sharp. The reduced-resolution capture that scrolling
-  uses (`render.fast_scroll`) is not shared with drag-to-select: the two
-  gestures look identical from the code's side and could not be less alike from
-  the reader's. Nobody reads text mid-scroll, so scrolling's blur is invisible;
-  a drag is the opposite — the eye is on the exact glyphs the pointer is
-  crossing, slowly, right up to the last one. The cheaper capture is available
-  as its own opt-in, `interaction.fast_drag` (default `false`), worth about
-  2.4x per moving frame; the commit frame after release is always device scale
-  either way.
-- `interaction.drag_debounce_ms` now defaults to `0` (was `40`). The old
-  default gated every drag-preview request behind a *trailing* debounce that
-  resets on every `<LeftDrag>` event, ahead of a pipeline that already has
-  its own one-in-flight backpressure (mirroring `controller.schedule_scroll`,
-  which has no such gate). Under continuous drag input faster than the
-  debounce interval this could starve dispatch far worse than adding 40ms of
-  latency: measured with a simulated 300ms continuous drag (a new point
-  every 15ms), the old default sent exactly **one** request for the whole
-  gesture, while immediate dispatch with in-flight coalescing sent eleven.
-  The knob still works if set above `0`, for anyone who wants deliberate
-  throttling back.
+- `security.document_root` now defaults to the **project** enclosing the document
+  (the nearest ancestor holding `.git`/`.hg`/`.svn`) rather than the document's
+  own directory, which refused every ordinary repo-relative link as a security
+  violation. Containment is unchanged, and local images and local links now share
+  one implementation of the root.
+- Clicking the preview no longer moves the source cursor under any gesture. A
+  plain click only clears an active selection; Ctrl/Cmd-click still activates
+  links. This replaces click-to-source, which fought drag-to-select.
+- Every way handing an external link to the OS can fail is now reported: an
+  OS-level refusal was previously indistinguishable from md-viewer never seeing
+  the click. `:MdViewerDebug` records the last hand-off and its outcome
+  (`last_external_open`), and a Ctrl/Cmd-click whose hit test fails now says so.
+- Moving drag frames stay sharp: the reduced-resolution capture that scrolling
+  uses is no longer shared with drag-to-select, where the reader's eye is on the
+  exact glyphs being crossed. `interaction.fast_drag` opts back in.
+- `interaction.drag_debounce_ms` now defaults to `0` (was `40`): the trailing
+  debounce sat ahead of a pipeline that already has backpressure, and under
+  continuous drag input could starve dispatch outright. Set it above `0` for
+  deliberate throttling.
+- Passive-overlay (notification) exclusions are cut out of the raw placement
+  again, so a notification over the preview keeps its own opaque background
+  instead of showing the rendered Markdown through it.
+- `kitty_raw.lua`'s `move()` now emits a replacement placement and the deletion
+  of the one it supersedes as a single write, new first — fixes a roll/blink
+  visible for as long as a notification stayed open over the preview.
+- The raw placement is torn down whenever its window's *tabpage* is not the one
+  displayed, not only when the window is hidden — a plugin opening its own
+  tabpage previously left a stale image composited over it.
+- Any new window, not only floating ones, reconciles the raw placement on
+  `WinNew`; plain splits could previously resize the preview without the image
+  following.
+- `session.source_win` reassignment is deferred by one event-loop tick, so
+  `:split other.md` no longer transiently steals tracking from the window still
+  showing the source buffer.
 
 ### Fixed
 
 - **A horizontally scrolled preview window no longer paints its image over the
-  top-left corner of the terminal.** `vim.fn.screenpos()` reports every field as
-  `0` when the requested position is off screen, which a window reaches on its
-  own as soon as it scrolls horizontally (`leftcol > 0` — a bare `zl` is
-  enough). The guard against that read `tonumber(screen.row) or fallback`, and
-  `0` is truthy in Lua, so the fallback was dead code: the placement came back at
-  row/column `-1`, which the raw Kitty backend formats as `ESC[0;0H` and every
-  terminal clamps to the origin. The fallback now tests the value rather than its
-  type, and accounts for the winbar row that `nvim_win_get_position()` does not
-  include.
-
-- The preview no longer stops producing frames on macOS. Chromium was launched
-  with `--disable-frame-rate-limit`, which skipped a fixed ~12ms compositor wait
-  on Linux but, on some macOS hosts, stopped frames being committed at all — so
-  the screenshot request that waits for one simply never came back. Measured on
-  GitHub's macOS runners, 0 of 12 launches captured a frame with the flag set
-  and 12 of 12 without it, on both macOS 15 and macOS 26 and with both Google
-  Chrome and Chrome for Testing. The flag is gone, and both halves of the fast
-  capture path are now bounded, so a browser that stops answering costs one slow
-  frame and falls back to the ordinary capture instead of wedging the renderer's
-  request queue for good.
-
-- The terminal cell size is measured fresh instead of being remembered. It was
-  read once and cached, and re-checked only against the row and column counts —
-  which a terminal can leave alone while changing its pixel geometry
-  underneath. WezTerm does exactly that on every launch: it sizes its pty at
-  half scale and corrects it about two seconds later, with the grid identical
-  either side. A preview opened in that window kept a half-scale cell for the
-  rest of the session and drew every drag-highlight rectangle at half size. A
-  terminal font-size change did the same thing more slowly. This affected every
-  terminal, not just WezTerm.
-
-- On Ghostty the instant highlight worked once per session and then silently
-  stopped, so every drag after the first behaved like the old re-photographed
-  path. It was not falling back — the highlight was being drawn *underneath* the
-  preview image.
-
-  The Kitty graphics protocol breaks a tie between two images on the same layer
-  by image id: the lower id draws underneath. md-viewer drew the preview and the
-  highlight on the same layer and numbered them from the same counter, so the
-  highlight outranked the preview for exactly one drag, and the next full frame —
-  the one taken when you release the mouse — took the lead back and kept it.
-  iTerm2 resolves that tie by which placement was made most recently, which is
-  why it never showed there. Ghostty follows the specification.
-
-  The preview and the highlight now always sit one layer apart, and the tint
-  image is numbered from a range above every preview frame, so neither the layer
-  nor the tie-break can put the highlight underneath. If you had pinned
-  `image.raw_zindex = -1` to work around anything here, you no longer need to;
-  it is now handled for you, and `interaction.selection_overlay = "off"` is the
-  only setting that still leaves that value untouched.
-
+  top-left corner of the terminal.** A bare `zl` was enough to trigger it.
+- **The preview no longer stops producing frames on macOS.** Chromium was
+  launched with `--disable-frame-rate-limit`, which on some macOS hosts stopped
+  frames being committed at all. The fast capture path is now bounded on both
+  halves, so a browser that stops answering costs one slow frame instead of
+  wedging the renderer's request queue.
+- **The terminal cell size is measured fresh rather than remembered.** A
+  terminal can change its pixel geometry while leaving its row and column counts
+  alone, which left a preview drawing every highlight rectangle at the wrong size
+  for the rest of the session.
+- **Drag rectangles were drawn too large** — wider than the text, and tall enough
+  that adjacent lines in a code block touched. The terminal's real cell size now
+  comes from the operating system; where a terminal does not report it, the
+  overlay switches itself off rather than drawing rectangles it cannot size.
+- **On Ghostty the instant highlight worked once per session and then silently
+  drew underneath the preview**, which looked exactly like falling back. The
+  preview and the highlight now always sit one layer apart. If you pinned
+  `image.raw_zindex = -1` to work around this, you no longer need to.
+- A highlight could survive into the next drag. A drag starting on a frame with a
+  settled selection painted into it now restores the cached selection-free frame
+  first.
 - Scrolling the preview while text was selected disabled the instant highlight
-  for every drag afterwards, until the preview happened to re-render with
-  nothing selected. Any frame that reaches the screen without a selection
-  painted into it now re-arms it — including the one a click-to-deselect
-  produces.
-
-- Drag rectangles were drawn too large — noticeably wider than the text and tall
-  enough that adjacent lines in a code block touched, where the real selection
-  leaves gaps.
-
-  md-viewer places the preview over a rectangle of terminal *cells* and lets the
-  terminal scale the image to fit, so when its estimate of your cell size is
-  wrong the picture is simply squeezed to the right box and only sharpness
-  suffers. The drag overlay was the first thing ever placed in **pixels**, and
-  pixels only mean something against the size the image is actually drawn at. It
-  was sizing rectangles against the size the image was *captured* at instead.
-  On a terminal whose cell is 7×16 while the estimate said 10×20, that is 1.41×
-  too wide and 1.24× too tall — at exactly the right position, because positions
-  were always in cells.
-
-  The terminal's real cell size now comes from the operating system
-  (`TIOCGWINSZ`), which needs no escape sequence and nothing read back — the
-  reason md-viewer could not ask for it before. Where a terminal does not report
-  it, the drag overlay switches itself off and the captured-frame path takes
-  over rather than drawing rectangles it cannot size. `:MdViewerDebug`
-  reports the measurement as `raw graphics cell pixels`.
-
-- A highlight could survive into the next drag. Selecting some text, releasing,
-  and then dragging out a new selection elsewhere left the first highlight on
-  screen for the whole second drag.
-
-  The frame underneath a drag is the browser's own capture, and after a
-  selection settles it has that selection painted into it. Drag rectangles
-  composite *over* that frame, so they can add a highlight but never remove one.
-  A drag that starts on a frame like that now puts the cached selection-free
-  frame back first — a local redraw, not another round trip to the browser — and
-  falls back to full captured frames when there is no cached frame it can prove
-  still matches what is on screen.
-
+  for every drag afterwards. Any frame reaching the screen without a selection
+  painted into it now re-arms it.
 - A drag that left the preview window stopped selecting. The gesture now stays
-  owned by the session that started it until the button comes up, wherever the
-  pointer goes.
-
-- A moving drag frame was captured at `render.fast_scroll`'s reduced scale,
-  which softened the exact glyphs the pointer was crossing and was reported as
-  the preview going blurry for the whole gesture. Moving drag frames are sharp
-  by default; `interaction.fast_drag` trades that back for a cheaper capture.
-
-- A capture taken while the preview was scrolled could have screenshotted the
-  top of the document rather than what was on screen, had the new capture path
-  shipped without carrying the page's scroll offset. Caught before release and
-  covered by a regression test.
-
-- WezTerm's upstream issue #6344 (divide-by-zero panics in Kitty placement
-  handling) is now unreachable from md-viewer: the measured cell must floor to
-  at least one pixel, and every crop must be at least one pixel and wholly
-  inside its image, before anything is emitted.
-
-- A link could be impossible to click at all. `hitTestInPage` resolved the
-  clicked cell horizontally but collapsed it to a single row vertically, and on
-  the estimated calibration tier a cell covers 20 CSS px while a rendered line
-  is 25 and an inline link's box about 18 — so a link can fall entirely between
-  two cell-row centres and become unreachable from every cell in the window, at
-  any click position. Enlarging the terminal font changed nothing but the
-  alignment, and made the same link work again, which is how it was reported.
-  The cell is now probed in both axes, still bounded by that one cell, and a
-  link anywhere under the clicked cell wins over the prose beside it — the cell
-  is the resolution limit of the input device, so there is no finer answer to
-  give. `tests/node/hitbox.test.js` sweeps every alignment a full cell height
-  can take.
-
-- `:MdViewerHealth` now warns when a configured `security.document_root` does
-  not contain the document being previewed. That combination refuses every
-  local link and image in the document, which is correct for the setting but
-  previously surfaced only one refusal at a time and read as a broken plugin.
-  The report also names where the root came from (configured or detected).
-- A link is never handed to the system handler when the target is something
-  the OS would *run*: macOS bundles and scripts (`.app`, `.command`,
-  `.terminal`, `.workflow`), Windows executables, `.desktop`/`.AppImage`/
-  `.jar`, disk images and installers, or any ordinary file carrying an execute
-  bit. It is refused with a notification instead. The document root was never
-  a defence here -- a cloned repository can ship `setup.command` beside its
-  README and link to it from inside the root.
+  owned by the session that started it until the button comes up.
+- **A link could be impossible to click at all**, at any position, because
+  hit-testing collapsed the clicked cell to a single row vertically and an inline
+  link can fall entirely between two cell-row centres. The cell is now probed in
+  both axes, and a link anywhere under it wins over adjacent prose.
+- The first character of a line is now clickable; hit-testing probes the clicked
+  cell's full width, not just its centre.
+- A click outside rendered text no longer crashes, and clicking preview text no
+  longer scrolls the preview itself.
+- A refused local link now says which refusal it was: a link to a missing file
+  reported "outside the document root", which was untrue and sent readers looking
+  for a security setting. An out-of-root path is still rejected without consulting
+  the filesystem, so the two messages cannot be used to probe for files outside
+  the root.
+- A link is never handed to the system handler when the target is something the
+  OS would *run*: macOS bundles and scripts, Windows executables,
+  `.desktop`/`.AppImage`/`.jar`, disk images, or any file carrying an execute
+  bit. The document root was never a defence here — a cloned repository can ship
+  `setup.command` beside its README.
+- `:MdViewerHealth` now warns when a configured `security.document_root` does not
+  contain the document being previewed — a combination that refuses every local
+  link and image, and previously surfaced only one refusal at a time. The report
+  also names where the root came from.
 - `:MdViewerHealth`/`:checkhealth` now describe the document rather than
-  themselves. Both create and enter their own scratch buffer before collecting,
-  so every document-relative answer -- including the document root -- described
-  the report buffer. The report now resolves a live preview's source buffer,
-  then a real file, then the buffer the report displaced.
-- A refused local link now says which refusal it was. A link to a file that
-  does not exist reported "refused to open link outside the document root",
-  which was untrue and sent the reader looking for a security setting; it now
-  reports that the target does not exist. A genuine escape still names the
-  root it was measured against. An out-of-root path is still rejected without
-  the filesystem being consulted at all, so the two messages cannot be used to
-  probe for files outside the root.
-- A find step or fragment jump now records where it scrolled the page to.
-  `interact` responses carry the resulting `scrollY`, but it was never stored,
-  so the next interaction sent a stale position and the shared page was
-  scrolled back before hit-testing — a click after a search resolved against a
-  different position than the image on screen showed.
-- A click outside rendered text no longer crashes
-  (`vim.json.decode`'s JSON-`null` sentinel is now decoded as an absent
-  Lua value at the protocol boundary, not a truthy userdata).
-- Clicking preview text no longer scrolls the preview itself.
-- The first character of a line is now clickable (hit-testing probes the
-  clicked terminal cell's full width, not just its center).
-- `selection_clear`/`find_*`/copy actions now carry the session's real
-  scroll position instead of silently resetting the shared page to the top
-  as a side effect.
-- Interaction capture frames no longer silently inherit whatever scale a recent
-  scroll had cached. A settled selection and a post-clear frame are always
-  device scale, so what the reader is left looking at does not depend on
-  whether they scrolled a moment earlier.
+  themselves; every document-relative answer previously described the report's
+  own scratch buffer.
+- A find step or fragment jump now records where it scrolled the page to, so a
+  click after a search no longer resolves against a different position than the
+  image on screen shows. `selection_clear`, `find_*` and copy likewise carry the
+  session's real scroll position instead of resetting the page to the top.
+- Interaction capture frames no longer inherit whatever scale a recent scroll had
+  cached; a settled selection and a post-clear frame are always device scale.
+- WezTerm's upstream issue #6344 (divide-by-zero panics in Kitty placement
+  handling) is unreachable from md-viewer.
 
 ### Removed
 
 - `:MdViewerRefresh`, `:MdViewerClearSelection` and `:MdViewerFindClear`.
-
-  Refreshing is already automatic — the preview re-renders on buffer changes,
-  and `controller.refresh()` remains the Lua API for the rare case that is not
-  enough. The other two each existed to do one thing that the search prompt now
-  expresses by being closed: `:MdViewerFind` (and `/`) always opens empty, and
-  dismissing it with Escape or an empty line clears the active search and any
-  selection. `<Esc>` with the preview focused still clears the same two, one
-  press at a time, and `controller.clear_selection()` / `controller.find_clear()`
-  remain callable from Lua.
-
-- `:MdViewerOpen` and `:MdViewerClose`. One command now owns whether a preview
-  is showing: `:MdViewerToggle`, which still takes the same optional position.
-  `controller.open()` and `controller.close()` remain as the Lua API and are
-  what to call from an autocmd or another plugin — `open()` is idempotent, so
-  it returns an existing preview rather than opening a second one and never
-  closes one, which is exactly where it differs from the toggle.
-
-- The `vim.ui.img` feasibility spike and its `:MdViewerSpikeStart`/
-  `:MdViewerSpikeReplace`/`:MdViewerSpikeStop` commands. They were only ever
-  reachable by launching Neovim with a dedicated init file, and the
-  `nvim_img` backend they were written to explore is unaffected.
+  Refreshing is already automatic, and the other two each did one thing the
+  search prompt now expresses by being dismissed. `<Esc>` with the preview
+  focused clears the same two, and `controller.refresh()`,
+  `controller.clear_selection()` and `controller.find_clear()` remain callable
+  from Lua.
+- `:MdViewerOpen` and `:MdViewerClose`. One command now owns whether a preview is
+  showing: `:MdViewerToggle`. `controller.open()` and `controller.close()` remain
+  as the Lua API — `open()` is idempotent and never closes a live preview, which
+  is exactly where it differs from the toggle.
+- The `vim.ui.img` feasibility spike and its `:MdViewerSpike*` commands, only
+  ever reachable via a dedicated init file. The `nvim_img` backend they explored
+  is unaffected.
 
 ## [0.2.0] - 2026-08-06
 

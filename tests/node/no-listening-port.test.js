@@ -62,7 +62,7 @@ test("the renderer subprocess and its Chromium child open no listening TCP port"
   const renderParams = {
     documentId: "port-scan", markdown: "# Title\n\nbody", baseDir: here, documentRoot: here,
     contentRevision: 1, viewport: { widthPx: 400, heightPx: 300, deviceScaleFactor: 1 }, scrollY: 0,
-    theme: "dark", rawHtml: false, localImages: false, maxLocalImageBytes: 1024, network: false,
+    theme: "dark", rawHtml: false, localImages: false, maxLocalImageBytes: 1024,
     browser: { executable_path: executable, launch_timeout_ms: 10000 },
   };
   child.stdin.write(`${JSON.stringify({ id: 1, method: "render", params: renderParams })}\n`);

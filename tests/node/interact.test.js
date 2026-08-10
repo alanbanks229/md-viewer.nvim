@@ -376,7 +376,7 @@ function startRenderer(t, executable) {
         baseDir: here, documentRoot: here,
         viewport: { widthPx: 800, heightPx: 600, deviceScaleFactor: 1 },
         scrollY: 0, theme: "dark", rawHtml: false, localImages: false,
-        maxLocalImageBytes: 1024, network: false,
+        maxLocalImageBytes: 1024,
         browser: { executable_path: executable, launch_timeout_ms: 10000 },
         ...overrides,
       };
@@ -519,7 +519,7 @@ test("a page that is not the document we believe it is refuses to answer", async
     documentId: "guarded", contentRevision: "1:0",
     viewport: { widthPx: 800, heightPx: 600, deviceScaleFactor: 1 },
     browser: { executable_path: executable, launch_timeout_ms: 10000 },
-    theme: "dark", scrollY: 0, network: false, captureScale: "css",
+    theme: "dark", scrollY: 0, captureScale: "css",
     scrollPastEnd: true, scrollPastEndOffsetPx: 22,
   };
   const html = '<h1 data-source-start="0" data-source-end="1">Guarded</h1>';

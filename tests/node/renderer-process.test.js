@@ -39,7 +39,6 @@ test("supersedes stale requests and shuts the renderer down", async (t) => {
       contentRevision: 1,
       viewport: { widthPx: 400, heightPx: 300, deviceScaleFactor: 1 }, scrollY: 0,
       theme: "dark", rawHtml: false, localImages: false, maxLocalImageBytes: 1024,
-      network: false,
       browser: { executable_path: executable, launch_timeout_ms: 10000 },
     },
   };

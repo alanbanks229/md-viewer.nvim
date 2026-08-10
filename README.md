@@ -1,120 +1,68 @@
 # md-viewer.nvim
 
-## Browser-quality Markdown previews inside terminal Neovim.
+**Browser-quality Markdown previews inside terminal Neovim.**
 
 <img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
 
-> [!IMPORTANT]
-> The preview is still a browser-rendered PNG surface. Mouse and keyboard
-> interactions are forwarded to the persistent Chromium DOM, which performs
-> hit-testing, selection, search, and link resolution before the viewport is
-> recaptured. This provides browser-like behavior but is **not** native
-> terminal text selection or a real embedded webview. Source text remains
-> separately, normally editable and selectable, as always.
->
-> Rendering does not open an external browser window, start an HTTP server, or
-> listen on localhost. Runtime browser network requests are blocked by default.
-> The initial `npm ci` dependency installation may contact the npm registry.
-> Playwright browser downloads are intentionally disabled; the plugin uses an
-> existing Chrome or Chromium installation.
-
-`md-viewer.nvim` opens a real, read-only Neovim split beside the Markdown
-source. A persistent headless Chromium page renders unsaved buffer contents to
+`md-viewer.nvim` opens a read-only Neovim split beside your Markdown source. A
+persistent headless Chromium page renders unsaved buffer contents to
 viewport-sized PNGs, which Neovim places in the preview split through the Kitty
-graphics protocol. The source buffer stays a normal editable Neovim buffer.
+graphics protocol. The source buffer stays a normal, editable Neovim buffer.
 
-Requirements:
-
-- Neovim 0.12+
-- Node.js 22.12+
-- an existing Google Chrome, Chromium, or Microsoft Edge installation
-- a terminal that advertises the Kitty graphics protocol, used without a
-  multiplexer (see "Terminal support" below)
-
-Kitty.app and the `kitty` or `kitten` executables are not required — any
-terminal that speaks the Kitty graphics protocol works, not only Kitty
-itself.
-
-### Terminal support
-
-md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp. Of those,
-iTerm2, Kitty, Ghostty and WezTerm have actually been launched and looked at on
-real hardware; Warp has not.
-
-The instant drag highlight paints the selection as a translucent overlay of
-rectangles instead of re-photographing the headless Chromium page for every
-frame. It is enabled only where a human confirmed it in a live terminal —
-today **iTerm2, Kitty and Ghostty**. Everywhere else a drag keeps the
-full-frame capture path, which stays correct and is merely slower.
-
-- **WezTerm is deliberately excluded, and stays excluded until an upstream PR
-  merges and ships.** The highlight draws correctly there — its geometry was
-  photographed and verified on two builds — but sustained placement traffic
-  grows WezTerm's resident memory without bound: 172 MB to 786 MB in four
-  seconds, with as few as four rectangles being replaced at 40fps. That is an
-  upstream defect
-  ([wezterm#7953](https://github.com/wezterm/wezterm/issues/7953)); the fix is
-  proposed in
-  [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035), **still open and
-  unmerged as of 2026-08-09**. You need do nothing to be safe: WezTerm already
-  gets the slower full-frame capture path by default. Just do not force the
-  overlay on there — it will look right and exhaust your memory.
-
-  Re-qualifying WezTerm once #8035 merges is not automatic and is not a
-  version check. It needs a *released* build carrying the fix, then
-  `scripts/overlay/geometry` and `scripts/overlay/stress` run against it, and
-  the profile flag flipped only if both pass. Until then this is the only
-  terminal md-viewer refuses on cost rather than correctness.
-- `interaction.selection_overlay = "on"` forces it on if you want to qualify
-  your own terminal. Read the option's notes in `lua/md-viewer/config.lua`
-  first, and do it on a machine you can afford to lose.
-
-This project labels every terminal claim with exactly one of four statuses —
-`Supported`, `Experimental`, `Protocol-compatible but unvalidated`, or
-`Unsupported` — and never promotes one on the strength of an environment
-variable matching. The definitions and the current per-terminal status live in
-[docs/manual-testing.md](docs/manual-testing.md). Read it before reporting a
-graphical bug or claiming a terminal works.
-
-tmux, screen, and Zellij are **not supported and not advertised**: no
-escape-sequence passthrough is implemented for any of them.
-`:MdViewerHealth` detects a multiplexer and reports it so the failure mode is
-diagnosable, but that is the entire extent of multiplexer support.
+> [!IMPORTANT]
+> The preview is a browser-rendered PNG surface. Mouse and keyboard gestures are
+> forwarded to the persistent Chromium DOM, which performs hit-testing,
+> selection, search, and link resolution before the viewport is recaptured. That
+> gives browser-like behavior — but it is **not** native terminal text selection
+> or an embedded webview.
+>
+> Nothing opens an external browser window, starts an HTTP server, or listens on
+> a port. Runtime browser network requests are always blocked; remote images
+> render only when you allowlist their hosts, and even then they are fetched by
+> the renderer process and inlined, never loaded by the browser. Playwright
+> browser downloads are disabled; the plugin uses an existing Chrome or Chromium
+> installation.
 
 ## Features
 
-- Live preview of unsaved Markdown buffer changes
+- Live preview of unsaved buffer changes, with source-to-preview cursor following
 - Headings, lists, task lists, tables, blockquotes, alerts, fenced code, and
-  local syntax highlighting
-- Dark and light browser themes
-- Source-to-preview cursor following
-- Preview keyboard and mouse-wheel navigation
-- Low-resolution moving frames followed by a Retina frame after scrolling
-- Drag-to-select, double-click word selection, and triple-click paragraph
-  selection, with copy to the unnamed register and (when available) the
-  system clipboard
+  local syntax highlighting, in dark and light themes
+- A real caret in the preview with Vim motions, counts, and keyboard selection
+- Drag-to-select, double-click word and triple-click paragraph selection, with
+  copy to the unnamed register and the system clipboard
 - In-preview search with match highlighting and next/previous stepping
-- Ctrl/Cmd-click link activation: `http(s)`, `mailto`, in-root local files,
-  and same-document fragment links, each resolved through the actual
-  rendered DOM rather than the raw Markdown source
+- Ctrl/Cmd-click link activation — `http(s)`, `mailto`, in-root local files, and
+  same-document fragments — resolved through the rendered DOM, with back/forward
+  history through the documents you follow
 - Exact source-position reporting where the parser supports it, degrading
   honestly to line- or block-level precision rather than guessing
-- Pinned previews that remain visible while the source split shows another file
-- Local PNG, JPEG, GIF, and WebP images constrained to a document root
-- A text-cell fallback when a graphical backend is unavailable
+- Pinned previews that stay visible while the source split shows another file
+- Local PNG, JPEG, GIF, and WebP images constrained to a document root, and
+  opt-in remote images from an explicit host allowlist
+- Visible placeholders that say why an image was refused or failed instead of
+  hiding it
+- A text-cell fallback when no graphical backend is available
 - Health and runtime diagnostics
 
 ## Requirements
 
-The renderer dependencies are locked in `renderer/package-lock.json`.
-Installation needs npm registry access unless those packages are already
-available through a configured npm cache. Runtime rendering itself is local.
+- Neovim 0.12+
+- Node.js 22.12+
+- An existing Google Chrome, Chromium, or Microsoft Edge installation
+- A terminal that advertises the Kitty graphics protocol, used without a
+  multiplexer — see [terminal support](#terminal-support)
 
-`md-viewer.nvim` never runs `playwright install` and never downloads a browser.
-Set `browser.executable_path` if automatic discovery does not find an approved
-installation.
+Kitty.app and the `kitty`/`kitten` executables are **not** required; any terminal
+speaking the Kitty graphics protocol works. Installation needs npm registry
+access unless the locked packages are already in a configured npm cache. Runtime
+rendering is entirely local.
 
 ## Installation
+
+The build hook installs the locked renderer dependencies. Both flags are
+deliberate: `md-viewer.nvim` never runs `playwright install` and never downloads
+a browser.
 
 ### lazy.nvim
 
@@ -123,11 +71,7 @@ installation.
   "alanbanks229/md-viewer.nvim",
   version = "v0.3.0",
   ft = "markdown",
-  cmd = {
-    "MdViewerToggle",
-    "MdViewerHealth",
-    "MdViewerDebug",
-  },
+  cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
     local env = vim.fn.environ()
     env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD = "1"
@@ -147,12 +91,9 @@ installation.
 }
 ```
 
-The explicit `kitty_raw` selection is intentional. Automatic mode
-will not assume raw-protocol support from `TERM_PROGRAM` alone.
-
 ### Native `vim.pack`
 
-Register the build hook before the first `vim.pack.add()` call so it also runs
+Register the build hook before the first `vim.pack.add()` call, so it also runs
 for a first-time installation:
 
 ```lua
@@ -178,15 +119,10 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  {
-    src = "https://github.com/alanbanks229/md-viewer.nvim",
-    version = "v0.3.0",
-  },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0" },
 })
 
-require("md-viewer").setup({
-  image = { backend = "kitty_raw" },
-})
+require("md-viewer").setup({ image = { backend = "kitty_raw" } })
 ```
 
 If the plugin was installed before the hook was added, run this once from the
@@ -196,444 +132,163 @@ repository's `renderer/` directory:
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 ```
 
-Do not run `playwright install`.
-
 ## Configuration
+
+The minimal setup is one option:
 
 ```lua
 require("md-viewer").setup({
-  split = { position = "right", width = 0.48, min_width = 45 },
-  preview = {
-    pinned = true,
-    winbar = true,
-    loading = true,
-    loading_interval_ms = 80,
-  },
-  render = {
-    debounce_ms = 200,
-    theme = "auto", -- "auto", "light", or "dark"
-    raw_html = false,
-    local_images = true,
-    max_local_image_bytes = 10 * 1024 * 1024,
-    device_scale_factor = 2,
-    font_size_px = 16,
-    cell_aspect_ratio = 0.5,
-    estimated_cell_width_px = 10,
-    max_width_px = 1920,
-    max_height_px = 1440,
-    max_png_bytes = 32 * 1024 * 1024,
-    scroll_past_end = true,
-    scroll_past_end_offset_px = 22,
-    fast_scroll = true,
-    scroll_settle_ms = 160,
-  },
-  browser = {
-    channel = "chrome",
-    executable_path = nil,
-    launch_timeout_ms = 10000,
-    -- Encode captured frames for speed rather than for size. Lossless either
-    -- way: the picture is identical, the file is larger. Set false to use
-    -- Playwright's default encoding.
-    fast_png_encode = true,
-  },
-  image = {
-    -- "auto", "nvim_img", "kitty_raw", or "cells". Default is "auto"; the
-    -- installation examples above set "kitty_raw" explicitly on purpose.
-    backend = "auto",
-    zindex = 20,
-    -- Both default to nil, meaning "let the detected terminal profile decide".
-    -- Set either one to override that profile. raw_zindex resolves to -2 on
-    -- every Kitty-graphics profile, leaving -1 free for the selection overlay.
-    double_buffer = nil,
-    raw_zindex = nil,
-    raw_statusline_guard_cells = 1,
-    -- Extra columns cut out past the trailing edge of a notification sitting
-    -- over the preview. See "Notifications over the preview" below.
-    raw_overlay_bleed_cells = 1,
-    -- Pixel offset at which the image starts inside its first cell. Cancels a
-    -- terminal that applies its window margin to text but not to graphics.
-    raw_cell_offset_px = { x = 0, y = 0 },
-    ui_poll_ms = 50,
-  },
-  sync = {
-    source_to_preview = true,
-    preview_to_source = false,
-    cursor_follow = true,
-    cursor_debounce_ms = 60,
-    navigation_line_px = 22,
-    mouse_scroll = true,
-    mouse_scroll_lines = 3,
-    manual_scroll_hold_ms = 500,
-    alignment_tolerance = 0.10,
-  },
-  security = {
-    network = false,
-    document_root = nil,
-    -- Identify the project enclosing the document when document_root is unset.
-    document_root_markers = { ".git", ".hg", ".svn" },
-  },
-  terminal = {
-    profile = "auto", -- "auto", or an explicit override: "iterm2", "kitty", "wezterm", "ghostty", "warp", "generic_kitty", "unknown"
-    kitty_graphics = "auto", -- "auto", "on", or "off"
-    probe = "off", -- "off" or "safe" -- an active runtime capability probe
-  },
-  interaction = {
-    enabled = true,
-    links = true,
-    -- Cells the pointer must move past `press` before it counts as a drag
-    -- rather than a click.
-    drag_threshold_cells = 1,
-    -- Gates installing the double/triple-click mappings at all.
-    double_click = true,
-    selection = true,
-    -- 0 dispatches every drag frame immediately, relying on the pipeline's own
-    -- one-in-flight backpressure. Set above 0 to throttle deliberately.
-    drag_debounce_ms = 0,
-    -- Whether a moving drag frame may capture at CSS scale. Off: a drag is the
-    -- one gesture where the reader is looking at the exact glyphs being
-    -- crossed, so the blur is visible in a way scroll's never is.
-    fast_drag = false,
-    -- `v`/`V`/`o` in the preview: extend a real DOM selection from the cursor
-    -- with ordinary motions. Not Neovim's visual mode -- see "Usage".
-    visual = true,
-    -- Keep scrolling while a drag holds past the top or bottom edge, so a
-    -- selection can run past what is on screen. Off, it freezes at the edge.
-    autoscroll = true,
-    autoscroll_interval_ms = 60,
-    -- Ceiling on lines per step; speed otherwise grows with distance past the edge.
-    autoscroll_max_lines = 6,
-    -- "auto" (per terminal profile), "on", or "off". See "Terminal support".
-    selection_overlay = "auto",
-    settle_ms = 120,
-    copy = true,
-    -- A plain click clears an existing selection; it never moves the source
-    -- cursor under any gesture.
-    copy_on_select = false,
-    word_select = true,
-    paragraph_select = true,
-    find = true,
-    -- How many documents back a preview remembers when a link retargets it.
-    history_limit = 32,
-    -- How long to watch a system handler started for an external link before
-    -- assuming it is running normally.
-    external_open_timeout_ms = 5000,
-  },
+  image = { backend = "kitty_raw" },
 })
 ```
 
-`document_root` defaults to the **project** enclosing the Markdown file — the
-nearest ancestor directory holding one of `document_root_markers`. With no
-marker found it falls back to the file's own directory, and an unsaved buffer
-uses Neovim's current working directory. Setting `document_root` explicitly
-always wins.
+The explicit `kitty_raw` is intentional. `auto` will not assume raw-protocol
+support from `TERM_PROGRAM` alone, so it falls back to text-only rendering
+instead of guessing.
 
-The project default is what makes an ordinary repo-relative link work: a
-document in `docs/` linking to `../README.md`, or to `docs/other.md` written
-relative to the repository root, resolves rather than being refused. Containment
-itself is unchanged — authorization checks both the lexical and the canonical
-path, so a symlink still cannot escape the root, and neither can `../`.
+A few overrides people commonly want:
 
-Exact terminal cell dimensions can be supplied with:
+```lua
+require("md-viewer").setup({
+  image = { backend = "kitty_raw" },
+  split = { position = "right", width = 0.48 },
+  render = { theme = "auto" },           -- "auto", "light", or "dark"
+  sync  = { cursor_follow = true },
+})
+```
+
+**Everything else lives in
+[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)**, which carries every
+option and default alongside the reasoning behind each non-obvious one. That is
+the reference — this README does not duplicate it. `:help md-viewer-config`
+describes the option groups and the handful that need more than a default value.
+
+For a sharper image, supply exact terminal cell dimensions (measure your own
+profile rather than copying these):
 
 ```sh
 export MD_VIEWER_CELL_WIDTH_PX=10
 export MD_VIEWER_CELL_HEIGHT_PX=20
 ```
 
-Measure the active terminal profile rather than copying the example values.
-
-### Backends
-
-- `kitty_raw`: the supported graphical path, on any terminal advertising the
-  Kitty graphics protocol; explicit opt-in is required.
-- `nvim_img`: uses Neovim's experimental `vim.ui.img` API when the installed
-  build exposes `set` and `del`.
-- `auto`: prefers a verified `vim.ui.img` API and otherwise uses `cells`; it
-  does not silently select the raw protocol.
-- `cells`: terminal-native text and extmark fallback without browser images.
-
-### Notifications over the preview
-
-With `kitty_raw`, the image is drawn by the terminal, not by Neovim, and its
-negative `raw_zindex` puts it below text glyphs but *above* cell background
-colours. A notification floating over the preview would therefore lose its background
-and show the Markdown through it, so md-viewer cuts the notification's rectangle
-out of the image.
-
-That cut is exact in cells, but some terminals — iTerm2 among them — apply their
-horizontal window margin to text while placing graphics without it, which draws
-the image a fraction of a cell toward the origin. Two settings deal with the
-leftover:
-
-- `raw_overlay_bleed_cells` (default `1`) cuts one extra column past the
-  notification's trailing edge, so the overhang can never paint across it. The
-  cost is a thin blank gap beside the notification instead of a flush edge.
-- `raw_cell_offset_px` cancels the offset outright, if your terminal implements
-  the Kitty protocol's `X`/`Y` placement keys. Measure it once: screenshot a
-  notification over the preview and compare the x of the image's edge with the x
-  of the notification's edge. Set `x` to the difference (10 for a 20px cell on
-  iTerm2's defaults). When it works, the gap closes completely and you can drop
-  `raw_overlay_bleed_cells` to `0`. `:MdViewerDebug` reports both values.
-
-If a notification over the preview bothers you at all, positioning it elsewhere
-(for `snacks.nvim`, `Snacks.notifier`'s placement options) avoids the overlap
-entirely.
-
 ## Usage
 
-Open a Markdown buffer, then use:
+Open a Markdown buffer and run `:MdViewerToggle`.
 
 | Command | Action |
 |---|---|
 | `:MdViewerToggle [right\|left\|below\|above]` | Open or close the preview |
-| `:MdViewerCopy` | Copy the current selection (also `y` with the preview focused) |
-| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given (also `/`). The prompt always opens empty, and dismissing it without a query clears the search and any selection |
-| `:MdViewerFindNext` | Jump to the next match (also `n`) |
-| `:MdViewerFindPrevious` | Jump to the previous match (also `N`) |
-| `:MdViewerHealth` | Show a short status summary: is this set up to work, and if not, why |
-| `:MdViewerDebug` | Show the full diagnostic — environment, capabilities, per-preview state, and the event log. This is what to attach to a bug report |
+| `:MdViewerCopy` | Copy the current selection |
+| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
+| `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
+| `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
+| `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
+| `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
-### Moving around the preview
+### Keys, with the preview focused
 
-The preview has a real caret, and it is a **position in the rendered document**
-— not a terminal cell. It only ever sits on an actual character, and it is drawn
-as a block the size of the glyph it is on, through the same overlay mechanism as
-the drag highlight. A caret on an `# H1` is drawn big; a caret on body text is
-drawn small. It cannot be parked in the page margin or in the empty space beside
-a short heading, because those are not places a reader can be.
-
-Neovim's own cursor is hidden while that block is on screen and follows along
-underneath, so focus and mappings keep working normally.
-
-With the preview focused:
+The preview has a real caret. It is a position in the rendered document rather
+than a terminal cell, so it only ever sits on an actual character and is drawn
+the size of the glyph it is on.
 
 | Key | Action |
 |---|---|
-| `h` / `l`, `Left` / `Right` | One character |
-| `j` / `k`, `Down` / `Up` | One rendered line, holding its column |
-| `0` / `$` | Start and end of the rendered line |
-| `w` / `b` / `e` | Next word, previous word, end of word |
-| `{` / `}` | Previous / next block |
-| `10j`, `5w`, `3l`, … | Counts work on every motion except `gg` / `G` |
-| Ctrl-d / Ctrl-u, Ctrl-f / Ctrl-b, PageUp / PageDown | Half a page and a page — line motions with a count, as in Vim, so the caret leads and the view follows |
-| Ctrl-e / Ctrl-y | Scroll the view and leave the caret on its document position (it is simply not drawn while off screen) |
-| `gg` / `G` | Start and end of the document — a count is ignored, since the lines you can see here are *rendered* lines and the one you would type is a *source* line. Going to a source line is a real feature and a separate one; it is not in this release |
-| `H` / `L` | Back and forward through documents followed by link |
+| `h` `l` `j` `k`, arrows | One character; one rendered line, holding its column |
+| `0` `$` | Start and end of the rendered line |
+| `w` `b` `e` | Next word, previous word, end of word |
+| `{` `}` | Previous / next block |
+| `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b` | Half a page, a page |
+| `Ctrl-e` `Ctrl-y` | Scroll the view, leaving the caret where it is |
+| `gg` `G` | Start and end of the document |
+| `v` `V` `o` | Start a selection at the caret; line-wise; swap ends |
+| `y` | Copy the selection |
+| `/` `n` `N` | Search, next match, previous match |
+| `H` `L` | Back / forward through followed-link history |
 
-The view scrolls whenever a motion would take the caret out of it, so holding
-`j` scrolls exactly as it did before there was a caret. Clicking moves the caret
-too, snapped to the nearest real character, so the pointer and the keyboard
-never disagree about where it is. The mouse wheel scrolls the preview only when
-the pointer is over it.
+Counts work on every motion except `gg`/`G` — `10j`, `5w`, `3l`.
 
-`j` and `k` hold their column the way Vim's do, through a sticky target
-(`curswant`) carried across the whole run — so `j` to the bottom of a document
-and `k` back returns to the character you started on, and stepping off a large
-heading glyph lands on the character below it rather than drifting sideways.
-Columns are matched on each glyph's left edge, not its centre, because centres
-do not survive a change of font size. `$` parks the column past every line's
-end, so a following `j` keeps following line ends down.
-
-Every motion is one round trip to the renderer, because only the renderer knows
-where the characters are. That is what buys the snapping and the glyph-sized
-caret; at reading speed it costs about what the scroll frame these keys already
-sent used to.
-
-On terminals that cannot draw the overlay (WezTerm today), the caret falls back
-to the terminal's own cursor. That is coarser — a fixed cell rather than the
-glyph — but it still sits on the character the caret is on, and Neovim's cursor
-is left visible there rather than hidden.
-
-#### Selecting with the keyboard
-
-| Key | Action |
-|---|---|
-| `v` | Start a selection anchored at the caret. Every motion above then extends it — `v3j`, `vw`, `vG` |
-| `V` | The same, line-wise: anchored at the start of the caret's line and extended to the end of the focus line |
-| `o` | Swap which end the caret holds, so the other end becomes the one being extended |
-| `y` | Copy the selection and leave visual mode |
-| `<Esc>` | Leave visual mode, keeping the highlight. A second `<Esc>` clears it |
-
-This is **not** Neovim's own visual mode, and it cannot be: the preview buffer
-holds blank cells, so a real visual selection over it would select spaces.
-Neovim stays in normal mode — which is also why every motion mapping and every
-mouse gesture keeps working unchanged — and the winbar shows `-- VISUAL --`
-since Neovim's own mode indicator has nothing to report. Set
-`interaction.visual = false` to leave `v`/`V`/`o` unmapped.
-
-What it drives is the *same* selection the mouse drives. The caret and the
-anchor are two document points; a mouse drag's anchor and pointer are two
-document points; both go through one request path to one real DOM selection. So
-keyboard selection inherits everything drag-select already had — the instant
-overlay highlight, the sharp settle frame, `y`, `:MdViewerCopy`, and exact
-source-position reporting — rather than reimplementing any of it.
-
-Selecting past the bottom of the window scrolls, the same as dragging past it:
-`vG` selects to the end of the document.
-
-
-### Mouse gestures
-
-All of these are dispatched through the `interact` transport to the live
-Chromium DOM — see the important note at the top of this document. Every
-gesture is gated by its own `interaction.*` config flag; setting one to
-`false` disables just that gesture without touching the others.
+### Mouse
 
 | Gesture | Action |
 |---|---|
-| Click and drag | Selects the dragged text (real DOM selection), matching browser/VS Code drag-select |
-| Drag past the top/bottom edge | Keeps scrolling the document and keeps extending the selection, so a selection can run past what is on screen — hold still past the edge and it keeps going, stopping at the start or end of the document |
-| Plain click | Clears an active selection. Never moves the source cursor, whether or not anything is selected. |
-| Double-click | Selects the word under the pointer |
-| Triple-click | Selects the enclosing paragraph/block |
-| Ctrl-click / Cmd-click | Activates a link under the pointer: opens `http(s)`/`mailto` externally via `vim.ui.open`, opens an in-document-root local file, or scrolls to a same-document `#fragment`. Refuses (with a notification) any link resolving to an unsafe scheme (`javascript:`, `data:`, etc.) or escaping the document root. Over non-link text, it does nothing. |
+| Click and drag | Selects the dragged text (a real DOM selection) |
+| Drag past the top/bottom edge | Keeps scrolling and extending the selection |
+| Plain click | Clears an active selection; never moves the source cursor |
+| Double-click / triple-click | Selects the word / the enclosing block |
+| Ctrl-click / Cmd-click | Activates a link under the pointer |
 
-Dragging past the edge scrolls at a speed that grows with how far past the edge
-the pointer is, capped by `interaction.autoscroll_max_lines`. Set
-`interaction.autoscroll = false` to keep the old behaviour, where a drag stops
-at the edge of what is visible. While the document is moving the highlight is
-drawn as a full captured frame rather than the fast overlay: overlay rectangles
-composite over the frame already on screen, and that frame is the one from
-*before* the scroll.
+A local Markdown link opens in Neovim, in the source window, and the preview
+follows it, so a documentation tree can be read by clicking through it; `<C-o>`
+returns. Copying is always manual — nothing reaches your clipboard on selection
+unless you ask for it.
 
-The mouse pointer does **not** change shape over the preview. The preview is a
-PNG, so only the terminal itself could change it (through `OSC 22`), and support
-is inconsistent enough across terminals that the result was worse than no
-feedback at all. Nothing is sent, and Neovim's global `'mousemoveevent'` is left
-alone.
+**`:help md-viewer` is the complete reference** for every command, key, gesture,
+and interaction semantic.
 
-A link to a local file **opens in Neovim**, in the source window, and the preview
-follows it, so a documentation tree can be read by clicking through it. `<C-o>`
-returns. Files Neovim has no filetype for (a `.png`, a `.zip`) and PDFs still go
-to the system handler via `vim.ui.open`; only Markdown re-points the preview.
+## Terminal support
 
-A link is never handed to the system handler when the target is something the OS
-would *run* — `.app`, `.command`, `.terminal`, `.workflow`, Windows executables,
-`.desktop`/`.AppImage`/`.jar`, disk images, or any file with an execute bit. Those
-are refused with a notification. The document root is not a defence here: a
-repository you cloned can ship `setup.command` beside its README.
-
-To make the preview open anything Neovim could open, set
-`security.document_root = "/"`. That is supported and switches containment off
-deliberately; keep `security.network = false` alongside it, and see
-`docs/security.md` for the trade.
-
-> **macOS note.** Both Ctrl-click and Cmd-click are mapped, but a terminal may
-> claim either one before Neovim sees it — iTerm2 uses Cmd-click to open URLs
-> itself, and some terminals emulate a right-click on Ctrl-click. If neither
-> gesture activates a link, that binding is being intercepted by the terminal,
-> not by md-viewer; check the terminal's own mouse settings.
-
-#### Going back and forth between documents
-
-Following a link retargets the preview, so without a way back the document the
-reader came from is simply gone: `preview.pinned` deliberately stops the preview
-following an ordinary buffer switch, so the source window's jump list moves the
-*text* back and leaves the rendered view behind.
-
-| Key / command | Action |
+| Terminal | Status |
 |---|---|
-| `H` (preview window) / `:MdViewerBack` | Previous document in this preview's history. Moves the source window too. |
-| `L` (preview window) / `:MdViewerForward` | Next document, after going back. |
+| iTerm2 3.5+ | Supported — image rendering and the drag-highlight overlay |
+| Kitty | Supported — drag-highlight overlay confirmed |
+| Ghostty 1.3.1 | Supported — drag-highlight overlay confirmed |
+| WezTerm | Supported for image rendering; the overlay is deliberately off |
+| Warp | Protocol-compatible, but never launched and unvalidated |
 
-`H` and `L` are installed by md-viewer in the preview window itself, beside the
-keys it already owns there (`y`, `/`, `n`, `N`, `gg`, `G`) — nothing to add to
-your config, and no leader prefix to collide with. They shadow "top/bottom of
-screen", which addresses nothing in a scratch buffer holding no text. Both
-commands work from either window if you would rather bind them globally.
+Every claim above carries an evidence label, and none is promoted on the strength
+of an environment variable matching. macOS Terminal.app does not implement the
+protocol and correctly degrades to the text-only `cells` backend. tmux, screen,
+and Zellij are **not supported** — no escape-sequence passthrough is implemented
+for any of them.
 
-`<C-o>` also works on its own: when the source window returns to a document this
-preview has already shown, the preview follows it back. That is deliberately
-narrow — only documents in this preview's own history qualify, so `pinned` still
-holds for every other buffer switch.
+On WezTerm the instant drag-highlight overlay is off pending an upstream fix
+([wezterm#8035](https://github.com/wezterm/wezterm/pull/8035), open as of
+2026-08-09); drags there use the slower full-frame path, which is correct, and
+you need do nothing.
 
-Navigating from the middle of the history abandons the forward branch, the same
-rule a browser follows. The list is capped at `interaction.history_limit` (32)
-and holds a buffer and a path per entry, so an entry whose buffer has been wiped
-still reopens its file.
-
-Copying (`y` / `:MdViewerCopy`) is always manual — nothing is copied
-automatically on selection unless `interaction.copy_on_select = true`, which
-is off by default (silently overwriting the system clipboard on every drag
-would be hostile).
-
-## How rendering works
-
-One Node.js child process communicates with Neovim through newline-delimited
-JSON over stdin/stdout. It keeps one headless Chromium browser, isolated
-context, and page alive while previews are active. Markdown is parsed and
-sanitized locally, the visible viewport is captured to a temporary PNG, and
-only plugin-owned image IDs and temporary files are removed during cleanup.
-
-There is no WebSocket, TCP connection, HTTP server, or listening port. See
-[architecture](docs/architecture.md) and [security](docs/security.md) for the
-full design.
+See [docs/terminal-support.md](docs/terminal-support.md) before reporting a
+graphical bug or claiming a terminal works.
 
 ## Security
 
-By default, Playwright aborts browser requests except `data:` and `about:`
-resources. The page uses a restrictive Content Security Policy, JavaScript is
-disabled in its browser context, raw Markdown HTML is disabled, and remote
-images are removed. Local images are converted to data URIs only after root,
-realpath, file type, signature, and size checks.
+Runtime browser requests are always blocked, JavaScript is disabled in the
+render context, and raw Markdown HTML is off. Remote images render only from
+hosts allowlisted in `security.remote_images` (off by default) — fetched over
+https by the renderer process, validated, and inlined, so the browser still
+makes no requests. Local images and local links are confined to a canonical
+document root — by default the project enclosing the document — with symlinks
+resolved. Interaction adds no new attack surface: nothing re-parses Markdown or
+touches the filesystem on a click, and diagnostics report selection and search
+state as lengths and counts only.
 
-Mouse and keyboard interaction adds no new attack surface of its own: every
-gesture resolves against the same sanitized, already-rendered document —
-nothing re-parses Markdown or re-touches the filesystem on a click, a drag,
-or a search. Link activation and local-file opening independently re-check
-the document root (mirroring the image-loading check, symlinks included) and
-refuse anything outside it or carrying an unsafe scheme, and every search
-match or selection is handled as plain text — a query or a selection
-containing HTML is matched/copied literally, never interpreted as markup.
-Diagnostics (`:MdViewerDebug`) report selection/search **lengths and counts
-only**, never the selected or searched text itself.
-
-Enabling `security.network` or `render.raw_html` relaxes the default policy and
-is reported by the health command. Review [SECURITY.md](SECURITY.md) before
-changing those options.
+Read [SECURITY.md](SECURITY.md) before setting `security.remote_images` or
+enabling `security.raw_html`; both are reported as overrides by
+`:MdViewerHealth`.
 
 ## Known limitations
 
-- The rendered preview is a PNG surface, not native terminal text or a real
-  embedded webview — see the note at the top of this document. Interaction
-  is real, browser-backed hit-testing and DOM manipulation forwarded over
-  the same local NDJSON transport as rendering, not terminal text selection.
-- Source-position precision degrades honestly (exact byte column → line →
-  block → none) depending on what the Markdown parser can establish for a
-  given piece of content; it is never guessed or interpolated.
-- Graphical confirmation is partial. Image rendering and the drag-highlight
-  overlay have been watched on real hardware; most of the placement and
-  occlusion fixes (the notification cut-out, the roll/blink swap, the tabpage
-  teardown) are covered by headless tests only. See
-  [Terminal support](#terminal-support) and
-  [docs/manual-testing.md](docs/manual-testing.md) for the per-terminal status.
-- The drag-highlight overlay is off on WezTerm pending an upstream fix that has
-  not merged yet ([wezterm#8035](https://github.com/wezterm/wezterm/pull/8035),
-  open as of 2026-08-09); drags there fall back to the slower full-frame path.
-  It stays off until that fix is in a released WezTerm build and md-viewer's
-  overlay scripts have been re-run against it.
+- The preview is a PNG surface, not native terminal text or an embedded webview.
+- Source-position precision degrades honestly (exact byte column → line → block →
+  none) depending on what the Markdown parser can establish; it is never guessed.
+- Graphical confirmation is partial: image rendering and the drag overlay have
+  been watched on real hardware, but most placement and occlusion behavior is
+  covered by headless tests only.
+- The drag-highlight overlay is off on WezTerm pending an upstream fix.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
-- Graphical correctness still requires interactive terminal testing; headless
-  tests cannot validate pixels, overlay behavior, click accuracy, or flicker.
 
-See [troubleshooting](docs/troubleshooting.md) and the
-[manual test checklist](docs/manual-testing.md) when reporting a graphical bug.
+## Documentation
 
-## Development
-
-```sh
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
-NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
-npm test --prefix renderer
-```
-
-Contributor workflow, architecture notes, and release checks are in
-[docs/development.md](docs/development.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
-How this project versions and cuts releases, in plain language with worked
-examples, is in [VERSIONING.md](VERSIONING.md).
+- `:help md-viewer` — complete command, key, and configuration reference
+- [Terminal support](docs/terminal-support.md) — does it work in your environment
+- [Troubleshooting](docs/troubleshooting.md) — what to do when it doesn't
+- [Architecture](docs/architecture.md) — how it works, and which invariants matter
+- [Security](SECURITY.md) — the trust boundary
+- [Development](docs/development.md) and [Contributing](CONTRIBUTING.md) — how to
+  work on it
+- [Changelog](CHANGELOG.md)
 
 ## License
 

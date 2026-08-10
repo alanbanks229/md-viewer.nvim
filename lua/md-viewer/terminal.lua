@@ -82,7 +82,7 @@ local function default_env() return vim.fn.environ() end
 -- reader can do something about it, `note` means this is how md-viewer knows
 -- what it knows. Only `warn` is reported by `:MdViewerHealth`, concise or
 -- verbose. Notes live here, where they explain why the code does what it does;
--- the reader-facing per-terminal status is docs/manual-testing.md. A validation
+-- the reader-facing per-terminal status is docs/terminal-support.md. A validation
 -- record ("this was photographed working on 2026-08-07") describes this
 -- project's testing, not the session in front of the user, and putting it in a
 -- diagnostic taught readers to skim past everything else in it.

@@ -74,7 +74,7 @@ and resident size once a second. Aborts if resident size crosses
 
 Drawing correctly and drawing affordably are separate questions. WezTerm answers
 the first yes and the second no, which is why its overlay is off; see
-`docs/manual-testing.md`.
+`docs/terminal-support.md`.
 
 That ceiling is not a nicety. Do not remove it and do not raise it casually.
 

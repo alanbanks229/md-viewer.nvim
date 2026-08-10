@@ -56,7 +56,7 @@ test("a link stays clickable at every alignment of the cell grid against the tex
     t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
     return;
   }
-  const { html, sourceMap } = renderMarkdown(markdown, { rawHtml: false, localImages: false });
+  const { html, sourceMap } = await renderMarkdown(markdown, { rawHtml: false, localImages: false });
   const renderer = new BrowserRenderer({ assetsDir });
   t.after(() => renderer.close());
 
@@ -66,7 +66,7 @@ test("a link stays clickable at every alignment of the cell grid against the tex
     documentId: "hitbox", contentRevision: "1:0",
     viewport: { widthPx, heightPx, deviceScaleFactor: 1 },
     browser: { executable_path: executable, launch_timeout_ms: 20000 },
-    theme: "dark", scrollY: 0, network: false, captureScale: "css",
+    theme: "dark", scrollY: 0, captureScale: "css",
     scrollPastEnd: true, scrollPastEndOffsetPx: 22, fontSizePx: 16,
   };
   const rendered = await renderer.render(params, html, 1);
@@ -133,7 +133,7 @@ test("cells that overlap no link still report source, not a link", async (t) => 
     t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
     return;
   }
-  const { html, sourceMap } = renderMarkdown(markdown, { rawHtml: false, localImages: false });
+  const { html, sourceMap } = await renderMarkdown(markdown, { rawHtml: false, localImages: false });
   const renderer = new BrowserRenderer({ assetsDir });
   t.after(() => renderer.close());
 
@@ -143,7 +143,7 @@ test("cells that overlap no link still report source, not a link", async (t) => 
     documentId: "hitbox-negative", contentRevision: "1:0",
     viewport: { widthPx, heightPx, deviceScaleFactor: 1 },
     browser: { executable_path: executable, launch_timeout_ms: 20000 },
-    theme: "dark", scrollY: 0, network: false, captureScale: "css",
+    theme: "dark", scrollY: 0, captureScale: "css",
     scrollPastEnd: true, scrollPastEndOffsetPx: 22, fontSizePx: 16,
   }, html, 1);
   fs.unlinkSync(rendered.pngPath);

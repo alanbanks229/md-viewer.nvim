@@ -34,7 +34,7 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   assert.equal(health.chromiumLaunch, "succeeded");
   assert.equal(renderer.deviceScaleFactor, 1);
   const params = { documentId: "buffer-7", contentRevision: 1, viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 2 },
-    browser: { executable_path: executable }, theme: "dark", scrollY: 0, network: false,
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
     captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22 };
   const html = '<h1 data-source-start="0" data-source-end="1">Heading</h1><p data-source-start="1" data-source-end="2">body</p>';
   const result = await renderer.render(params, html, 42);
@@ -182,7 +182,7 @@ test("the fast PNG encoder changes the bytes and not one pixel", async (t) => {
   const params = {
     documentId: "encode-doc", contentRevision: 1,
     viewport: { widthPx: 800, heightPx: 600, deviceScaleFactor: 2 },
-    browser: { executable_path: executable }, theme: "dark", scrollY: 0, network: false,
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
     captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
   };
   const html = tallHtml();
@@ -242,7 +242,7 @@ test("a drag frame paints the selection it reports, not the previous one", async
   const rendered = await renderer.render({
     documentId: "drag-doc", contentRevision: 1,
     viewport: { widthPx: 800, heightPx: 600, deviceScaleFactor: 1 },
-    browser: { executable_path: executable }, theme: "dark", scrollY: 0, network: false,
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
     captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
   }, tallHtml(), "drag-0");
   fs.unlinkSync(rendered.pngPath);
@@ -299,7 +299,7 @@ test("a scrolled capture shows what is on screen, not the top of the document", 
   const params = {
     documentId: "scroll-doc", contentRevision: 1,
     viewport: { widthPx: 800, heightPx: 600, deviceScaleFactor: 1 },
-    browser: { executable_path: executable }, theme: "dark", network: false,
+    browser: { executable_path: executable }, theme: "dark",
     captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
   };
   const html = tallHtml();
@@ -340,7 +340,7 @@ test("browser.fast_png_encode = false keeps Playwright's encoder", async (t) => 
     documentId: "opt-out", contentRevision: 1,
     viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
     browser: { executable_path: executable, fast_png_encode: false },
-    theme: "dark", scrollY: 0, network: false, captureScale: "device",
+    theme: "dark", scrollY: 0, captureScale: "device",
   };
   const off = await renderer.render(params, tallHtml(), "opt-out-1");
   assert.equal(off.captureEncoder, "playwright_png");

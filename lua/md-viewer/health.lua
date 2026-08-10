@@ -146,7 +146,7 @@ function M.collect(renderer_result, renderer_error)
       or (renderer_error and ("failed: " .. renderer_error) or "not tested"),
     temporary_directory_writable = temp_writable(),
     renderer_process = process.status(),
-    network_blocked = sec.network_blocked,
+    remote_image_hosts = sec.remote_image_hosts,
     raw_html = sec.raw_html,
     local_image_root = sec.document_root,
     document_root_source = sec.document_root_source,
@@ -192,7 +192,7 @@ end
 -- another one is merged into it, and a field that can only ever hold one value
 -- is not a diagnostic at all. What is deliberately absent is provenance about
 -- *this project's* testing -- which terminal was photographed working on which
--- date. That belongs in docs/manual-testing.md; it says nothing about the
+-- date. That belongs in docs/terminal-support.md; it says nothing about the
 -- session in front of the reader, and printing it beside real diagnostics
 -- teaches them to skim.
 local VERBOSE_LABEL_WIDTH = 26
@@ -314,8 +314,9 @@ end
 local function verbose_security(report)
   -- document_root_unbounded is not reported: it is true exactly when the
   -- document root on the line above is "/".
+  local hosts = report.remote_image_hosts or {}
   local rows = {
-    { "network", report.network_blocked == false and "ENABLED" or "blocked" },
+    { "remote images", #hosts == 0 and "off" or ("ENABLED (" .. table.concat(hosts, ", ") .. ")") },
     { "raw html", yes_no(report.raw_html) },
     { "document root", ("%s (%s)"):format(report.local_image_root, report.document_root_source) },
   }
@@ -477,7 +478,6 @@ end
 ---repeat the same diagnosis across a caveat, a reason, and a warning.
 local function build_warnings(report, status, status_reason)
   local warnings = {}
-  local network_blocked = report.network_blocked ~= false
   if status ~= "healthy" then
     -- status_reason can be a multi-paragraph Playwright launch-failure
     -- message; keep the full text, just split so no single buffer line
@@ -509,23 +509,6 @@ local function build_warnings(report, status, status_reason)
           .. "or adjust security.document_root_markers.",
       },
     }
-  elseif report.document_root_unbounded and not network_blocked then
-    -- An unbounded root is a stated configuration, not a fault, so on its own
-    -- it is a note (see build_notes). Combined with network access it stops
-    -- being just a wider read scope: a document can then reach a file and send
-    -- what it read, which is the one combination worth flagging.
-    warnings[#warnings + 1] = {
-      text = 'security.document_root is "/" and network access is enabled',
-      severity = "warn",
-      detail = {
-        "A rendered document can read any path on this filesystem and make network requests.",
-        "Set security.document_root, or set security.network = false.",
-      },
-    }
-  end
-  if not network_blocked and not report.document_root_unbounded then
-    warnings[#warnings + 1] =
-      { text = "security.network is enabled: rendered documents can make network requests", severity = "warn" }
   end
   if not report.tui_attached then warnings[#warnings + 1] = { text = "no TUI attached", severity = "warn" } end
   return warnings
@@ -538,10 +521,20 @@ end
 ---a health report arguing with the reader about their own configuration.
 local function build_notes(report)
   local notes = {}
-  if report.document_root_unbounded and report.network_blocked ~= false then
+  local hosts = report.remote_image_hosts or {}
+  if report.document_root_unbounded then
     notes[#notes + 1] = {
       text = 'security.document_root is "/": local links and images resolve to any path on this filesystem',
-      detail = { "Network access is blocked, so a document can read a local file but cannot send it." },
+      detail = { "Browser network access is always blocked, so a document can read a local file but cannot send it." },
+    }
+  end
+  if #hosts > 0 then
+    notes[#notes + 1] = {
+      text = "security.remote_images allows remote images from: " .. table.concat(hosts, ", "),
+      detail = {
+        "Previewing a document that references images on these hosts sends them HTTP requests, "
+          .. "which discloses that the document was viewed. The browser itself still makes no requests.",
+      },
     }
   end
   return notes

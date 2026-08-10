@@ -1,266 +1,245 @@
 # Troubleshooting
 
-Start with `:MdViewerHealth` for the overall status, selected backend, and any
-warnings. `:MdViewerDebug` is the full diagnostic in one buffer -- the environment and
-capability detail, then what each open preview is actually doing -- and is what
-to attach to a bug report. It separates terminal detection, `vim.ui.img`
-presence, and a successful image render. `TERM_PROGRAM=iTerm.app` alone is never treated as proof.
+Start with `:MdViewerHealth` for the overall status, the selected backend, and
+any warnings. `:MdViewerDebug` is the full diagnostic in one buffer — environment
+and capability detail, then what each open preview is actually doing — and is
+what to attach to a bug report. It separates terminal detection, `vim.ui.img`
+presence, and a successful image render; `TERM_PROGRAM=iTerm.app` alone is never
+treated as proof.
 
-## Preview uses styled text instead of a PNG
+## The preview shows styled text instead of an image
 
-`auto` selected the cell fallback because the installed build did not expose a
-usable `vim.ui.img` API. This is a build/API availability issue, not a Kitty.app
-dependency. Explicitly select `backend = "kitty_raw"` inside a direct TUI (no
-multiplexer) for the supported graphical path.
+`auto` selected the `cells` fallback because the installed Neovim build did not
+expose a usable `vim.ui.img` API. This is a build/API availability issue, not a
+Kitty.app dependency. Set `image.backend = "kitty_raw"` explicitly, inside a
+direct TUI with no multiplexer.
 
-## Explicit backend reports unavailable
+## An explicit backend reports unavailable
 
-This is intentional: explicit `nvim_img` and `kitty_raw` selections do not
-silently fall back. Use `:MdViewerHealth`; select `cells` while investigating.
+Intentional: explicit `nvim_img` and `kitty_raw` selections never silently fall
+back. Check `:MdViewerHealth` for the reason, and select `cells` while
+investigating.
 
-## Renderer exits or Playwright is missing
+## The renderer exits, or Playwright is missing
 
-Run the locked local install from `renderer/`:
+Run the locked install from `renderer/`:
 
 ```sh
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 ```
 
-Do not run `playwright install`. Confirm that the approved Chrome path shown by
-`:MdViewerHealth` exists and set `browser.executable_path` when needed. Renderer
-stderr and request serials are available through `:MdViewerDebug`.
+Do not run `playwright install`. Confirm the Chrome path `:MdViewerHealth` shows
+exists, and set `browser.executable_path` if automatic discovery misses your
+installation. Renderer stderr and request serials are in `:MdViewerDebug`.
 
-## Image is stretched or soft
+## The image is stretched, soft, or the wrong size
 
-Set the actual terminal profile cell size, in pixels:
+`:MdViewerHealth` reports `viewport calibration` as `estimated`. Set the actual
+cell size of your terminal profile — measure it rather than copying these:
 
 ```sh
 export MD_VIEWER_CELL_WIDTH_PX=10
 export MD_VIEWER_CELL_HEIGHT_PX=20
 ```
 
-Those numbers are examples only—measure the active profile rather than copying
-them. Health should then report `viewport calibration: explicit`.
+Health should then report `viewport calibration: explicit`.
 
-## Local image is absent
+If the typography is smaller than you expect, the estimated cell width is
+probably too large, causing the terminal to scale the whole screenshot down.
+Lower `render.estimated_cell_width_px` gradually, or prefer the exact values
+above.
 
-Confirm it is PNG/JPEG/GIF/WebP, below the byte limit, and canonically inside
-`security.document_root`. A symlink pointing outside the root is rejected. SVG
-and every remote URL are intentionally unsupported.
+## An image shows a placeholder instead of the picture
 
-## Mouse wheel does not move the preview
+An image that cannot render shows a visible placeholder naming the reason;
+nothing is silently hidden. A dashed border means it was refused by policy:
+the host is not in `security.remote_images` (remote images are off by
+default), the URL is not https, the file sits outside
+`security.document_root`, or it is an unsupported format — SVG is intentionally
+excluded, see [SECURITY.md](../SECURITY.md). A solid border means the image was
+attempted and failed: the host was unreachable or timed out, the response was
+not a valid image, or the size exceeds `max_local_image_bytes`. A symlink
+pointing outside the document root is rejected like any other escape.
+
+Remote fetches do not honor proxy environment variables; behind a mandatory
+proxy they fail to a placeholder. A failed remote fetch is retried on the
+next render after about a minute.
+
+## The mouse wheel does not scroll the preview
 
 Confirm `sync.mouse_scroll = true`, that Neovim mouse support is enabled, and
-that the pointer is inside the preview content window. The handler is scoped by
-the window under the pointer; it intentionally does not turn source-window
-wheel events into preview motion. Vim navigation continues to work even when
-mouse support is disabled.
+that the pointer is inside the preview window. The handler is scoped to the
+window under the pointer and deliberately does not turn source-window wheel
+events into preview motion. Keyboard navigation works regardless.
 
-## Preview scrolling feels slow
+## Scrolling feels slow
 
-Run `:MdViewerDebug` after a scroll and compare the persisted `fast_*` and
-`retina_*` values, especially `fast_capture_ms`, `fast_png_bytes`, and
+Run `:MdViewerDebug` after a scroll and compare the `fast_*` and `retina_*`
+values, especially `fast_capture_ms`, `fast_png_bytes`, and
 `fast_image_update_ms`. The coalesced counter shows how much repeated input was
-collapsed to the newest position. Completed frames are not deliberately
-discarded. If terminal transfer remains dominant, lower
-`render.device_scale_factor` to `1` as a final quality/performance tradeoff.
-
-## Preview typography is smaller than VS Code
-
-The browser CSS uses a 14 px system-font baseline. A visual size
-mismatch usually means the estimated terminal cell width is too large, causing
-the terminal to scale the whole screenshot down. Lower
-`render.estimated_cell_width_px` gradually. Prefer exact `MD_VIEWER_CELL_WIDTH_PX` and
-`MD_VIEWER_CELL_HEIGHT_PX` values when available.
-
-## Image overlaps UI or survives close
-
-For `kitty_raw`, confirm `:MdViewerDebug` reports a negative raw
-z-index (`-2` by default) and
-`:MdViewerDebug` reports `occluded = true` while an overlapping float is visible.
-The overlap guard removes the image only for focusable UI. Non-focusable
-notifications create cropped placement cutouts, exposing their actual background
-without blanking the rest of the Markdown document. `:MdViewerDebug` reports the
-active count as `passive_cutouts`.
-
-If a provider creates windows with `noautocmd=true`, confirm debug output shows
-`ui_polling = true`. The default 50 ms interval discovers focusable floats
-without requiring provider-specific hooks. Passive notifications are ignored by
-full suppression; the same poll updates their cutout geometry without
-retransmitting the PNG.
+collapsed to the newest position; completed frames are never deliberately
+discarded. If terminal transfer still dominates, lowering
+`render.device_scale_factor` to `1` is the final quality/performance trade.
 
 ## A notification over the preview shows Markdown through its background
 
-This is the specific bug `image.raw_overlay_bleed_cells` and the atomic
-placement-swap fix (`kitty_raw.lua`'s `M.move`) exist for. A negative
-`raw_zindex` draws the image below terminal text glyphs but *above* cell
-background colors, so a passive (non-focusable) float does not occlude the image on its
-own -- its rectangle has to be cut out of the placement, and that cut has to
-actually reach the terminal. If you see the rendered Markdown showing through
-a notification instead of the notification's own background:
+A negative `raw_zindex` draws the image below text glyphs but *above* cell
+background colours, so a passive (non-focusable) float does not occlude the image
+on its own — its rectangle has to be cut out of the placement.
 
-- Confirm you are running a build that includes the fix (`:MdViewerDebug`
-  reports `raw graphics overlay bleed cells`; if that field is absent, the
-  build predates it).
 - Confirm `:MdViewerDebug` reports a nonzero `passive_cutouts` while the
-  notification is visible. Zero means the float wasn't recognized as a
-  passive overlay at all (check whether it is genuinely non-focusable).
+  notification is visible. Zero means the float was not recognized as a passive
+  overlay at all — check whether it is genuinely non-focusable.
+- Confirm the raw z-index is negative (`-2` by default).
 
-## A gap or overhang appears beside a notification over the preview
+## A gap or overhang appears beside a notification
 
-The cutout is exact in cells, but the image's own on-screen origin need not
-be: some terminals (iTerm2 confirmed) apply their horizontal window margin to
-text but not to graphics placements, shifting the image a fraction of a cell
-toward the origin. `image.raw_overlay_bleed_cells` (default `1`) absorbs a
-small gap; `image.raw_cell_offset_px` cancels the shift outright on a
-terminal that implements the Kitty protocol's `X`/`Y` placement keys. See
-"Notifications over the preview" in README.md for how to measure the offset,
-and `docs/manual-testing.md`'s alignment matrix for what has and has not been
-measured on which terminal.
+The cut-out is exact in cells, but the image's on-screen origin need not be: some
+terminals (iTerm2 confirmed) apply their horizontal window margin to text but not
+to graphics placements, shifting the image a fraction of a cell toward the origin.
 
-## The preview image blinks, rolls, or briefly shifts by about a row
+`image.raw_overlay_bleed_cells` (default `1`) absorbs the gap.
+`image.raw_cell_offset_px` cancels the shift outright on a terminal that
+implements the Kitty protocol's `X`/`Y` placement keys. To measure it: screenshot
+a notification over the preview and compare the x coordinate of the image's edge
+with the x coordinate of the notification's edge; set `x` to the difference (10
+for a 20px cell on iTerm2's defaults). When it works the gap closes completely
+and you can drop `raw_overlay_bleed_cells` to `0`. `:MdViewerDebug` reports both
+as `cell offset / bleed`.
 
-A stale symptom of re-cropping the image non-atomically -- fixed by making
-`kitty_raw.lua`'s `M.move` emit the replacement placement and the deletion of
-the one it supersedes as a single write, new first. If this reappears, it
-means a placement change (typically a passive overlay appearing/disappearing)
-is once again being applied as two separate terminal writes. `:MdViewerDebug`
-cannot observe this directly -- it is terminal compositing behavior -- but
-`tests/lua/cases/backend_kitty.lua` asserts the ordering at the byte level;
-a regression there is the mechanism to look for.
+If a notification over the preview bothers you at all, positioning it elsewhere
+avoids the overlap entirely — for `snacks.nvim`, see `Snacks.notifier`'s
+placement options.
 
-## The preview image persists over another plugin's windows, or on the wrong tabpage
+## The image overlaps other UI, or survives closing
 
-A raw Kitty placement is absolute screen coordinates the terminal keeps
-compositing until explicitly told to stop -- it does not know or care which
-Neovim window or tabpage is actually on screen. `:MdViewerDebug`'s
-`tabpage_hidden` field reports whether md-viewer believes the preview's
-tabpage is not the one currently displayed; if a stray image is visible while
-`tabpage_hidden` is `false`, the plugin whose windows the image is
-overlapping likely resized or repositioned the preview split without md-viewer
-noticing (`WinNew`/`WinResized` should catch this for any new or resized
-window, not only floating ones -- if it doesn't, that's a real regression to
-report). If the image is visible on a *different* tabpage than the preview's
-own, `refresh_deferred` should be `true` until you return to the preview's
+`:MdViewerDebug` reports `occluded = true` while an overlapping *focusable* float
+is visible; the overlap guard removes the image only for those. If a provider
+creates windows with `noautocmd = true`, confirm `ui_polling = true` — the
+default 50 ms poll discovers them without provider-specific hooks.
+
+If a stray image persists over another plugin's windows while `tabpage_hidden` is
+`false`, that plugin most likely resized or repositioned the preview split
+without md-viewer noticing. `WinNew`/`WinResized` should catch any new or resized
+window, not only floating ones — if they don't, that is a real regression worth
+reporting. If the image is visible on a *different* tabpage than the preview's
+own, `refresh_deferred` should read `true` until you return to the preview's
 tabpage.
+
+Close the preview with `:MdViewerToggle`; md-viewer deletes only the image IDs it
+owns. Do not use global image deletion — it can damage unrelated plugins.
 
 ## Clicking, dragging, searching, or copying does nothing
 
-Confirm `:MdViewerDebug` reports `interaction enabled: yes` and that
-the relevant `interaction.*` flag (`selection`, `word_select`, `paragraph_select`,
-`find`, `copy`, `links`) is not disabled. Interaction is unavailable outright
-for the `cells` backend (`:MdViewerHealth`'s Backend row must not read
-`cells`) -- there is no DOM to hit-test against without a graphical backend.
-`:MdViewerDebug`'s `interaction_request_count` and `interaction_stale_count`
-distinguish "nothing is being sent at all" (both stay at zero -- check the
-mapping/config above) from "requests are being sent but keep losing a race"
-(a nonzero, growing `interaction_stale_count` -- usually caused by editing or
-scrolling continuously enough that every interaction's content revision goes
-stale before the renderer answers it; this is a real requirement, not a bug,
-since a selection captured against superseded content must never be shown).
+Confirm `:MdViewerDebug` reports `interaction enabled: yes` and that the relevant
+`interaction.*` flag (`selection`, `word_select`, `paragraph_select`, `find`,
+`copy`, `links`) is not disabled. Interaction is unavailable outright on the
+`cells` backend — there is no DOM to hit-test against.
 
-## A selection or highlight does not appear after dragging
+`interaction_request_count` and `interaction_stale_count` distinguish the two
+cases. Both at zero means nothing is being sent at all: check the config above.
+A growing `interaction_stale_count` means requests are being sent but losing a
+race — usually from editing or scrolling continuously enough that every
+interaction's content revision goes stale before the renderer answers. That is a
+requirement rather than a bug: a selection captured against superseded content
+must never be shown.
 
-Drag distance has to cross `interaction.drag_threshold_cells` (default `1`)
-before a drag is even recognized as one rather than a click; a very small,
-fast drag inside one cell can register as a plain click instead, which clears
-any existing selection rather than creating a new one. `:MdViewerDebug`'s
-`selection_active`/`selection_text_length` report whether anything is
-actually held selected server-side, independent of whether it is currently
-visible on screen (a selection can be correctly held while occluded, e.g.
-during a scroll-only capture).
+## A selection does not appear after dragging
 
-## A click lands on the wrong character, or link activation resolves the wrong content
+A drag has to cross `interaction.drag_threshold_cells` (default `1`) before it is
+recognized as a drag rather than a click, so a very small, fast drag inside one
+cell registers as a plain click — which clears any existing selection instead of
+creating one. `:MdViewerDebug`'s `selection_active` and `selection_text_length`
+report whether anything is held selected server-side, independently of whether it
+is currently visible.
 
-Confirm the active `viewport calibration` tier (`:MdViewerDebug`) is
-`explicit`, not `estimated` -- an estimated cell size is a real source of
-click-position error on a terminal/font combination the estimate doesn't
-match well. Set `MD_VIEWER_CELL_WIDTH_PX`/`MD_VIEWER_CELL_HEIGHT_PX` (see
-above) to remove the estimate entirely. `:MdViewerDebug`'s
-`interaction_last_precision` reports what precision the *last* interaction
-actually resolved at (`exact`, `line`, `block`, or `none`) -- a `none` where
-you expected an exact hit usually means the click landed in padding or
-whitespace the parser genuinely cannot attribute to any source position, not
-a bug; see docs/architecture.md for what each precision level means. No
-automated test in this repository can confirm where a real click lands on
-real hardware for multibyte content -- see `docs/manual-testing.md`.
+## A click lands on the wrong character
+
+Confirm `viewport calibration` reads `explicit`, not `estimated` — an estimated
+cell size is a real source of click-position error on a terminal/font combination
+the estimate does not match well. Setting `MD_VIEWER_CELL_WIDTH_PX` and
+`MD_VIEWER_CELL_HEIGHT_PX` removes the estimate entirely.
+
+`interaction_last_precision` reports what the last interaction actually resolved
+at: `exact`, `line`, `block`, or `none`. A `none` where you expected an exact hit
+usually means the click landed in padding or whitespace the parser genuinely
+cannot attribute to a source position — see
+[architecture.md](architecture.md) for what each level means. No automated test
+can confirm where a real click lands on real hardware; see
+[development.md](development.md#manual-verification).
 
 ## A link to another document refuses to open
 
-Check which message it is -- they mean different things.
+The message distinguishes three different things.
 
-*"link target does not exist"* means the path resolved fine and there is nothing
+**"link target does not exist"** — the path resolved fine and there is nothing
 there: a typo, or a file not written yet. Nothing to configure.
 
-*"refused to open link outside the document root (`<root>`)"* names the root it
-was measured against. By default that is the project enclosing the document (the
-nearest ancestor holding `.git`, `.hg`, or `.svn`). A document outside any such
-project is rooted at its own directory instead, so a link to a sibling directory
-is genuinely outside it. Either set `security.document_root` explicitly, or add
-a marker to `security.document_root_markers`.
+**"refused to open link outside the document root"** — the message names the root
+it was measured against. By default that is the project enclosing the document
+(the nearest ancestor holding `.git`, `.hg`, or `.svn`); a document outside any
+such project is rooted at its own directory instead, so a link to a sibling
+directory is genuinely outside it. Either set `security.document_root`
+explicitly, or add a marker to `security.document_root_markers`.
 
-`:MdViewerHealth` warns outright when a **configured** `security.document_root`
-does not contain the document being previewed -- the case where every local
-link and image in that document is refused and nothing else says why.
-`:MdViewerDebug` shows both the resolved root and where it came from
-(the `document root` line names both).
+Check this first if links fail in one project but work in another: a
+`security.document_root` set once, globally, pins every preview to that one
+directory. `:MdViewerHealth` warns outright when a **configured** root does not
+contain the document being previewed — the case where every local link and image
+is refused and nothing else says why. `:MdViewerDebug`'s `document root` line
+names both the resolved root and where it came from.
 
-This is worth checking first if links fail in one project but work in another:
-a `security.document_root` set once, globally, in your Neovim config pins every
-preview to that one directory. Unset it and let `document_root_markers` root
-each document in its own project instead.
+**Refused as an executable** — md-viewer never hands a link to the system handler
+when the target is something the OS would *run*. `:help md-viewer-security`
+lists what counts.
 
 ## Ctrl-click or Cmd-click does not activate a link
 
-Both are mapped. On macOS the terminal itself often claims them first: iTerm2
-uses Cmd-click to open URLs, and several terminals emulate a right-click on
-Ctrl-click. If `:MdViewerDebug`'s `interaction_request_count` does not increase
-when you click, the gesture never reached Neovim and the terminal's own mouse
-settings are where to look. If it does increase but nothing opens, the link was
-classified or refused -- see above.
+Both are mapped, but on macOS the terminal often claims them first: iTerm2 uses
+Cmd-click to open URLs, and several terminals emulate a right-click on
+Ctrl-click. If `interaction_request_count` does not increase when you click, the
+gesture never reached Neovim and the terminal's own mouse settings are where to
+look. If it does increase but nothing opens, the link was classified or refused —
+see above.
 
-## A ctrl-clicked external link does nothing
+## A Ctrl-clicked external link does nothing
 
-`:MdViewerDebug` records the hand-off: `last_external_open` holds the URL, when
-it was attempted, and what came back.
+`:MdViewerDebug`'s `last_external_open` records the hand-off: the URL, when it
+was attempted, and what came back.
 
-- `"none"` -- md-viewer never got that far. Either the click did not reach
-  Neovim (see the section above) or the point was not over a link; a ctrl-click
-  whose hit test *fails* now says so rather than going quiet.
-- `no handler: ...` -- `vim.ui.open` found nothing to run. This used to be
-  silent: it reports that failure by returning `nil`, not by raising, so the
-  `pcall` around it never saw anything wrong.
-- `exit code N`, or a message from the handler -- the OS started a handler and
-  it refused. Also reported as a notification.
-- `spawned`, with nothing after it -- the handler is still running, which is the
+- `"none"` — md-viewer never got that far. Either the click did not reach Neovim
+  (see above) or the point was not over a link.
+- `no handler: ...` — `vim.ui.open` found nothing to run.
+- `exit code N`, or a message from the handler — the OS started a handler and it
+  refused. Also reported as a notification.
+- `spawned`, with nothing after it — the handler is still running, which is the
   successful case for a browser that stays open.
 
 md-viewer never opens a URL itself; it asks Neovim, which asks the operating
-system (`open` on macOS, `xdg-open` on Linux, `start` on Windows). If
-`last_external_open` says the handler exited cleanly and no window appeared, run
-the same URL through your own shell -- the problem is between the OS and the
-default browser, not in the preview.
+system (`open`, `xdg-open`, `start`). If the handler exited cleanly and no window
+appeared, run the same URL through your own shell — the problem is between the OS
+and the default browser.
 
 ## The mouse pointer never changes shape over the preview
 
-It never will: md-viewer does not change it. The preview is a PNG, so only the
-terminal itself could (through `OSC 22`), and support proved inconsistent enough
-across terminals that the feature was removed rather than left half-working.
-Neovim's global `'mousemoveevent'` is left alone as a result.
+It never will. The preview is a PNG, so only the terminal itself could change the
+pointer (through `OSC 22`), and support proved inconsistent enough across
+terminals that the feature was removed rather than left half-working. Neovim's
+global `'mousemoveevent'` is left alone as a result.
 
-## Wrong terminal profile detected
+## The wrong terminal profile was detected
 
 `:MdViewerHealth`'s Terminal/Profile row names what was detected;
-`:MdViewerDebug`'s `identified by` field shows exactly
-why -- never trust `TERM_PROGRAM` alone
-(policy: detection evidence is not validation). If the profile is wrong,
-override it explicitly with `terminal.profile` rather than relying on
-`"auto"`; `terminal.kitty_graphics` and `terminal.probe` are the finer-grained
-overrides beneath it. A wrong profile most commonly affects the default
-z-index/double-buffer values and the calibration tier's defaults, not
-whether the preview renders at all.
+`:MdViewerDebug`'s `identified by` field shows exactly why. If it is wrong,
+override it with `terminal.profile` rather than relying on `"auto"`;
+`terminal.kitty_graphics` and `terminal.probe` are the finer-grained overrides
+beneath it. A wrong profile most commonly affects the default z-index and
+double-buffer values and the calibration tier's defaults, not whether the preview
+renders at all.
 
-Stop and record the exact backend, terminal/Neovim versions,
-statusline/winbar configuration, and reproduction in a bug report. Use
-`:MdViewerToggle` to close the preview; md-viewer deletes only IDs it owns. Do not use global
-image deletion because that can damage unrelated plugins.
+---
+
+When reporting a graphical bug, record the exact backend, terminal and Neovim
+versions, statusline/winbar configuration, and a minimal reproduction, and
+confirm it reproduces outside any multiplexer. See
+[terminal-support.md](terminal-support.md) for the per-terminal status.

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { LineProtocol } from "./protocol.js";
 import { BrowserRenderer } from "./browser.js";
 import { renderMarkdown } from "./markdown.js";
+import { normalizeAllowlist } from "./remote-images.js";
 import { LANES, createLaneError, createLaneRegistry } from "./lanes.js";
 import { validateEnvelope } from "./interact.js";
 
@@ -149,6 +150,10 @@ function dispatchRender(request) {
       markdownReused = true;
       html = previous.html;
     } else {
+      // Normalized (sorted, deduplicated) so it can join the cache key: an
+      // allowlist edit must invalidate the cached HTML, and a mere reordering
+      // must not.
+      const remoteImages = normalizeAllowlist(params.remoteImages);
       markdownKey = JSON.stringify([
         params.contentRevision ?? params.markdown,
         params.rawHtml === true,
@@ -156,17 +161,19 @@ function dispatchRender(request) {
         Number(params.maxLocalImageBytes) || 10 * 1024 * 1024,
         params.baseDir,
         params.documentRoot,
+        remoteImages,
       ]);
       markdownReused = previous?.key === markdownKey;
       if (markdownReused) {
         html = previous.html;
       } else {
-        const rendered = renderMarkdown(params.markdown, {
+        const rendered = await renderMarkdown(params.markdown, {
           rawHtml: params.rawHtml === true,
           localImages: params.localImages === true,
           maxLocalImageBytes: Number(params.maxLocalImageBytes) || 10 * 1024 * 1024,
           baseDir: params.baseDir,
           documentRoot: params.documentRoot,
+          remoteImages,
         });
         html = rendered.html;
         rememberMarkdown(params.documentId, {

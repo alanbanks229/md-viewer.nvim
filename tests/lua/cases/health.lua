@@ -36,7 +36,7 @@ local function base_report()
     chromium_launch = "succeeded",
     temporary_directory_writable = true,
     renderer_process = { running = true, pid = 1234, stderr = "" },
-    network_blocked = true,
+    remote_image_hosts = {},
     raw_html = false,
     local_image_root = "/project",
     document_root_source = "configured (security.document_root)",
@@ -149,14 +149,16 @@ return function(t)
     t.ok(not warning_texts(filtered):match("validated"), "a validation record is evidence, never a warning")
     t.ok(not warning_texts(filtered):match("inferred"), "how the terminal was identified is not a warning")
 
-    -- An unbounded document root on its own is a stated choice reported as a
-    -- note; it becomes a warning only in combination with network access,
-    -- which is the pairing that lets a document both read a file and send it.
+    -- An unbounded document root is a stated choice reported as a note. The
+    -- old escalation to a warning under network access went with
+    -- security.network itself: browser networking is always blocked now, and
+    -- remote image URLs are static text in a JavaScript-free page, so the
+    -- read-a-file-then-send-it pairing cannot recur.
     local wide = base_report()
     wide.document_root_unbounded = true
     wide.local_image_root = "/"
     local wide_diagnosis = health._diagnose(wide, auto_cfg)
-    t.eq(0, #wide_diagnosis.warnings, 'document_root="/" with the network blocked is not a warning')
+    t.eq(0, #wide_diagnosis.warnings, 'document_root="/" is not a warning')
     t.eq(1, #wide_diagnosis.notes, 'document_root="/" is reported as a note')
     t.ok(wide_diagnosis.notes[1].text:match("document_root"), "the note names the setting it is about")
     t.ok(
@@ -166,13 +168,14 @@ return function(t)
       "a note states what is true; it does not defend the user's configuration to them"
     )
 
-    local wide_and_online = base_report()
-    wide_and_online.document_root_unbounded = true
-    wide_and_online.network_blocked = false
-    local online_diagnosis = health._diagnose(wide_and_online, auto_cfg)
-    t.eq(1, #online_diagnosis.warnings, "an unbounded root plus network access is a single combined warning")
-    t.ok(warning_texts(online_diagnosis):match("network"), "the combined warning names the network")
-    t.eq(0, #online_diagnosis.notes, "the warning replaces the note rather than duplicating it")
+    -- A configured allowlist is likewise a stated fact: a note naming the
+    -- hosts (the overrides row already shouts SECURITY RELAXED), not a warning.
+    local allowing = base_report()
+    allowing.remote_image_hosts = { "github.com", "*.githubusercontent.com" }
+    local allowing_diagnosis = health._diagnose(allowing, auto_cfg)
+    t.eq(0, #allowing_diagnosis.warnings, "an allowlist alone is not a warning")
+    t.eq(1, #allowing_diagnosis.notes, "a configured allowlist is reported as a note")
+    t.ok(allowing_diagnosis.notes[1].text:match("github%.com"), "the note names the allowed hosts")
 
     -- The genuinely broken case is unchanged: a document outside a configured
     -- root has every local link and image refused, and that is an error.

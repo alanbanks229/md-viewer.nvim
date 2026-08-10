@@ -87,7 +87,6 @@ export class BrowserRenderer {
     this.context = null;
     this.page = null;
     this.deviceScaleFactor = null;
-    this.networkEnabled = null;
     this.files = new Set();
     this.layout = null;
     this.viewport = null;
@@ -123,7 +122,7 @@ export class BrowserRenderer {
     return executable;
   }
 
-  async ensure(options = {}, deviceScaleFactor = 2, network = false) {
+  async ensure(options = {}, deviceScaleFactor = 2) {
     const scale = Math.max(1, Math.min(3, Number(deviceScaleFactor) || 2));
     // Re-read on every call, ahead of the early return below, so flipping the
     // setting takes effect on the next frame rather than needing a relaunch.
@@ -135,12 +134,13 @@ export class BrowserRenderer {
         args: CHROMIUM_LAUNCH_ARGS,
       });
     }
-    if (this.context && this.deviceScaleFactor === scale && this.networkEnabled === network) return;
+    // The device scale factor is the only setting that can force a context
+    // restart; the network policy below is unconditional and never varies.
+    if (this.context && this.deviceScaleFactor === scale) return;
     try { await this.context?.close(); } catch {}
     this.deviceScaleFactor = scale;
-    this.networkEnabled = network;
     this.context = await this.browser.newContext({ deviceScaleFactor: this.deviceScaleFactor, javaScriptEnabled: false });
-    await installNetworkPolicy(this.context, network);
+    await installNetworkPolicy(this.context);
     this.page = await this.context.newPage();
     // Bound to this page, so it is recreated with it and never outlives it.
     this.cdp = await this.context.newCDPSession(this.page).catch(() => null);
@@ -312,7 +312,7 @@ export class BrowserRenderer {
     const viewport = params.viewport ?? {};
     const width = Math.max(320, Math.min(1920, Math.round(viewport.widthPx ?? 960)));
     const height = Math.max(240, Math.min(1440, Math.round(viewport.heightPx ?? 900)));
-    await this.ensure(params.browser, viewport.deviceScaleFactor, params.network);
+    await this.ensure(params.browser, viewport.deviceScaleFactor);
     const viewportChanged = !this.viewport || this.viewport.width !== width || this.viewport.height !== height;
     if (viewportChanged) {
       await this.page.setViewportSize({ width, height });
@@ -367,7 +367,6 @@ export class BrowserRenderer {
       theme, fontSizePx, scrollPastEnd, scrollPastEndOffsetPx,
       width, height,
       deviceScaleFactor: this.deviceScaleFactor,
-      network: this.networkEnabled,
       browserOptions: params.browser,
       scrollY,
       documentHeight,
@@ -434,7 +433,7 @@ export class BrowserRenderer {
 
     // Pass the record's own browser settings so establishing an interaction can
     // never trigger a context recreation that would destroy the page.
-    await this.ensure(record.browserOptions, record.deviceScaleFactor, record.network);
+    await this.ensure(record.browserOptions, record.deviceScaleFactor);
     if (!this.page) {
       throw createInteractError("INTERACT_NOT_READY", "no browser page is available; perform a full render first", { documentId });
     }
@@ -672,7 +671,7 @@ export class BrowserRenderer {
 
   async health(options) {
     const executable = this.resolveExecutable(options);
-    await this.ensure(options, 1, false);
+    await this.ensure(options, 1);
     return {
       chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page),
       discoveryReason: this.discoveryReason,
@@ -685,7 +684,7 @@ export class BrowserRenderer {
     try { await this.context?.close(); } catch {}
     try { await this.browser?.close(); } catch {}
     this.context = this.browser = this.page = this.cdp = null;
-    this.deviceScaleFactor = this.networkEnabled = null;
+    this.deviceScaleFactor = null;
     this.layout = this.viewport = this.active = null;
     this.documents.clear();
     for (const file of this.files) { try { fs.unlinkSync(file); } catch {} }

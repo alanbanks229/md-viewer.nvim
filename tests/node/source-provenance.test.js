@@ -37,7 +37,7 @@ function render(markdown = fixture) {
   });
 }
 
-const { html: FIXTURE_HTML, sourceMap: FIXTURE_MAP } = render();
+const { html: FIXTURE_HTML, sourceMap: FIXTURE_MAP } = await render();
 
 // ---------------------------------------------------------------------------
 // Looking a run up by what it *renders*, never by where it claims to come from.
@@ -329,11 +329,11 @@ test("unknown, forged, and absent region keys resolve to nothing rather than to 
   assert.ok(forged.line >= 1 && forged.line <= LINES.length);
 });
 
-test("multi-line inline code refuses to claim a column", () => {
+test("multi-line inline code refuses to claim a column", async () => {
   // markdown-it rewrites the newline inside `a\nb` to a space, so the rendered
   // run no longer matches any single source line. That is exactly the shape that
   // must not be reported as exact.
-  const { html, sourceMap } = render("Text with `split\ncode` inside.\n");
+  const { html, sourceMap } = await render("Text with `split\ncode` inside.\n");
   const runs = renderedRuns(html);
   assert.match(html, /<code[^>]*>split code<\/code>/);
   assert.equal([...runs.entries()].filter(([id, text]) =>
@@ -401,9 +401,9 @@ test("the source map carries keys, never Markdown, into the page", () => {
   assert.equal(FIXTURE_MAP.version, 1);
 });
 
-test("the sanitizer keeps provenance ids and still strips everything else", () => {
+test("the sanitizer keeps provenance ids and still strips everything else", async () => {
   assert.match(FIXTURE_HTML, /<span data-md-source-id="s\d+">/);
-  const { html } = renderMarkdown(
+  const { html } = await renderMarkdown(
     '<span data-md-source-id="s1" onclick="alert(1)" style="x">a</span><script>alert(1)</script>'
     + '<iframe src="x"></iframe><b data-md-source-id="../../etc">b</b>',
     { rawHtml: true, localImages: false, maxLocalImageBytes: 1, baseDir: here, documentRoot: here }
@@ -494,7 +494,7 @@ test("clicking a known character in a real browser yields its exact source colum
     documentId: "provenance", contentRevision: "1:0",
     viewport: { widthPx: 900, heightPx: 700, deviceScaleFactor: 1 },
     browser: { executable_path: executable, launch_timeout_ms: 10000 },
-    theme: "dark", scrollY: 0, network: false, captureScale: "css",
+    theme: "dark", scrollY: 0, captureScale: "css",
     scrollPastEnd: true, scrollPastEndOffsetPx: 22, fontSizePx: 16,
   }, FIXTURE_HTML, 1);
   fs.unlinkSync(rendered.pngPath);

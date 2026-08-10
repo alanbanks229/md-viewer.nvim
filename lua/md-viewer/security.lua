@@ -179,8 +179,8 @@ function M.summary(cfg, buf)
   local real = name ~= "" and vim.uv.fs_realpath(vim.fs.normalize(name)) or nil
   if configured and configured ~= "" and real then excludes_current = not M.is_inside(root, real) end
   return {
-    network_blocked = not cfg.security.network,
-    raw_html = cfg.render.raw_html,
+    remote_image_hosts = cfg.security.remote_images,
+    raw_html = cfg.security.raw_html,
     local_images = cfg.render.local_images,
     document_root = root,
     document_root_source = (configured and configured ~= "") and "configured (security.document_root)"
@@ -192,7 +192,7 @@ function M.summary(cfg, buf)
     -- than left to be inferred from the path.
     document_root_unbounded = root == "/",
     max_local_image_bytes = cfg.render.max_local_image_bytes,
-    overrides = (cfg.security.network or cfg.render.raw_html) and "SECURITY RELAXED" or "none",
+    overrides = (#cfg.security.remote_images > 0 or cfg.security.raw_html) and "SECURITY RELAXED" or "none",
   }
 end
 

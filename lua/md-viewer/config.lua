@@ -11,7 +11,6 @@ M.defaults = {
   render = {
     debounce_ms = 200,
     theme = "auto",
-    raw_html = false,
     local_images = true,
     max_local_image_bytes = 10 * 1024 * 1024,
     device_scale_factor = 2,
@@ -76,7 +75,22 @@ M.defaults = {
     alignment_tolerance = 0.10,
   },
   security = {
-    network = false,
+    -- Off by default. When true, markdown-it parses raw HTML embedded in the
+    -- document instead of dropping it; the output still passes the allowlist
+    -- sanitizer, so scripts, event attributes, frames and remote image
+    -- sources stay forbidden either way. See SECURITY.md before enabling.
+    raw_html = false,
+    -- Hosts whose images the *renderer process* may fetch over https and
+    -- inline as data: URIs; the browser itself never makes a network request
+    -- under any configuration. Empty means remote images are off. Entries are
+    -- exact host names ("github.com") or single leading wildcards
+    -- ("*.githubusercontent.com"). A wildcard matches proper subdomains only:
+    -- it never matches its own bare domain (list both to allow both), and the
+    -- required dot boundary means "*.example.com" cannot match
+    -- "evil-example.com". Previewing a document that references images on an
+    -- allowlisted host sends requests to it, which discloses that the
+    -- document was viewed -- see SECURITY.md before adding hosts.
+    remote_images = {},
     document_root = nil,
     -- Markers that identify the project enclosing the document when
     -- `document_root` is unset. See md-viewer.security.document_root for why
@@ -283,6 +297,7 @@ local function validate(cfg)
   )
   assert(tri_state[cfg.terminal.kitty_graphics], "md-viewer: terminal.kitty_graphics must be auto, on, or off")
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
+  assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(
     vim.islist(cfg.security.document_root_markers),
     "md-viewer: security.document_root_markers must be a list of marker names"
@@ -291,6 +306,20 @@ local function validate(cfg)
     assert(
       type(marker) == "string" and marker ~= "",
       "md-viewer: security.document_root_markers entries must be non-empty strings"
+    )
+  end
+  assert(vim.islist(cfg.security.remote_images), "md-viewer: security.remote_images must be a list of host names")
+  for _, host in ipairs(cfg.security.remote_images) do
+    local shaped = type(host) == "string"
+    if shaped then
+      -- A host name, optionally behind one leading "*.": no scheme, no path,
+      -- no port, no embedded wildcard.
+      local rest = host:sub(1, 2) == "*." and host:sub(3) or host
+      shaped = rest ~= "" and not rest:find("[*/:%s]")
+    end
+    assert(
+      shaped,
+      'md-viewer: security.remote_images entries must be host names like "github.com" or "*.githubusercontent.com"'
     )
   end
   assert(type(cfg.interaction.enabled) == "boolean", "md-viewer: interaction.enabled must be boolean")
@@ -345,7 +374,8 @@ end
 
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
-  current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts or {})
+  opts = vim.deepcopy(opts or {})
+  current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   return current
 end

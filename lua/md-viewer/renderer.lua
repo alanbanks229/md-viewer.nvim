@@ -59,10 +59,10 @@ function M.request(session, markdown, options, callback)
     scrollPastEnd = cfg.render.scroll_past_end,
     scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,
     theme = cfg.render.theme == "auto" and (vim.o.background == "dark" and "dark" or "light") or cfg.render.theme,
-    rawHtml = cfg.render.raw_html,
+    rawHtml = cfg.security.raw_html,
     localImages = cfg.render.local_images,
     maxLocalImageBytes = cfg.render.max_local_image_bytes,
-    network = cfg.security.network,
+    remoteImages = cfg.security.remote_images,
     browser = cfg.browser,
   }
   if not capture_only then params.markdown = markdown end
