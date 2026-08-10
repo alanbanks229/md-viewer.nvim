@@ -40,7 +40,7 @@ needs to be attributable to the terminal, not to a known-broken build.
 | iTerm2 3.5+ | `Supported` for image rendering and the drag-highlight overlay | Operator-driven, 2026-08-07. The rest of the feature set is `Protocol-compatible but unvalidated`. |
 | Kitty | `Supported` for the drag-highlight overlay | Operator-driven, 2026-08-08, across repeated drags. |
 | Ghostty 1.3.1 | `Supported` for the drag-highlight overlay | Operator-driven, 2026-08-08, across repeated drags. |
-| WezTerm | `Supported` for image rendering; overlay deliberately **off** | See "WezTerm" below. |
+| WezTerm | `Supported` for image rendering; fast overlay highlighting is deliberately **off** | See "WezTerm" below. |
 | Warp | `Protocol-compatible but unvalidated` | Never launched. Its Kitty-graphics support is newer than the others'; if it fails outright, record what broke. |
 
 At minimum, sanity-check **one** terminal from the `Supported` set. Check
@@ -84,6 +84,44 @@ not tell you (see §5).
 | Copy | `y` or `:MdViewerCopy` | Unnamed register, and the system clipboard where available. Nothing is copied automatically. |
 | Search | `/` or `:MdViewerFind`, then `n`/`N`, then `/` again dismissed with Escape | Matches highlight, stepping wraps, dismissing the empty prompt removes them. |
 | Multibyte columns | Ctrl/Cmd-click on `café`, `日本語`, an emoji, in `provenance-comprehensive.md` | `:MdViewerDebug` reports an exact byte column that lands inside the line it names. |
+| Drag past the bottom edge | Start a drag mid-document, move the pointer below the preview split, and **hold still** | The document keeps scrolling and the selection keeps extending, stopping at the end of the document. Holding still is the point: `<LeftDrag>` fires only while the mouse moves, so this is what proves the scroll is timer-driven. |
+| Drag past the top edge | The same upward | Scrolls up, stops at the start of the document. |
+| Release after a long auto-scroll | Let go a page or more from where the drag began, then `y` | The settled highlight matches what was dragged, and the copied text starts where the drag started — not where the anchor's original screen position now happens to point. |
+
+### The preview caret
+
+| Check | How | Expect |
+|---|---|---|
+| **Shaped like the glyph** | Focus the preview, put the caret on an `# H1`, then on body text | The caret is a block the size of the character it is on — visibly taller and wider on the heading. Not a fixed terminal cell. |
+| **Never on nothing** | Click far to the right of a short heading, in the empty space beside it; click in the left margin | The caret snaps onto the nearest real character. It never hovers over blank space. |
+| Neovim's cursor is hidden | Focus the preview, then leave it | Only the block caret is visible while the preview is focused; the ordinary cursor comes back everywhere else, including after `:q`, a tab switch and a crash-free `:qa`. |
+| **Only one caret after refocusing** | Focus the preview, switch to another application or tmux pane, then switch back — and press nothing | Still only the block caret. Neovim's own cursor must not be sitting beside it waiting for the next motion to clear it. |
+| Character motion | `h`, `l`, `10l` | Moves one glyph at a time, and ten with the count. |
+| **Backward motion never sticks** | `$` on a heading, then hold `h` all the way back to its first letter | Every press moves one glyph. It must not stop on a glyph and refuse to leave — and `l` back across the same heading must visit the same glyphs, skipping none. |
+| **`l` stops at the end of a line** | Hold `l` along a rendered line, including one in the middle of a wrapped paragraph | It stops at the last glyph of that line. It does not slide onto the line below or run on through the blocks beneath. `h` likewise stops at the line's first glyph. |
+| **`w` does not skip a word** | Caret on the last word of a heading, then `w` | Lands on the **first** word of the next block, not its second. Same at the end of a list item. |
+| Line motion | `j`, `k`, `3j` | Moves a rendered line, holding its column. |
+| **Column is held** | Caret on the first letter of the `# H1`, then `j` once | Lands on the *first* letter of the line below, not one character right of it. |
+| **Round trip** | `j` held to the bottom of the document, then `k` held back to the top | Returns to the character it started on. |
+| Line ends | `0`, `$`, then `j` after `$` | Start and end of the rendered line; after `$`, `j` keeps following line ends down. |
+| Word / block | `w`, `b`, `e`, `}`, `{` | Move through real words and blocks. Repeated `w` always advances. |
+| Scroll follows the caret | Hold `j` to the bottom of the view; `<C-d>`, `<C-f>` | The view scrolls to keep the caret visible. |
+| Caret stays put under `<C-e>` | `<C-e>` repeatedly until the caret leaves the view | The view moves, the caret does not; it stops being drawn once off screen and returns when scrolled back. |
+| Document ends | `gg`, `G`, and `30G` | `gg` and `G` go to the first and last character. `30G` does the same as `G` — the count is ignored, not silently reinterpreted. |
+| Click agreement | Click somewhere, then press `l` | The caret continues from where you clicked. |
+| Non-overlay terminal | The same on WezTerm | The caret falls back to the terminal's own cursor: a fixed cell, but on the right character. Neovim's cursor is *not* hidden there. |
+
+### Keyboard selection
+
+| Check | How | Expect |
+|---|---|---|
+| Visual mode | `v`, then `3j`, then `y` | The highlight follows the cursor; the winbar shows `-- VISUAL --`; `y` copies and leaves visual mode. |
+| Line-wise | `V`, then `j` | Whole rendered lines highlight. Winbar shows `-- VISUAL LINE --`. |
+| Swap ends | `v`, `3j`, `o`, then `k` | The cursor jumps to the other end and extends from there. |
+| Past the viewport | `v`, then `G` | Scrolls and keeps extending to the end of the document — the same anchor-pinning path drag auto-scroll uses. |
+| Escape precedence | `v`, motion, `<Esc>`, `<Esc>` | First leaves visual mode and keeps the highlight; second clears the highlight. |
+| Mouse takes over | `v`, motion, then drag with the mouse | Visual mode ends and the drag replaces the selection. |
+| Matches the mouse | Select the same span by drag and by `v` + motions, copying each | Identical text in the register. |
 
 ### Links and history
 

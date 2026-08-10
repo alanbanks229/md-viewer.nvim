@@ -8,11 +8,13 @@ import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
 import { buildOverlaySheetPng } from "./overlay-sheet.js";
 import {
+  CARET_TINT,
   MAX_FIND_MATCHES_REPORTED,
   MAX_SELECTION_RECTS,
   SELECTION_TINT,
   TEXT_PREVIEW_LIMIT,
   buildActionResult,
+  buildCaretMoveResult,
   buildFindClearResult,
   buildFindResult,
   buildFindStepResult,
@@ -23,6 +25,7 @@ import {
   clearSelectionInPage,
   createInteractError,
   hitTestInPage,
+  moveCaretInPage,
   normalizeHit,
   paragraphSelectInPage,
   readSelectionTextInPage,
@@ -512,12 +515,21 @@ export class BrowserRenderer {
     if (action === "selection_preview" || action === "selection_commit") {
       return this.page.evaluate(resolveSelectionInPage, {
         token, anchor: envelope.anchorCoordinates, focus: envelope.coordinates,
+        anchorPinned: envelope.anchorPinned,
         cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
         maxRects: MAX_SELECTION_RECTS,
       });
     }
     if (action === "selection_clear") return this.page.evaluate(clearSelectionInPage, { token });
     if (action === "selection_text") return this.page.evaluate(readSelectionTextInPage, { token });
+    if (action === "caret_move") {
+      return this.page.evaluate(moveCaretInPage, {
+        token, x: envelope.coordinates.x, y: envelope.coordinates.y,
+        cellWidthPx: envelope.cellWidthPx,
+        granularity: envelope.granularity, direction: envelope.direction, count: envelope.motionCount,
+        desiredX: envelope.desiredX, caretIndex: envelope.caretIndex,
+      });
+    }
     if (action === "word_select") {
       return this.page.evaluate(wordSelectInPage, {
         token, x: envelope.coordinates.x, y: envelope.coordinates.y,
@@ -567,6 +579,7 @@ export class BrowserRenderer {
       return { result: buildSelectionResult(raw, cached?.sourceMap), hit: null };
     }
     if (action === "selection_text") return { result: buildSelectionTextResult(raw), hit: null };
+    if (action === "caret_move") return { result: buildCaretMoveResult(raw), hit: null };
     if (action === "selection_clear") return { result: buildSelectionClearResult(), hit: null };
     if (action === "find_set") return { result: buildFindResult(raw, cached?.sourceMap, envelope.query), hit: null };
     if (action === "find_next" || action === "find_previous") {
@@ -607,11 +620,17 @@ export class BrowserRenderer {
     result.scrollY = scrollY;
     result.viewportHeightPx = record.height;
     result.documentHeightPx = documentHeight;
-    if (result.kind === "selection") {
+    // The caret is drawn through the same overlay path as a selection, from a
+    // rectangle measured the same way, so it needs the same tint constant and
+    // the same tint sheet.
+    if (result.kind === "selection" || result.kind === "caret") {
       // The one constant the Lua drag overlay may paint with. Sourced from the
       // rendered document's own theme so Lua never hardcodes a color that the
-      // settle frame's ::selection rule could drift away from.
-      result.selectionTint = SELECTION_TINT[record.theme] ?? SELECTION_TINT.dark;
+      // settle frame's ::selection rule could drift away from. The caret is
+      // drawn through the same path from its own, heavier constant.
+      result.selectionTint = result.kind === "caret"
+        ? (CARET_TINT[record.theme] ?? CARET_TINT.dark)
+        : (SELECTION_TINT[record.theme] ?? SELECTION_TINT.dark);
       if (envelope.overlaySheet) {
         result.overlaySheetPng = buildOverlaySheetPng(
           envelope.overlaySheet.widthPx,

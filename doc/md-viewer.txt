@@ -169,21 +169,95 @@ COMMANDS                                                 *md-viewer-commands*
 =============================================================================
 PREVIEW NAVIGATION                                   *md-viewer-navigation*
 
-The graphical preview maps these Normal-mode keys:
+The preview has a real caret, and it is a position in the *rendered document*
+rather than a terminal cell. It only ever sits on an actual character, and it
+is drawn as a block the size of the glyph it is on, through the same overlay
+mechanism as the drag highlight -- a caret on an h1 is drawn big, a caret on
+body text small. It cannot be parked in the page margin or in the empty space
+beside a short heading, because those are not places a reader can be.
 
-    j, k, Down, Up           One rendered line
-    CTRL-E, CTRL-Y           One rendered line
-    CTRL-D, CTRL-U           Half a viewport
-    CTRL-F, CTRL-B           Approximately one viewport
-    PageDown, PageUp         Approximately one viewport
-    gg, G                    Document top or bottom
+Neovim's own cursor is hidden while that block is on screen and follows along
+underneath, so focus and mappings keep working normally.
+
+The graphical preview maps these Normal-mode keys. Counts work on all of the
+motions (`10j`, `5w`, `3l`) except gg and G, which always mean the ends of
+the document -- going to a *source* line is a separate feature, not this
+keystroke wearing a count, and it is not in this release:
+
+    h, l, Left, Right        One character, within the rendered line
+    j, k, Down, Up           One rendered line, holding its column
+    0, $                     Start or end of the rendered line
+    w, b, e                  Next word, previous word, end of word
+    {, }                     Previous or next block
+    CTRL-D, CTRL-U           Half a page
+    CTRL-F, CTRL-B           A page
+    PageDown, PageUp         A page
+    CTRL-E, CTRL-Y           Scroll the view, leaving the caret on its
+                             document position
+    gg, G                    Start or end of the document (counts ignored)
     H, L                     Back/forward through the preview history
                              (|md-viewer-history|)
-    y                        Copy the current selection (:MdViewerCopy)
+    v, V                     Start a selection at the caret, extended by
+                             any motion above; V is line-wise
+    o                        Swap which end of the selection the caret
+                             holds
+    y                        Copy the current selection (:MdViewerCopy),
+                             leaving visual mode
     /                        Prompt and search (:MdViewerFind)
     n, N                     Next/previous search match
 
+The view scrolls whenever a motion would take the caret out of it, so holding
+j scrolls exactly as it did before there was a caret. CTRL-D and friends are
+line motions with a count, which is what Vim does with them, so the caret
+leads and the view follows. CTRL-E and CTRL-Y are the exceptions: they move
+the view and leave the caret where it is, which may take it off screen, where
+it is simply not drawn until it comes back.
+
+j and k hold their column the way Vim's do, through a sticky target
+(`curswant`) carried across the whole run -- so j to the bottom of a document
+and k back returns to the character you started on, and stepping off a large
+heading glyph lands on the character below it rather than drifting sideways.
+Columns are matched on each glyph's left edge, not its centre, because centres
+do not survive a change of font size. `$` parks the column past every line's
+end, so a following j keeps following line ends down.
+
+h and l stay on the rendered line they start on, the way Vim's do under the
+default 'whichwrap': l at the end of a line does nothing rather than sliding
+onto the line below, and h at the start does nothing. A paragraph wrapped over
+several rendered lines is several lines here -- the same lines j, k, 0 and $
+already work on. w, b and e do cross lines, as they do in Vim.
+
+Clicking moves the caret too, snapped to the nearest real character, so the
+pointer and the keyboard never disagree about where it is.
+
+Every motion is one round trip to the renderer, because only the renderer
+knows where the characters are. That is what buys the snapping and the
+glyph-sized caret; at reading speed it costs about what the scroll frame these
+keys already sent used to.
+
+On a terminal that cannot draw the overlay (WezTerm today) the caret falls
+back to the terminal's own cursor: coarser, a fixed cell rather than the
+glyph, but still on the character the caret is on. Neovim's cursor is left
+visible there rather than hidden.
+
 Mouse-wheel events scroll the preview only when the pointer is over its split.
+
+                                                        *md-viewer-visual*
+`v` does not enter Neovim's visual mode, and cannot: the preview buffer holds
+blank cells, so a real visual selection over it would select spaces. Neovim
+stays in Normal mode -- which is also what keeps every motion mapping and every
+mouse gesture working unchanged -- and the winbar shows "-- VISUAL --", since
+Neovim's own mode indicator has nothing to report. `interaction.visual` gates
+it.
+
+What it drives is the same selection the mouse drives: an anchor point and a
+caret point, resolved through one request path to one real DOM selection. So it
+inherits the instant overlay highlight where that is available, the sharp
+settle frame after it ends, copy, and exact source-position reporting.
+
+Extending past the bottom of the window scrolls, exactly as dragging past it
+does, so `vG` selects to the end of the document.
+
 
 =============================================================================
 MOUSE INTERACTION                                    *md-viewer-interaction*
@@ -193,6 +267,15 @@ live Chromium DOM -- see |md-viewer| for what that means and does not mean.
 Each is gated by its own `interaction.*` config flag.
 
     Click and drag        Selects the dragged text (a real DOM selection)
+    Drag past an edge       Keeps scrolling the document and keeps
+                            extending the selection, so a selection can
+                            run past what is on screen. Hold still past
+                            the edge and it keeps going, stopping at the
+                            start or end of the document. Speed grows
+                            with distance past the edge, capped by
+                            `interaction.autoscroll_max_lines`. Set
+                            `interaction.autoscroll` to false to keep the
+                            old behaviour of freezing at the edge.
     Plain click            Clears an active selection; never moves the
                             source cursor, whether or not anything was
                             selected

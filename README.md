@@ -293,6 +293,15 @@ require("md-viewer").setup({
     -- one gesture where the reader is looking at the exact glyphs being
     -- crossed, so the blur is visible in a way scroll's never is.
     fast_drag = false,
+    -- `v`/`V`/`o` in the preview: extend a real DOM selection from the cursor
+    -- with ordinary motions. Not Neovim's visual mode -- see "Usage".
+    visual = true,
+    -- Keep scrolling while a drag holds past the top or bottom edge, so a
+    -- selection can run past what is on screen. Off, it freezes at the edge.
+    autoscroll = true,
+    autoscroll_interval_ms = 60,
+    -- Ceiling on lines per step; speed otherwise grows with distance past the edge.
+    autoscroll_max_lines = 6,
     -- "auto" (per terminal profile), "on", or "off". See "Terminal support".
     selection_overlay = "auto",
     settle_ms = 120,
@@ -385,11 +394,84 @@ Open a Markdown buffer, then use:
 | `:MdViewerDebug` | Show the full diagnostic — environment, capabilities, per-preview state, and the event log. This is what to attach to a bug report |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
-When the preview has focus, `j`/`k`, arrow keys, Ctrl-e/Ctrl-y,
-Ctrl-d/Ctrl-u, Ctrl-f/Ctrl-b, PageUp/PageDown, and `gg`/`G` move the rendered
-viewport; `H`/`L` move back and forward through the documents you have followed
-links into. The mouse wheel scrolls the preview only when the pointer is over
-it.
+### Moving around the preview
+
+The preview has a real caret, and it is a **position in the rendered document**
+— not a terminal cell. It only ever sits on an actual character, and it is drawn
+as a block the size of the glyph it is on, through the same overlay mechanism as
+the drag highlight. A caret on an `# H1` is drawn big; a caret on body text is
+drawn small. It cannot be parked in the page margin or in the empty space beside
+a short heading, because those are not places a reader can be.
+
+Neovim's own cursor is hidden while that block is on screen and follows along
+underneath, so focus and mappings keep working normally.
+
+With the preview focused:
+
+| Key | Action |
+|---|---|
+| `h` / `l`, `Left` / `Right` | One character |
+| `j` / `k`, `Down` / `Up` | One rendered line, holding its column |
+| `0` / `$` | Start and end of the rendered line |
+| `w` / `b` / `e` | Next word, previous word, end of word |
+| `{` / `}` | Previous / next block |
+| `10j`, `5w`, `3l`, … | Counts work on every motion except `gg` / `G` |
+| Ctrl-d / Ctrl-u, Ctrl-f / Ctrl-b, PageUp / PageDown | Half a page and a page — line motions with a count, as in Vim, so the caret leads and the view follows |
+| Ctrl-e / Ctrl-y | Scroll the view and leave the caret on its document position (it is simply not drawn while off screen) |
+| `gg` / `G` | Start and end of the document — a count is ignored, since the lines you can see here are *rendered* lines and the one you would type is a *source* line. Going to a source line is a real feature and a separate one; it is not in this release |
+| `H` / `L` | Back and forward through documents followed by link |
+
+The view scrolls whenever a motion would take the caret out of it, so holding
+`j` scrolls exactly as it did before there was a caret. Clicking moves the caret
+too, snapped to the nearest real character, so the pointer and the keyboard
+never disagree about where it is. The mouse wheel scrolls the preview only when
+the pointer is over it.
+
+`j` and `k` hold their column the way Vim's do, through a sticky target
+(`curswant`) carried across the whole run — so `j` to the bottom of a document
+and `k` back returns to the character you started on, and stepping off a large
+heading glyph lands on the character below it rather than drifting sideways.
+Columns are matched on each glyph's left edge, not its centre, because centres
+do not survive a change of font size. `$` parks the column past every line's
+end, so a following `j` keeps following line ends down.
+
+Every motion is one round trip to the renderer, because only the renderer knows
+where the characters are. That is what buys the snapping and the glyph-sized
+caret; at reading speed it costs about what the scroll frame these keys already
+sent used to.
+
+On terminals that cannot draw the overlay (WezTerm today), the caret falls back
+to the terminal's own cursor. That is coarser — a fixed cell rather than the
+glyph — but it still sits on the character the caret is on, and Neovim's cursor
+is left visible there rather than hidden.
+
+#### Selecting with the keyboard
+
+| Key | Action |
+|---|---|
+| `v` | Start a selection anchored at the caret. Every motion above then extends it — `v3j`, `vw`, `vG` |
+| `V` | The same, line-wise: anchored at the start of the caret's line and extended to the end of the focus line |
+| `o` | Swap which end the caret holds, so the other end becomes the one being extended |
+| `y` | Copy the selection and leave visual mode |
+| `<Esc>` | Leave visual mode, keeping the highlight. A second `<Esc>` clears it |
+
+This is **not** Neovim's own visual mode, and it cannot be: the preview buffer
+holds blank cells, so a real visual selection over it would select spaces.
+Neovim stays in normal mode — which is also why every motion mapping and every
+mouse gesture keeps working unchanged — and the winbar shows `-- VISUAL --`
+since Neovim's own mode indicator has nothing to report. Set
+`interaction.visual = false` to leave `v`/`V`/`o` unmapped.
+
+What it drives is the *same* selection the mouse drives. The caret and the
+anchor are two document points; a mouse drag's anchor and pointer are two
+document points; both go through one request path to one real DOM selection. So
+keyboard selection inherits everything drag-select already had — the instant
+overlay highlight, the sharp settle frame, `y`, `:MdViewerCopy`, and exact
+source-position reporting — rather than reimplementing any of it.
+
+Selecting past the bottom of the window scrolls, the same as dragging past it:
+`vG` selects to the end of the document.
+
 
 ### Mouse gestures
 
@@ -401,10 +483,19 @@ gesture is gated by its own `interaction.*` config flag; setting one to
 | Gesture | Action |
 |---|---|
 | Click and drag | Selects the dragged text (real DOM selection), matching browser/VS Code drag-select |
+| Drag past the top/bottom edge | Keeps scrolling the document and keeps extending the selection, so a selection can run past what is on screen — hold still past the edge and it keeps going, stopping at the start or end of the document |
 | Plain click | Clears an active selection. Never moves the source cursor, whether or not anything is selected. |
 | Double-click | Selects the word under the pointer |
 | Triple-click | Selects the enclosing paragraph/block |
 | Ctrl-click / Cmd-click | Activates a link under the pointer: opens `http(s)`/`mailto` externally via `vim.ui.open`, opens an in-document-root local file, or scrolls to a same-document `#fragment`. Refuses (with a notification) any link resolving to an unsafe scheme (`javascript:`, `data:`, etc.) or escaping the document root. Over non-link text, it does nothing. |
+
+Dragging past the edge scrolls at a speed that grows with how far past the edge
+the pointer is, capped by `interaction.autoscroll_max_lines`. Set
+`interaction.autoscroll = false` to keep the old behaviour, where a drag stops
+at the edge of what is visible. While the document is moving the highlight is
+drawn as a full captured frame rather than the fast overlay: overlay rectangles
+composite over the frame already on screen, and that frame is the one from
+*before* the scroll.
 
 The mouse pointer does **not** change shape over the preview. The preview is a
 PNG, so only the terminal itself could change it (through `OSC 22`), and support

@@ -58,6 +58,10 @@ return function(t)
     "MdViewerRefresh",
     "MdViewerClearSelection",
     "MdViewerFindClear",
+    -- Going to a *source* line from the preview: deferred rather than shipped
+    -- half-considered. Removed outright, code and all, so nothing claims it
+    -- works -- `{count}G` no longer means it either.
+    "MdViewerGoto",
   }) do
     t.ok(not exists(gone), ("%s is no longer a command"):format(gone))
     t.ok(doc:find("*:" .. gone .. "*", 1, true) == nil, ("the help has no tag for %s"):format(gone))

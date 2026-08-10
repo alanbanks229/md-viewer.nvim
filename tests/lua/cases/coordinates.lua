@@ -84,6 +84,50 @@ return function(t)
   vim.api.nvim_win_close(winbar_win, true)
   vim.api.nvim_set_current_win(original_win)
 
+  -- ---------------------------------------------------------------------
+  -- A horizontally scrolled window still reports a real placement.
+  --
+  -- screenpos() answers with every field 0 once `leftcol > 0`, because column
+  -- 1 is no longer on screen. The guard used to be `tonumber(screen.row) or
+  -- fallback`, and 0 is truthy in Lua -- so the fallback never ran and the
+  -- placement came back row/col = -1, which kitty_raw formats as `ESC[0;0H`
+  -- and every terminal clamps to the origin: the preview painted over the top
+  -- left of the whole terminal instead of over its own split. A bare `zl`
+  -- reaches this, with or without any of the caret work that made it likely.
+  -- ---------------------------------------------------------------------
+  do
+    vim.cmd("rightbelow vsplit")
+    local scrolled_win = vim.api.nvim_get_current_win()
+    local scrolled_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(scrolled_win, scrolled_buf)
+    vim.api.nvim_win_set_width(scrolled_win, 40)
+    vim.wo[scrolled_win].wrap = false
+    vim.api.nvim_buf_set_lines(scrolled_buf, 0, -1, false, { string.rep("x", 200) })
+
+    local unscrolled = coords.for_window(scrolled_win)
+    vim.cmd("normal! zl")
+    t.ok(
+      vim.api.nvim_win_call(scrolled_win, function() return vim.fn.winsaveview().leftcol end) > 0,
+      "zl actually scrolled the window horizontally"
+    )
+    local scrolled = coords.for_window(scrolled_win)
+    t.ok(scrolled.row >= 0, "a horizontally scrolled window reports a non-negative row")
+    t.ok(scrolled.col >= 0, "a horizontally scrolled window reports a non-negative column")
+    t.eq(unscrolled.row, scrolled.row, "horizontal scroll does not move the text area's screen row")
+    t.eq(unscrolled.col, scrolled.col, "horizontal scroll does not move the text area's screen column")
+
+    -- Same again with a winbar: the fallback has to add the winbar row back
+    -- itself, since nvim_win_get_position() reports the frame, not the text
+    -- area. Without that it lands one row high and the image covers the title.
+    vim.wo[scrolled_win].winbar = "test"
+    local scrolled_winbar = coords.for_window(scrolled_win)
+    t.eq(unscrolled.row + 1, scrolled_winbar.row, "the scrolled fallback still accounts for the winbar row")
+
+    vim.api.nvim_win_close(scrolled_win, true)
+    vim.api.nvim_buf_delete(scrolled_buf, { force = true })
+    vim.api.nvim_set_current_win(original_win)
+  end
+
   -- laststatus: 0/1/2/3.
   vim.cmd("rightbelow vsplit")
   local status_win = vim.api.nvim_get_current_win()

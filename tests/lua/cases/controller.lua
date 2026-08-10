@@ -234,7 +234,18 @@ return function(t)
     end)(),
     "mouse wheel advances configured rendered lines"
   )
-  t.eq(1, vim.api.nvim_buf_line_count(session.preview_buf), "preview has no synthetic extra lines")
+  -- The surface is exactly the placement: one blank line per row the image
+  -- covers, each as wide as the image. That is what makes the caret's cell an
+  -- address into the rendered document -- `coordinates.cell_to_css` refuses any
+  -- row at or past `placement.height`, so a surface even one row taller would
+  -- give the caret a position that silently resolves to nothing.
+  do
+    local placement = preview.placement(session.preview_win, session.backend.name)
+    local lines = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
+    t.eq(placement.height, #lines, "the caret surface is exactly as tall as the placement")
+    t.eq(placement.width, #lines[1], "and exactly as wide")
+    t.eq(string.rep(" ", placement.width), lines[1], "made of spaces, not virtual space")
+  end
   controller.schedule_scroll = function() end
   controller.navigate(session, "bottom")
   controller.schedule_scroll = original_schedule_scroll

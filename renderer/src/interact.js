@@ -25,6 +25,11 @@ export const INTERACT_ACTIONS = Object.freeze({
   // Read-only: it re-queries the live DOM selection rather than mutating it, so
   // a copy can never itself "commit" a selection that was only ever previewed.
   selection_text: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: false }),
+  // Read-only, and that is structural rather than incidental: a caret motion
+  // happens *while* a visual selection is up, so it must not disturb the DOM
+  // selection -- which rules out `Selection.modify`, the obvious primitive,
+  // since it can only move a caret by moving the selection's own focus.
+  caret_move: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: true }),
   word_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
   paragraph_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
   find_set: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true }),
@@ -58,6 +63,15 @@ export const SELECTION_TINT = Object.freeze({
 // dense tables can double that), so this is far above any real frame; if it is
 // ever exceeded the result says so via rectsTruncated and Lua falls back to a
 // captured frame rather than drawing a highlight with missing pieces.
+// The caret's own tint, drawn through the same overlay path as a selection but
+// deliberately heavier: a selection is a wash over a span the reader is already
+// looking at, whereas a caret is a single glyph they have to *find*. At the
+// selection's own alpha a one-character block is easy to lose on a busy line.
+export const CARET_TINT = Object.freeze({
+  dark: Object.freeze({ r: 230, g: 230, b: 230, a: 0.62 }),
+  light: Object.freeze({ r: 90, g: 90, b: 90, a: 0.55 }),
+});
+
 export const MAX_SELECTION_RECTS = 256;
 
 // A find_set response over NDJSON must stay bounded: DOM highlighting marks
@@ -219,6 +233,66 @@ export function validateEnvelope(params) {
     };
   }
 
+  // Prefer the live DOM anchor over re-resolving `anchorCoordinates` -- see
+  // resolveSelectionInPage. Set by any caller whose page has scrolled since the
+  // anchor was placed, which is the only case where the two disagree. Defaults
+  // false, so a caller that never scrolls mid-selection sends and behaves
+  // exactly as it did before this existed.
+  const anchorPinned = envelope.anchorPinned === true;
+
+  // `caret_move`'s two axes. Validated here rather than in the page so an
+  // unknown granularity is an honest INVALID_INTERACTION instead of a caret
+  // that silently declines to move.
+  // "none" is the snap-only case: resolve the given point onto the nearest
+  // character the caret may occupy and report where that is. It is how a click,
+  // and the caret's own first placement, find a legal position.
+  const CARET_GRANULARITIES = [
+    "none",
+    "character",
+    "line",
+    "lineboundary",
+    "word",
+    "word_end",
+    "block",
+    "document",
+  ];
+  let granularity = null;
+  let direction = null;
+  let motionCount = 1;
+  let desiredX = null;
+  let caretIndex = null;
+  if (envelope.action === "caret_move") {
+    granularity = envelope.granularity ?? "character";
+    if (!CARET_GRANULARITIES.includes(granularity)) {
+      throw createInteractError(
+        "INVALID_INTERACTION",
+        `unknown caret granularity: ${granularity}; expected one of ${CARET_GRANULARITIES.join(", ")}`
+      );
+    }
+    direction = envelope.direction === "backward" ? "backward" : "forward";
+    motionCount = envelope.count === undefined ? 1 : Number(envelope.count);
+    if (!Number.isInteger(motionCount) || motionCount < 1) {
+      throw createInteractError("INVALID_INTERACTION", "caret_move count must be a positive integer");
+    }
+    // The sticky column a line motion aims at -- Vim's `curswant`. Owned by the
+    // caller, which is what makes a run of `j` and the matching run of `k`
+    // retrace the same characters instead of drifting apart.
+    if (envelope.desiredX !== undefined && envelope.desiredX !== null) {
+      desiredX = requireFiniteNumber(envelope.desiredX, "desiredX");
+    }
+    // Where the caret already is, as an index into the renderer's own character
+    // space rather than a point to hit-test again -- see moveCaretInPage for
+    // why a point is not good enough. Optional, and deliberately: a click and
+    // the caret's first placement have no index to send, and resolve from their
+    // coordinates the way everything did before this existed.
+    if (envelope.caretIndex !== undefined && envelope.caretIndex !== null) {
+      if (!Number.isInteger(envelope.caretIndex) || envelope.caretIndex < 0) {
+        throw createInteractError("INVALID_INTERACTION", "caret_move caretIndex must be a non-negative integer");
+      }
+      caretIndex = envelope.caretIndex;
+    }
+  }
+
   // Matched literally, never as a regular expression -- see setFindInPage.
   let query = null;
   if (action.requiresQuery) {
@@ -306,6 +380,12 @@ export function validateEnvelope(params) {
     actionSpec: action,
     coordinates,
     anchorCoordinates,
+    anchorPinned,
+    granularity,
+    direction,
+    motionCount,
+    desiredX,
+    caretIndex,
     query,
     modifiers: {
       ctrl: modifiers.ctrl === true,
@@ -879,12 +959,78 @@ export function resolveSelectionInPage(input) {
     selection.addRange(range);
   }
 
-  const anchor = resolveSelectionPoint(input.anchor.x, input.anchor.y, input.cellWidthPx, input.strategy);
+  // Describe an existing DOM (node, offset) pair the same way
+  // resolveSelectionPoint describes one it has just resolved from a
+  // coordinate. Only the pinned-anchor path below uses it: that path already
+  // holds a live anchor node and has no coordinate left worth resolving.
+  function describeNode(node, offset) {
+    if (node === null || node === undefined) return null;
+    const element = node.nodeType === 3 ? node.parentElement : node;
+    if (element === null) return null;
+    const block = element.closest("[data-source-start][data-source-end]");
+    if (block === null) return null;
+    let runElement = element.closest("[data-md-source-id]");
+    if (runElement !== null && !block.contains(runElement)) runElement = null;
+    let runOffset = null;
+    let runLength = null;
+    if (runElement !== null) {
+      runLength = (runElement.textContent || "").length;
+      if (node.nodeType === 3 && runElement.contains(node)) {
+        const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+        let consumed = 0;
+        let current = walker.nextNode();
+        while (current !== null) {
+          if (current === node) {
+            runOffset = consumed + offset;
+            break;
+          }
+          consumed += current.nodeValue.length;
+          current = walker.nextNode();
+        }
+      }
+    }
+    return {
+      node,
+      offset,
+      block: {
+        sourceStart: Number(block.getAttribute("data-source-start")),
+        sourceEnd: Number(block.getAttribute("data-source-end")),
+        sourceId: block.getAttribute("data-md-source-id"),
+        tagName: block.tagName,
+      },
+      inline: runElement === null ? null : {
+        sourceId: runElement.getAttribute("data-md-source-id"),
+        offset: runOffset,
+        textLength: runLength,
+      },
+    };
+  }
+
+  const selection = window.getSelection();
+
+  // A selection whose page scrolls mid-gesture moves its own anchor coordinate
+  // out from under itself. The anchor's viewport y shifts with every scrolled
+  // pixel, and once it leaves the viewport entirely resolveSelectionPoint
+  // refuses it outright (its first line bounds-checks against innerHeight), so
+  // the whole frame returns anchor_miss and interaction.lua's `result.ok ~=
+  // false` check silently drops it -- the highlight freezes at the edge. That
+  // is the drag auto-scroll case and the keyboard selection case alike.
+  //
+  // Reuse the live DOM anchor instead: it is precisely the endpoint
+  // setBaseAndExtent recorded on the previous frame, expressed as a node rather
+  // than a pixel, so scrolling cannot touch it. Falls back to the coordinate
+  // whenever there is nothing live to pin to -- the first frame of a gesture,
+  // or a selection cleared in between -- which is also what makes the field
+  // safe to send unconditionally.
+  let anchor = null;
+  if (input.anchorPinned === true && selection.anchorNode !== null) {
+    anchor = describeNode(selection.anchorNode, selection.anchorOffset);
+  }
+  if (!anchor) anchor = resolveSelectionPoint(input.anchor.x, input.anchor.y, input.cellWidthPx, input.strategy);
   if (!anchor) return { ok: false, reason: "anchor_miss" };
   const focus = resolveSelectionPoint(input.focus.x, input.focus.y, input.cellWidthPx, input.strategy);
   if (!focus) return { ok: false, reason: "focus_miss" };
 
-  const selection = window.getSelection();
   applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
 
   // Selection geometry for the drag overlay: viewport-relative CSS
@@ -1137,6 +1283,442 @@ export function clearSelectionInPage(input) {
   }
   window.getSelection().removeAllRanges();
   return { ok: true };
+}
+
+/// `caret_move`. The preview's caret, resolved entirely against the rendered
+/// document: it reports the **rectangle of the character it sits on**, which is
+/// what lets Lua draw a caret shaped like the glyph under it rather than a
+/// fixed terminal cell floating in whitespace.
+///
+/// Two rules follow from that and drive everything below:
+///
+///   1. A caret position is always a real character. There is no such thing as
+///      a caret in the page's margin or in the blank space beside a heading --
+///      those are positions the reader cannot be at, so motions skip them and
+///      `granularity: "none"` snaps an arbitrary point onto the nearest one.
+///   2. Zero-width boxes are not characters. Collapsed inter-element
+///      whitespace measures zero wide and would render as an invisible caret,
+///      so it is skipped the same way the margin is.
+///
+/// Read-only, deliberately. `Selection.modify` is the primitive this obviously
+/// wants and is unusable here: it moves a caret only by moving the DOM
+/// selection's own focus, and a caret motion in preview visual mode happens
+/// while a selection is up -- it would destroy the selection it is meant to
+/// extend. Everything below builds throwaway Ranges and never touches
+/// `window.getSelection()`.
+export function moveCaretInPage(input) {
+  const token = input.token;
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== token) {
+    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+
+  // Every character of the document that a caret may occupy, in document
+  // order: the text nodes inside source-mapped blocks, flattened into one
+  // index space. Built per request rather than cached -- a preview document is
+  // a README, not a corpus, and a stale cache across a re-render would put the
+  // caret on text that no longer exists.
+  const nodes = [];
+  const starts = [];
+  const blockOf = [];
+  let text = "";
+  {
+    const blocks = document.querySelectorAll("[data-source-start][data-source-end]");
+    const seen = new Set();
+    let previousInner = null;
+    for (const block of blocks) {
+      const rect = block.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) continue;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node !== null) {
+        // A nested block (a list item inside a list) is walked by both; the
+        // first, outermost pass is the one that counts, so document order is
+        // preserved and no character is indexed twice.
+        if (node.nodeValue.length > 0 && !seen.has(node)) {
+          seen.add(node);
+          // A word boundary where the rendering has one. The whitespace between
+          // two blocks lives in their container, not inside either of them, so
+          // it is never walked -- and without a separator `Intl.Segmenter` reads
+          // the end of one block and the start of the next as a single word
+          // ("Vault" + "Private" -> "VaultPrivate"), which makes `w` jump clean
+          // over the second one. The separator belongs to no node, so `rectOf`
+          // reports it as null and every rect-driven motion skips it exactly the
+          // way it skips collapsed whitespace.
+          //
+          // Keyed on the *innermost* source block, not on `blockOf` above, which
+          // holds the outermost: every <li> in one list shares that, and list
+          // items are where the joined words are worst. Text nodes within one
+          // block are never separated -- <strong>bold</strong>face renders as one
+          // word and has to stay one.
+          const inner = node.parentElement && node.parentElement.closest("[data-source-start][data-source-end]");
+          if (text.length > 0 && inner !== previousInner) text += "\n";
+          previousInner = inner;
+          nodes.push(node);
+          starts.push(text.length);
+          blockOf.push(block);
+          text += node.nodeValue;
+        }
+        node = walker.nextNode();
+      }
+    }
+  }
+  if (text.length === 0) return { ok: false, reason: "no_content" };
+
+  function nodeIndexOf(flat) {
+    let low = 0;
+    let high = nodes.length - 1;
+    let found = 0;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (starts[mid] <= flat) {
+        found = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return found;
+  }
+
+  // The box of the character at `flat`. Null when it has none -- a collapsed
+  // whitespace run between elements, which is exactly what must never hold a
+  // caret.
+  const range = document.createRange();
+  function rectOf(flat) {
+    if (flat < 0 || flat >= text.length) return null;
+    const index = nodeIndexOf(flat);
+    const node = nodes[index];
+    const offset = flat - starts[index];
+    if (offset >= node.nodeValue.length) return null;
+    range.setStart(node, offset);
+    range.setEnd(node, offset + 1);
+    const rect = range.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return null;
+    return rect;
+  }
+
+  // The nearest occupiable character at or after `flat` in `step` direction.
+  function settle(flat, step) {
+    let cursor = flat;
+    while (cursor >= 0 && cursor < text.length) {
+      if (rectOf(cursor) !== null) return cursor;
+      cursor += step;
+    }
+    // Ran off that end: come back the other way rather than report failure, so
+    // a motion to the very start or end of the document always lands.
+    cursor = Math.max(0, Math.min(text.length - 1, flat));
+    while (cursor >= 0 && cursor < text.length) {
+      if (rectOf(cursor) !== null) return cursor;
+      cursor -= step;
+    }
+    return null;
+  }
+
+  // Where the incoming point sits in that index space. `caretPositionFromPoint`
+  // answers with a DOM position; mapping it back through the flat index is what
+  // makes a click and a keyboard motion land on the same character.
+  function flatFromPoint(x, y, cellWidthPx) {
+    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
+    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
+    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
+    for (const dx of offsets) {
+      const px = x + dx;
+      if (!(px >= 0 && px < window.innerWidth)) continue;
+      let position = null;
+      if (typeof document.caretPositionFromPoint === "function") {
+        const found = document.caretPositionFromPoint(px, y);
+        if (found && found.offsetNode) position = { node: found.offsetNode, offset: found.offset };
+      }
+      if (position === null && typeof document.caretRangeFromPoint === "function") {
+        const found = document.caretRangeFromPoint(px, y);
+        if (found && found.startContainer) position = { node: found.startContainer, offset: found.startOffset };
+      }
+      if (position === null) continue;
+      const index = nodes.indexOf(position.node);
+      if (index < 0) continue;
+      return starts[index] + Math.min(position.offset, nodes[index].nodeValue.length - 1);
+    }
+    return null;
+  }
+
+  // No caret under the point at all (the margin, the gap beside a heading, the
+  // scroll-past-end padding). Fall back to the character whose box is nearest,
+  // ranking vertical distance far above horizontal so a point out in the left
+  // margin stays on the line it is level with.
+  function nearestFlat(x, y) {
+    let best = null;
+    let bestKey = Infinity;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      range.setStart(node, 0);
+      range.setEnd(node, node.nodeValue.length);
+      const rect = range.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) continue;
+      const dy = y < rect.top ? rect.top - y : y > rect.bottom ? y - rect.bottom : 0;
+      const dx = x < rect.left ? rect.left - x : x > rect.right ? x - rect.right : 0;
+      const key = dy * 100000 + dx;
+      if (key < bestKey) {
+        bestKey = key;
+        best = index;
+      }
+    }
+    if (best === null) return null;
+    // Within the winning run, the character horizontally closest to the point.
+    let winner = starts[best];
+    let winnerDistance = Infinity;
+    for (let flat = starts[best]; flat < starts[best] + nodes[best].nodeValue.length; flat += 1) {
+      const rect = rectOf(flat);
+      if (rect === null) continue;
+      const distance = Math.abs(rect.left + rect.width / 2 - x) + (y < rect.top || y > rect.bottom ? 100000 : 0);
+      if (distance < winnerDistance) {
+        winnerDistance = distance;
+        winner = flat;
+      }
+    }
+    return settle(winner, 1);
+  }
+
+  function wordEdges() {
+    const wordStarts = [];
+    const wordEnds = [];
+    if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+      const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
+      for (const segment of segmenter.segment(text)) {
+        if (!segment.isWordLike) continue;
+        wordStarts.push(segment.index);
+        wordEnds.push(segment.index + segment.segment.length - 1);
+      }
+      return { wordStarts, wordEnds };
+    }
+    // Same fallback shape wordSelectInPage uses when Intl.Segmenter is absent.
+    const isWordChar = (ch) => typeof ch === "string" && /[\p{L}\p{N}_]/u.test(ch);
+    let index = 0;
+    while (index < text.length) {
+      if (isWordChar(text[index])) {
+        const start = index;
+        while (index < text.length && isWordChar(text[index])) index += 1;
+        wordStarts.push(start);
+        wordEnds.push(index - 1);
+      } else {
+        index += 1;
+      }
+    }
+    return { wordStarts, wordEnds };
+  }
+
+  // Two glyph boxes are on the same visual line when they overlap vertically by
+  // more than half the smaller one. Comparing `top` alone is not good enough:
+  // a line can mix font sizes (inline code inside a paragraph, a link inside a
+  // heading), and their tops legitimately differ by several pixels.
+  function sameLine(a, b) {
+    const overlap = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    return overlap > Math.min(a.height, b.height) * 0.5;
+  }
+
+  // A visual line step. Walked rather than computed: line boxes vary in height
+  // across a heading, a paragraph and a code block, so "add a line height"
+  // guesses wrong exactly where it matters.
+  //
+  // The column is matched on the glyph's **left edge**, and against a *sticky*
+  // target (`wantedX`, Vim's `curswant`) rather than the current glyph's own
+  // edge. Both halves are load-bearing:
+  //
+  //   - Centres do not survive a font-size change. Stepping off the `P` of a
+  //     38px heading, that glyph's centre sits at x≈35.6, while on the 18px
+  //     line below it `P` is centred at 31 and `r` at 39 -- so centre-matching
+  //     lands on `r`, one character right, every single time.
+  //   - Without a sticky target, each step re-derives the column from wherever
+  //     the last one landed, so a run of `j` accumulates drift and the matching
+  //     run of `k` cannot retrace it. Carrying the original column through the
+  //     whole run is what makes down-N-then-up-N return to the character it
+  //     started on.
+  function lineStep(flat, forward, wantedX) {
+    const from = rectOf(flat);
+    if (from === null) return null;
+    const wanted = typeof wantedX === "number" ? wantedX : from.left;
+    const step = forward ? 1 : -1;
+    let cursor = flat;
+    let landing = null;
+    while (true) {
+      cursor += step;
+      if (cursor < 0 || cursor >= text.length) return null;
+      const rect = rectOf(cursor);
+      if (rect === null) continue;
+      if (!sameLine(rect, from)) {
+        landing = rect;
+        break;
+      }
+    }
+    // Sweep that line for the character whose left edge is nearest the target
+    // column. Ties go to the earlier character, which keeps the sweep's answer
+    // independent of the direction it arrived from.
+    let best = cursor;
+    let bestDistance = Math.abs(landing.left - wanted);
+    let probe = cursor;
+    while (probe >= 0 && probe < text.length) {
+      probe += step;
+      if (probe < 0 || probe >= text.length) break;
+      const rect = rectOf(probe);
+      if (rect === null) continue;
+      if (!sameLine(rect, landing)) break;
+      const distance = Math.abs(rect.left - wanted);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = probe;
+      }
+    }
+    return best;
+  }
+
+  // `h` and `l`: one character, and never off the visual line the caret is on.
+  // Vim's `h` and `l` do not leave the line under the default `whichwrap`, and
+  // `0`/`$` below already work on the visual line, so all four agree about what
+  // a line is. Without the check, holding `l` walks off the right edge of a
+  // rendered row and on through every block beneath it, and `h` walks back up
+  // the same way.
+  //
+  // Null-box indices are walked through rather than stopped at, the way `settle`
+  // walks them: the inter-block separator and collapsed whitespace are not
+  // characters, so they are not somewhere the caret can be *or* a boundary it
+  // can be stopped by. The line is what stops it.
+  function charStep(flat, forward) {
+    const from = rectOf(flat);
+    if (from === null) return null;
+    const step = forward ? 1 : -1;
+    let probe = flat;
+    while (true) {
+      probe += step;
+      if (probe < 0 || probe >= text.length) return null;
+      const rect = rectOf(probe);
+      if (rect === null) continue;
+      return sameLine(rect, from) ? probe : null;
+    }
+  }
+
+  // `0` and `$`: the first or last character of the caret's own visual line.
+  function lineEdge(flat, forward) {
+    const from = rectOf(flat);
+    if (from === null) return null;
+    const step = forward ? 1 : -1;
+    let best = flat;
+    let probe = flat;
+    while (probe >= 0 && probe < text.length) {
+      probe += step;
+      if (probe < 0 || probe >= text.length) break;
+      const rect = rectOf(probe);
+      if (rect === null) continue;
+      if (!sameLine(rect, from)) break;
+      best = probe;
+    }
+    return best;
+  }
+
+  const forward = input.direction !== "backward";
+  const count = Math.max(1, input.count || 1);
+  const granularity = input.granularity || "character";
+
+  // Where the caret already is, exactly. A motion continuing from the caret
+  // sends back the index the last one returned, and that is the whole reason
+  // this exists: the alternative -- re-resolving the caret's own glyph centre
+  // through `caretPositionFromPoint` -- asks for the nearest *insertion point*,
+  // which is a boundary between two characters, and at the exact middle of a
+  // glyph the boundaries either side are equidistant. Which one Blink picks
+  // comes down to rounding the glyph's advance to a LayoutUnit, so it is stable
+  // per glyph and differs from glyph to glyph. On the glyphs that rounded the
+  // other way the renderer decided the caret was one character right of where it
+  // was drawn: `h` stepped back onto the glyph it started on and the caret never
+  // moved again, and `l` skipped one.
+  //
+  // Checked, not trusted. This index space is rebuilt from the DOM on every
+  // request, so an index from before a re-render may name nothing; one that no
+  // longer resolves falls back to the point below, which is what a click and the
+  // caret's first placement use anyway.
+  let flat = null;
+  if (Number.isInteger(input.caretIndex) && rectOf(input.caretIndex) !== null) {
+    flat = input.caretIndex;
+  }
+  if (flat === null) {
+    flat = flatFromPoint(input.x, input.y, input.cellWidthPx);
+    if (flat !== null) flat = settle(flat, 1);
+    if (flat === null) flat = nearestFlat(input.x, input.y);
+  }
+  if (flat === null) return { ok: false, reason: "no_caret" };
+
+  if (granularity === "document") {
+    flat = forward ? settle(text.length - 1, -1) : settle(0, 1);
+  } else if (granularity !== "none") {
+    const edges = granularity === "word" || granularity === "word_end" ? wordEdges() : null;
+    for (let step = 0; step < count; step += 1) {
+      let target = null;
+      if (granularity === "character") {
+        target = charStep(flat, forward);
+      } else if (granularity === "line") {
+        target = lineStep(flat, forward, input.desiredX);
+      } else if (granularity === "lineboundary") {
+        target = lineEdge(flat, forward);
+      } else if (granularity === "block") {
+        const block = blockOf[nodeIndexOf(flat)];
+        let probe = flat;
+        while (probe >= 0 && probe < text.length) {
+          probe += forward ? 1 : -1;
+          if (probe < 0 || probe >= text.length) break;
+          if (blockOf[nodeIndexOf(probe)] !== block) {
+            target = settle(probe, forward ? 1 : -1);
+            break;
+          }
+        }
+      } else {
+        const positions = granularity === "word_end" ? edges.wordEnds : edges.wordStarts;
+        if (forward) {
+          for (const position of positions) {
+            if (position > flat) {
+              target = settle(position, 1);
+              break;
+            }
+          }
+        } else {
+          for (let index = positions.length - 1; index >= 0; index -= 1) {
+            if (positions[index] < flat) {
+              target = settle(positions[index], -1);
+              break;
+            }
+          }
+        }
+      }
+      if (target === null || target === flat) break;
+      flat = target;
+    }
+  }
+
+  let rect = rectOf(flat);
+  if (rect === null) return { ok: false, reason: "no_caret" };
+
+  // Bring the caret into view if the motion ran off the viewport, then
+  // re-measure: `browser.js` forwards a `scrollY` from here to Lua the same way
+  // it does for a find step.
+  let scrolled = null;
+  if (rect.top < 0 || rect.bottom > window.innerHeight) {
+    const above = rect.top < 0;
+    const desired = above
+      ? window.scrollY + rect.top - window.innerHeight * 0.25
+      : window.scrollY + rect.bottom - window.innerHeight * 0.75;
+    const limit = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+    window.scrollTo(0, Math.max(0, Math.min(limit, desired)));
+    scrolled = window.scrollY;
+    rect = rectOf(flat);
+    if (rect === null) return { ok: false, reason: "no_caret" };
+  }
+
+  return {
+    ok: true,
+    index: flat,
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height,
+    scrollY: scrolled,
+  };
 }
 
 /// `word_select`. Resolves one caret point, then expands to word boundaries via
@@ -1701,6 +2283,27 @@ export function buildSelectionTextResult(raw) {
 /// `selection_clear`.
 export function buildSelectionClearResult() {
   return { kind: "selection", cleared: true };
+}
+
+/// `caret_move`. The **box of the character the caret landed on**, in the same
+/// viewport CSS pixels the selection rectangles use -- so Lua can draw a caret
+/// shaped like the glyph beneath it through the identical overlay path, rather
+/// than leaving the terminal to draw a fixed-size cell wherever it likes.
+///
+/// `index` is *which* character that is, in the renderer's own character space.
+/// The box says how to draw the caret; the index says where it is, and Lua sends
+/// it back with the next motion so the caret is never re-derived from its own
+/// geometry -- see moveCaretInPage.
+export function buildCaretMoveResult(raw) {
+  if (!raw || raw.ok !== true) {
+    return { kind: "caret", ok: false, reason: (raw && raw.reason) || "no_target" };
+  }
+  return {
+    kind: "caret",
+    ok: true,
+    index: raw.index,
+    rect: { x: raw.x, y: raw.y, width: raw.width, height: raw.height },
+  };
 }
 
 /// `find_set`. Each match's `{sourceId, offset}` resolves through

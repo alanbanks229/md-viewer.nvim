@@ -1,8 +1,7 @@
 # Security model
 
 The renderer has no WebSocket, listening socket, or HTTP server. Chromium is headless, uses
-an isolated temporary context, disables extensions, and never uses the regular
-browser profile.
+an isolated temporary context, disables extensions, and never uses the regular browser profile.
 
 Default policy:
 

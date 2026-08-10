@@ -101,6 +101,25 @@ M.defaults = {
     -- a schedule). Kept as a knob rather than removed: set above 0 to
     -- deliberately throttle preview requests.
     drag_debounce_ms = 0,
+    -- Keep scrolling the document while a drag holds past the top or bottom
+    -- edge of the preview, so a selection can run past what is on screen the
+    -- way it does on a web page. Off, a drag that leaves the window freezes at
+    -- the edge -- `locate_for_drag` clamps the point to the placement, and the
+    -- placement is the visible document.
+    -- `v`/`V` in the preview: extend a real DOM selection from the caret with
+    -- ordinary motions, instead of Neovim's own visual mode, which over a
+    -- surface of blank cells would only ever select spaces.
+    visual = true,
+    autoscroll = true,
+    -- How often an edge-scrolling drag takes a step. Each step is one interact
+    -- round trip that scrolls, extends the selection and captures the frame
+    -- together, so this is a floor on latency, not a fixed frame rate: a step
+    -- slower than the interval simply paces the next one.
+    autoscroll_interval_ms = 60,
+    -- Ceiling on lines scrolled per step. Speed otherwise scales with how far
+    -- past the edge the pointer is; without a cap, flinging the pointer to the
+    -- far corner of the screen would skip whole pages between frames.
+    autoscroll_max_lines = 6,
     -- Whether a *moving* drag-preview frame may capture at CSS scale (half the
     -- pixel density of `render.device_scale_factor`) the way a moving scroll
     -- frame does. Off by default, and deliberately not wired to
@@ -287,6 +306,16 @@ local function validate(cfg)
     "md-viewer: interaction.drag_debounce_ms must be non-negative"
   )
   assert(type(cfg.interaction.fast_drag) == "boolean", "md-viewer: interaction.fast_drag must be boolean")
+  assert(type(cfg.interaction.visual) == "boolean", "md-viewer: interaction.visual must be boolean")
+  assert(type(cfg.interaction.autoscroll) == "boolean", "md-viewer: interaction.autoscroll must be boolean")
+  assert(
+    type(cfg.interaction.autoscroll_interval_ms) == "number" and cfg.interaction.autoscroll_interval_ms >= 0,
+    "md-viewer: interaction.autoscroll_interval_ms must be non-negative"
+  )
+  assert(
+    type(cfg.interaction.autoscroll_max_lines) == "number" and cfg.interaction.autoscroll_max_lines > 0,
+    "md-viewer: interaction.autoscroll_max_lines must be positive"
+  )
   assert(
     cfg.interaction.selection_overlay == "auto"
       or cfg.interaction.selection_overlay == "on"

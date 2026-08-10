@@ -129,6 +129,12 @@ end
 
 local function title_text(session)
   local text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  -- The one piece of modal state the preview has, and the winbar is the only
+  -- place it can be said: Neovim's own mode indicator reports normal mode,
+  -- because as far as Neovim is concerned that is what this is.
+  if session.visual_active then
+    text = text .. "  %#ModeMsg#-- VISUAL" .. (session.visual_linewise and " LINE" or "") .. " --%*"
+  end
   local notice = fallback_notice(session)
   if notice then text = text .. "  " .. notice end
   return text
@@ -169,6 +175,13 @@ function M.open(position, session)
   vim.wo[win].wrap = false
   vim.wo[win].cursorline = false
   vim.wo[win].spell = false
+  -- Window-local, and load-bearing rather than tidy: the surface is exactly as
+  -- tall as the placement, so a global 'scrolloff' would fence the caret away
+  -- from the top and bottom rows -- the two rows whose whole job is to be
+  -- reachable, since reaching them is what scrolls the document. 'sidescrolloff'
+  -- is the same argument one axis over, and also keeps 'leftcol' at 0.
+  vim.wo[win].scrolloff = 0
+  vim.wo[win].sidescrolloff = 0
 
   if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
 
@@ -178,6 +191,39 @@ function M.open(position, session)
     vim.api.nvim_win_set_height(win, math.max(8, math.floor(vim.o.lines * cfg.split.width)))
   end
   return buf, win
+end
+
+-- The reader's real `guicursor`, held while the preview is focused and the
+-- caret is being drawn as an overlay rectangle instead. Module-local rather
+-- than per-session because 'guicursor' is global: two previews cannot disagree
+-- about it, and whichever restores last must restore the *original*, not the
+-- hidden setting a sibling left behind.
+local saved_guicursor = nil
+
+---Hide Neovim's own cursor in favour of the overlay caret.
+---
+---Only while the overlay caret is actually on screen. Where it cannot be drawn
+---(a backend or terminal without overlay support) the terminal's cursor *is*
+---the caret -- coarser, but it now sits on the glyph the caret is on rather
+---than wherever the reader last left it -- so hiding it there would leave no
+---caret at all.
+function M.hide_cursor(session)
+  if saved_guicursor then return end
+  local backend = session and session.backend
+  if not (backend and backend.overlay_supported and backend.overlay_supported()) then return end
+  saved_guicursor = vim.o.guicursor
+  vim.api.nvim_set_hl(0, "MdViewerHiddenCursor", { blend = 100, nocombine = true })
+  vim.o.guicursor = "a:MdViewerHiddenCursor"
+end
+
+---Give the reader their cursor back. Called from every path that can take focus
+---away from a preview, and from session teardown -- a plugin that leaves the
+---cursor invisible has broken the editor, so this errs heavily toward running
+---more often than strictly needed.
+function M.restore_cursor()
+  if not saved_guicursor then return end
+  vim.o.guicursor = saved_guicursor
+  saved_guicursor = nil
 end
 
 function M.placement(win, backend_name)
@@ -202,16 +248,82 @@ function M.occlusion(win)
   return #overlaps > 0, overlaps
 end
 
+---How many blank cells the preview surface must offer, as `rows, columns`:
+---exactly the placement the image is drawn into, so every cell a caret can
+---reach is a cell `coordinates.cell_to_css` can resolve.
+---
+---Not the window's own height. `M.placement` hands the raw Kitty backend a
+---statusline guard row back, and `cell_to_css` refuses any row at or past
+---`placement.height` -- a caret parked on that row would resolve to nothing,
+---and resolve to nothing *silently*, since a nil point is how "not addressable
+---content" is spelled everywhere downstream.
+function M.surface_size(session)
+  if not (session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)) then return nil end
+  local backend_name = session.backend and session.backend.name
+  if backend_name == "cells" then return nil end
+  local placement = M.placement(session.preview_win, backend_name)
+  return math.max(1, placement.height), math.max(1, placement.width)
+end
+
+---Clamp the caret back inside the surface, and report where it landed.
+---Called after anything that can change the surface's shape underneath it.
+function M.clamp_caret(session)
+  local win = session.preview_win
+  if not (win and vim.api.nvim_win_is_valid(win)) then return end
+  if vim.api.nvim_win_get_buf(win) ~= session.preview_buf then return end
+  local rows, columns = M.surface_size(session)
+  if not rows then return end
+  local cursor = vim.api.nvim_win_get_cursor(win)
+  local row = math.max(1, math.min(rows, cursor[1]))
+  local col = math.max(0, math.min(columns - 1, cursor[2]))
+  if row ~= cursor[1] or col ~= cursor[2] then pcall(vim.api.nvim_win_set_cursor, win, { row, col }) end
+end
+
+---Hold the preview buffer at the shape a caret needs: one line per placement
+---row, each as wide as the placement.
+---
+---Spaces rather than empty lines plus `virtualedit = "all"`. Virtual space lets
+---the cursor push one column past the window's width, which scrolls the window
+---horizontally -- and a horizontally scrolled window is one `screenpos()`
+---reports as not visible, which is exactly the placement corruption
+---`coordinates.for_window` documents. Real characters buy the same free
+---horizontal movement with none of that: a W-wide line exactly fills a W-wide
+---window, so `leftcol` stays 0. Measured both ways on 0.12.4.
+---
+---Re-asserted before every frame, because a frame is also the moment the
+---geometry may have changed -- but it preserves the caret while doing so.
+---`nvim_buf_set_lines` clamps the cursor to line 1 when it shrinks the buffer,
+---and this runs on every render, scroll, drag frame, find step and cached
+---restore; a caret that jumped home on each of those would not be a caret.
 function M.reset_surface(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
   if session.backend and session.backend.name == "cells" then return end
+  local rows, columns = M.surface_size(session)
+  if not rows then return end
+  local blank = string.rep(" ", columns)
   local lines = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
-  if #lines ~= 1 or lines[1] ~= "" then
-    vim.bo[session.preview_buf].modifiable = true
-    vim.bo[session.preview_buf].readonly = false
-    vim.api.nvim_buf_set_lines(session.preview_buf, 0, -1, false, { "" })
-    vim.bo[session.preview_buf].modifiable = false
-    vim.bo[session.preview_buf].readonly = true
+  -- Every line is identical by construction and the buffer is nomodifiable, so
+  -- the first one settles the width for all of them.
+  if #lines == rows and lines[1] == blank then return end
+  local win = session.preview_win
+  local cursor = nil
+  if win and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == session.preview_buf then
+    cursor = vim.api.nvim_win_get_cursor(win)
+  end
+  local replacement = {}
+  for index = 1, rows do
+    replacement[index] = blank
+  end
+  vim.bo[session.preview_buf].modifiable = true
+  vim.bo[session.preview_buf].readonly = false
+  vim.api.nvim_buf_set_lines(session.preview_buf, 0, -1, false, replacement)
+  vim.bo[session.preview_buf].modifiable = false
+  vim.bo[session.preview_buf].readonly = true
+  if cursor then
+    pcall(vim.api.nvim_win_set_cursor, win, {
+      math.max(1, math.min(rows, cursor[1])),
+      math.max(0, math.min(columns - 1, cursor[2])),
+    })
   end
 end
 

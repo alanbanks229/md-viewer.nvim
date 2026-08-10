@@ -1153,6 +1153,157 @@ return function(t)
     process.request = original_request
   end
 
+  -- ---------------------------------------------------------------------
+  -- Edge auto-scroll: a drag held past the top or bottom of the preview keeps
+  -- scrolling the document and keeps extending the selection into what it
+  -- reveals, the way a drag past the edge of any scrollable view does.
+  --
+  -- The whole reason this is timer-driven: <LeftDrag> fires only while the
+  -- mouse *moves*, so a reader who drags to the edge and holds still -- the
+  -- ordinary way of saying "keep going" -- generates no further events at all.
+  -- Every assertion below therefore advances by waiting, not by dispatching
+  -- another drag event.
+  -- ---------------------------------------------------------------------
+  do
+    setup_interaction({ drag_debounce_ms = 0, settle_ms = 0, autoscroll_interval_ms = 5 })
+
+    -- fake_session()'s placement is rows 1..24, so row 30 is six cells below
+    -- the bottom edge and row 0 is one above the top.
+    local function scrolling_session(scroll_y)
+      local session = fake_session()
+      session.document_height_px = 10000
+      session.viewport_height_px = 600
+      session.scroll_y = scroll_y or 0
+      session.applied_scroll_y = scroll_y or 0
+      return session
+    end
+
+    -- `auto_answer` completes each request on the next event-loop turn. Without
+    -- it the one-request-in-flight rule holds every follow-up frame, so the
+    -- scroll would advance while the requests proving it never went out.
+    local function capture_requests(auto_answer)
+      local requests, callbacks = {}, {}
+      local original_request = process.request
+      process.request = function(_, params, callback)
+        requests[#requests + 1] = params
+        callbacks[#callbacks + 1] = callback
+        if auto_answer then
+          vim.schedule(function() callback({ kind = "selection", ok = true, text = "x", collapsed = false }, nil) end)
+        end
+      end
+      return requests, callbacks, function() process.request = original_request end
+    end
+
+    -- A drag that stays inside the window never arms the timer.
+    do
+      local session = scrolling_session()
+      local requests, _, restore = capture_requests()
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(20, 15))
+      vim.wait(60, function() return #requests >= 2 end, 5)
+      t.eq(nil, session.pointer.autoscroll, "a drag inside the window does not auto-scroll")
+      t.eq(0, session.scroll_y, "and does not move the document")
+      interaction.forget(session)
+      restore()
+    end
+
+    -- Dragging past the bottom edge scrolls without any further drag events,
+    -- and every request carries the position it is asking the page to move to.
+    do
+      local session = scrolling_session()
+      local requests, _, restore = capture_requests(true)
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(30, 15)) -- six cells below the bottom edge
+      t.eq(6, session.pointer.autoscroll, "the overscroll is measured in cells past the edge")
+      vim.wait(300, function() return session.scroll_y > 0 end, 5)
+      t.ok(session.scroll_y > 0, "holding past the bottom edge scrolls the document down")
+
+      local first_scrolled = nil
+      vim.wait(300, function()
+        for _, params in ipairs(requests) do
+          if (params.scrollY or 0) > 0 then
+            first_scrolled = params
+            return true
+          end
+        end
+        return false
+      end, 5)
+      t.ok(first_scrolled ~= nil, "an auto-scroll step sends its requested position, not the one on screen")
+      t.eq(
+        true,
+        first_scrolled and first_scrolled.anchorPinned,
+        "once the page has moved off the anchor's scroll, the anchor is pinned to the live DOM node"
+      )
+      t.eq(nil, first_scrolled and first_scrolled.capture, "an auto-scrolling frame is captured, never overlaid")
+
+      interaction.on_release(session, point(30, 15))
+      t.eq(nil, session.pointer.autoscroll, "release stops the edge scroll")
+      t.eq(nil, session.drag_autoscroll_timer, "and closes its timer")
+      interaction.forget(session)
+      restore()
+    end
+
+    -- The first frame of a gesture has nothing to pin to, so it resolves the
+    -- anchor from coordinates exactly as it always did.
+    do
+      local session = scrolling_session()
+      local requests, _, restore = capture_requests()
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(10, 15))
+      vim.wait(200, function() return #requests >= 1 end, 5)
+      t.eq(false, requests[1].anchorPinned, "a drag that has not scrolled resolves its anchor from coordinates")
+      interaction.forget(session)
+      restore()
+    end
+
+    -- Hard against the end of the document there is nothing left to reveal, so
+    -- the timer stops rather than spinning on identical requests forever.
+    do
+      local session = scrolling_session(9400) -- document 10000 - viewport 600
+      local _, _, restore = capture_requests()
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(30, 15))
+      vim.wait(200, function() return session.pointer.autoscroll == nil end, 5)
+      t.eq(nil, session.pointer.autoscroll, "an edge scroll stops at the bottom of the document")
+      t.eq(9400, session.scroll_y, "and leaves the scroll position clamped there")
+      interaction.forget(session)
+      restore()
+    end
+
+    -- Same at the top edge, in the other direction.
+    do
+      -- Five 22px steps from the top, so the walk down to zero stays well
+      -- inside the wait below: the tick interval floors at 16ms regardless of
+      -- how small autoscroll_interval_ms is set.
+      local session = scrolling_session(100)
+      local _, _, restore = capture_requests()
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(0, 15)) -- one cell above the top edge
+      t.eq(-1, session.pointer.autoscroll, "an overscroll above the top edge is negative")
+      vim.wait(600, function() return session.scroll_y == 0 end, 5)
+      t.eq(0, session.scroll_y, "holding past the top edge scrolls up and stops at the document start")
+      interaction.forget(session)
+      restore()
+    end
+
+    -- Turning it off restores the old behaviour outright: the drag still
+    -- extends toward the edge, it just never moves the page.
+    do
+      setup_interaction({ drag_debounce_ms = 0, settle_ms = 0, autoscroll = false })
+      local session = scrolling_session()
+      local _, _, restore = capture_requests()
+      interaction.on_press(session, point(10, 10), { x = 100, y = 100 }, 1)
+      interaction.on_drag(session, point(30, 15))
+      vim.wait(100, function() return session.scroll_y > 0 end, 5)
+      t.eq(nil, session.pointer.autoscroll, "interaction.autoscroll = false never arms the edge scroll")
+      t.eq(0, session.scroll_y, "and never moves the document")
+      interaction.forget(session)
+      restore()
+    end
+
+    setup_interaction({})
+  end
+
   controller.display_interact_result = original_display
   config.reset()
 end

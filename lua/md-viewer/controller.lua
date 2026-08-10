@@ -1,4 +1,5 @@
 local backends = require("md-viewer.backends")
+local caret = require("md-viewer.caret")
 local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
@@ -56,6 +57,7 @@ function M.clear_selection_overlay(session) clear_selection_overlay(session) end
 
 local function clear_image(session)
   clear_selection_overlay(session)
+  M.clear_caret_overlay(session)
   if session.image_id and session.backend then session.backend.clear(session.image_id) end
   session.image_id = nil
   session.last_placement = nil
@@ -163,6 +165,16 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- the new frame was placed, never before -- deleting first would blank the
   -- highlight for the gap between the two writes (the M.move hazard).
   clear_selection_overlay(session)
+  -- Same rule for the caret, and then straight back: its rectangle was measured
+  -- against the frame that has just been superseded, but the caret itself has
+  -- not moved. Redrawing here is local (no round trip), so the caret survives
+  -- every scroll and re-render without a flicker or a request.
+  --
+  -- `place_caret` rather than a bare redraw because this is also the moment a
+  -- preview that was focused before it had ever rendered gets its first caret:
+  -- there was nothing to place one on until now.
+  M.clear_caret_overlay(session)
+  M.place_caret(session)
   return true
 end
 
@@ -247,6 +259,95 @@ function M.display_selection_overlay(session, result)
   session.overlay_last_ms = (vim.uv.hrtime() - started) / 1000000
   session.overlay_last_error = nil
   return true
+end
+
+---Draw the caret: one overlay rectangle, shaped like the glyph it sits on.
+---
+---The same `overlay_apply` the drag highlight uses, in its own rect set, so the
+---two coexist without either having to know about the other -- a caret inside a
+---selection is simply two sets of rectangles over one base image. It carries
+---its own, heavier tint (`CARET_TINT` in the renderer): a selection is a wash
+---over a span the reader is already looking at, a caret is one glyph they have
+---to find.
+---
+---Local: no renderer round trip, so an ordinary scroll can re-place the caret
+---without asking anyone where it went.
+---
+---Returns false when the caret cannot be drawn -- no overlay support (the
+---backend, or the terminal profile), no base image, or the caret has scrolled
+---out of view. The terminal's own cursor is left visible in exactly those
+---cases; see `preview.hide_cursor`.
+function M.display_caret_overlay(session, tint, sheet_png)
+  if not valid(session) or session.backend.name == "cells" then return false end
+  local backend = session.backend
+  if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
+  if not (session.image_id and session.last_placement) then return false end
+  local rect = caret.rect(session)
+  if not rect then
+    M.clear_caret_overlay(session)
+    -- No block on screen means Neovim's cursor is the only caret there is, so
+    -- it has to come back. Restoring here rather than only on WinLeave is what
+    -- covers a caret that scrolled out of view.
+    preview.restore_cursor()
+    return false
+  end
+  session.caret_tint = tint or session.caret_tint
+  if not session.caret_tint then return false end
+  local ok, set_id = pcall(
+    backend.overlay_apply,
+    session.caret_overlay_set,
+    session.image_id,
+    { rect },
+    { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px },
+    session.caret_tint,
+    sheet_png,
+    session.last_placement
+  )
+  if not ok or not set_id then
+    -- "need_sheet" is expected once per colour. The sheet is the renderer's to
+    -- build, so the next motion asks for one by carrying the tint again; until
+    -- then the caret is simply not drawn, which is honest rather than wrong.
+    session.caret_overlay_error = ok and set_id or tostring(set_id)
+    return false
+  end
+  session.caret_overlay_set = set_id
+  session.caret_overlay_error = nil
+  -- The block is on screen now, so Neovim's own cursor would be a second,
+  -- differently-sized caret sitting somewhere else. Hidden here, at the one
+  -- place that knows the block was actually drawn, rather than on a window
+  -- event that has to guess -- guessing is what left both visible at once.
+  if vim.api.nvim_get_current_win() == session.preview_win then preview.hide_cursor(session) end
+  return true
+end
+
+---Make sure this preview has a caret, and that it is drawn.
+---
+---Cheap and idempotent: an existing caret is simply redrawn locally, and only
+---the first call for a session costs the round trip that finds a character to
+---put it on. Called from every path that can make a caret visible -- focusing
+---the preview, and the first frame landing in an already-focused one.
+function M.place_caret(session)
+  if not valid(session) or session.backend.name == "cells" then return end
+  if not config.get().interaction.enabled then return end
+  -- Only for the preview the reader is actually in. A caret in an unfocused
+  -- preview is one nobody can see, and placing it costs a round trip -- which
+  -- an unrendered document answers with an error, and a failed interact
+  -- restarts the renderer, whose exit hook drops selection and find state on
+  -- every open session.
+  if vim.api.nvim_get_current_win() ~= session.preview_win then return end
+  if session.caret_rect then
+    M.display_caret_overlay(session)
+    return
+  end
+  if not (session.renderer_revision and session.last_placement) then return end
+  interaction.caret_motion(session, "none", "forward", 1)
+end
+
+function M.clear_caret_overlay(session)
+  local set = session and session.caret_overlay_set
+  if not set then return end
+  session.caret_overlay_set = nil
+  if session.backend and session.backend.overlay_clear then pcall(session.backend.overlay_clear, set) end
 end
 
 ---Display the PNG an interact response captured (every mutating selection/find
@@ -470,10 +571,13 @@ local function close_session(session)
     "selection_debounce_timer",
     "selection_settle_timer",
     "drag_idle_settle_timer",
+    "drag_autoscroll_timer",
   }) do
     debounce.close(session, name)
   end
   preview.stop_loading(session)
+  preview.restore_cursor()
+  caret.forget(session)
   clear_image(session)
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
@@ -525,6 +629,10 @@ function M.open(position)
   M.history_init(session)
   session.backend, session.backend_reason = backend, reason
   session.preview_buf, session.preview_win = preview.open(position, session)
+  -- Size the caret surface now that the split has been created and resized;
+  -- `preview.open` cannot do it itself, since the placement it measures needs
+  -- the window handle this line is what assigns.
+  preview.reset_surface(session)
   if backend.name ~= "cells" then
     preview.start_loading(session)
     navigation.attach(session, M.navigate)
@@ -735,10 +843,39 @@ function M.toggle(position)
   end
 end
 
-function M.navigate(session, action)
+---The furthest the document can be scrolled: everything below scrolls within
+---this, and nothing scrolls past it.
+local function scroll_maximum(session)
+  return math.max(0, (session.document_height_px or 0) - (session.viewport_height_px or 0))
+end
+
+---Move the preview to an absolute document position and schedule the frame that
+---shows it. The shared tail of every deliberate scroll -- keyboard motions, a
+---caret motion that ran off the edge of the surface, the wheel -- so the clamp,
+---the manual-scroll hold and the source-sync opt-in are stated once.
+---Returns whether the position actually changed.
+function M.scroll_to(session, next_scroll)
+  if not valid(session) or session.backend.name == "cells" then return false end
+  local cfg = config.get()
+  next_scroll = math.max(0, math.min(scroll_maximum(session), next_scroll))
+  if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return false end
+  session.scroll_y = next_scroll
+  session.manual_scroll_until = vim.uv.now() + cfg.sync.manual_scroll_hold_ms
+  if cfg.sync.preview_to_source then sync.update_source_from_scroll(session, next_scroll) end
+  M.schedule_scroll(session)
+  return true
+end
+
+function M.scroll_by(session, delta_px)
+  if not valid(session) or session.backend.name == "cells" then return false end
+  return M.scroll_to(session, (session.scroll_y or 0) + delta_px)
+end
+
+function M.navigate(session, action, count)
   if not valid(session) or session.backend.name == "cells" then return end
   local cfg = config.get()
-  local maximum = math.max(0, session.document_height_px - session.viewport_height_px)
+  count = math.max(1, math.floor(count or 1))
+  local maximum = scroll_maximum(session)
   local deltas = {
     line_down = cfg.sync.navigation_line_px,
     line_up = -cfg.sync.navigation_line_px,
@@ -749,20 +886,9 @@ function M.navigate(session, action)
     wheel_down = cfg.sync.navigation_line_px * cfg.sync.mouse_scroll_lines,
     wheel_up = -cfg.sync.navigation_line_px * cfg.sync.mouse_scroll_lines,
   }
-  local next_scroll
-  if action == "top" then
-    next_scroll = 0
-  elseif action == "bottom" then
-    next_scroll = maximum
-  else
-    next_scroll = (session.scroll_y or 0) + (deltas[action] or 0)
-  end
-  next_scroll = math.max(0, math.min(maximum, next_scroll))
-  if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return end
-  session.scroll_y = next_scroll
-  session.manual_scroll_until = vim.uv.now() + cfg.sync.manual_scroll_hold_ms
-  if cfg.sync.preview_to_source then sync.update_source_from_scroll(session, next_scroll) end
-  M.schedule_scroll(session)
+  if action == "top" then return M.scroll_to(session, 0) end
+  if action == "bottom" then return M.scroll_to(session, maximum) end
+  return M.scroll_by(session, (deltas[action] or 0) * count)
 end
 
 local function each_session(fn)
@@ -831,6 +957,12 @@ local function reconcile_placement(session, force)
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.
   session.last_placement = placement
+  -- The caret surface is sized from the placement, so it has to follow it here
+  -- too. A re-render would resize it via `apply_image`, but the callers that
+  -- reach this without one -- a float opening, `cmdheight = 0` shrinking the
+  -- window around the command line -- would otherwise leave the caret able to
+  -- sit on a row the image no longer covers, which resolves to nothing.
+  preview.reset_surface(session)
 end
 
 local function reconcile_occlusion()
@@ -987,6 +1119,11 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
     group = group,
     callback = function(args)
+      -- Nothing to do for the preview's own buffer: the caret is a position in
+      -- the rendered document, not Neovim's cursor, so it moves through
+      -- `interaction.caret_motion` and never through a cursor event. Neovim's
+      -- cursor only shadows it.
+      if state.from_preview(args.buf) then return end
       local session = state.get(args.buf)
       if session and config.get().sync.source_to_preview and config.get().sync.cursor_follow then
         local cfg = config.get().sync
@@ -1086,6 +1223,39 @@ function M.setup_autocmds()
       end)
     end,
   })
+  -- Neovim's cursor is hidden only while a preview with a drawable overlay
+  -- caret is focused, so these two autocmds own the whole of that state. Restore
+  -- is unconditional and idempotent: leaving a reader with an invisible cursor
+  -- is far worse than restoring one that was never hidden.
+  --
+  -- `FocusGained` is here because `FocusLost` restores the cursor without any
+  -- window changing, so nothing fires `WinEnter` on the way back: leaving the
+  -- terminal and returning to it left Neovim's own cursor sitting beside the
+  -- overlay caret until some later motion happened to redraw it.
+  --
+  -- `VimSuspend`, the other event that restores without a window change, needs
+  -- no counterpart here: it drops the image outright (below), and the resume
+  -- that puts one back goes through display_image, which calls place_caret
+  -- itself once there is something to draw the caret over.
+  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "FocusGained" }, {
+    group = group,
+    callback = function()
+      local session = state.from_preview_win(vim.api.nvim_get_current_win())
+      if not (session and valid(session)) then
+        preview.restore_cursor()
+        return
+      end
+      -- Focusing a preview is when a caret first becomes something the reader
+      -- can see, so this is where one gets placed. Snapping with no motion puts
+      -- it on the first character of whatever is on screen; drawing it is what
+      -- then hides Neovim's own cursor, so the two can never both be up.
+      M.place_caret(session)
+    end,
+  })
+  vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave", "TabLeave", "VimSuspend", "VimLeavePre", "FocusLost" }, {
+    group = group,
+    callback = function() preview.restore_cursor() end,
+  })
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,
     callback = function(args)
@@ -1166,6 +1336,18 @@ function M.setup_autocmds()
     pattern = "background",
     callback = function()
       each_session(function(session) M.schedule(session, 0) end)
+    end,
+  })
+  -- 'laststatus' decides whether the raw Kitty backend gives a statusline guard
+  -- row back (coordinates.for_window, preview.placement), so it changes the
+  -- caret surface's height with no resize event of any kind to announce it --
+  -- and under `laststatus = 1` it does so whenever the tabpage's window count
+  -- crosses one, which is not a change to the preview window at all.
+  vim.api.nvim_create_autocmd("OptionSet", {
+    group = group,
+    pattern = "laststatus",
+    callback = function()
+      each_session(function(session) preview.reset_surface(session) end)
     end,
   })
   vim.api.nvim_create_autocmd("BufHidden", {

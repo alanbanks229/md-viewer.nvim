@@ -7,6 +7,100 @@ All notable changes to this project will be documented here. The project uses
 
 ### Added
 
+- **A real caret in the preview, and keyboard selection.** The preview buffer
+  was one blank line, so the cursor sat pinned at the top-left corner and every
+  key was a scroll command.
+
+  The caret is a **position in the rendered document**, not a terminal cell. It
+  only ever sits on an actual character, and it is drawn as a block the size of
+  the glyph it is on — through the same overlay mechanism as the drag highlight,
+  from a rectangle the renderer measures. A caret on an `# H1` is drawn big; a
+  caret on body text is drawn small; and it cannot be parked in the page margin
+  or in the empty space beside a short heading, because those are not places a
+  reader can be. Neovim's own cursor is hidden while that block is on screen and
+  follows along underneath, so focus and mappings keep working normally.
+
+  `h`/`l` move by a character, `j`/`k` by a rendered line, `0`/`$` to the ends
+  of one, `w`/`b`/`e` by a word, `{`/`}` by a block, `gg`/`G` to the ends of the
+  document — all with counts (`10j`, `5w`). `h` and `l` stay on the rendered
+  line they start on, the way Vim's do under the default `whichwrap`, and a
+  paragraph wrapped over several rendered lines is several lines here — the same
+  lines `j`, `k`, `0` and `$` work on. `w`, `b` and `e` do cross lines, as they
+  do in Vim. `j` and `k` hold their column through a sticky target, the way
+  Vim's `curswant` does, so a run down the document and back returns to the
+  character it started on; columns are matched on each glyph's left edge rather
+  than its centre, since centres do not survive a change of font size.
+  `Ctrl-d`/`Ctrl-u`/`Ctrl-f`/`Ctrl-b` are line motions with a count, as in Vim,
+  so the caret leads and the view follows; `Ctrl-e`/`Ctrl-y` scroll and leave
+  the caret where it is. The view scrolls whenever a motion would take the caret
+  out of it, so holding `j` still scrolls. `gg` and `G` are the ends of the
+  document and ignore a count: the lines a reader can see here are *rendered*
+  lines, and the one they would type is a *source* line — going to one is a real
+  feature and a separate one, not this keystroke wearing a count. Clicking moves
+  the caret too, snapped to the nearest real character.
+
+  `v` starts a selection anchored at the caret and any motion extends it —
+  `v3j`, `vw`, `vG` — with `V` line-wise, `o` to swap ends, and `y` to copy and
+  leave. It is not Neovim's visual mode (the preview buffer holds blank cells,
+  so a real visual selection over it would select spaces); Neovim stays in
+  normal mode, which is what keeps every motion and every mouse gesture working
+  unchanged, and the winbar shows `-- VISUAL --`. `interaction.visual = false`
+  unmaps it.
+
+  Motions are served by a new read-only `caret_move` interact action, because
+  only the renderer knows where the characters are — that is what buys both the
+  snapping and the glyph-sized caret. It answers with the glyph's box *and* with
+  which character that is, and a motion continuing from the caret sends that
+  index back rather than a point. The box is how the caret is drawn; the index is
+  where it is. Re-finding the caret from its own geometry cannot work:
+  `caretPositionFromPoint` answers with the nearest boundary *between* two
+  characters, and a glyph's middle is equidistant from the boundaries either side
+  of it — a tie broken by rounding the glyph's advance, so stable per glyph and
+  different from glyph to glyph. On the glyphs that broke rightward the renderer
+  put the caret one character past where it was drawn, which left `h` stepping
+  back onto the glyph it started on and staying there, and `l` skipping one.
+
+  Read-only is structural rather than incidental: a motion in visual mode has to
+  *extend* the selection, so it must not disturb it, which rules out
+  `Selection.modify` — the obvious primitive — since that can only move a caret
+  by moving the selection's own focus.
+
+  None of this is a second selection mechanism. The caret and the anchor are two
+  document points, exactly as a mouse drag's anchor and pointer are, so keyboard
+  selection resolves through the *same* request path to the same real DOM
+  selection — inheriting the instant overlay highlight, the settle frame, copy
+  and exact source-position reporting rather than reimplementing them.
+
+  On a terminal that cannot draw the overlay (WezTerm today) the caret falls
+  back to the terminal's own cursor: coarser, a fixed cell rather than the
+  glyph, but still on the character the caret is on.
+
+- **Drag-select past the edge of the preview.** A drag held past the top or
+  bottom of the preview now keeps scrolling the document and keeps extending the
+  selection into what it reveals, the way a drag past the edge of any scrollable
+  view does — so a selection is no longer limited to what happens to be on
+  screen when it starts. It stops at the start or end of the document.
+
+  Scroll speed grows with how far past the edge the pointer is, capped by
+  `interaction.autoscroll_max_lines`. `interaction.autoscroll = false` restores
+  the previous behaviour (the highlight freezes at the edge), and
+  `interaction.autoscroll_interval_ms` paces the steps.
+
+  This is timer-driven rather than event-driven, and it has to be: `<LeftDrag>`
+  fires only while the mouse actually *moves*, so a reader who drags to the edge
+  and holds still — the ordinary way of saying "keep going" — generates no
+  further events at all.
+
+  Two things made this more than a loop. The renderer resolved a selection's
+  anchor from viewport coordinates on every frame, and viewport coordinates move
+  under a scrolling page: the anchor drifted onto whatever text scrolled into
+  those pixels, and once it scrolled out of view entirely the renderer refused
+  the point and dropped the whole frame. Selections that scroll now pin the
+  anchor to the live DOM node instead (`anchorPinned` on the `interact`
+  envelope), which is immune to scrolling. And while the page is moving the
+  highlight uses the full captured-frame path rather than the fast overlay,
+  since overlay rectangles composite over the pre-scroll frame.
+
 - **An instant drag highlight.** Drag-to-highlight no longer re-photographs the
   page on every frame. While the mouse is down the highlight is drawn directly
   in the terminal as translucent rectangles composited over the frame already on
@@ -211,6 +305,17 @@ All notable changes to this project will be documented here. The project uses
   throttling back.
 
 ### Fixed
+
+- **A horizontally scrolled preview window no longer paints its image over the
+  top-left corner of the terminal.** `vim.fn.screenpos()` reports every field as
+  `0` when the requested position is off screen, which a window reaches on its
+  own as soon as it scrolls horizontally (`leftcol > 0` — a bare `zl` is
+  enough). The guard against that read `tonumber(screen.row) or fallback`, and
+  `0` is truthy in Lua, so the fallback was dead code: the placement came back at
+  row/column `-1`, which the raw Kitty backend formats as `ESC[0;0H` and every
+  terminal clamps to the origin. The fallback now tests the value rather than its
+  type, and accounts for the winbar row that `nvim_win_get_position()` does not
+  include.
 
 - The preview no longer stops producing frames on macOS. Chromium was launched
   with `--disable-frame-rate-limit`, which skipped a fixed ~12ms compositor wait

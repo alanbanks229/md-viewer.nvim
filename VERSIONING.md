@@ -103,7 +103,7 @@ Where this project has been, and the one checkpoint still ahead of it:
 |---|---|---|
 | `v0.1.0-beta` | First public release: iTerm2-only raw Kitty preview. | Shipped. |
 | `v0.2.0` | Works on any Kitty-graphics terminal without hand-tuned config, honest capability reporting. No interaction changes. | Shipped. |
-| `v0.3.0` | Mouse interaction: drag/word/paragraph selection, copy, in-preview search, link activation, preview history, and the instant drag-highlight overlay. Hardened, documented, with a real per-terminal status. | Ready to tag. |
+| `v0.3.0` | Interaction: drag/word/paragraph selection, copy, in-preview search, link activation, preview history, and the instant drag-highlight overlay. Drag-select past the edge of the preview. A real cursor in the preview with Vim motions, counts, source-line navigation, and keyboard selection. Hardened, documented, with a real per-terminal status. | Ready to tag, pending the cursor-visibility check in `docs/manual-testing.md`. |
 | `v1.0.0` | Whenever you decide the config surface and behavior have stopped needing to change, and you're confident enough to promise that in writing. | No target date — this is a judgment call, not a checklist item. |
 
 Nothing forces `v1.0.0` to happen right after `v0.3.0`, or ever on a

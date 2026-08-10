@@ -51,10 +51,28 @@ function M.create(source_buf, source_win)
     selection_active = false,
     selection_content_revision = nil,
     selection_text_length = nil,
+    -- Preview visual mode: a selection being extended from the caret rather
+    -- than from the pointer. See md-viewer.interaction's visual_start.
+    visual_active = false,
+    visual_linewise = false,
+    visual_columns = nil,
+    -- The caret's glyph box, the scroll it was measured at, and the sticky
+    -- column line motions aim at (Vim's `curswant`). See md-viewer.caret.
+    caret_rect = nil,
+    caret_scroll_y = nil,
+    caret_desired_x = nil,
+    -- *Which* character the caret is on, in the renderer's own character space,
+    -- and the content revision that space belonged to. The box above is how the
+    -- caret is drawn; this is where it is.
+    caret_index = nil,
+    caret_index_revision = nil,
     selection_render_in_flight = false,
     selection_render_pending = false,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
+    -- Re-arms itself for as long as a drag holds past the preview's top or
+    -- bottom edge; see md-viewer.interaction's update_drag_autoscroll.
+    drag_autoscroll_timer = nil,
     -- Documents this preview has followed links through, oldest first, and
     -- where in that list it currently sits. Entry 1 is the document the
     -- preview was opened on; `M.retarget` appends, and md-viewer.controller's

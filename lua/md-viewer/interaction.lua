@@ -1,7 +1,9 @@
+local caret = require("md-viewer.caret")
 local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
+local preview = require("md-viewer.preview")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
 
@@ -51,6 +53,7 @@ end
 ---this function for both would violate that on every tab switch.
 function M.forget(session)
   if captured == session then captured = nil end
+  M.stop_drag_autoscroll(session)
   if session then session.pointer = nil end
 end
 
@@ -65,6 +68,9 @@ end
 ---(session closing) or no longer exists (process restarted).
 function M.forget_selection(session)
   if not session then return end
+  -- The content the selection was anchored in is gone, so the anchor is too.
+  session.visual_active = false
+  session.visual_linewise = false
   -- A renderer restart or content change orphans any overlay rectangles on
   -- screen: nothing will ever supersede them, so they must go now.
   require("md-viewer.controller").clear_selection_overlay(session)
@@ -78,6 +84,9 @@ function M.forget_selection(session)
   debounce.close(session, "selection_debounce_timer")
   debounce.close(session, "selection_settle_timer")
   debounce.close(session, "drag_idle_settle_timer")
+  -- The content this drag was selecting against is gone; there is nothing left
+  -- for another edge-scroll step to extend into.
+  M.stop_drag_autoscroll(session)
   if session.pointer then
     session.pointer.selection_request_in_flight = false
     session.pointer.pending_settle = nil
@@ -161,8 +170,110 @@ end
 
 local function screen_cell(mouse) return { row = tonumber(mouse.screenrow) or 0, col = tonumber(mouse.screencol) or 0 } end
 
+---How far past the placement's top or bottom edge the pointer has strayed, in
+---cells: negative above, positive below, nil while it is still inside. Measured
+---against the same rectangle `M.locate_for_drag` clamps the focus point to, so
+---the two agree by construction about where the edge is.
+local function edge_overscroll(session, mouse)
+  local placement = session.last_placement
+  local row = mouse and tonumber(mouse.screenrow)
+  if not (placement and row) then return nil end
+  local top, bottom = placement.row + 1, placement.row + placement.height
+  if row < top then return row - top end
+  if row > bottom then return row - bottom end
+  return nil
+end
+
+---Stop the edge-scroll timer and forget that this gesture was auto-scrolling.
+---Safe to call unconditionally; every gesture teardown path does.
+function M.stop_drag_autoscroll(session)
+  if not session then return end
+  debounce.close(session, "drag_autoscroll_timer")
+  if session.pointer then session.pointer.autoscroll = nil end
+end
+
+---One edge-scroll step. Re-arms itself rather than running on a repeating
+---timer, so the gesture ending anywhere simply stops re-arming.
+local function autoscroll_tick(session, pointer)
+  if session.pointer ~= pointer or not (pointer.pressed and pointer.drag_started and pointer.autoscroll) then
+    M.stop_drag_autoscroll(session)
+    return
+  end
+  local cfg = config.get()
+  local overscroll = pointer.autoscroll
+  local limit = math.max(0, (session.document_height_px or 0) - (session.viewport_height_px or 0))
+  -- Speed scales with how far past the edge the pointer is, the way a browser's
+  -- own edge scrolling does: a pointer just outside creeps, one dragged well
+  -- clear of the window travels. Clamped, so flinging the pointer to the far
+  -- corner of the screen does not skip whole pages between frames.
+  local lines = math.min(math.abs(overscroll), cfg.interaction.autoscroll_max_lines)
+  local delta = (overscroll < 0 and -1 or 1) * lines * cfg.sync.navigation_line_px
+  local target = math.max(0, math.min(limit, (session.scroll_y or 0) + delta))
+  if target == session.scroll_y then
+    -- Hard against the top or bottom of the document: there is nothing further
+    -- to reveal, so stop rather than spin sending identical requests forever.
+    M.stop_drag_autoscroll(session)
+    return
+  end
+  session.scroll_y = target
+  -- Same hold every other deliberate scroll takes, so source-cursor follow does
+  -- not yank the preview back while the reader is still dragging.
+  session.manual_scroll_until = vim.uv.now() + cfg.sync.manual_scroll_hold_ms
+  M.schedule_selection_preview(session)
+  debounce.call(
+    session,
+    "drag_autoscroll_timer",
+    math.max(16, cfg.interaction.autoscroll_interval_ms),
+    function() autoscroll_tick(session, pointer) end
+  )
+end
+
+---Keep scrolling the document while a drag holds past the top or bottom edge,
+---so a selection can run past what is on screen the way it does on any web
+---page. Without this the highlight simply stops at the edge, which is the
+---limitation readers actually hit: `M.locate_for_drag` clamps an off-window
+---point to the edge of the placement, and the edge of the placement is the edge
+---of the visible document.
+---
+---Timer-driven, and that is the whole trick. `<LeftDrag>` fires only while the
+---mouse *moves*, so a reader who drags to the bottom edge and holds still --
+---the ordinary way of saying "keep going" -- produces no further events at all,
+---and anything event-driven would stop dead exactly when it should not.
+---
+---One round trip per tick does all three jobs: `browser.interact` applies the
+---requested scrollY before evaluating the action, so the same
+---`selection_preview` that extends the selection also moves the page and
+---captures the frame that shows it.
+function M.update_drag_autoscroll(session, mouse)
+  local pointer = session.pointer
+  if not (pointer and pointer.pressed and pointer.drag_started) then return end
+  local cfg = config.get().interaction
+  if not (cfg.autoscroll and cfg.selection) then return end
+  local overscroll = edge_overscroll(session, mouse)
+  if not overscroll then
+    M.stop_drag_autoscroll(session)
+    return
+  end
+  local already_running = pointer.autoscroll ~= nil
+  pointer.autoscroll = overscroll
+  -- A drag that is already scrolling only needs its speed updated; re-arming
+  -- here as well would reset the interval on every mouse event and starve the
+  -- tick under continuous movement.
+  if already_running then return end
+  debounce.call(
+    session,
+    "drag_autoscroll_timer",
+    math.max(16, cfg.autoscroll_interval_ms),
+    function() autoscroll_tick(session, pointer) end
+  )
+end
+
 function M.on_press(session, mouse, point, click_count)
   click_count = click_count or 1
+  -- A press ends a keyboard selection without settling it: the drag about to
+  -- start replaces it outright, so a settle frame would be a round trip spent
+  -- on a highlight that is already gone.
+  if M.visual_active(session) then M.visual_stop(session, false) end
   session.pointer = {
     pressed = true,
     press_cell = screen_cell(mouse),
@@ -172,6 +283,15 @@ function M.on_press(session, mouse, point, click_count)
     -- The drag's fixed start point, set once on the first threshold crossing
     -- in on_drag and never moved again for the rest of this gesture.
     anchor_point = nil,
+    -- The page scroll `anchor_point` was measured against. Once the two
+    -- disagree, the anchor's coordinates no longer describe the anchor and
+    -- requests must pin it to the live DOM node instead (see
+    -- M.request_selection, and resolveSelectionInPage on the renderer side).
+    anchor_scroll_y = nil,
+    -- Signed cells past the placement edge while an edge-scroll is running,
+    -- nil otherwise. Set by M.update_drag_autoscroll; also read by
+    -- `overlay_ready`, which must refuse the overlay while the page moves.
+    autoscroll = nil,
     selection_request_in_flight = false,
     newest_pending_drag_point = nil,
     -- Sticky per-gesture opt-out of the overlay display path: set when a
@@ -193,6 +313,7 @@ function M.on_press(session, mouse, point, click_count)
     multi_click_fired = false,
   }
   captured = session
+  if point then M.caret_from_click(session, point) end
   -- <2-LeftMouse>/<3-LeftMouse> are already routed through on_press with
   -- click_count = 2/3 (mouse.lua's gestures()); dispatching word/paragraph
   -- select here, on press, matches how a real double/triple-click resolves
@@ -218,8 +339,10 @@ function M.on_drag(session, mouse)
     pointer.newest_pending_drag_point = M.locate_for_drag(session, mouse)
     if not pointer.anchor_point and pointer.newest_pending_drag_point then
       pointer.anchor_point = pointer.newest_pending_drag_point
+      pointer.anchor_scroll_y = session.applied_scroll_y or 0
     end
     if config.get().interaction.selection and pointer.anchor_point and pointer.newest_pending_drag_point then
+      M.update_drag_autoscroll(session, mouse)
       M.schedule_selection_preview(session)
     end
   end
@@ -233,6 +356,14 @@ end
 ---gesture (`pointer.overlay_fallback`).
 local function overlay_ready(session, pointer)
   if pointer.overlay_fallback then return false end
+  -- Overlay rectangles composite over the base image already on screen, and
+  -- while an edge-scroll is running that image is the *pre-scroll* frame: the
+  -- rectangles would land on whatever text used to be at those pixels. The
+  -- page has to move, so the frame has to be recaptured. Not sticky, unlike
+  -- `overlay_fallback` -- though in practice the first overlay frame after the
+  -- scroll stops will find no clean base at the new position and latch it
+  -- anyway, which is the honest outcome: correct and slower.
+  if pointer.autoscroll then return false end
   local backend = session.backend
   if not (backend and backend.overlay_apply and backend.overlay_supported) then return false end
   if not backend.overlay_supported() then return false end
@@ -334,6 +465,18 @@ local function attempt_selection_preview(session, pointer, force_device)
       )
     overlay_opts = { overlay = true, sheet = want_sheet and sheet_dims(session) or nil }
   end
+  -- Kept separate from `overlay_opts`, which the completion callback below
+  -- still inspects to tell "the backend wants the tint sheet" from "the overlay
+  -- refused this frame outright".
+  local request_opts = {
+    overlay = overlay_opts and overlay_opts.overlay or nil,
+    sheet = overlay_opts and overlay_opts.sheet or nil,
+    anchor_scroll_y = pointer.anchor_scroll_y,
+    -- An edge-scrolling drag drives the page from this very request instead of
+    -- waiting on a separate scroll frame, so it sends the position it wants
+    -- rather than the one already on screen.
+    scroll_y = pointer.autoscroll and session.scroll_y or nil,
+  }
   M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
     if session.pointer ~= pointer then return end
     pointer.selection_request_in_flight = false
@@ -377,7 +520,7 @@ local function attempt_selection_preview(session, pointer, force_device)
     then
       M.schedule_selection_preview(session)
     end
-  end, overlay_opts)
+  end, request_opts)
 end
 
 ---Debounced (`interaction.drag_debounce_ms`, default `0` -- see below),
@@ -430,21 +573,38 @@ end
 ---screenshot (`capture = false`) and answers with selection rectangles
 ---instead; `opts.sheet` additionally asks for the tint-sheet PNG at the given
 ---device-pixel dimensions (sent only until the backend's upload cache is
----warm). The commit path never passes opts, so a release always produces the
+---warm). The commit path never sets either, so a release always produces the
 ---true browser-rendered frame.
+---
+---`opts.scroll_y` overrides the scroll this request resolves against, and
+---`opts.anchor_scroll_y` states the scroll the anchor was measured at. Both
+---exist for selections that move the page mid-gesture; see below.
 function M.request_selection(session, anchor, focus, capture_scale, is_commit, callback, opts)
   opts = opts or {}
+  -- Ordinarily the scroll to resolve against is the one the image on screen
+  -- shows -- `applied_scroll_y`, not `scroll_y`; see `request_hit` for why. An
+  -- edge-scrolling drag is the one exception: moving the page *is* the point,
+  -- so it passes the position it wants and lets this single round trip scroll,
+  -- extend and capture together.
+  local scroll_y = opts.scroll_y or session.applied_scroll_y or 0
   local params = {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
     action = is_commit and "selection_commit" or "selection_preview",
     coordinates = { x = focus.x, y = focus.y },
     anchorCoordinates = { x = anchor.x, y = anchor.y },
+    -- Once the page has moved off the scroll the anchor was measured at, the
+    -- anchor's coordinates describe whatever text now occupies those pixels
+    -- instead -- and once it has scrolled out of the viewport altogether the
+    -- renderer refuses the point and the frame is dropped as `anchor_miss`.
+    -- Ask it to reuse the live DOM anchor in that case. Always a boolean, never
+    -- nil: the wire-encoding discipline the `modifiers` table follows.
+    anchorPinned = opts.anchor_scroll_y ~= nil and math.abs(scroll_y - opts.anchor_scroll_y) > 0.5,
     cellWidthPx = focus.cellWidthPx,
     cellHeightPx = focus.cellHeightPx,
     viewportWidthPx = session.viewport_width_px,
     viewportHeightPx = session.viewport_height_render_px,
-    scrollY = session.applied_scroll_y or 0,
+    scrollY = scroll_y,
     captureScale = capture_scale,
   }
   if opts.overlay then
@@ -469,6 +629,11 @@ function M.settle_selection(session, pointer, anchor, point)
   pointer.selection_request_in_flight = true
   debounce.call(session, "selection_settle_timer", config.get().interaction.settle_ms, function()
     if session.pointer ~= pointer then return end
+    -- The page may have edge-scrolled a long way from where the anchor was
+    -- placed, so the commit pins it too: this frame must reproduce exactly the
+    -- selection the last preview frame established, not re-resolve an anchor
+    -- coordinate that now points at different text (or at nothing).
+    local settle_opts = { anchor_scroll_y = pointer.anchor_scroll_y }
     M.request_selection(session, anchor, point, "device", true, function(result, err)
       if session.pointer ~= pointer then return end
       pointer.selection_request_in_flight = false
@@ -484,7 +649,266 @@ function M.settle_selection(session, pointer, anchor, point)
         pointer.pending_settle = nil
         M.settle_selection(session, pointer, pending.anchor, pending.point)
       end
-    end)
+    end, settle_opts)
+  end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Preview visual mode.
+--
+-- Not Neovim's own visual mode, and it cannot be: the preview surface holds no
+-- document text, only blank cells sized to the image, so a real visual
+-- selection over it would select spaces. What it is instead is a drag driven by
+-- the keyboard. An anchor cell is recorded on `v`, every caret motion supplies
+-- a new focus cell, and both go through `M.request_selection` -- the same
+-- machinery, backpressure, overlay path, settle and copy the mouse already
+-- uses. That is why this section is short: there is no second selection
+-- mechanism here, only a second way to point at one.
+--
+-- The pointer record is deliberately the same shape `on_press` builds, with
+-- `drag_started` already true. A real mouse press overwrites it, which is
+-- exactly right -- clicking during a visual selection ends it and starts a
+-- drag, as it would anywhere else.
+-- ---------------------------------------------------------------------------
+
+---Put the caret where a click landed, snapped to a real glyph -- the pointer
+---can land in the page margin or in the blank space beside a short heading, and
+---the caret may only ever sit on a character.
+---
+---Only while the preview is focused. A click does not take focus (mouse.lua
+---answers a handled gesture with `<Ignore>`, which is the focus discipline
+---every other gesture follows), so a caret moved in an unfocused preview is one
+---nobody can see, bought with a round trip.
+function M.caret_from_click(session, point)
+  if not point then return end
+  if vim.api.nvim_get_current_win() ~= session.preview_win then return end
+  M.caret_motion(session, "none", "forward", 1, point)
+end
+
+function M.visual_active(session) return session ~= nil and session.visual_active == true end
+
+---Begin a visual selection anchored at the caret's glyph. `linewise` (`V`)
+---anchors at the left edge of the caret's line and extends to the right edge of
+---the focus line, the same widening `V` does in a text buffer.
+function M.visual_start(session, linewise)
+  if not config.get().interaction.visual then return false end
+  if not config.get().interaction.selection then return false end
+  if not session.last_placement then return false end
+  local rect = caret.rect(session)
+  if not rect then return false end
+  -- Line-wise anchors at the page's own left edge rather than at the caret,
+  -- which is what makes `V` cover the whole rendered line and not the tail of
+  -- it. The renderer slides an endpoint that lands off content onto the nearest
+  -- block (`nearestBlockPoint`), so the margin resolves to the line's start.
+  local anchor = linewise and { x = 0, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+  session.visual_active = true
+  session.visual_linewise = linewise == true
+  session.pointer = {
+    pressed = false,
+    drag_started = true,
+    anchor_point = anchor,
+    anchor_scroll_y = session.applied_scroll_y or 0,
+    selection_request_in_flight = false,
+    newest_pending_drag_point = nil,
+    overlay_fallback = false,
+    overlay_want_sheet = false,
+    pending_settle = nil,
+    pending_idle_settle = nil,
+    click_count = 1,
+    multi_click_fired = false,
+  }
+  captured = nil
+  preview.update_title(session)
+  M.visual_update(session)
+  return true
+end
+
+---Push the caret's glyph as the selection's focus. Called after every caret
+---motion, so every way the caret can move extends the selection identically.
+function M.visual_update(session)
+  if not M.visual_active(session) then return end
+  local pointer = session.pointer
+  if not (pointer and pointer.anchor_point) then return end
+  local rect = caret.rect(session)
+  if not rect then return end
+  local point = session.visual_linewise and { x = (session.viewport_width_px or 1) - 1, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+  pointer.newest_pending_drag_point = point
+  M.schedule_selection_preview(session)
+end
+
+---Swap the anchor and the caret, so the end being extended becomes the end
+---being held -- `o` in Vim's visual mode.
+---
+---The caret has to physically move to the old anchor, which means asking the
+---renderer to resolve that point back into a glyph: the anchor is a coordinate,
+---and a caret is a character.
+function M.visual_swap(session)
+  if not M.visual_active(session) then return false end
+  local pointer = session.pointer
+  local anchor = pointer and pointer.anchor_point
+  local rect = caret.rect(session)
+  if not (anchor and rect) then return false end
+  pointer.anchor_point = { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+  pointer.anchor_scroll_y = session.applied_scroll_y or 0
+  -- Place the caret on the old anchor by snapping it there; the motion's own
+  -- completion re-sends the selection with the two ends now exchanged. No index
+  -- goes with the box, deliberately: the anchor is a coordinate, so the snap
+  -- below has to resolve it as one rather than resume from wherever the caret
+  -- last was.
+  caret.set_rect(session, { x = anchor.x, y = anchor.y, width = rect.width, height = rect.height })
+  M.caret_motion(session, "none", "forward", 1)
+  return true
+end
+
+---Leave visual mode. `settle` lands the final sharp frame, the same way
+---releasing the mouse does; the highlight itself stays up, and the next `<Esc>`
+---clears it through the ordinary precedence in `M.escape`.
+function M.visual_stop(session, settle)
+  if not M.visual_active(session) then return false end
+  session.visual_active = false
+  session.visual_linewise = false
+  local pointer = session.pointer
+  if settle and pointer and pointer.anchor_point and pointer.newest_pending_drag_point then
+    M.settle_selection(session, pointer, pointer.anchor_point, pointer.newest_pending_drag_point)
+  end
+  preview.update_title(session)
+  return true
+end
+
+---Move the caret, and draw it.
+---
+---Every motion is a renderer round trip, and that is the design rather than a
+---cost to apologise for: the caret is a position in the rendered document, and
+---only the renderer knows where the characters are. It is what stops the caret
+---sitting in the page margin or in the blank space beside a short heading --
+---positions the reader cannot be at -- and it is what supplies the glyph box
+---the caret is drawn from. A keystroke arrives at reading speed; a round trip
+---here costs about the same as the scroll frame these keys already sent.
+---
+---`granularity = "none"` is the snap-only case: resolve wherever the caret is
+---(or, with no caret yet, the top-left of the image) onto the nearest real
+---character. That is how the caret is first placed, and how a click re-places
+---it.
+function M.caret_motion(session, granularity, direction, count, from)
+  if not config.get().interaction.enabled then return end
+  if not session.renderer_revision then return end
+  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
+  if not session.last_placement then return end
+  -- `from` is a click: start the motion from where the pointer landed rather
+  -- than from wherever the caret happened to be. Otherwise this is the caret's
+  -- own position as a point, which the renderer uses only when it has no index
+  -- to resume from (`caretIndex` below) -- the caret's first placement, and the
+  -- first motion after a re-render.
+  local point = from or caret.origin(session)
+  if not point then return end
+  -- The caret's tint is its own, so it needs its own sheet -- once, then the
+  -- backend's upload cache serves every later frame. Asked for whenever the
+  -- backend says it has nothing that would serve, which before the first caret
+  -- has ever been drawn is "any colour".
+  local backend = session.backend
+  local want_sheet = backend
+    and backend.overlay_needs_sheet
+    and session.image_id
+    and backend.overlay_needs_sheet(session.image_id, session.caret_tint, session.last_placement)
+  -- The column a run of line motions aims at, held across the whole run --
+  -- Vim's `curswant`. Seeded from the caret's own left edge when a run starts,
+  -- and cleared by any motion that is not a line motion (below), so the next
+  -- `j` aims at wherever that motion left the caret.
+  local desired_x = nil
+  if granularity == "line" then
+    desired_x = session.caret_desired_x
+    if not desired_x then
+      local rect = caret.rect(session)
+      desired_x = rect and rect.x
+      session.caret_desired_x = desired_x
+    end
+    -- Nothing that cannot survive JSON goes on the wire. `protocol.encode`
+    -- raises on NaN and infinity, and it raises from inside the keymap that
+    -- sent the request, so an unencodable field here surfaces as a traceback in
+    -- the reader's face rather than a dropped frame.
+    if desired_x and (desired_x ~= desired_x or desired_x == math.huge or desired_x == -math.huge) then
+      desired_x = nil
+    end
+  end
+  -- Which character the caret is on, so the renderer resumes from the caret
+  -- itself rather than hit-testing `point` and having to decide which side of a
+  -- glyph's centre it meant -- the ambiguity that used to leave `h` stepping
+  -- back onto the glyph it started on. See `caret.index`.
+  --
+  -- Withheld from the two cases that are *asking* for a point to be resolved: a
+  -- click (`from`), and `"none"`, the snap-only granularity that means "put the
+  -- caret on the character nearest here" -- which is how a caret is first placed
+  -- and how a click re-places it.
+  local caret_index = nil
+  if granularity ~= "none" and not from then caret_index = caret.index(session) end
+  interact_request(session, {
+    documentId = session.document_id,
+    contentRevision = session.renderer_revision,
+    action = "caret_move",
+    coordinates = { x = point.x, y = point.y },
+    granularity = granularity,
+    direction = direction,
+    count = math.max(1, math.floor(count or 1)),
+    desiredX = desired_x,
+    caretIndex = caret_index,
+    overlaySheet = want_sheet and sheet_dims(session) or nil,
+    -- The probe width the renderer may search either side of the point. Only
+    -- meaningful when the point came from a terminal cell (a click); a point
+    -- taken from the caret's own glyph box needs no widening, so zero.
+    cellWidthPx = point.cellWidthPx or 0,
+    cellHeightPx = point.cellHeightPx or 0,
+    viewportWidthPx = session.viewport_width_px,
+    viewportHeightPx = session.viewport_height_render_px,
+    scrollY = session.applied_scroll_y or 0,
+  }, function(result, err)
+    if err or not result or result.ok ~= true or type(result.rect) ~= "table" then return end
+    local controller = require("md-viewer.controller")
+    -- A motion past the edge of the viewport scrolls the page in-page, the same
+    -- way a find step does. Nothing captures a frame for a read-only action, so
+    -- the new position has to be recorded and a frame asked for explicitly --
+    -- otherwise the browser is scrolled and the image on screen is not.
+    local scrolled = type(result.scrollY) == "number"
+      and math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5
+    if scrolled then
+      session.scroll_y = result.scrollY
+      session.applied_scroll_y = result.scrollY
+      session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+    end
+    -- Recorded against the scroll the renderer measured it at, which after an
+    -- in-page scroll is the position above, not the one this request was sent
+    -- with.
+    caret.set_rect(session, result.rect, session.applied_scroll_y or 0, result.index)
+    -- Any motion that is not a line motion re-seeds the sticky column, so the
+    -- next `j` aims at where *this* motion left the caret. `$` is the one
+    -- exception and matches Vim: it parks the column past every line's end, so
+    -- a following `j` keeps landing on line ends rather than snapping back to
+    -- the column the last line happened to be long enough to reach.
+    if granularity == "lineboundary" and direction == "forward" then
+      -- Past the right edge of every line, so a following `j` keeps landing on
+      -- line ends. The viewport's own width rather than `math.huge`: this is
+      -- sent over JSON, which has no encoding for infinity, and
+      -- `protocol.encode` refuses it outright rather than emitting something
+      -- the renderer would have to guess at. All content is laid out inside the
+      -- viewport, so its width is past every line's end by construction.
+      session.caret_desired_x = session.viewport_width_px or result.rect.x
+    elseif granularity ~= "line" then
+      session.caret_desired_x = result.rect.x
+    end
+    if scrolled then
+      -- The new frame repaints the caret itself once it lands; drawing now as
+      -- well would put it over the pre-scroll image for one frame.
+      controller.schedule_scroll(session)
+    else
+      local sheet_png = nil
+      if type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
+        local decoded_ok, decoded = pcall(vim.base64.decode, result.overlaySheetPng)
+        if decoded_ok then sheet_png = decoded end
+      end
+      controller.display_caret_overlay(session, result.selectionTint, sheet_png)
+    end
+    M.visual_update(session)
   end)
 end
 
@@ -673,6 +1097,12 @@ end
 ---selection; otherwise report false so the caller can fall through to normal
 ---<Esc> behaviour.
 function M.escape(session)
+  -- Visual mode goes first: it is the most recently entered state, and leaving
+  -- it keeps the highlight, so a second press still reaches the clear below.
+  if M.visual_active(session) then
+    M.visual_stop(session, true)
+    return true
+  end
   if session.find_active then
     M.find_clear(session)
     return true
@@ -948,6 +1378,9 @@ function M.on_release(session, mouse)
   pointer.pressed = false
   pointer.drag_started = false
   pointer.newest_pending_drag_point = nil
+  -- Before the settle below, so the commit resolves against wherever the
+  -- edge-scroll actually stopped rather than racing one more tick.
+  M.stop_drag_autoscroll(session)
   if captured == session then captured = nil end
   if is_drag then
     -- Prefer the point under the pointer right now, clamped to the preview
@@ -958,6 +1391,9 @@ function M.on_release(session, mouse)
     if config.get().interaction.selection and pointer.anchor_point and release_point then
       M.settle_selection(session, pointer, pointer.anchor_point, release_point)
     end
+    -- Leave the caret on the end the drag finished at, snapped to a real glyph,
+    -- so a keyboard extension of this selection carries on from there.
+    if release_point then M.caret_from_click(session, release_point) end
     return
   end
   if multi_click_fired then return end -- already handled on press; not also a click.

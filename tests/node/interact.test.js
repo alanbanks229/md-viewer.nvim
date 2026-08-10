@@ -116,8 +116,11 @@ test("no interaction actions remain reserved", () => {
   });
 });
 
-test("all nine interaction actions are registered with the correct flags", () => {
+test("every interaction action is registered with the correct flags", () => {
   const expected = {
+    // Read-only by design, not by omission: a caret motion runs while a visual
+    // selection is up, so it must not disturb the DOM selection.
+    caret_move: { mutatesVisibleState: false, requiresCoordinates: true },
     selection_preview: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
     selection_commit: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
     selection_clear: { mutatesVisibleState: true, requiresCoordinates: false },
@@ -136,10 +139,71 @@ test("all nine interaction actions are registered with the correct flags", () =>
     }
   }
   assert.deepEqual([...Object.keys(INTERACT_ACTIONS)].sort(), [
-    "activate_at", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
+    "activate_at", "caret_move", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
     "paragraph_select", "selection_clear", "selection_commit", "selection_preview",
     "selection_text", "word_select",
   ]);
+});
+
+test("caret_move validates its granularity, direction, count and caret index", () => {
+  const base = {
+    documentId: "buffer-1", contentRevision: "1:0", action: "caret_move",
+    viewportWidthPx: 800, viewportHeightPx: 600, coordinates: { x: 10, y: 10 },
+  };
+  assert.equal(validateEnvelope(base).granularity, "character", "character is the default granularity");
+  assert.equal(validateEnvelope(base).direction, "forward", "forward is the default direction");
+  assert.equal(validateEnvelope(base).motionCount, 1, "one is the default count");
+  // The sticky column a run of line motions aims at (Vim's `curswant`).
+  assert.equal(validateEnvelope(base).desiredX, null, "absent by default");
+  assert.equal(validateEnvelope({ ...base, desiredX: 0 }).desiredX, 0, "and zero is a real column, not absent");
+  assert.equal(validateEnvelope({ ...base, desiredX: 42.5 }).desiredX, 42.5);
+  assert.throws(() => validateEnvelope({ ...base, desiredX: "left" }), (error) => {
+    assert.equal(error.code, "INVALID_INTERACTION");
+    assert.match(error.message, /desiredX/);
+    return true;
+  });
+  for (const granularity of ["none", "character", "line", "lineboundary", "word", "word_end", "block", "document"]) {
+    assert.equal(validateEnvelope({ ...base, granularity }).granularity, granularity);
+  }
+  assert.equal(validateEnvelope({ ...base, direction: "backward" }).direction, "backward");
+  // Anything that is not "backward" is forward, rather than an error: direction
+  // has exactly two values and no useful third answer.
+  assert.equal(validateEnvelope({ ...base, direction: "sideways" }).direction, "forward");
+  assert.equal(validateEnvelope({ ...base, count: 7 }).motionCount, 7);
+  assert.throws(() => validateEnvelope({ ...base, granularity: "sentence" }), (error) => {
+    assert.equal(error.code, "INVALID_INTERACTION");
+    assert.match(error.message, /granularity/);
+    return true;
+  });
+  // Coerced, not rejected -- the same contract `clickCount` already has.
+  assert.equal(validateEnvelope({ ...base, count: "3" }).motionCount, 3);
+  for (const count of [0, -1, 1.5, "abc", null]) {
+    assert.throws(() => validateEnvelope({ ...base, count }), (error) => {
+      assert.equal(error.code, "INVALID_INTERACTION");
+      assert.match(error.message, /count/);
+      return true;
+    }, `count=${count}`);
+  }
+  // Where the caret already is, in the renderer's own character space. Optional:
+  // a click and the caret's first placement have no index and resolve from their
+  // coordinates instead.
+  assert.equal(validateEnvelope(base).caretIndex, null, "absent by default");
+  assert.equal(validateEnvelope({ ...base, caretIndex: null }).caretIndex, null, "and explicitly absent");
+  assert.equal(validateEnvelope({ ...base, caretIndex: 0 }).caretIndex, 0, "zero is the first character, not absent");
+  assert.equal(validateEnvelope({ ...base, caretIndex: 7 }).caretIndex, 7);
+  // Not coerced, unlike `count`: an index is an exact position into a character
+  // space, so a value that is not already one is a caller bug worth reporting
+  // rather than something to round into place.
+  for (const caretIndex of [-1, 1.5, "3", "abc", {}]) {
+    assert.throws(() => validateEnvelope({ ...base, caretIndex }), (error) => {
+      assert.equal(error.code, "INVALID_INTERACTION");
+      assert.match(error.message, /caretIndex/);
+      return true;
+    }, `caretIndex=${caretIndex}`);
+  }
+  // The other actions must not grow these fields.
+  assert.equal(validateEnvelope({ ...base, action: "hit_test" }).granularity, null);
+  assert.equal(validateEnvelope({ ...base, action: "hit_test", caretIndex: 7 }).caretIndex, null);
 });
 
 test("selection and find actions validate their required fields", () => {

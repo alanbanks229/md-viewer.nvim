@@ -14,10 +14,30 @@ function M.for_window(win)
   local height = vim.api.nvim_win_get_height(win)
   local pos = vim.api.nvim_win_get_position(win)
   local topline = vim.api.nvim_win_call(win, function() return vim.fn.line("w0") end)
-  local screen = vim.fn.screenpos(win, topline, 1)
-  local row = (tonumber(screen.row) or (pos[1] + 1)) - 1
-  local col = (tonumber(screen.col) or (pos[2] + 1)) - 1
   local winbar = option_value("winbar", { win = win }) or ""
+
+  -- screenpos() reports every field as 0 when the requested position is not
+  -- currently visible, and a window reaches that state on its own the moment it
+  -- scrolls horizontally: `leftcol > 0` means column 1 is off screen. Measured
+  -- on Neovim 0.12.4 -- a bare `zl` in a 40-column split is enough.
+  --
+  -- The old guard was `tonumber(screen.row) or fallback`, which never fired:
+  -- 0 is truthy in Lua, so the fallback was dead code and the placement became
+  -- row/col = -1. kitty_raw then formats `ESC[0;0H` (kitty_raw.lua's `at`),
+  -- terminals clamp that to the origin, and the preview PNG is painted over the
+  -- top-left of the whole terminal instead of over its own split. Test the
+  -- value, not its type.
+  --
+  -- nvim_win_get_position() reports the window frame, which starts one row
+  -- above the text area whenever a winbar is present (measured: position row 0
+  -- with screenpos row 2). The fallback has to add that row back itself; it is
+  -- the text area, not the frame, that every caller here means by "row".
+  local screen = vim.fn.screenpos(win, topline, 1)
+  local screen_row = tonumber(screen.row) or 0
+  local screen_col = tonumber(screen.col) or 0
+  local row = screen_row > 0 and (screen_row - 1) or (pos[1] + (winbar ~= "" and 1 or 0))
+  local col = screen_col > 0 and (screen_col - 1) or pos[2]
+
   local laststatus = tonumber(option_value("laststatus", {})) or 2
   local window_count = #vim.api.nvim_tabpage_list_wins(vim.api.nvim_win_get_tabpage(win))
   local statusline_present = laststatus == 2 or laststatus == 3 or (laststatus == 1 and window_count > 1)
@@ -201,6 +221,45 @@ function M.viewport(rect, render)
     cellWidthPx = cell_w,
     cellHeightPx = cell_h,
   }
+end
+
+---The inverse of `M.cell_to_css`: the surface cell a viewport CSS point falls
+---in, as 1-based `row, column` within `placement`.
+---
+---Clamped rather than refused, unlike `cell_to_css` in the other direction. The
+---caller is placing a caret, and a caret has to go somewhere -- a point a
+---fraction of a pixel outside the image should put it on the nearest edge cell,
+---not nowhere.
+function M.css_to_cell(point, placement, viewport)
+  if not (point and placement and viewport and viewport.widthPx and viewport.heightPx) then return nil end
+  if placement.width <= 0 or placement.height <= 0 then return nil end
+  if viewport.widthPx <= 0 or viewport.heightPx <= 0 then return nil end
+  local row = math.floor(((tonumber(point.y) or 0) / viewport.heightPx) * placement.height) + 1
+  local column = math.floor(((tonumber(point.x) or 0) / viewport.widthPx) * placement.width) + 1
+  return math.max(1, math.min(placement.height, row)), math.max(1, math.min(placement.width, column))
+end
+
+---The absolute screen cell the cursor occupies in `win`, in the same 1-based
+---`screenrow`/`screencol` shape `vim.fn.getmousepos()` reports. That shape is
+---the point: a caret position then feeds `M.cell_to_css` exactly the way a
+---pointer position does, so the keyboard and the mouse address the rendered
+---document through one conversion rather than two.
+---
+---Deliberately not `screenrow()`/`screencol()`. Those read the *UI grid's*
+---cursor rather than the window's, and answer 1,1 for a caret in a window that
+---is not current -- measured on 0.12.4, inside `nvim_win_call`, after a redraw,
+---and with the window made current. `winline()`/`wincol()` are window-relative
+---and correct in every one of those cases; `M.for_window` supplies the text
+---origin to add them to, already accounting for a winbar.
+---
+---`nvim_win_call` yields only its function's first return value, hence the
+---table.
+function M.cursor_cell(win)
+  if type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then return nil end
+  local rect = M.for_window(win)
+  local ok, position = pcall(vim.api.nvim_win_call, win, function() return { vim.fn.winline(), vim.fn.wincol() } end)
+  if not ok or type(position) ~= "table" then return nil end
+  return { screenrow = rect.row + position[1], screencol = rect.col + position[2] }
 end
 
 ---Convert a `vim.fn.getmousepos()`-style screen point into CSS pixel

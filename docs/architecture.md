@@ -40,14 +40,69 @@ provide the natural pacing.
 ## Preview surface and coordinates
 
 `preview.lua` creates a normal read-only `nofile` scratch buffer, never a
-terminal. `coordinates.lua` uses `screenpos(win, 1, 1)` for the first visible
-buffer cell and Neovim's window width/height for the exact text grid. A winbar,
-statusline, tabline, global statusline, separator, and command line are therefore
-outside the placement rectangle. Resize and scroll events recalculate it.
+terminal. `coordinates.lua` uses `screenpos(win, topline, 1)` for the first
+visible buffer cell and Neovim's window width/height for the exact text grid. A
+winbar, statusline, tabline, global statusline, separator, and command line are
+therefore outside the placement rectangle. Resize and scroll events recalculate
+it. `screenpos()` answers with every field `0` when the position is not visible
+— which a horizontally scrolled window reaches on its own — so that result is
+tested for and falls back to `nvim_win_get_position` plus the winbar row.
+
+The scratch buffer holds one line of spaces per placement row, each as wide as
+the placement (`preview.surface_size`, re-asserted by `preview.reset_surface`
+before every frame). It holds no document text and is not what the reader
+navigates: it exists so Neovim's cursor has somewhere legal to sit, so the
+window cannot scroll under the image, and so a terminal without overlay support
+still has a cursor on the right cell. Real spaces rather than empty lines plus
+`virtualedit`: virtual space lets the cursor push `leftcol` past zero, which is
+precisely the not-visible case above.
+
+The caret itself is a *position in the rendered document*, owned by the renderer
+(`caret_move` in `interact.js`) and held in `caret.lua` as the **glyph box** the
+renderer measured for it. Two properties follow, and both are the point rather
+than side effects: a caret only ever sits on a real character -- never in the
+page margin or the blank space beside a short heading -- and it is drawn the
+size of the character it is on, through the same `overlay_apply` path as the
+drag highlight, in its own rect set and with its own heavier tint (`CARET_TINT`).
+Neovim's cursor is hidden while a preview with a drawable caret is focused
+(`preview.hide_cursor`, a global `guicursor` swap) and shadows the caret
+underneath via `coordinates.css_to_cell`.
+
+The box is stored with the scroll it was measured at, so an ordinary scroll
+re-places the caret locally with no round trip, and a caret scrolled out of the
+viewport is simply not drawn. Motions cost one `interact` round trip each,
+because only the renderer knows where the characters are; a keystroke arrives at
+reading speed, so that is about what the scroll frame these keys already sent
+used to cost.
+
+The box is how the caret is *drawn*; it is not what the caret *is*. That is the
+index the renderer reports beside it (`caretIndex` on the way back out), and a
+motion continuing from the caret sends that index rather than a point. Asking the
+renderer to re-find the caret from its own geometry does not work, and the
+failure is not subtle: `caretPositionFromPoint` answers with the nearest boundary
+*between* two characters, and a glyph's middle is equidistant from the boundaries
+either side of it. Which one Blink returns comes down to rounding the glyph's
+advance to a LayoutUnit, so it is stable per glyph and differs from glyph to
+glyph -- on the ones that broke rightward the renderer placed the caret one
+character past where it was drawn, `h` stepped back onto the glyph it started on
+and stayed there, and `l` skipped one. The index is checked, not trusted: the
+renderer rebuilds that character space from the DOM per request, so an index that
+no longer names a character falls back to the point. Two granularities withhold
+it deliberately -- `"none"`, the snap-only case that means "the character nearest
+here", and a click, which is asking for a point to be resolved.
+
+Character motion is line-aware, like `0` and `$` and unlike a raw index step:
+`h` and `l` compare the candidate glyph's box against the current one and refuse
+to leave the rendered row, which is what Vim's `h`/`l` do under the default
+`whichwrap`. Word motion still crosses rows and blocks, as Vim's `w` crosses
+lines -- but the flat character space the renderer builds puts a separator
+between blocks, because the whitespace between two of them lives in their
+container and is never walked, and without one `Intl.Segmenter` reads the end of
+one block and the start of the next as a single word.
 
 During the initial persistent-renderer and Chromium startup, `preview.lua`
 centers a one-line non-focusable spinner float relative to the preview window.
-The scratch buffer itself stays one blank line. A successful first frame removes
+A successful first frame removes
 the spinner before calculating Kitty placements; a renderer failure removes it
 before emitting the actionable notification. Its timer is owned by the buffer
 session and is closed on every preview shutdown path.
@@ -120,9 +175,10 @@ All image implementations expose `detect`, `show`, `update`, `move`, `clear`,
 
 ## Scroll synchronization
 
-The graphical preview buffer remains one blank line; it no longer pretends that
-browser pixels are editable buffer lines. Buffer-local Vim motions update browser
-`scrollY` directly: line, half-page, page, top, and bottom movements. Source
+The graphical preview buffer holds blank cells, never document text; it does not
+pretend that browser pixels are editable buffer lines. Buffer-local Vim motions
+move the caret across those cells and update browser `scrollY` directly when the
+caret reaches an edge: line, half-page, page, top, and bottom movements. Source
 lines map to browser blocks through markdown-it token ranges and measured DOM
 geometry. A per-session guard prevents preview/source feedback. The most specific token
 range containing the cursor wins over enclosing lists, tables, and blockquotes.
