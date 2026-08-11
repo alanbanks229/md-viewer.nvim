@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+  --bg: #1e1e1e;
+  --fg: #d4d4d4;
+  --heading: #f0f0f0;
+  --muted: #a9a9a9;
+  --border: #3b3b3b;
+  --border-subtle: #343434;
+  --accent: #58a6ff;
+  --link: #65a9e8;
+  --quote: #666f7a;
+  --alert: #58a6ff;
+  --code-bg: #2b2b2b;
+  --code-inline: #3a3d41;
+  --table-head: #292929;
+  --table-stripe: #232323;
+  --syntax-comment: #7f8c8d;
+  --syntax-keyword: #c586c0;
+  --syntax-string: #ce9178;
+  --syntax-number: #b5cea8;
+  --syntax-type: #4ec9b0;
+  --syntax-function: #dcdcaa;
+  --find-mark-bg: rgba(255, 213, 79, 0.35);
+  --find-mark-active-bg: rgba(255, 152, 0, 0.65);
+  /* Selection background, pinned. With no ::selection rule Chromium's dark
+     default painted the equivalent of rgba(97,97,97,0.846) (measured by
+     tests/node/selection-tint.test.js's method); at that opacity the
+     drag overlay -- which sits *above* the glyphs during a drag, unlike the
+     browser's own paint, which sits below them -- would wash the text out.
+     This value composites to the exact same #575757 over the page background
+     (0.3*220 + 0.7*30 = 87) so the at-rest look is unchanged, while staying
+     translucent enough that text under the moving overlay reads normally.
+     Must stay equal to SELECTION_TINT.dark in renderer/src/interact.js; a
+     test asserts the captured pixels match that constant. */
+  --selection-bg: rgba(220, 220, 220, 0.3);
+}

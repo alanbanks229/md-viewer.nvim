@@ -1,0 +1,5 @@
+renderer/node_modules/
+*.log
+nvim.log
+.DS_Store
+tmp/

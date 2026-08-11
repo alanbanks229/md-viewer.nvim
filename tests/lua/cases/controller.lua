@@ -1,0 +1,548 @@
+return function(t)
+  local config = require("md-viewer.config")
+  local coords = require("md-viewer.coordinates")
+  local preview = require("md-viewer.preview")
+  local state = require("md-viewer.state")
+  local mouse = require("md-viewer.mouse")
+
+  require("md-viewer").setup({ image = { backend = "cells" } })
+  local source = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_set_current_buf(source)
+  vim.bo[source].filetype = "markdown"
+  vim.api.nvim_buf_set_lines(source, 0, -1, false, { "# One", "", "body" })
+  local controller = require("md-viewer.controller")
+  local session = assert(controller.open("right"))
+  t.ok(vim.api.nvim_win_is_valid(session.preview_win), "preview opens in a real split")
+  t.eq("nofile", vim.bo[session.preview_buf].buftype, "preview scratch buffer")
+  t.eq(false, vim.bo[session.preview_buf].modifiable, "preview is read-only")
+  local winbar = vim.api.nvim_get_option_value("winbar", { win = session.preview_win })
+  t.ok(winbar:match("No Name"), "preview winbar names its source document")
+  local placement = coords.for_window(session.preview_win)
+  t.eq(vim.api.nvim_win_get_width(session.preview_win), placement.width, "real split coordinate width")
+  t.eq(vim.api.nvim_win_get_height(session.preview_win), placement.height, "real split coordinate height")
+  t.eq(true, placement.winbar, "image placement accounts for preview winbar")
+  t.ok(placement.row > placement.window_row, "image starts below preview winbar")
+
+  local raw_placement = preview.placement(session.preview_win, "kitty_raw")
+  t.eq(placement.height - 1, raw_placement.height, "raw placement keeps one row above the statusline")
+  t.eq(1, raw_placement.statusline_guard_cells, "raw placement reports its dynamic statusline guard")
+  preview.start_loading(session)
+  t.eq(true, session.loading, "startup indicator is active before the first graphical frame")
+  t.ok(vim.api.nvim_win_is_valid(session.loading_win), "startup indicator uses a real floating window")
+  local loading_config = vim.api.nvim_win_get_config(session.loading_win)
+  t.eq("win", loading_config.relative, "startup indicator is local to the preview split")
+  t.eq(false, loading_config.focusable, "startup indicator cannot steal focus")
+  local first_loading_line = vim.api.nvim_buf_get_lines(session.loading_buf, 0, 1, false)[1]
+  t.ok(first_loading_line:match("Rendering Markdown"), "startup indicator explains renderer activity")
+  vim.wait(300, function()
+    local line = vim.api.nvim_buf_get_lines(session.loading_buf, 0, 1, false)[1]
+    return line ~= first_loading_line
+  end)
+  local next_loading_line = vim.api.nvim_buf_get_lines(session.loading_buf, 0, 1, false)[1]
+  t.ok(next_loading_line ~= first_loading_line, "startup indicator animates")
+  preview.stop_loading(session)
+  t.eq(false, session.loading, "startup indicator stops before image display")
+  t.eq(nil, session.loading_win, "startup indicator window is cleaned up")
+  local original_backend = session.backend
+  local cleared_images, restored_images = 0, 0
+  session.backend = {
+    name = "kitty_raw",
+    clear = function()
+      cleared_images = cleared_images + 1
+      return true
+    end,
+    show = function(bytes)
+      t.eq("cached-png", bytes, "float restoration reuses the cached PNG")
+      restored_images = restored_images + 1
+      return 88
+    end,
+    move = function(image_id) return image_id end,
+  }
+  session.image_id = 77
+  session.last_image_bytes = "cached-png"
+  local float_buf = vim.api.nvim_create_buf(false, true)
+  local float_win = vim.api.nvim_open_win(float_buf, false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = math.min(3, placement.height),
+    style = "minimal",
+  })
+  local occluded, occluding_windows = preview.occlusion(session.preview_win)
+  t.eq(true, occluded, "overlapping floating UI occludes the graphical preview")
+  t.eq(float_win, occluding_windows[1], "occlusion reports the actual floating window")
+  vim.wait(100, function() return session.image_id == nil end)
+  t.eq(1, cleared_images, "opening an overlapping float clears the raw placement")
+  vim.api.nvim_win_close(float_win, true)
+  t.eq(false, select(1, preview.occlusion(session.preview_win)), "closing a float removes occlusion")
+  vim.wait(100, function() return session.image_id == 88 end)
+  t.eq(1, restored_images, "closing the float restores the cached raw placement")
+
+  local passive_buf = vim.api.nvim_create_buf(false, true)
+  local passive_win = vim.api.nvim_open_win(passive_buf, false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = 1,
+    style = "minimal",
+    border = "rounded",
+    focusable = false,
+  })
+  t.eq(false, select(1, preview.occlusion(session.preview_win)), "non-focusable notifications do not blank the preview")
+  local passive_placement = preview.placement(session.preview_win, "kitty_raw")
+  t.ok(#passive_placement.exclusions > 0, "non-focusable notification creates a raw-image cutout")
+  local passive_rect = passive_placement.exclusions[1]
+  t.eq(
+    math.min(10, placement.width) + 2 + config.get().image.raw_overlay_bleed_cells,
+    passive_rect.width,
+    "notification cutout includes both border columns plus the trailing bleed"
+  )
+  t.eq(placement.col, passive_rect.col, "the bleed never moves the cutout's leading edge")
+  vim.api.nvim_win_close(passive_win, true)
+
+  -- Regression: a passive (non-focusable) float appearing or disappearing must
+  -- re-place the image, even though its row/col/width/height never change.
+  -- raw_zindex is -1 for every terminal profile (terminal.lua), and a negative
+  -- z above INT32_MIN/2 draws the image below text glyphs but *above* cell
+  -- background colors -- so a notification does not occlude the image on its
+  -- own, and without the cutout actually reaching the terminal the Markdown
+  -- composites straight through the notification's background. The exclusion
+  -- must also stay tracked on last_placement, since interaction.locate's
+  -- click-resolution depends on it.
+  local move_calls, moved_exclusions = 0, nil
+  session.backend.move = function(image_id, moved_placement)
+    move_calls = move_calls + 1
+    moved_exclusions = #(moved_placement.exclusions or {})
+    return image_id
+  end
+  t.eq(0, #(session.last_placement.exclusions or {}), "sanity: no exclusion before the notification opens")
+  local notify_buf = vim.api.nvim_create_buf(false, true)
+  local notify_win = vim.api.nvim_open_win(notify_buf, false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.wait(300, function() return #(session.last_placement.exclusions or {}) > 0 end, 10)
+  t.ok(#(session.last_placement.exclusions or {}) > 0, "the exclusion is tracked for click-resolution")
+  t.ok(move_calls > 0, "a passive float's exclusion change re-crops the image")
+  t.eq(1, moved_exclusions, "the re-crop carries the notification's cutout to the backend")
+  move_calls, moved_exclusions = 0, nil
+  vim.api.nvim_win_close(notify_win, true)
+  vim.wait(300, function() return #(session.last_placement.exclusions or {}) == 0 end, 10)
+  t.eq(0, #(session.last_placement.exclusions or {}), "the exclusion is removed once the float closes")
+  t.ok(move_calls > 0, "closing the passive float restores the uncropped image")
+  t.eq(0, moved_exclusions, "the restoring re-crop carries no cutout")
+
+  -- A steady state with no float open must not churn: the 50ms ui_poll and
+  -- every window event recompute the placement constantly, and an unchanged
+  -- one has to compare equal or the image would be re-placed forever.
+  move_calls = 0
+  vim.wait(200)
+  t.eq(0, move_calls, "an unchanged placement never re-places the image")
+
+  -- Regression: a plain (non-floating) split opened elsewhere -- e.g. a
+  -- third-party diff/explorer plugin's own panes, opened "relative to
+  -- editor" -- can shrink or reposition the preview split as an immediate
+  -- side effect. WinNew must reconcile for *any* new window, not only
+  -- floating ones, so the raw image follows without waiting on a separate
+  -- WinResized round trip or the 50ms poll to eventually catch up.
+  move_calls = 0
+  local before_width = vim.api.nvim_win_get_width(session.preview_win)
+  local squeeze_buf = vim.api.nvim_create_buf(false, true)
+  local squeeze_win = vim.api.nvim_open_win(squeeze_buf, false, {
+    split = "left",
+    win = -1,
+    width = math.max(20, math.floor(vim.o.columns / 2)),
+  })
+  vim.wait(300, function() return vim.api.nvim_win_get_width(session.preview_win) ~= before_width end, 10)
+  t.ok(
+    vim.api.nvim_win_get_width(session.preview_win) ~= before_width,
+    "sanity: the new split actually resized the preview window"
+  )
+  vim.wait(300, function() return move_calls > 0 end, 10)
+  t.ok(move_calls > 0, "a plain split's WinNew event alone reconciles the preview's now-changed geometry")
+  vim.api.nvim_win_close(squeeze_win, true)
+
+  vim.keymap.set("n", "<ScrollWheelDown>", "<Nop>", { desc = "test prior wheel mapping" })
+  mouse.attach(controller.navigate)
+  t.eq(true, mouse.is_attached(), "mouse wheel dispatch attaches for graphical preview")
+  session.document_height_px = 1000
+  session.viewport_height_px = 200
+  session.scroll_y = 0
+  preview.reset_surface(session)
+  local source_cursor = vim.api.nvim_win_get_cursor(session.source_win)
+  local original_schedule = controller.schedule
+  local original_refresh = controller.refresh
+  local scheduled = {}
+  controller.refresh = function(_, options) scheduled.scroll_timer = { delay = 0, options = options } end
+  controller.schedule = function(_, delay, timer_name, options)
+    scheduled[timer_name] = { delay = delay, options = options }
+  end
+  session.scroll_render_in_flight = false
+  controller.schedule_scroll(session)
+  session.scroll_render_in_flight = false
+  controller.refresh = original_refresh
+  controller.schedule = original_schedule
+  t.eq("css", scheduled.scroll_timer.options.capture_scale, "moving preview uses CSS-resolution frame")
+  t.eq(true, scheduled.scroll_timer.options.capture_only, "scroll capture omits unchanged Markdown payload")
+  t.eq(true, scheduled.scroll_timer.options.scroll_frame, "moving capture is identified for scroll ordering")
+  t.eq("device", scheduled.scroll_settle_timer.options.capture_scale, "settled preview restores Retina frame")
+  t.ok(scheduled.scroll_timer.delay < scheduled.scroll_settle_timer.delay, "fast frame precedes settled frame")
+
+  local fast_requests, latest_fast_options = 0, nil
+  controller.refresh = function(_, options)
+    fast_requests = fast_requests + 1
+    latest_fast_options = options
+  end
+  controller.schedule = function() end
+  session.scroll_render_in_flight = false
+  session.scroll_render_pending = false
+  controller.schedule_scroll(session)
+  controller.schedule_scroll(session)
+  t.eq(1, fast_requests, "only one scroll capture is in flight")
+  t.eq(true, session.scroll_render_pending, "newest scroll position is retained as one pending frame")
+  latest_fast_options.on_complete()
+  vim.wait(100, function() return fast_requests == 2 end)
+  t.eq(2, fast_requests, "pending scroll position renders after current capture")
+  session.scroll_render_in_flight = false
+  session.scroll_render_pending = false
+  controller.refresh = original_refresh
+  controller.schedule = original_schedule
+
+  local original_schedule_scroll = controller.schedule_scroll
+  local scroll_requests = 0
+  controller.schedule_scroll = function() scroll_requests = scroll_requests + 1 end
+  controller.navigate(session, "line_down")
+  controller.schedule_scroll = original_schedule_scroll
+  t.eq(22, session.scroll_y, "j advances one rendered line")
+  t.ok(session.manual_scroll_until > vim.uv.now(), "manual navigation pauses cursor-follow briefly")
+  t.eq(1, scroll_requests, "preview navigation requests a backpressured scroll frame")
+  t.eq(source_cursor, vim.api.nvim_win_get_cursor(session.source_win), "preview motion preserves source cursor")
+  t.eq(
+    88,
+    (function()
+      controller.schedule_scroll = function() end
+      controller.navigate(session, "wheel_down")
+      controller.schedule_scroll = original_schedule_scroll
+      return session.scroll_y
+    end)(),
+    "mouse wheel advances configured rendered lines"
+  )
+  -- The surface is exactly the placement: one blank line per row the image
+  -- covers, each as wide as the image. That is what makes the caret's cell an
+  -- address into the rendered document -- `coordinates.cell_to_css` refuses any
+  -- row at or past `placement.height`, so a surface even one row taller would
+  -- give the caret a position that silently resolves to nothing.
+  do
+    local placement = preview.placement(session.preview_win, session.backend.name)
+    local lines = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
+    t.eq(placement.height, #lines, "the caret surface is exactly as tall as the placement")
+    t.eq(placement.width, #lines[1], "and exactly as wide")
+    t.eq(string.rep(" ", placement.width), lines[1], "made of spaces, not virtual space")
+  end
+  controller.schedule_scroll = function() end
+  controller.navigate(session, "bottom")
+  controller.schedule_scroll = original_schedule_scroll
+  t.eq(800, session.scroll_y, "G moves browser viewport to document bottom")
+
+  session.backend = original_backend
+  local other = vim.api.nvim_create_buf(true, false)
+  vim.api.nvim_win_set_buf(session.source_win, other)
+  t.eq(session, state.get(source), "preview survives source buffer becoming hidden")
+  t.ok(vim.api.nvim_win_is_valid(session.preview_win), "pinned preview remains visible while browsing files")
+  controller.close()
+  t.eq(nil, state.get(source), "preview close removes session")
+  t.eq(false, mouse.is_attached(), "mouse dispatch is removed with the last graphical preview")
+  local restored_wheel = vim.fn.maparg("<ScrollWheelDown>", "n", false, true)
+  t.eq("<Nop>", restored_wheel.rhs, "previous mouse mapping is restored")
+  vim.keymap.del("n", "<ScrollWheelDown>")
+  vim.api.nvim_set_current_buf(source)
+  local reopened = assert(controller.open("right"))
+  t.ok(reopened.preview_buf ~= session.preview_buf, "preview close and reopen")
+  controller.close(source)
+
+  -- ---------------------------------------------------------------------
+  -- Regression: splitting off an *unrelated* file must not steal
+  -- `session.source_win`. `:split other.md` fires `WinEnter` for the new
+  -- window while it still shows the window-it-split-from's buffer (the
+  -- source buffer) -- that is how `:split` works, before the trailing
+  -- `:edit other.md` swaps it out a moment later in the same command. The
+  -- old, synchronous version of this autocmd read `nvim_get_current_buf()`
+  -- at that transient instant and reassigned `source_win` to the new
+  -- window; nothing ever corrected it back, since the original window
+  -- (still legitimately showing the source buffer) was never touched
+  -- again. That silently broke `WinScrolled`-driven cursor-follow in the
+  -- window the user was actually still working in.
+  -- ---------------------------------------------------------------------
+  do
+    local original_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_buf(source)
+    local real_session = assert(controller.open("right"))
+    local true_source_win = real_session.source_win
+    t.eq(true_source_win, vim.api.nvim_get_current_win(), "sanity: source_win starts out correct")
+
+    local other_path = vim.fn.tempname() .. "-unrelated.md"
+    vim.fn.writefile({ "unrelated content" }, other_path)
+    -- The real command a user runs: split, then load a different file into
+    -- the new window, all as one compound `:split` invocation -- exactly
+    -- what triggers the transient WinEnter this regression is about.
+    vim.cmd("leftabove vsplit " .. vim.fn.fnameescape(other_path))
+    vim.wait(50)
+
+    t.eq(
+      true_source_win,
+      real_session.source_win,
+      "splitting off an unrelated file leaves source_win pointed at the real source window"
+    )
+
+    local other_buf = vim.api.nvim_get_current_buf()
+    pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+    vim.api.nvim_set_current_win(true_source_win)
+    controller.close(source)
+    pcall(vim.api.nvim_buf_delete, other_buf, { force = true })
+    pcall(vim.api.nvim_set_current_win, original_win)
+    vim.fn.delete(other_path)
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Regression: a window keeps its id when its buffer changes. Opening a
+  -- second file in the window a preview was started from left WinScrolled's
+  -- `scrolled_win == session.source_win` test passing, so scrolling the new
+  -- file looked its line numbers up in the old file's source map and
+  -- scrolled the old file's preview -- the operator saw scrolling SECURITY.md
+  -- move a README.md preview.
+  -- ---------------------------------------------------------------------
+  do
+    local entry_win = vim.api.nvim_get_current_win()
+    local original_lines = vim.api.nvim_buf_get_lines(source, 0, -1, false)
+    local long = {}
+    for i = 1, 40 do
+      long[i] = "line " .. i
+    end
+    vim.api.nvim_buf_set_lines(source, 0, -1, false, long)
+    vim.api.nvim_set_current_buf(source)
+    local scrolled = assert(controller.open("right"))
+    local win = scrolled.source_win
+    -- A source map coarse enough that a line deep in either buffer lands well
+    -- outside the anchor tolerance, so the unfixed code moves `scroll_y` a long
+    -- way rather than declining to for some unrelated reason.
+    local function arm()
+      scrolled.latest_blocks = {
+        { sourceStart = 0, sourceEnd = 3, topPx = 0, bottomPx = 100 },
+        { sourceStart = 3, sourceEnd = 60, topPx = 100, bottomPx = 2000 },
+      }
+      scrolled.viewport_height_px, scrolled.document_height_px = 200, 2000
+      scrolled.scroll_y, scrolled.last_source_block = 0, nil
+    end
+    local function scroll(target)
+      vim.api.nvim_exec_autocmds("WinScrolled", { group = "md-viewer", pattern = tostring(target) })
+    end
+    -- The debounced follow-up would schedule real renders; every assertion here
+    -- is on `scroll_y`, which sync sets synchronously before calling back.
+    local original_schedule_scroll = controller.schedule_scroll
+    controller.schedule_scroll = function() end
+
+    local stranger = vim.api.nvim_create_buf(true, false)
+    vim.bo[stranger].filetype = "markdown"
+    vim.api.nvim_buf_set_lines(stranger, 0, -1, false, long)
+    vim.api.nvim_win_set_buf(win, stranger)
+    vim.api.nvim_win_set_cursor(win, { 30, 0 })
+    vim.wait(50)
+    arm()
+    scroll(win)
+    t.eq(0, scrolled.scroll_y, "scrolling another file in the preview's old source window leaves the preview alone")
+    t.eq(source, scrolled.source_buf, "...and the pinned preview goes on rendering its own document")
+
+    -- The source document reopened in a different window drives the preview
+    -- again. `source_win` is put back deliberately after the split settles: a
+    -- wheel over an unfocused window scrolls it without any WinEnter, so this
+    -- is the state the resolver has to recover from on its own.
+    vim.api.nvim_set_current_win(win)
+    vim.cmd("leftabove split")
+    local pane3 = vim.api.nvim_get_current_win()
+    vim.api.nvim_win_set_buf(pane3, source)
+    vim.api.nvim_win_set_cursor(pane3, { 30, 0 })
+    vim.api.nvim_set_current_win(win)
+    vim.wait(50)
+    scrolled.source_win = win
+    arm()
+    scroll(pane3)
+    t.ok(scrolled.scroll_y > 0, "the source document reopened in another window drives the preview again")
+    t.eq(pane3, scrolled.source_win, "...and that window is adopted as the source window")
+
+    -- Two windows showing one document is the transient state a compound
+    -- `:vsplit other.md` passes through, and the one the regression above is
+    -- about. There is no principled tiebreak, so nothing is adopted and the
+    -- WinEnter handler is left to settle it when the reader picks a window.
+    vim.api.nvim_win_set_buf(win, source)
+    scrolled.source_win = scrolled.preview_win
+    t.eq(nil, state.source_window(scrolled), "one document in two windows adopts neither")
+
+    -- The guard must not have simply switched cursor-follow off.
+    scrolled.source_win = win
+    vim.api.nvim_win_set_cursor(win, { 30, 0 })
+    arm()
+    scroll(win)
+    t.ok(scrolled.scroll_y > 0, "the window actually showing the source document still drives the preview")
+
+    controller.schedule_scroll = original_schedule_scroll
+    pcall(vim.api.nvim_win_close, pane3, true)
+    controller.close(source)
+    pcall(vim.api.nvim_buf_delete, stranger, { force = true })
+    vim.api.nvim_buf_set_lines(source, 0, -1, false, original_lines)
+    pcall(vim.api.nvim_set_current_win, entry_win)
+  end
+
+  -- ---------------------------------------------------------------------
+  -- Overlay display: display_selection_overlay refuses any result
+  -- whose geometry cannot be proven to match the frame on screen, applies
+  -- matching ones through the backend, and clear_selection_overlay releases
+  -- the placements exactly once.
+  -- ---------------------------------------------------------------------
+  do
+    local entry_win = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_current_buf(source)
+    local session = assert(controller.open("right"))
+    local applied, cleared = {}, {}
+    session.backend = {
+      name = "kitty_raw",
+      overlay_supported = function() return true end,
+      overlay_needs_sheet = function() return false end,
+      overlay_apply = function(set_id, image_id, rects, viewport, tint, sheet, placement)
+        applied[#applied + 1] = {
+          set_id = set_id,
+          image_id = image_id,
+          rects = rects,
+          viewport = viewport,
+          tint = tint,
+          sheet = sheet,
+          placement = placement,
+        }
+        return 91, { rects = #rects, bytes = 420, placed = #rects, kept = 0, deleted = 0 }
+      end,
+      overlay_clear = function(set_id) cleared[#cleared + 1] = set_id end,
+      clear = function() return true end,
+    }
+    session.image_id = 7
+    session.last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} }
+    session.renderer_revision = "1:0"
+    session.applied_scroll_y = 40
+    session.viewport_width_px = 800
+    session.viewport_height_render_px = 600
+
+    local good = {
+      contentRevision = "1:0",
+      scrollY = 40,
+      rects = { { x = 1, y = 2, width = 3, height = 4 } },
+      rectsTruncated = false,
+      selectionTint = { r = 220, g = 220, b = 220, a = 0.3 },
+    }
+
+    t.eq(
+      false,
+      (
+        controller.display_selection_overlay(
+          session,
+          vim.tbl_extend("force", vim.deepcopy(good), { contentRevision = "0:9" })
+        )
+      ),
+      "a result from another content revision is refused"
+    )
+    t.eq(
+      false,
+      (controller.display_selection_overlay(session, vim.tbl_extend("force", vim.deepcopy(good), { scrollY = 0 }))),
+      "a result measured at a different scroll than the frame on screen is refused"
+    )
+    t.eq(
+      false,
+      (
+        controller.display_selection_overlay(
+          session,
+          vim.tbl_extend("force", vim.deepcopy(good), { rectsTruncated = true })
+        )
+      ),
+      "a truncated rect set is refused rather than drawn with missing pieces"
+    )
+    t.eq(0, #applied, "refused results never reach the backend")
+
+    t.eq(true, (controller.display_selection_overlay(session, good)), "a matching result applies")
+    t.eq(1, #applied, "the backend received the apply")
+    t.eq(7, applied[1].image_id, "the overlay composites over the base image on screen")
+    t.eq(91, session.overlay_set, "the set id is recorded for the next diff")
+    t.eq(1, session.overlay_rect_count)
+    t.eq(420, session.overlay_last_bytes)
+
+    -- The next frame passes the recorded set id back in, so the backend can
+    -- diff instead of replacing everything.
+    t.eq(true, (controller.display_selection_overlay(session, good)))
+    t.eq(91, applied[2].set_id)
+
+    controller.clear_selection_overlay(session)
+    t.eq(1, #cleared, "clearing releases the backend set")
+    t.eq(91, cleared[1])
+    t.eq(nil, session.overlay_set)
+    controller.clear_selection_overlay(session)
+    t.eq(1, #cleared, "a second clear is a no-op, not a double delete")
+
+    -- restore_clean_base's preconditions. It runs on the first frame of a drag
+    -- and puts a cached selection-free frame back so overlay rectangles have
+    -- something clean to composite over; every way of not knowing that the
+    -- cached frame still matches what is on screen has to refuse rather than
+    -- place a frame from the wrong scroll position or the wrong document.
+    session.base_selection_painted = false
+    t.eq(true, controller.restore_clean_base(session), "an already-clean base needs no work")
+    session.base_selection_painted = true
+    session.clean_image_bytes = nil
+    t.eq(false, controller.restore_clean_base(session), "no cached selection-free frame means no restore")
+    session.clean_image_bytes = "png"
+    session.clean_image_revision = session.renderer_revision
+    session.applied_scroll_y = 0
+    session.clean_image_scroll_y = 240
+    t.eq(false, controller.restore_clean_base(session), "a frame cached at another scroll position is refused")
+    session.clean_image_scroll_y = 0
+    session.clean_image_revision = "not-the-current-revision"
+    t.eq(false, controller.restore_clean_base(session), "a frame cached against other content is refused")
+    t.eq(true, session.base_selection_painted, "a refusal leaves the base marked painted")
+
+    -- Which frames become the cached clean base. Recorded wherever a frame
+    -- reaches the screen rather than in M.refresh alone: a scroll taken while
+    -- a selection was up drops the cache, and interact frames never reach
+    -- M.refresh, so clicking to deselect -- which produces a perfectly good
+    -- selection-free frame -- used to leave the drag overlay disabled until
+    -- some later render happened to land with nothing selected.
+    local function interact_frame(bytes)
+      local path = vim.fn.tempname()
+      local fd = assert(vim.uv.fs_open(path, "w", 384))
+      vim.uv.fs_write(fd, bytes, 0)
+      vim.uv.fs_close(fd)
+      controller.display_interact_result(session, { pngPath = path, scrollY = 40, captureScale = "device" })
+    end
+    session.backend.show = function() return 12 end
+    session.backend.update = function() return 12 end
+    session.clean_image_bytes = nil
+    session.clean_image_revision = nil
+
+    session.selection_active = true
+    interact_frame("selected-frame")
+    t.eq(nil, session.clean_image_bytes, "a frame captured with a selection painted in is not cached as clean")
+    t.eq(true, session.base_selection_painted, "and is marked as carrying a selection")
+
+    session.selection_active = false
+    interact_frame("clean-frame")
+    t.eq("clean-frame", session.clean_image_bytes, "a selection-free interact frame becomes the clean base")
+    t.eq(40, session.clean_image_scroll_y, "cached against the scroll position it was taken at")
+    t.eq("1:0", session.clean_image_revision, "and against the content revision it belongs to")
+    t.eq("device", session.clean_image_scale, "the capture scale rides along so the restore matches")
+    t.eq(false, session.base_selection_painted, "the frame on screen is now known to be clean")
+    t.eq(true, controller.restore_clean_base(session), "so the next drag has a base to composite over")
+
+    controller.close(source)
+    pcall(vim.api.nvim_set_current_win, entry_win)
+  end
+end
