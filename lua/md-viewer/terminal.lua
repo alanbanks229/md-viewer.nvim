@@ -67,15 +67,16 @@ local function default_env() return vim.fn.environ() end
 -- The default path is untouched, byte for byte, and
 -- `tests/lua/cases/backend_kitty.lua` pins that as a golden stream.
 
--- `default_raw_zindex` is -2 for every profile that speaks the Kitty graphics
--- protocol, so the selection overlay always has -1 to itself. The two layers
--- must not coincide: the protocol breaks a z-index tie by image id ("the image
--- with the lower id is considered to have the lower z-index"), and md-viewer
--- re-uploads the base image on every full frame, so a base sharing the
--- overlay's layer climbs above it and stays there. -2 and -1 render
--- identically for the base -- both are under text and over the cell background
--- -- so this costs nothing on profiles that never draw an overlay, and it
--- means turning one on later is a one-line change rather than a layer audit.
+-- `default_raw_zindex` is -3 for every profile that speaks the Kitty graphics
+-- protocol, so animation frames always have -2 to themselves and the selection
+-- overlay -1. The layers must not coincide: the protocol breaks a z-index tie
+-- by image id ("the image with the lower id is considered to have the lower
+-- z-index"), and md-viewer re-uploads the base image on every full frame, so a
+-- base sharing an upper layer climbs above it and stays there. -3, -2 and -1
+-- render identically for the base -- all are under text and over the cell
+-- background -- so this costs nothing on profiles that never animate or draw
+-- an overlay, and it means the default stack needs no "lowered from" slide in
+-- `resolve_layers`: what the profile declares is what is emitted.
 
 -- Every caveat carries a `kind`, and the distinction is load-bearing rather
 -- than decorative: `warn` means something may actually misbehave and the
@@ -90,14 +91,29 @@ M.profiles = {
   iterm2 = {
     id = "iterm2",
     label = "iTerm2",
-    -- -2 rather than -1 so the selection overlay gets its own layer at -1:
-    -- base below highlight, both below Neovim's text (Kitty draws z<0 under
-    -- text). The probe ran its base at -2 through every check, so this exact
-    -- configuration is what was validated. See the note above M.profiles for
-    -- why every Kitty-protocol profile now shares it.
-    default_raw_zindex = -2,
+    -- -3 rather than -1 so animation frames get their own layer at -2 and the
+    -- selection overlay its own at -1: base below frames below highlight, all
+    -- below Neovim's text (Kitty draws z<0 under text). The overlay probe ran
+    -- its base two layers under the overlay through every check, so that
+    -- relative stack is what was validated. See the note above M.profiles for
+    -- why every Kitty-protocol profile shares it.
+    default_raw_zindex = -3,
     default_double_buffer = true,
     selection_overlay = true,
+    -- Animation is a *mode*, not a flag, because two different workloads hide
+    -- behind the word. "frames" is client-driven: one placement swap per
+    -- frame, the same operation as an overlay crop, so the profiles validated
+    -- for the overlay are the profiles validated for it. "native" hands the
+    -- Kitty protocol's own animation extension (a=f frame data, a=a playback)
+    -- to the terminal and walks away -- a different protocol surface that
+    -- being good at placements says nothing about. Like every capability
+    -- here, a mode is only ever promoted after someone watched it; until
+    -- then `terminal.animation = "native"` exists precisely so someone can.
+    animation = {
+      mode = "frames",
+      evidence = "client-driven frame placements ride the operator-validated overlay machinery; "
+        .. "the terminal-driven animation extension is unverified here",
+    },
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (drag-highlight overlay, 2026-08-07)",
     caveats = {
@@ -116,9 +132,20 @@ M.profiles = {
   kitty = {
     id = "kitty",
     label = "Kitty",
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     selection_overlay = true,
+    -- "frames" even though Kitty is the animation extension's own reference
+    -- implementation: the mode table's rule is that nothing is promoted on
+    -- reasoning, and the native path has not yet been watched on real
+    -- hardware. scripts/animation/ is the qualification run; flip this to
+    -- "native" (evidence and all) once it passes there, and users can flip it
+    -- early for themselves with `terminal.animation = "native"`.
+    animation = {
+      mode = "frames",
+      evidence = "client-driven frame placements validated by the operator (2026-08-08); native "
+        .. "playback is protocol-documented for Kitty but pending the scripts/animation run",
+    },
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (2026-08-08)",
     caveats = {
@@ -139,7 +166,7 @@ M.profiles = {
   wezterm = {
     id = "wezterm",
     label = "WezTerm",
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     -- The only profile that does not express sub-cell position with the
     -- protocol's own X/Y keys. See the note above M.profiles for the measured
@@ -169,6 +196,16 @@ M.profiles = {
     -- carries the fix: run scripts/overlay/geometry and scripts/overlay/stress
     -- against it, and flip the flag only if both pass.
     selection_overlay = false,
+    -- Off for the same upstream defect, and more firmly. #7953 duplicates a
+    -- cell's attachment list on every repeat placement over it -- that is per
+    -- placement, not per second, so a slower tick does not make it safe, only
+    -- slower. A drag ends; a preview stays open. Re-qualify with
+    -- scripts/overlay/geometry and scripts/overlay/stress before flipping it.
+    animation = {
+      mode = "off",
+      evidence = "not validated for animation: wezterm/wezterm#7953 grows the terminal's memory on "
+        .. "every repeat placement over a covered cell",
+    },
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "geometry pixel-verified by automated screenshot on 20240203-110809-5046fc22 and "
       .. "20260805-104032-4b1c3c15 (2026-08-08); overlay disabled -- placement churn grows the "
@@ -222,15 +259,25 @@ M.profiles = {
   ghostty = {
     id = "ghostty",
     label = "Ghostty",
-    -- -2 for the same reason as iTerm2: the selection overlay needs a layer of
-    -- its own at -1. Ghostty is stricter about this than iTerm2 -- it sorts
+    -- -3 for the same reason as iTerm2: animation frames and the selection
+    -- overlay each need a layer of their own. Ghostty is stricter about this
+    -- than iTerm2 -- it sorts
     -- placements by (z, image id) and rebuilds that list from an unordered map
     -- every frame, so a base sharing the overlay's layer wins on image id the
     -- moment it is re-uploaded, with no creation order to fall back on. See
     -- `resolve_layers` in backends/kitty_raw.lua.
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     selection_overlay = true,
+    -- "frames": client-driven placement swaps ride the same machinery the
+    -- overlay validated. Ghostty's support for the protocol's *animation
+    -- extension* (a=f/a=a) is unverified here -- `terminal.animation =
+    -- "native"` plus the scripts/animation run is how that changes.
+    animation = {
+      mode = "frames",
+      evidence = "client-driven frame placements validated by the operator (2026-08-08); the "
+        .. "terminal-driven animation extension is unverified here",
+    },
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "operator-validated (2026-08-08)",
     caveats = {
@@ -250,7 +297,7 @@ M.profiles = {
   warp = {
     id = "warp",
     label = "Warp",
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
@@ -265,7 +312,7 @@ M.profiles = {
   generic_kitty = {
     id = "generic_kitty",
     label = "Kitty-compatible (TERM only)",
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     placement = { deletion = "by-id", crop = "cropped-placements" },
     validation = "protocol-compatible-but-unvalidated",
@@ -281,10 +328,10 @@ M.profiles = {
     id = "unknown",
     label = "Unknown terminal",
     -- Matches every other profile even though this one never reaches the raw
-    -- backend, so the "lowered from -1" note in :MdViewerHealth only ever
+    -- backend, so the "lowered from" note in :MdViewerHealth only ever
     -- appears for a deliberate image.raw_zindex override, where it means
     -- something.
-    default_raw_zindex = -2,
+    default_raw_zindex = -3,
     default_double_buffer = true,
     placement = { deletion = "unsupported", crop = "unsupported" },
     validation = "not-attempted",
@@ -399,6 +446,26 @@ function M.capability(cfg, env)
     reason = "inferred from " .. (evidence[1] or profile_id)
   end
 
+  -- Animation resolves to `{ mode, evidence }` unconditionally. Profiles that
+  -- say nothing are off -- the conservative default for warp, generic_kitty
+  -- and unknown -- and an explicit `terminal.animation` override replaces the
+  -- profile's answer wholesale, evidence included, because the override IS the
+  -- evidence: the user asserting a mode for a terminal this table does not
+  -- (yet) trust is exactly how a new terminal gets qualified.
+  local animation = profile.animation
+  if type(animation) ~= "table" or type(animation.mode) ~= "string" then
+    animation = {
+      mode = "off",
+      evidence = ("profile %s is not validated for animation frame placements"):format(profile_id),
+    }
+  end
+  if cfg.animation == "native" or cfg.animation == "frames" or cfg.animation == "off" then
+    animation = {
+      mode = cfg.animation,
+      evidence = ("terminal.animation=%s (explicit override)"):format(cfg.animation),
+    }
+  end
+
   local mux, mux_evidence = M.multiplexer(env)
   local caveats = vim.deepcopy(profile.caveats or {})
   if mux ~= "none" then
@@ -422,6 +489,7 @@ function M.capability(cfg, env)
     -- Only ever true for profiles someone actually looked at, by eye or by
     -- photograph; see the comment above M.profiles.
     selection_overlay = profile.selection_overlay == true,
+    animation = animation,
     overlay_encoding = profile.overlay_encoding or "sub-cell-offset",
     placement = profile.placement,
     multiplexer = mux,
@@ -431,11 +499,28 @@ function M.capability(cfg, env)
   }
 end
 
+-- Capability resolution snapshots the whole process environment
+-- (vim.fn.environ()), reads uname, and deep-copies profile caveats. Callers
+-- reach M.detect() on every placement and, while animating, several times per
+-- tick -- through zindex resolution and animation gating -- so an unmemoized
+-- walk is thousands of environment snapshots per minute. The environment
+-- cannot change under a running Neovim; the config half can, and
+-- config.setup()/reset() invalidate this cache when it does.
+local detected = nil
+
 --- Convenience entry point used by backend selection and diagnostics: reads
---- live configuration and the real process environment.
+--- live configuration and the real process environment, memoized until the
+--- configuration changes.
 function M.detect()
+  if detected then return detected end
   local config = require("md-viewer.config")
-  return M.capability(config.get().terminal)
+  detected = M.capability(config.get().terminal)
+  return detected
 end
+
+--- Drop the memoized capability snapshot. Called by config.setup()/reset();
+--- tests that stub the environment go through M.capability directly, which is
+--- never cached.
+function M.invalidate() detected = nil end
 
 return M

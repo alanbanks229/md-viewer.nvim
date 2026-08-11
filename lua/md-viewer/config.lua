@@ -14,7 +14,12 @@ M.defaults = {
     local_images = true,
     max_local_image_bytes = 10 * 1024 * 1024,
     device_scale_factor = 2,
-    font_size_px = 16,
+    -- Base font of the rendered document, in CSS pixels. Paired with the cell
+    -- the viewport is calibrated against: a 2x display's cell is about 7 CSS px
+    -- wide, and a 14px body font averages about 7px per character, so preview
+    -- text lands at roughly one character per terminal cell. Raise it together
+    -- with nothing else -- the viewport is measured, not derived from this.
+    font_size_px = 14,
     cell_aspect_ratio = 0.5,
     estimated_cell_width_px = 10,
     max_width_px = 1920,
@@ -24,6 +29,29 @@ M.defaults = {
     scroll_past_end_offset_px = 22,
     fast_scroll = true,
     scroll_settle_ms = 160,
+    -- Animated images (GIF, animated WebP), off by default. A frame of the
+    -- preview is one browser screenshot, so an animated image painted into it
+    -- is already frozen on its first frame; with this on, the renderer
+    -- additionally decodes the real frames and the terminal draws them on their
+    -- own layer over that still one. Only terminals validated for natural-size
+    -- placements do it (see terminal.lua's per-profile `animation` mode, and
+    -- `terminal.animation` to override it).
+    --
+    -- Off is the default because the still frame is never lost: with this
+    -- false, no frame is decoded, no layer is placed, and the picture on screen
+    -- is exactly the one the screenshot captured. Turning it off costs motion
+    -- and nothing else, and playback is the more expensive half of the feature
+    -- -- a decode pass per animated image, and a frame swap per animation up to
+    -- `animate_fps`.
+    animate = false,
+    -- Ceiling on the *client-driven* frame-swap rate; playback keeps each
+    -- animation's own frame timing under it, skipping frames rather than
+    -- stretching them, so a capped animation stays the right length. 5fps is
+    -- low enough that a preview left open all day is not a background CPU
+    -- cost; each swap is a few hundred bytes of placement commands, not a
+    -- re-render. Ignored entirely where the terminal itself drives playback
+    -- (`terminal.animation = "native"`), which has no per-frame client cost.
+    animate_fps = 5,
   },
   browser = {
     channel = "chrome",
@@ -77,20 +105,9 @@ M.defaults = {
   security = {
     -- Off by default. When true, markdown-it parses raw HTML embedded in the
     -- document instead of dropping it; the output still passes the allowlist
-    -- sanitizer, so scripts, event attributes, frames and remote image
-    -- sources stay forbidden either way. See SECURITY.md before enabling.
+    -- sanitizer, so scripts, event attributes, and frames stay forbidden
+    -- either way. See SECURITY.md before enabling.
     raw_html = false,
-    -- Hosts whose images the *renderer process* may fetch over https and
-    -- inline as data: URIs; the browser itself never makes a network request
-    -- under any configuration. Empty means remote images are off. Entries are
-    -- exact host names ("github.com") or single leading wildcards
-    -- ("*.githubusercontent.com"). A wildcard matches proper subdomains only:
-    -- it never matches its own bare domain (list both to allow both), and the
-    -- required dot boundary means "*.example.com" cannot match
-    -- "evil-example.com". Previewing a document that references images on an
-    -- allowlisted host sends requests to it, which discloses that the
-    -- document was viewed -- see SECURITY.md before adding hosts.
-    remote_images = {},
     document_root = nil,
     -- Markers that identify the project enclosing the document when
     -- `document_root` is unset. See md-viewer.security.document_root for why
@@ -208,6 +225,12 @@ M.defaults = {
     profile = "auto",
     kitty_graphics = "auto",
     probe = "off",
+    -- How animated images are played. "auto" takes the profile's validated
+    -- mode; "native" forces the terminal's own animation player (the Kitty
+    -- protocol's a=f/a=a extension -- use to qualify a terminal the profile
+    -- table does not yet trust); "frames" forces client-driven frame
+    -- placements; "off" leaves every animation as its still first frame.
+    animation = "auto",
   },
 }
 
@@ -247,9 +270,32 @@ local function validate(cfg)
     type(cfg.render.estimated_cell_width_px) == "number" and cfg.render.estimated_cell_width_px > 0,
     "md-viewer: render.estimated_cell_width_px must be positive"
   )
+  -- Both of these are divisors, and neither was checked before the measured
+  -- calibration tier made `device_scale_factor` one. The 1..3 bound is the one
+  -- browser.js applies to the same value when it creates the browser context;
+  -- accepting a wider range here only produces a viewport that disagrees with
+  -- the page.
+  assert(
+    type(cfg.render.device_scale_factor) == "number"
+      and cfg.render.device_scale_factor >= 1
+      and cfg.render.device_scale_factor <= 3,
+    "md-viewer: render.device_scale_factor must be between 1 and 3"
+  )
+  assert(
+    type(cfg.render.cell_aspect_ratio) == "number" and cfg.render.cell_aspect_ratio > 0,
+    "md-viewer: render.cell_aspect_ratio must be positive"
+  )
   assert(
     type(cfg.render.font_size_px) == "number" and cfg.render.font_size_px > 0,
     "md-viewer: render.font_size_px must be positive"
+  )
+  assert(type(cfg.render.animate) == "boolean", "md-viewer: render.animate must be a boolean")
+  -- Bounded at both ends. Below 1 the timer would never fire; above 30 the
+  -- placement traffic stops being negligible, which is the only reason drawing
+  -- frames this way is affordable at all.
+  assert(
+    type(cfg.render.animate_fps) == "number" and cfg.render.animate_fps >= 1 and cfg.render.animate_fps <= 30,
+    "md-viewer: render.animate_fps must be between 1 and 30"
   )
   assert(
     cfg.image.raw_zindex == nil
@@ -297,6 +343,8 @@ local function validate(cfg)
   )
   assert(tri_state[cfg.terminal.kitty_graphics], "md-viewer: terminal.kitty_graphics must be auto, on, or off")
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
+  local animation_modes = { auto = true, native = true, frames = true, off = true }
+  assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(
     vim.islist(cfg.security.document_root_markers),
@@ -306,20 +354,6 @@ local function validate(cfg)
     assert(
       type(marker) == "string" and marker ~= "",
       "md-viewer: security.document_root_markers entries must be non-empty strings"
-    )
-  end
-  assert(vim.islist(cfg.security.remote_images), "md-viewer: security.remote_images must be a list of host names")
-  for _, host in ipairs(cfg.security.remote_images) do
-    local shaped = type(host) == "string"
-    if shaped then
-      -- A host name, optionally behind one leading "*.": no scheme, no path,
-      -- no port, no embedded wildcard.
-      local rest = host:sub(1, 2) == "*." and host:sub(3) or host
-      shaped = rest ~= "" and not rest:find("[*/:%s]")
-    end
-    assert(
-      shaped,
-      'md-viewer: security.remote_images entries must be host names like "github.com" or "*.githubusercontent.com"'
     )
   end
   assert(type(cfg.interaction.enabled) == "boolean", "md-viewer: interaction.enabled must be boolean")
@@ -372,16 +406,29 @@ local function validate(cfg)
   )
 end
 
+-- The terminal module memoizes its capability snapshot against the `terminal`
+-- config section; a config change is the one event that can invalidate it.
+-- Guarded on package.loaded so configuring md-viewer does not load the
+-- terminal module as a side effect.
+local function invalidate_terminal()
+  local terminal = package.loaded["md-viewer.terminal"]
+  if terminal and terminal.invalidate then terminal.invalidate() end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
+  invalidate_terminal()
   return current
 end
 
 function M.get() return current end
 
-function M.reset() current = vim.deepcopy(M.defaults) end
+function M.reset()
+  current = vim.deepcopy(M.defaults)
+  invalidate_terminal()
+end
 
 return M

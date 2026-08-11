@@ -31,8 +31,8 @@ throughout.
 
 The renderer opens no external browser window, starts no HTTP server, and
 listens on no localhost port. The browser makes no runtime network requests
-under any configuration; allowlisted remote images are fetched by the
-renderer process and inlined (|md-viewer-remote-images|).
+under any configuration; remote images are fetched by the renderer process
+and inlined (|md-viewer-remote-images|).
 
 =============================================================================
 REQUIREMENTS                                         *md-viewer-requirements*
@@ -67,7 +67,7 @@ grouped:
     browser     Existing browser executable and launch timeout
     image       Graphical or cell backend and placement behavior
     sync        Source-following and preview navigation
-    security    Remote image allowlist and local document root
+    security    Local document root and raw HTML sanitization
     terminal    Terminal profile detection and capability overrides
     interaction Mouse/keyboard interaction: selection, search, links, caret
 
@@ -96,14 +96,30 @@ fails with an actionable error instead.
 CELL CALIBRATION ~
 
 md-viewer places the image over a rectangle of terminal cells and lets the
-terminal scale it. Exact cell dimensions give a sharper result: >sh
+terminal scale it, so the render is sharpest when it is built against the
+terminal's real cell size. That needs no configuration: the cell is measured
+from the operating system, via the pixel geometry TIOCGWINSZ carries beside
+the row and column counts. :MdViewerHealth reports which of three tiers is in
+use, with the numbers behind it:
 
-    export MD_VIEWER_CELL_WIDTH_PX=10
-    export MD_VIEWER_CELL_HEIGHT_PX=20
+- `measured`: the terminal reported its pixel geometry. This is the normal
+  case on iTerm2, Kitty, Ghostty, WezTerm and Alacritty.
+- `env`: MD_VIEWER_CELL_WIDTH_PX and MD_VIEWER_CELL_HEIGHT_PX are both set,
+  and override the measurement.
+- `estimated`: nothing could be measured -- chiefly tmux and screen, which do
+  not propagate pixel geometry, and any Neovim without LuaJIT. The preview
+  still renders, from `render.estimated_cell_width_px` and
+  `render.cell_aspect_ratio`, but is not pixel-exact.
+
+To override the measurement, give the cell size in *CSS* pixels -- the
+measured size divided by `render.device_scale_factor`, so a 2x display
+measuring 14x32 device pixels wants 7 and 16: >sh
+
+    export MD_VIEWER_CELL_WIDTH_PX=7
+    export MD_VIEWER_CELL_HEIGHT_PX=16
 <
-Measure the active terminal profile rather than copying those values.
-:MdViewerHealth then reports `viewport calibration: explicit` instead of
-`estimated`.
+Measure the active terminal profile rather than copying those values;
+:MdViewerHealth prints both the measurement and its CSS conversion.
 
                                               *md-viewer-overlay-alignment*
 NOTIFICATIONS OVER THE PREVIEW ~
@@ -151,35 +167,81 @@ whatever Neovim itself would open; see SECURITY.md for that trade-off.
                                                     *md-viewer-remote-images*
 REMOTE IMAGES ~
 
-Remote images are off by default. `security.remote_images` is a host
-allowlist: when a Markdown image's https URL matches it, the renderer process
-fetches the bytes, validates them exactly like a local image (magic bytes,
-`max_local_image_bytes`), and inlines them as a data URI. The browser itself
-never makes a network request under any configuration. >lua
+Remote images need no configuration. When an image's URL is https, the
+renderer process fetches the bytes, validates them exactly like a local image
+(magic bytes, `max_local_image_bytes`), and inlines them as a data URI. The
+browser itself never makes a network request under any configuration.
 
-    require("md-viewer").setup({
-      security = {
-        remote_images = { "github.com", "*.githubusercontent.com" },
-      },
-    })
+This covers both `![alt](url)` and a bare `<img src="url">` tag. An `<img>` is
+parsed into an ordinary Markdown image regardless of `security.raw_html`, and
+carries only `src`, `alt`, `title`, and integer `width`/`height`; it gains no
+privilege from being written as HTML.
+
+Only https URLs are fetched, and only if the URL -- and every redirect hop,
+should the response be one -- resolves to a public network address; loopback,
+private, link-local, and other reserved ranges are refused before a
+connection is attempted (see |md-viewer-security|). Redirects are otherwise
+followed at most three hops. Fetched images are cached in the renderer
+process, so live-preview re-renders do not refetch them.
+
+                                                          *md-viewer-animation*
+ANIMATED IMAGES ~
+
+Off by default. Turn it on with: >lua
+
+    require("md-viewer").setup({ render = { animate = true } })
 <
-Entries are exact host names or single leading wildcards. `*.example.com`
-matches proper subdomains only: it never matches the bare `example.com` (list
-both to allow both), and the required dot boundary means it cannot match
-`evil-example.com`. Only https URLs are fetched; redirects are followed at
-most three hops with every hop re-checked against the allowlist. Fetched
-images are cached in the renderer process, so live-preview re-renders do not
-refetch them.
+A frame of the preview is one browser screenshot, so an animated GIF or WebP
+painted into it is frozen on its first frame. That still frame is what shows
+with `render.animate` off, and nothing about the document changes: the image
+is inlined, painted and placed exactly as it is with animation on, so the
+default costs motion and never a picture.
+
+With it on, the renderer additionally decodes the real frames -- in the same
+Chromium that renders the preview, at the size the image is drawn -- and the
+terminal draws them itself, on their own layer above the base image and below
+the selection highlight. Each frame keeps its own display time from the source
+file; nothing is resampled to a canonical tick.
+
+How the frames move depends on what the active terminal was qualified for
+(`terminal.animation`, default `"auto"`):
+
+- `native`: the Kitty graphics protocol's animation extension. Frames upload
+  once with their gaps and the terminal owns playback -- no timer and no
+  per-frame traffic in Neovim at all. Not yet the default anywhere: run the
+  `scripts/animation` checklist in your terminal, then opt in with
+  `terminal.animation = "native"`.
+- `frames`: client-driven. A shared timer swaps which frame is placed,
+  honouring each frame's own timing under the `render.animate_fps` ceiling
+  (default 5); when the ceiling bites, frames are skipped, never stretched,
+  so the animation stays the right length. This is the qualified default on
+  iTerm2, Kitty and Ghostty.
+- `off`: every animation stays its still first frame.
+
+Chromium still paints the image, so frames are drawn over a picture that is
+already correct: wherever animation cannot run, the still frame is what stays
+on screen -- there is no hole to fall into. It cannot run on the `cells` or
+`nvim_img` backends, where the terminal's pixel cell size is unmeasurable, or
+on a terminal profile not validated for natural-size placements (WezTerm is
+deliberately excluded -- see |md-viewer-terminals|). Very long or large
+recordings are thinned to a fixed pixel budget -- duration preserved, motion
+choppier -- rather than allowed to grow the terminal's memory without bound,
+and a source past the hard caps stays a still image.
+
+Animation is suspended while a drag or visual selection is in progress, while
+a floating window occludes the preview, and while the completion popup is up.
+`:MdViewerHealth` reports the strategy and the layer stack; `:MdViewerDebug`
+reports per-animation state and, when nothing is moving,
+`animation_suppressed_reason`.
 
 An image that is refused or fails shows a visible placeholder naming the
-reason: a dashed border for a policy refusal (remote images off, host not
-allowlisted, non-https), a solid border for an attempted fetch that failed
-(unreachable, timed out, too large, not a valid image). See
-docs/troubleshooting.md.
+reason: a dashed border for a policy refusal (a non-public destination,
+non-https), a solid border for an attempted fetch that failed (unreachable,
+timed out, too large, not a valid image). See docs/troubleshooting.md.
 
-Previewing a document that references images on an allowlisted host sends
-requests to that host, which discloses that the document was viewed. Read
-SECURITY.md for this and the other trade-offs before adding hosts.
+Previewing a document that references a remote image sends that host a
+request, which discloses that the document was viewed. Read SECURITY.md for
+this and the other trade-offs.
 
 =============================================================================
 COMMANDS                                                 *md-viewer-commands*
@@ -460,12 +522,12 @@ option's notes in lua/md-viewer/config.lua.
 SECURITY                                                 *md-viewer-security*
 
 The renderer blocks all runtime browser networking unconditionally, disables
-browser JavaScript, and disables raw Markdown HTML. Remote images render only
-from hosts allowlisted in `security.remote_images` -- none by default, and
-fetched by the renderer process rather than the browser
-(|md-viewer-remote-images|). Local images and local links are confined to a
-canonical document root (|md-viewer-document-root|). Initial npm ci
-installation may contact the configured npm registry.
+browser JavaScript, and disables raw Markdown HTML. Remote images are fetched
+by the renderer process rather than the browser, and only from public network
+destinations -- never loopback, private, or link-local, on the initial URL or
+a redirect hop (|md-viewer-remote-images|). Local images and local links are
+confined to a canonical document root (|md-viewer-document-root|). Initial
+npm ci installation may contact the configured npm registry.
 
 Mouse and keyboard interaction adds no new attack surface: every gesture
 resolves against the same already-sanitized document (nothing re-parses
@@ -479,8 +541,8 @@ something it would execute rather than display: macOS bundles and scripts,
 Windows executables, .desktop/.AppImage/.jar, disk images, or any file with an
 execute bit. Those are refused with a notification.
 
-Read SECURITY.md before setting `security.remote_images` or enabling
-`security.raw_html`; both are reported as overrides by :MdViewerHealth.
+Read SECURITY.md before enabling `security.raw_html`; it is reported as an
+override by :MdViewerHealth.
 
 =============================================================================
 HEALTH AND DIAGNOSTICS                                     *md-viewer-health*

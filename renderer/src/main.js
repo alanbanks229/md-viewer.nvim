@@ -4,12 +4,18 @@ import { fileURLToPath } from "node:url";
 import { LineProtocol } from "./protocol.js";
 import { BrowserRenderer } from "./browser.js";
 import { renderMarkdown } from "./markdown.js";
-import { normalizeAllowlist } from "./remote-images.js";
+import { AnimationStore } from "./animation.js";
 import { LANES, createLaneError, createLaneRegistry } from "./lanes.js";
 import { validateEnvelope } from "./interact.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const browser = new BrowserRenderer({ assetsDir: path.resolve(directory, "../assets") });
+// Frames are written inside the browser's own temp directory, which is the
+// trust boundary: the terminal is handed a path to read, so that path must
+// never be one the document chose. browser.close() already removes it. The
+// provider hands the store the live Browser handle so its decode context can
+// follow a relaunch; the store never owns browser lifecycle.
+const animations = new AnimationStore({ dir: browser.tempDir, browserProvider: () => browser.browser });
 
 const MAX_CACHED_DOCUMENTS = 64;
 // documentId -> { key, html, sourceMap }. The source map is the trusted-memory
@@ -149,11 +155,11 @@ function dispatchRender(request) {
       markdownKey = previous.key;
       markdownReused = true;
       html = previous.html;
+      // A hit must refresh recency. Captures are the scroll path -- the
+      // hottest there is -- and without this a document scrolled for an hour
+      // ages to the eviction end of the queue while it is on screen.
+      rememberMarkdown(params.documentId, previous);
     } else {
-      // Normalized (sorted, deduplicated) so it can join the cache key: an
-      // allowlist edit must invalidate the cached HTML, and a mere reordering
-      // must not.
-      const remoteImages = normalizeAllowlist(params.remoteImages);
       markdownKey = JSON.stringify([
         params.contentRevision ?? params.markdown,
         params.rawHtml === true,
@@ -161,11 +167,18 @@ function dispatchRender(request) {
         Number(params.maxLocalImageBytes) || 10 * 1024 * 1024,
         params.baseDir,
         params.documentRoot,
-        remoteImages,
+        // Whether animation is on changes the markup -- an animated image
+        // carries `data-md-anim-id` or it does not -- so flipping it has to
+        // invalidate the cached HTML. The drawn *size* deliberately stays out
+        // of this key: resizing the window must re-encode frames, not re-parse
+        // the document.
+        params.animate === true,
       ]);
       markdownReused = previous?.key === markdownKey;
       if (markdownReused) {
         html = previous.html;
+        // Same refresh as the capture path: a reused parse is still a use.
+        rememberMarkdown(params.documentId, previous);
       } else {
         const rendered = await renderMarkdown(params.markdown, {
           rawHtml: params.rawHtml === true,
@@ -173,11 +186,12 @@ function dispatchRender(request) {
           maxLocalImageBytes: Number(params.maxLocalImageBytes) || 10 * 1024 * 1024,
           baseDir: params.baseDir,
           documentRoot: params.documentRoot,
-          remoteImages,
+          animationStore: params.animate === true ? animations : null,
         });
         html = rendered.html;
         rememberMarkdown(params.documentId, {
           key: markdownKey, html: rendered.html, sourceMap: rendered.sourceMap,
+          animations: rendered.animations,
         });
         // New content: whatever the user had selected or searched for belongs to
         // the old document body and must not be carried forward.
@@ -185,8 +199,23 @@ function dispatchRender(request) {
       }
     }
 
-    const result = await browser.render({ ...params, contentFingerprint: markdownKey }, html, request.id);
+    const cachedEntry = markdownCache.get(params.documentId);
+    const result = await browser.render(
+      { ...params, contentFingerprint: markdownKey, animationIds: [...(cachedEntry?.animations?.keys() ?? [])] },
+      html,
+      request.id
+    );
     result.markdownReused = markdownReused;
+    // Animation geometry travels with the render it was measured against --
+    // same response, same staleness lane as the base image, so the two can
+    // never disagree. The sha is joined here so the Lua side can ask the
+    // content-addressed media lane for frames without this process keeping a
+    // second, evictable copy of what the request means.
+    const registry = cachedEntry?.animations;
+    result.animations = (result.animations ?? []).flatMap((rect) => {
+      const meta = registry?.get(rect.id);
+      return meta ? [{ ...rect, sha: meta.sha }] : [];
+    });
     const after = lanes.isStale(ticket);
     if (after) {
       unlinkQuietly(result.pngPath);
@@ -265,9 +294,40 @@ function dispatchInteract(request) {
   return enqueue(task, ticket);
 }
 
+/// Materialize the PNG frames for animated images, addressed by content hash.
+///
+/// Deliberately outside `enqueue`. The decode happens in the decode context's
+/// own page, never the shared render page, so the serial page queue buys
+/// nothing and joining it would put a decode in front of every scroll and
+/// keystroke.
+///
+/// The request names (sha, drawn size) per animation and nothing else.
+/// Geometry lives in the render response it was measured for, so there is no
+/// second copy here to go stale -- the race where a decode finished against a
+/// document that had moved on is unrepresentable in this shape. Every item
+/// resolves to its own status; a sha this process no longer holds answers
+/// `unknown-source`, which the Lua side treats as "ask again after the next
+/// render re-registers the bytes", never as "this document has no animations".
+function dispatchAnimation(request) {
+  const params = request.params ?? {};
+  const requests = Array.isArray(params.requests) ? params.requests : null;
+  if (!requests) throw new Error("animation requires a requests array");
+
+  const jobs = requests.map(async (item) => {
+    const id = typeof item?.id === "string" ? item.id : null;
+    if (!id || typeof item?.sha !== "string") {
+      return { id: id ?? "?", status: "error", reason: "each animation request needs id and sha strings" };
+    }
+    const outcome = await animations.materialize(item.sha, item.targetWidthPx, item.targetHeightPx);
+    return { id, ...outcome };
+  });
+  return Promise.all(jobs).then((resolved) => ({ animations: resolved }));
+}
+
 async function dispatch(request) {
   if (request.method === "shutdown") {
     shuttingDown = true;
+    await animations.close().catch(() => {});
     await browser.close();
     setImmediate(() => process.exit(0));
     return { shutdown: true };
@@ -280,8 +340,10 @@ async function dispatch(request) {
       cachedDocuments: markdownCache.size,
       laneDocuments: lanes.size,
       interactionDocuments: interactionState.size,
+      animationStore: animations.snapshot(),
     };
   }
+  if (request.method === "animation") return dispatchAnimation(request);
   if (request.method === "interact") return dispatchInteract(request);
   if (request.method !== "render" && request.method !== "capture") {
     throw new Error(`unknown method: ${request.method}`);
@@ -295,6 +357,7 @@ protocol.start();
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  await animations.close().catch(() => {});
   await browser.close();
   process.exit(0);
 }

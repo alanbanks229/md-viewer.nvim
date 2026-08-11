@@ -3,6 +3,7 @@ import taskLists from "markdown-it-task-lists";
 import hljs from "highlight.js";
 import sanitizeHtml from "sanitize-html";
 import { attachSourceMaps } from "./source-map.js";
+import { rawImagePlugin } from "./raw-image.js";
 import { resolveLocalImage } from "./security.js";
 import { REMOTE_IMAGES, resolveRemoteImages } from "./remote-images.js";
 import {
@@ -64,6 +65,13 @@ function createMarkdown(options) {
   md.use(taskLists, { enabled: false, label: true, labelAfter: true });
   md.use(alertPlugin);
   md.use(headingAnchorPlugin);
+  // Ahead of provenance on purpose: `provenancePlugin` wraps every rule already
+  // present in the inline ruler at install time, so registering here is what
+  // gives a converted `<img>` the same span capture -- and therefore the same
+  // exact source position -- that `![](...)` gets. Registered after, the token
+  // would carry no provenance and `registerPointRegion` would silently return
+  // null: degraded rather than wrong, but degraded for no reason.
+  md.use(rawImagePlugin);
   // Registered last on purpose: `Ruler.after()` inserts at index+1, so the
   // last-registered `after("inline")` rule runs first. Provenance has to read
   // inline content before markdown-it-task-lists rewrites it.
@@ -99,12 +107,15 @@ function createMarkdown(options) {
     const source = token.attrGet("src") ?? "";
     // Remote sources were resolved (fetched, validated, inlined -- or refused)
     // before rendering began; the rule itself never awaits. A miss can only
-    // mean the source was not collected, which fails closed.
+    // mean the source was not collected, which fails closed -- this is a bug
+    // guard, not a policy outcome, so it is "failed" rather than "blocked".
     const result = /^https?:/i.test(source)
-      ? (env[REMOTE_IMAGES]?.get(source) ?? { ok: false, kind: "blocked", label: "remote images are disabled" })
+      ? (env[REMOTE_IMAGES]?.get(source) ?? { ok: false, kind: "failed", label: "remote image was not resolved" })
       : resolveLocalImage(source, options);
-    if (result.ok) token.attrSet("src", result.dataUri);
-    else {
+    if (result.ok) {
+      token.attrSet("src", result.dataUri);
+      registerAnimation(token, result.dataUri, options, env);
+    } else {
       token.attrSet("src", placeholderDataUri(result.kind, result.label, source));
       token.attrJoin("class", result.kind === "blocked" ? "md-viewer-image-blocked" : "md-viewer-image-failed");
       token.attrSet("title", `${result.label} — ${source}`.slice(0, 256));
@@ -126,6 +137,42 @@ function createMarkdown(options) {
     return `<pre${attrs}><code${langClass}>${highlighted}</code></pre>\n`;
   };
   return md;
+}
+
+// The data-URI prefixes whose bytes can carry animation at all. GIF, and WebP
+// whose VP8X ANIM flag the store's sniff checks -- PNG is deliberately absent
+// (APNG detection needs a chunk walk nothing else pays for) and every other
+// type is still by construction.
+const ANIMATABLE_DATA_URIS = ["data:image/gif;base64,", "data:image/webp;base64,"];
+const ANIMATIONS = Symbol("md-viewer.animations");
+
+/// Mark an image whose bytes are an animated GIF or WebP, so the terminal can
+/// draw the animation over the still frame Chromium paints.
+///
+/// This lives in the render rule rather than in either resolver because it is
+/// where the local and remote paths converge, and because it is the only place
+/// that knows the image will actually be emitted. Recovering the bytes from the
+/// data URI costs one base64 decode, and only for animatable types; carrying a
+/// decoded buffer through remote-images.js's cache instead would double its
+/// budget.
+///
+/// With no `animationStore` -- every existing caller, and every test that does
+/// not ask for animation -- this does nothing at all and the markup is byte for
+/// byte what it was.
+function registerAnimation(token, dataUri, options, env) {
+  const store = options.animationStore;
+  if (!store) return;
+  const prefix = ANIMATABLE_DATA_URIS.find((candidate) => dataUri.startsWith(candidate));
+  if (!prefix) return;
+  const animations = env[ANIMATIONS];
+  if (!animations || animations.size >= store.perDocumentLimit) return;
+  const registered = store.register(Buffer.from(dataUri.slice(prefix.length), "base64"));
+  // A still image, or one past a cap, keeps its painted frame and says
+  // nothing. Failing closed here is what makes "never a blank hole" true by
+  // construction rather than by the Lua side checking for it.
+  if (!registered) return;
+  token.attrSet("data-md-anim-id", registered.id);
+  animations.set(registered.id, { sha: registered.sha, frameCount: registered.frameCount });
 }
 
 function xmlEscape(text) {
@@ -188,7 +235,7 @@ function collectRemoteImageSources(tokens, sources = []) {
 export async function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);
   const builder = createSourceMapBuilder(markdown);
-  const env = { [SOURCE_MAP_BUILDER]: builder };
+  const env = { [SOURCE_MAP_BUILDER]: builder, [ANIMATIONS]: new Map() };
   const tokens = attachSourceMaps(md.parse(markdown, env), env, builder.lines);
   env[REMOTE_IMAGES] = await resolveRemoteImages(collectRemoteImageSources(tokens), options);
   let html = md.renderer.render(tokens, md.options, env);
@@ -202,7 +249,20 @@ export async function renderMarkdown(markdown, options) {
       // document can do by forging one is send its own click somewhere else in
       // itself -- the same bounded exposure `data-source-start` already has.
       "*": ["class", "data-source-start", "data-source-end", "data-alert-title", "data-md-source-id"],
-      a: ["href", "title"], img: ["src", "alt", "title", "class"],
+      // `width`/`height` carry across from a raw `<img>` only. sanitize-html
+      // validates attribute *names* and never their values, so raw-image.js's
+      // bare-integer check is the actual guard and this entry is only what lets
+      // an already-validated value through. They matter because preview.css
+      // gives every image `max-width: 100%; height: auto` -- with no intrinsic
+      // size the box is laid out from the decoded bytes alone, and a wide
+      // screenshot reflows the document around it after the fact.
+      // `data-md-anim-id` is an opaque per-render key, like `data-md-source-id`
+      // and with the same bounded exposure: a document that forges one can at
+      // most point its own <img> at another of its own animations, and
+      // collectAnimationGeometry refuses ids it did not mint and dedupes the
+      // rest, so it cannot multiply placements either.
+      a: ["href", "title"],
+      img: ["src", "alt", "title", "class", "width", "height", "data-md-anim-id"],
       input: ["type", "checked", "disabled"], label: ["class"], th: ["style"], td: ["style"],
       h1: ["id"], h2: ["id"], h3: ["id"], h4: ["id"], h5: ["id"], h6: ["id"],
     },
@@ -211,5 +271,5 @@ export async function renderMarkdown(markdown, options) {
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });
-  return { html, sourceMap: builder.build() };
+  return { html, sourceMap: builder.build(), animations: env[ANIMATIONS] };
 }

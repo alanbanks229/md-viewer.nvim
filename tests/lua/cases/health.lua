@@ -36,7 +36,6 @@ local function base_report()
     chromium_launch = "succeeded",
     temporary_directory_writable = true,
     renderer_process = { running = true, pid = 1234, stderr = "" },
-    remote_image_hosts = {},
     raw_html = false,
     local_image_root = "/project",
     document_root_source = "configured (security.document_root)",
@@ -44,6 +43,8 @@ local function base_report()
     document_root_unbounded = false,
     security_overrides = "none",
     viewport_calibration_tier = "estimated",
+    viewport_cell_pixels = "unmeasured (the terminal reports no pixel geometry)",
+    viewport_cell_css_px = "n/a (estimated tier)",
     interaction_enabled = true,
     chromium_active_document = "doc-1",
     chromium_cached_document_frames = 1,
@@ -168,15 +169,6 @@ return function(t)
       "a note states what is true; it does not defend the user's configuration to them"
     )
 
-    -- A configured allowlist is likewise a stated fact: a note naming the
-    -- hosts (the overrides row already shouts SECURITY RELAXED), not a warning.
-    local allowing = base_report()
-    allowing.remote_image_hosts = { "github.com", "*.githubusercontent.com" }
-    local allowing_diagnosis = health._diagnose(allowing, auto_cfg)
-    t.eq(0, #allowing_diagnosis.warnings, "an allowlist alone is not a warning")
-    t.eq(1, #allowing_diagnosis.notes, "a configured allowlist is reported as a note")
-    t.ok(allowing_diagnosis.notes[1].text:match("github%.com"), "the note names the allowed hosts")
-
     -- The genuinely broken case is unchanged: a document outside a configured
     -- root has every local link and image refused, and that is an error.
     local excluded = base_report()
@@ -192,6 +184,26 @@ return function(t)
   -- End-to-end: the concise default and the verbose opt-in both render from
   -- the same collected state, without embedded newlines (nvim_buf_set_lines
   -- rejects those) and without losing any detail field in verbose mode.
+  -- The calibration tier is only checkable if the numbers behind it are
+  -- printed beside it: "measured" alone cannot show that the device-pixel
+  -- reading was converted to CSS pixels the right way round, which is the one
+  -- way that tier goes wrong.
+  do
+    local measured = base_report()
+    measured.viewport_calibration_tier = "measured"
+    measured.viewport_cell_pixels = "14.00x32.00 px per cell (208x55 cells reported by TIOCGWINSZ)"
+    measured.viewport_cell_css_px = "7.00x16.00"
+    local lines = table.concat(health.environment_lines(measured), "\n")
+    t.ok(lines:match("viewport calibration:%s+measured"), "the environment dump names the calibration tier")
+    t.ok(lines:match("measured cell:%s+14%.00x32%.00 px per cell"), "the environment dump shows the measured cell")
+    t.ok(lines:match("viewport cell %(CSS px%):%s+7%.00x16%.00"), "the environment dump shows the converted CSS cell")
+
+    local estimated = base_report()
+    local estimated_lines = table.concat(health.environment_lines(estimated), "\n")
+    t.ok(estimated_lines:match("unmeasured"), "an unmeasurable terminal says so rather than showing a cell")
+    t.ok(estimated_lines:match("n/a %(estimated tier%)"), "the estimated tier reports no exact CSS cell")
+  end
+
   local original_tmux = vim.env.TMUX
   vim.env.TMUX = "/tmp/tmux-501/default,1234,0" -- forces a second, multi-entry caveat
 

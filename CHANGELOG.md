@@ -7,20 +7,55 @@ All notable changes to this project will be documented here. The project uses
 
 ### Added
 
-- **Opt-in remote images.** `security.remote_images` is a host allowlist
-  (empty by default — remote images stay off): a Markdown image whose https URL
-  matches it is fetched by the *renderer process*, validated exactly like a
-  local image (magic bytes, `max_local_image_bytes` enforced while streaming),
-  and inlined as a data URI. The browser still makes no network requests — its
-  route, CSP, and sanitizer are unchanged and unconditional. Redirects are
-  followed at most three hops with every hop re-checked against the allowlist;
-  `*.example.com` matches proper subdomains only, never the bare domain and
-  never `evil-example.com`. Fetches are cached in the renderer process so
-  live-preview re-renders do not refetch. See `:help md-viewer-remote-images`
-  and SECURITY.md.
+- **Remote images.** A Markdown image or bare `<img>` whose URL is https is
+  fetched by the *renderer process*, validated exactly like a local image
+  (magic bytes, `max_local_image_bytes` enforced while streaming), and inlined
+  as a data URI. No configuration is needed for an ordinary public host. The
+  browser still makes no network requests — its route, CSP, and sanitizer are
+  unchanged and unconditional. Requests to loopback, private, link-local, and
+  other non-public network destinations are refused, on the initial URL and on
+  every redirect hop; redirects are otherwise followed at most three hops.
+  Fetches are cached in the renderer process so live-preview re-renders do not
+  refetch. See `:help md-viewer-remote-images` and SECURITY.md.
+- **Animated images.** An animated GIF or WebP can be played by the terminal on
+  its own layer over the browser-painted still frame, with each frame keeping
+  its own display time. Two strategies: terminal-driven playback through the
+  Kitty graphics protocol's animation extension, and client-driven frame
+  placement from one shared timer, capped by `render.animate_fps` (default 5)
+  and chosen per terminal profile (`terminal.animation`, default `"auto"`).
+  **Off by default** — set `render.animate = true` to turn it on. With it off
+  nothing about the document changes: the image is still inlined and painted,
+  and the still first frame the screenshot captured is what stays on screen, so
+  the default costs motion and never a picture. See
+  `:help md-viewer-animation`.
 
 ### Changed
 
+- **Viewport calibration is measured from the terminal.** The cell size used to
+  size the browser render now comes from the operating system — the pixel
+  geometry `TIOCGWINSZ` carries beside the row and column counts, the same
+  measurement the image-placement path already trusted. `:MdViewerHealth`
+  reports the tier as `measured` alongside the numbers behind it, and
+  `estimated` now means the terminal genuinely reports no pixel geometry,
+  chiefly under tmux and screen. `MD_VIEWER_CELL_WIDTH_PX` and
+  `MD_VIEWER_CELL_HEIGHT_PX` still take precedence over the measurement, and
+  are still read as CSS pixels — that is the measured size divided by
+  `render.device_scale_factor`, so a 2x display measuring 14×32 wants 7 and 16.
+- **The preview looks different, and `render.font_size_px` now defaults to 14.**
+  A measured cell on a 2x display is about 7 CSS pixels wide against the 10 the
+  estimate assumed, so the viewport is roughly 30% narrower and the same font
+  size renders visibly larger relative to the preview. The default font drops
+  from 22 to 14 to compensate, which puts preview text at roughly one character
+  per terminal cell. If you have pinned `render.font_size_px`, scale your value
+  by about 0.7 to keep the density you had. Vertical aspect improves in the
+  same change: a real 14×32 cell is 0.4375 against the assumed 0.5, a 14%
+  stretch that is now gone.
+- **`render.device_scale_factor` and `render.cell_aspect_ratio` are validated.**
+  Both are divisors on the viewport path and neither was checked before. The
+  device scale must be between 1 and 3, matching the bound the renderer applies
+  to the same value; the aspect ratio must be positive. A configuration outside
+  those now fails at `setup()` instead of producing a viewport that disagrees
+  with the page.
 - **Images that cannot render are now visible.** A blocked or failed image
   shows a placeholder naming the reason (dashed border for a policy refusal,
   solid for an attempted fetch or read that failed, with the source in the
@@ -29,18 +64,28 @@ All notable changes to this project will be documented here. The project uses
   placeholders, so previews of such documents lay out slightly differently
   than before.
 - **Breaking: `security.network` was removed.** It had no effect on page
-  content — the page CSP already refused every remote subresource — and
-  `security.remote_images` supersedes it. Browser networking is now always
-  blocked with no configuration that relaxes it; a leftover `security.network`
-  key in your config is silently ignored. As a side effect, flipping network
-  policy no longer forces a browser-context restart; only a device-scale
-  change does.
+  content — the page CSP already refused every remote subresource. Browser
+  networking is now always blocked with no configuration that relaxes it; a
+  leftover `security.network` key in your config is silently ignored. As a
+  side effect, flipping network policy no longer forces a browser-context
+  restart; only a device-scale change does.
 - **Breaking: `render.raw_html` moved to `security.raw_html`.** Raw-HTML
-  parsing is security-relevant in the same way `security.remote_images` and
-  `security.document_root` are, and now lives alongside them instead of under
-  `render`; `:MdViewerHealth` already reported it as a security override
-  before this move. Update `render.raw_html = true` to
-  `security.raw_html = true` in your config.
+  parsing is security-relevant in the same way `security.document_root` is,
+  and now lives alongside it instead of under `render`; `:MdViewerHealth`
+  already reported it as a security override before this move. Update
+  `render.raw_html = true` to `security.raw_html = true` in your config.
+
+### Fixed
+
+- **Small previews reported a viewport the page never used.** The renderer
+  floors its page viewport at 320×240 CSS pixels, and md-viewer did not mirror
+  that floor — a preview under about 15 rows tall reported a height up to 20%
+  short of the one the page actually rendered at. Those numbers are the
+  denominator of every click hit-test, drag-overlay rectangle, and animation
+  frame position, so all three were proportionally off in a short split. The
+  1920×1440 cap is mirrored the same way, so raising `render.max_width_px` or
+  `max_height_px` past what the renderer honours can no longer desynchronise
+  them either.
 
 ## [0.3.0] - 2026-08-09
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { collectBlockGeometry } from "./source-map.js";
+import { collectAnimationGeometry, collectBlockGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
 import { buildOverlaySheetPng } from "./overlay-sheet.js";
@@ -36,6 +36,13 @@ import {
 } from "./interact.js";
 
 const MAX_DOCUMENT_FRAMES = 64;
+
+// How many further renders may re-measure animation geometry that was still
+// settling when its layout was built. Each retry is one page.evaluate against a
+// page that has already loaded, and the Lua side schedules a render to carry it
+// -- so the bound is what keeps a permanently unmeasurable image (a broken
+// source has a zero box for good) from becoming a permanent render loop.
+const MAX_ANIMATION_GEOMETRY_RETRIES = 10;
 
 // How long the raw CDP capture may take before it is treated as unavailable.
 // A frame that takes this long is already useless to a preview; the number only
@@ -87,7 +94,6 @@ export class BrowserRenderer {
     this.context = null;
     this.page = null;
     this.deviceScaleFactor = null;
-    this.files = new Set();
     this.layout = null;
     this.viewport = null;
     this.discoveryReason = null;
@@ -174,7 +180,7 @@ export class BrowserRenderer {
   /// cleared *before* setContent and repopulated only after the geometry has
   /// been recollected, so there is no window in which a caller can read a
   /// half-loaded document and believe it.
-  async loadDocument({ documentId, contentRevision, layoutKey, html, theme, fontSizePx, scrollPastEnd, scrollPastEndOffsetPx, width, height }) {
+  async loadDocument({ documentId, contentRevision, layoutKey, html, theme, fontSizePx, scrollPastEnd, scrollPastEndOffsetPx, width, height, animationIds }) {
     this.active = null;
     this.layout = null;
     this.documentTokenSerial += 1;
@@ -183,9 +189,18 @@ export class BrowserRenderer {
     await this.page.setContent(documentHtml, { waitUntil: "domcontentloaded" });
     const documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
     const blocks = await collectBlockGeometry(this.page);
-    this.layout = { key: layoutKey, documentHeight, blocks };
+    // Measured here, with the layout, because that is the only moment the rects
+    // are known to match the document that produced them. A document with no
+    // animated images pays one empty-set check and no round trip.
+    //
+    // `animationsComplete` rides along so `render` can take the measurement
+    // again on a later pass: this one runs immediately after setContent, which
+    // is the least likely moment in the document's life for every data-URI
+    // image to have an intrinsic size yet.
+    const { rects: animations, complete } = await collectAnimationGeometry(this.page, animationIds ?? []);
+    this.layout = { key: layoutKey, documentHeight, blocks, animations, animationsComplete: complete };
     this.active = { documentId, contentRevision, layoutKey, token, width, height, scrollY: 0 };
-    return { token, documentHeight, blocks };
+    return { token, documentHeight, blocks, animations };
   }
 
   async applyScroll(documentHeight, height, requested) {
@@ -288,7 +303,6 @@ export class BrowserRenderer {
     const captureEncoder = await this.captureViewportPng(pngPath, scale);
     const captureMs = performance.now() - started;
     const pngBytes = fs.statSync(pngPath).size;
-    this.files.add(pngPath);
     return { pngPath, captureScale: scale, pngBytes, captureMs: round(captureMs), captureEncoder };
   }
 
@@ -343,10 +357,37 @@ export class BrowserRenderer {
       await this.loadDocument({
         documentId: params.documentId, contentRevision,
         layoutKey, html, theme, fontSizePx, scrollPastEnd, scrollPastEndOffsetPx, width, height,
+        animationIds: params.animationIds,
       });
     } else {
       if (viewportChanged) {
         this.layout.documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
+      }
+      // Take the animation measurement again if the one built with this layout
+      // timed out. Without this, that first attempt is the only one there will
+      // ever be: geometry is collected in `loadDocument` alone, and `layoutKey`
+      // carries width but not height -- so a document whose images had not been
+      // sized within the deadline stayed on its still frames for the life of
+      // the layout, and resizing the window "fixed" it only by re-keying it.
+      // Costs one page.evaluate against an already-settled page, and only until
+      // it succeeds, which is normally the very next render.
+      if (this.layout.animationsComplete === false) {
+        // One probe, no polling: a render already separates this attempt from
+        // the last, so waiting here would only add latency to the render the
+        // user is waiting on.
+        const { rects, complete } = await collectAnimationGeometry(this.page, params.animationIds ?? [], { deadlineMs: 0 });
+        // Never trade a longer set of rects for a shorter one. Nothing should
+        // un-measure an image, but a retraction here would pull placements out
+        // from under animations the Lua side is already running, which is worse
+        // than waiting for the next pass.
+        if (complete || rects.length > this.layout.animations.length) this.layout.animations = rects;
+        // Bounded, because "not measured yet" and "will never measure" look
+        // identical from here: an image whose source is broken keeps a zero box
+        // forever, and an unbounded retry would ask Lua to re-render forever
+        // chasing it. On giving up the layout is declared settled, which stops
+        // both this retry and the scheduling on the Lua side.
+        this.layout.animationRetries = (this.layout.animationRetries ?? 0) + 1;
+        this.layout.animationsComplete = complete || this.layout.animationRetries >= MAX_ANIMATION_GEOMETRY_RETRIES;
       }
     }
     const layoutMs = performance.now() - layoutStarted;
@@ -371,6 +412,8 @@ export class BrowserRenderer {
       scrollY,
       documentHeight,
       blocks: this.layout.blocks,
+      animations: this.layout.animations,
+      animationIds: params.animationIds,
     });
 
     return {
@@ -379,6 +422,15 @@ export class BrowserRenderer {
       viewportHeightPx: height,
       scrollY,
       blocks: this.layout.blocks,
+      // Document-coordinate rects only. Frames are materialized off this path
+      // (main.js's `animation` method): decoding a large GIF is seconds of CPU
+      // and this is the queue every scroll and keystroke waits behind.
+      animations: this.layout.animations ?? [],
+      // True while some minted animation still has no measurable box. The Lua
+      // side answers it with one more render, because nothing else would: an
+      // idle preview issues no renders at all, so without a nudge the retry
+      // above would sit waiting for a scroll or a keystroke that never comes.
+      animationsIncomplete: this.layout.animationsComplete === false,
       layoutReused,
       captureScale: capture.captureScale,
       captureEncoder: capture.captureEncoder,
@@ -467,6 +519,7 @@ export class BrowserRenderer {
       scrollPastEndOffsetPx: record.scrollPastEndOffsetPx,
       width: record.width,
       height: record.height,
+      animationIds: record.animationIds,
     });
     // Recollected rather than reused: the layout key pins everything that
     // affects geometry, so these should equal the stored values, and a test
@@ -474,6 +527,7 @@ export class BrowserRenderer {
     record.token = loaded.token;
     record.documentHeight = loaded.documentHeight;
     record.blocks = loaded.blocks;
+    record.animations = loaded.animations;
     const scrollY = await this.applyScroll(loaded.documentHeight, record.height, envelope.scrollY ?? record.scrollY);
     return { rehydrated: true, record, scrollY, documentHeight: loaded.documentHeight };
   }
@@ -687,7 +741,10 @@ export class BrowserRenderer {
     this.deviceScaleFactor = null;
     this.layout = this.viewport = this.active = null;
     this.documents.clear();
-    for (const file of this.files) { try { fs.unlinkSync(file); } catch {} }
+    // Captured PNGs (and animation frames) all live under tempDir; the
+    // recursive removal is the whole cleanup. A per-file Set used to sit here
+    // and grew by one path per rendered frame for the process lifetime,
+    // because the Lua side deletes the files without telling this one.
     try { fs.rmSync(this.tempDir, { recursive: true }); } catch {}
   }
 }

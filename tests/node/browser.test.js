@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserRenderer, CHROMIUM_LAUNCH_ARGS } from "../../renderer/src/browser.js";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 import { resolveSelectionInPage } from "../../renderer/src/interact.js";
+import { collectAnimationGeometry } from "../../renderer/src/source-map.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assetsDir = path.resolve(here, "../../renderer/assets");
@@ -411,4 +412,122 @@ test("a capture that never answers degrades to the Playwright path instead of ha
     assert.equal(again, "playwright_png", `${name}: the fast path must stay disabled`);
     assert.equal(playwrightScreenshots, 2, `${name}: the second frame still gets captured`);
   }
+});
+
+test("animated image geometry is reported in document coordinates, and forged ids are not", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+
+  const params = {
+    documentId: "anim-doc", contentRevision: 1,
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
+    captureScale: "device", scrollPastEnd: false, scrollPastEndOffsetPx: 0,
+    // Only "a1" was minted by this render. "a2" is on an element that never
+    // registered one, and the second "a1" is a duplicate claim.
+    animationIds: ["a1"],
+  };
+  const pixel = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+  const html = '<p style="height:200px">spacer</p>'
+    + `<img data-md-anim-id="a1" src="${pixel}" style="width:120px;height:80px;display:block;margin:0">`
+    + `<img data-md-anim-id="a2" src="${pixel}" style="width:120px;height:80px;display:block;margin:0">`
+    + `<img data-md-anim-id="a1" src="${pixel}" style="width:99px;height:99px;display:block;margin:0">`;
+
+  const result = await renderer.render(params, html, "anim-1");
+  assert.equal(result.animations.length, 1, "one id was minted, so exactly one rect is reported");
+
+  const rect = result.animations[0];
+  assert.equal(rect.id, "a1");
+  assert.equal(rect.widthPx, 120);
+  assert.equal(rect.heightPx, 80);
+  assert.ok(rect.yPx >= 200, "the rect carries its document position, not a viewport-relative one");
+
+  // A scroll must not move it: Lua subtracts scrollY itself, which is what lets
+  // the ticker follow a scroll with no re-render.
+  const scrolled = await renderer.render({ ...params, scrollY: 50 }, html, "anim-2");
+  assert.deepEqual(scrolled.animations, result.animations);
+
+  // A document with nothing registered reports nothing and asks the page nothing.
+  const none = await renderer.render({ ...params, documentId: "plain", animationIds: [] }, html, "anim-3");
+  assert.deepEqual(none.animations, []);
+  assert.equal(none.animationsIncomplete, false);
+});
+
+// The regression for the bug where every animation in a full-screen preview
+// stayed on its first frame until the window was resized. Geometry is collected
+// once per layout, and a data-URI <img> has no box until Chromium has sized it,
+// so a measurement taken before that happened reported *no animations* -- which
+// is indistinguishable from a document that has none. That empty set was then
+// cached for the life of the layout, and `layoutKey` carries width but not
+// height, so nothing short of a re-key ever measured again.
+test("an animation measurement that has not settled is retried, not cached as final", async () => {
+  const rectFor = (id) => ({ id, xPx: 0, yPx: 0, widthPx: 10, heightPx: 10 });
+  // Stands in for a page whose images gain their boxes only after some probes.
+  const stub = (answers) => {
+    let call = 0;
+    return { evaluate: async () => answers[Math.min(call++, answers.length - 1)] };
+  };
+
+  const settles = await collectAnimationGeometry(
+    stub([[], [rectFor("a1")], [rectFor("a1"), rectFor("a2")]]),
+    ["a1", "a2"]
+  );
+  assert.equal(settles.rects.length, 2, "the poll keeps asking until every minted id has a box");
+  assert.equal(settles.complete, true);
+
+  // The case that caused the bug: the deadline expires with ids unmeasured.
+  // Reporting only the short array is what let the caller treat it as settled.
+  const expired = await collectAnimationGeometry(stub([[rectFor("a1")]]), ["a1", "a2"], { deadlineMs: 0 });
+  assert.deepEqual(expired.rects, [rectFor("a1")], "whatever was measured is still returned");
+  assert.equal(expired.complete, false, "a timed-out measurement must not pass for a settled one");
+
+  // Nothing minted costs no round trip at all.
+  const empty = await collectAnimationGeometry(
+    { evaluate: () => assert.fail("a document with no animations must not be asked about them") },
+    []
+  );
+  assert.deepEqual(empty, { rects: [], complete: true });
+});
+
+test("a layout whose animation geometry never settles re-measures, then stops asking", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+
+  const pixel = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
+  // "a2" is minted but has no element in the document, so the measurement can
+  // never complete -- the same shape as an image Chromium has not sized yet,
+  // and the case that must not retry forever.
+  const params = {
+    documentId: "unsettled", contentRevision: 1,
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
+    captureScale: "device", scrollPastEnd: false, scrollPastEndOffsetPx: 0,
+    animationIds: ["a1", "a2"],
+  };
+  const html = `<img data-md-anim-id="a1" src="${pixel}" style="width:120px;height:80px;display:block;margin:0">`;
+
+  const first = await renderer.render(params, html, "unsettled-1");
+  assert.equal(first.animationsIncomplete, true, "an unmeasured id is reported, not hidden");
+  assert.equal(first.animations.length, 1, "the id that could be measured is still delivered");
+
+  // Every render below reuses the layout -- the path that used to hand back the
+  // first measurement unchanged forever.
+  let renders = 1;
+  let last = first;
+  while (last.animationsIncomplete && renders < 40) {
+    last = await renderer.render(params, html, `unsettled-${++renders}`);
+    assert.equal(last.animations.length, 1, "a retry never retracts a rect it already reported");
+  }
+  assert.equal(last.animationsIncomplete, false, "the retry is bounded rather than a render loop");
+  assert.ok(renders <= 12, `gave up after ${renders} renders, which is the bound plus the first pass`);
 });

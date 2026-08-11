@@ -1,4 +1,5 @@
 local backends = require("md-viewer.backends")
+local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local process = require("md-viewer.process")
@@ -122,10 +123,18 @@ function M.collect(renderer_result, renderer_error)
     -- bytes per frame) or by re-photographing the page, and why.
     raw_graphics_overlay_supported = backend.kitty_raw.overlay_supported,
     raw_graphics_overlay_reason = backend.kitty_raw.overlay_reason,
-    -- The overlay's own layer. It must sit exactly one above
-    -- raw_graphics_zindex: equal numbers mean the base and the highlight are
-    -- ordered by image id instead, and the highlight disappears under the base
-    -- as soon as a full frame is re-uploaded.
+    -- The rest of the layer stack, reported beside the base because the three
+    -- numbers together are the diagnostic: they must be distinct and ascending.
+    -- Two equal numbers anywhere mean those layers are ordered by image id
+    -- instead, and whichever is meant to be on top disappears under the base as
+    -- soon as a full frame is re-uploaded.
+    raw_graphics_animation_zindex = backend.kitty_raw.animation_zindex,
+    raw_graphics_animation_supported = backend.kitty_raw.animation_supported,
+    raw_graphics_animation_reason = backend.kitty_raw.animation_reason,
+    raw_graphics_animation_mode = backend.kitty_raw.animation_mode,
+    raw_graphics_animation_native = backend.kitty_raw.animation_native_supported,
+    raw_graphics_animation_native_reason = backend.kitty_raw.animation_native_reason,
+    raw_graphics_animation_images = backend.kitty_raw.animation_images,
     raw_graphics_overlay_zindex = backend.kitty_raw.overlay_zindex or "none (interaction.selection_overlay=off)",
     -- What a pixel is worth on screen. Overlay rectangles are sized in pixels,
     -- so "unmeasured" here is the whole reason the overlay is off.
@@ -146,7 +155,6 @@ function M.collect(renderer_result, renderer_error)
       or (renderer_error and ("failed: " .. renderer_error) or "not tested"),
     temporary_directory_writable = temp_writable(),
     renderer_process = process.status(),
-    remote_image_hosts = sec.remote_image_hosts,
     raw_html = sec.raw_html,
     local_image_root = sec.document_root,
     document_root_source = sec.document_root_source,
@@ -156,7 +164,18 @@ function M.collect(renderer_result, renderer_error)
     document_root_excludes_current = sec.document_root_excludes_current or false,
     document_root_unbounded = sec.document_root_unbounded or false,
     security_overrides = sec.overrides,
-    viewport_calibration_tier = coordinates.calibration_tier(),
+    viewport_calibration_tier = coordinates.calibration_tier(cfg.render),
+    -- The two numbers behind that tier. The measurement is in device pixels
+    -- (what a placement rectangle is drawn in); the CSS pair is what the
+    -- browser viewport is built from, and the two differ by
+    -- `device_scale_factor`. Printing both is what makes "measured" checkable:
+    -- a tier name alone cannot show that the conversion went the right way.
+    viewport_cell_pixels = cellpixels.describe(),
+    viewport_cell_css_px = (function()
+      local _, css_w, css_h = coordinates.cell_metrics(cfg.render)
+      if not css_w then return "n/a (estimated tier)" end
+      return ("%.2fx%.2f"):format(css_w, css_h)
+    end)(),
     interaction_enabled = cfg.interaction.enabled,
     -- The single authoritative answer to "which document is currently loaded in
     -- Chromium" (renderer/src/browser.js's `this.active`), only available once
@@ -275,10 +294,33 @@ local function verbose_raw_graphics(report)
   -- the cause, so this does not repeat the same parenthetical verbatim.
   local cell_pixels = tostring(report.raw_graphics_cell_pixels)
   if cell_pixels:match("^unmeasured") then cell_pixels = "unmeasured" end
+  -- The strategy is the fact a bug report needs first: "native" means the
+  -- terminal owns playback and a stutter is the terminal's, "frames" means
+  -- the shared timer owns it, "off" carries its own reason.
+  local animation = report.raw_graphics_animation_supported
+      and ("%s, layer %s over base %s"):format(
+        report.raw_graphics_animation_native and "native (terminal-driven)"
+          or ("frames (client-driven, %s fps cap)"):format(require("md-viewer.config").get().render.animate_fps or 5),
+        report.raw_graphics_animation_zindex,
+        report.raw_graphics_zindex
+      )
+    or ("off -- %s"):format(report.raw_graphics_animation_reason or "reason not reported")
   return {
     { "overlay", overlay },
+    { "animation", animation },
     { "cell pixels", cell_pixels },
     { "base layer", ("%s (%s)"):format(report.raw_graphics_zindex, report.raw_graphics_zindex_source) },
+    -- Printed as one ascending run rather than three separate numbers, because
+    -- the failure this catches is two of them being equal -- which is obvious
+    -- on one line and easy to miss across three.
+    {
+      "layer stack",
+      ("base %s / animation %s / selection %s"):format(
+        report.raw_graphics_zindex,
+        report.raw_graphics_animation_zindex,
+        report.raw_graphics_overlay_zindex
+      ),
+    },
     {
       "double buffer",
       ("%s (%s)"):format(yes_no(report.raw_graphics_double_buffer), report.raw_graphics_double_buffer_source),
@@ -314,9 +356,7 @@ end
 local function verbose_security(report)
   -- document_root_unbounded is not reported: it is true exactly when the
   -- document root on the line above is "/".
-  local hosts = report.remote_image_hosts or {}
   local rows = {
-    { "remote images", #hosts == 0 and "off" or ("ENABLED (" .. table.concat(hosts, ", ") .. ")") },
     { "raw html", yes_no(report.raw_html) },
     { "document root", ("%s (%s)"):format(report.local_image_root, report.document_root_source) },
   }
@@ -363,6 +403,8 @@ function M.environment_lines(report)
       rows = {
         { "interaction enabled", yes_no(report.interaction_enabled) },
         { "viewport calibration", report.viewport_calibration_tier },
+        { "measured cell", report.viewport_cell_pixels },
+        { "viewport cell (CSS px)", report.viewport_cell_css_px },
       },
     },
     { title = "Chromium Session State", rows = verbose_chromium(report) },
@@ -521,20 +563,10 @@ end
 ---a health report arguing with the reader about their own configuration.
 local function build_notes(report)
   local notes = {}
-  local hosts = report.remote_image_hosts or {}
   if report.document_root_unbounded then
     notes[#notes + 1] = {
       text = 'security.document_root is "/": local links and images resolve to any path on this filesystem',
       detail = { "Browser network access is always blocked, so a document can read a local file but cannot send it." },
-    }
-  end
-  if #hosts > 0 then
-    notes[#notes + 1] = {
-      text = "security.remote_images allows remote images from: " .. table.concat(hosts, ", "),
-      detail = {
-        "Previewing a document that references images on these hosts sends them HTTP requests, "
-          .. "which discloses that the document was viewed. The browser itself still makes no requests.",
-      },
     }
   end
   return notes

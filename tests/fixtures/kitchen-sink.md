@@ -53,6 +53,6 @@ print(message)
 
 ![A local image](./local-image.png)
 
-![A remote image that must be blocked](https://example.invalid/tracker.png)
+![A remote image pointed at a non-public address, refused with no network attempt](https://127.0.0.1/tracker.png)
 
 <script>alert("raw HTML is disabled")</script>

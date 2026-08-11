@@ -1,5 +1,16 @@
 local M = {}
 
+local cellpixels = require("md-viewer.cellpixels")
+
+-- browser.js bounds the page viewport itself before it renders (`render()`:
+-- 320..1920 wide, 240..1440 tall, in CSS pixels). Those bounds are mirrored here
+-- so `viewport()` describes the viewport the page actually got: its numbers
+-- become `session.viewport_width_px`/`viewport_height_render_px`, which are the
+-- denominator of every hit test, overlay scale, and animation frame. A viewport
+-- reported outside them is a silent scale error in all three.
+local MIN_VIEWPORT_WIDTH_PX, MIN_VIEWPORT_HEIGHT_PX = 320, 240
+local MAX_VIEWPORT_WIDTH_PX, MAX_VIEWPORT_HEIGHT_PX = 1920, 1440
+
 local function option_value(name, scope)
   local ok, value = pcall(vim.api.nvim_get_option_value, name, scope or {})
   return ok and value or nil
@@ -178,44 +189,80 @@ function M.passive_overlays(rect, ignored_win, bleed_cells)
   return result
 end
 
----Which calibration tier cell-metric conversion currently uses:
----"env" when MD_VIEWER_CELL_WIDTH_PX/MD_VIEWER_CELL_HEIGHT_PX are both set to
----positive numbers, otherwise "estimated" (the configured aspect ratio and
----width guess).
+---The terminal's cell in **CSS** pixels, and which tier it came from.
 ---
----A "measured" tier (deriving real cell-pixel dimensions from the terminal
----itself, with no configuration at all) was investigated for this and is not
----currently possible: Neovim's `TermResponse` autocmd only fires for DA1,
----OSC, DCS, and APC terminal responses, and `nvim_list_uis()` reports grid
----size in cells, not pixels. The XTWINOPS pixel-geometry reports
----(`CSI 14 t` / `CSI 18 t`) most terminals answer are plain CSI responses,
----which Neovim does not expose a way to read. If a future Neovim version
----exposes real pixel geometry, add "measured" ahead of "env" here.
-function M.calibration_tier()
-  local cell_w = tonumber(vim.env.MD_VIEWER_CELL_WIDTH_PX)
-  local cell_h = tonumber(vim.env.MD_VIEWER_CELL_HEIGHT_PX)
-  if cell_w and cell_h and cell_w > 0 and cell_h > 0 then return "env" end
-  return "estimated"
+---Precedence is env > measured > estimated:
+---
+---* "env" -- MD_VIEWER_CELL_WIDTH_PX/MD_VIEWER_CELL_HEIGHT_PX are both set to
+---  positive numbers. Deliberately ahead of the measurement so a terminal that
+---  reports geometry nobody can correct stays correctable by hand.
+---* "measured" -- `cellpixels.measure()` answered. `TIOCGWINSZ` carries
+---  `ws_xpixel`/`ws_ypixel` beside the grid size, so this needs no terminal
+---  reply and no Neovim API. (An earlier note here said a measured tier was
+---  impossible; it reasoned only about the XTWINOPS reports `CSI 14 t` /
+---  `CSI 18 t`, which are plain CSI responses Neovim owns and will not surface.
+---  The ioctl sidesteps that entirely -- see `cellpixels.lua`.)
+---* "estimated" -- nothing measurable, chiefly tmux and screen, which do not
+---  propagate pixel geometry. Both dimensions come back nil and the caller
+---  falls back to `estimated_cell_width_px` and `cell_aspect_ratio`.
+---
+---Returns `tier, css_width, css_height`.
+function M.cell_metrics(render)
+  local env_w = tonumber(vim.env.MD_VIEWER_CELL_WIDTH_PX)
+  local env_h = tonumber(vim.env.MD_VIEWER_CELL_HEIGHT_PX)
+  if env_w and env_h and env_w > 0 and env_h > 0 then return "env", env_w, env_h end
+
+  local cell = cellpixels.measure()
+  if cell then
+    local scale = tonumber(render and render.device_scale_factor) or 1
+    if not (scale > 0) then scale = 1 end
+    -- `measure()` reports *device* pixels -- the unit a placement rectangle is
+    -- drawn in. A viewport is CSS pixels, and browser.js captures it back at
+    -- `deviceScaleFactor`, so dividing here is what makes the PNG land exactly
+    -- `cols * cell.width` device pixels wide: the same number of pixels the
+    -- terminal draws it into. Multiplying, or not dividing, doubles the CSS
+    -- viewport and quadruples the PNG before the caps below start downscaling
+    -- it. Not rounded: `measure()` reports fractional cells on purpose.
+    return "measured", cell.width / scale, cell.height / scale
+  end
+
+  return "estimated", nil, nil
 end
 
----Map cells to a bounded browser viewport. Exact cell pixels can be supplied
----through MD_VIEWER_CELL_WIDTH_PX/MD_VIEWER_CELL_HEIGHT_PX. Otherwise this preserves
----the configured cell aspect ratio and lets the terminal scale the PNG.
+---Which calibration tier cell-metric conversion currently uses. `render`
+---defaults to the active configuration, so `:MdViewerHealth` can ask without
+---one; the measured tier needs it only for `device_scale_factor`.
+function M.calibration_tier(render)
+  local tier = M.cell_metrics(render or require("md-viewer.config").get().render)
+  return tier
+end
+
+---Map cells to a bounded browser viewport. Under the env and measured tiers the
+---cell size is exact and the viewport is the cell rect scaled by it; otherwise
+---this preserves the configured cell aspect ratio and lets the terminal scale
+---the PNG.
 function M.viewport(rect, render)
-  local tier = M.calibration_tier()
-  local cell_w = tonumber(vim.env.MD_VIEWER_CELL_WIDTH_PX)
-  local cell_h = tonumber(vim.env.MD_VIEWER_CELL_HEIGHT_PX)
+  local tier, cell_w, cell_h = M.cell_metrics(render)
   local width, height
-  if tier == "env" then
+  if cell_w and cell_h then
     width, height = rect.width * cell_w, rect.height * cell_h
   else
-    width = math.max(320, rect.width * (render.estimated_cell_width_px or 10))
+    -- The width floor stays ahead of the aspect derivation: height is derived
+    -- from the floored width, and flooring afterwards instead would squash a
+    -- narrow preview to the wrong aspect rather than merely stretch it.
+    width = math.max(MIN_VIEWPORT_WIDTH_PX, rect.width * (render.estimated_cell_width_px or 10))
     height = width * (rect.height / math.max(rect.width, 1)) / render.cell_aspect_ratio
   end
-  local scale = math.min(1, render.max_width_px / width, render.max_height_px / height)
+  -- One uniform scale, so the cap never changes the aspect. The configured caps
+  -- are themselves bounded by what browser.js will honour: raising
+  -- `max_width_px` past 1920 otherwise buys nothing but a viewport that
+  -- disagrees with the page.
+  local max_width = math.min(render.max_width_px, MAX_VIEWPORT_WIDTH_PX)
+  local max_height = math.min(render.max_height_px, MAX_VIEWPORT_HEIGHT_PX)
+  local scale = math.min(1, max_width / width, max_height / height)
   return {
-    widthPx = math.max(1, math.floor(width * scale + 0.5)),
-    heightPx = math.max(1, math.floor(height * scale + 0.5)),
+    widthPx = math.max(MIN_VIEWPORT_WIDTH_PX, math.floor(width * scale + 0.5)),
+    heightPx = math.max(MIN_VIEWPORT_HEIGHT_PX, math.floor(height * scale + 0.5)),
     deviceScaleFactor = render.device_scale_factor,
     tier = tier,
     cellWidthPx = cell_w,

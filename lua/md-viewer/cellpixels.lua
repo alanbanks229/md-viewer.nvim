@@ -20,9 +20,14 @@
 ---counts Neovim already knows. Terminals that fill them in -- iTerm2, Kitty,
 ---Ghostty, WezTerm, Alacritty -- give an exact answer with no escape sequence
 ---and nothing to read back, which matters because Neovim owns terminal input
----and cannot read a CSI reply (see `coordinates.lua`'s `calibration_tier`).
----Terminals that leave them zero, multiplexers that do not propagate them, and
----any Neovim without LuaJIT report nothing, and callers fall back.
+---and cannot read a CSI reply -- the XTWINOPS pixel reports `CSI 14 t` and
+---`CSI 18 t` are unreachable from a plugin for that reason. Terminals that
+---leave them zero, multiplexers that do not propagate them, and any Neovim
+---without LuaJIT report nothing, and callers fall back.
+---
+---This is also the source of `coordinates.lua`'s "measured" calibration tier,
+---which sizes the browser render; see `coordinates.cell_metrics` for the
+---device-to-CSS-pixel conversion that tier applies.
 local M = {}
 
 -- macOS and the BSDs encode TIOCGWINSZ as _IOR('t', 104, struct winsize):

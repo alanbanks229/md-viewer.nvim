@@ -44,17 +44,39 @@ allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
 route aborts every browser request that is not `data:`/`about:`
 (`renderer/src/security.js`) — all three unconditional, with nothing that
 relaxes them. Local files are validated (magic bytes, size cap, document root)
-and inlined during `renderMarkdown`. Remote images keep the same shape: when a
-host is allowlisted in `security.remote_images`, the Node process fetches over
-https between markdown-it's parse and render (`renderer/src/remote-images.js`),
-re-validates every redirect hop against the allowlist, enforces the size cap
-while streaming, sniffs the magic bytes, and inlines the result as another
-`data:` URI, cached by URL so live-preview re-renders do not refetch.
-**Invariant:** `security.remote_images` widens what the *Node process* may
-fetch and nothing else — the browser's route, CSP, and sanitizer never consult
-it, which is what keeps an allowlisted host limited to supplying image bytes.
-An image that is refused or fails renders as a visible placeholder with the
-reason baked into an inline SVG, so showing it needs no network and no script.
+and inlined during `renderMarkdown`. Remote images keep the same shape: the
+Node process fetches over https unconditionally between markdown-it's parse
+and render (`renderer/src/remote-images.js`), follows redirects up to three
+hops, enforces the size cap while streaming, sniffs the magic bytes, and
+inlines the result as another `data:` URI, cached by URL so live-preview
+re-renders do not refetch. Every fetch — the URL as written and each redirect
+hop alike — first resolves the host and connects only if the result is a
+public network address, pinned to the specific address checked (a `lookup`
+that re-resolved independently at connect time would leave a window for the
+checked and connected addresses to differ). **Invariant:** remote fetching
+happens only in the Node process — the browser's route, CSP, and sanitizer are
+never involved and never make a network request, regardless of what a
+document references. An image that is refused or fails renders as a visible
+placeholder with the reason baked into an inline SVG, so showing it needs no
+network and no script.
+
+**The media lane.** Animated images (GIF, animated WebP) get a second request
+lane that never touches the render queue or its serials. Registration is a
+shallow header sniff at parse time (`renderer/src/media.js`, the single home of
+the animation budgets); geometry travels *with the render response*, measured
+in the pass that produced the base screenshot, so rects and the picture under
+them share one staleness and cannot disagree. Frames are materialized on
+demand, addressed purely by `(content sha, drawn size)`: decoded and resized by
+Chromium in a dedicated JavaScript-enabled context (`renderer/src/decode-context.js`
+— see SECURITY.md for its boundary), written as drawn-size PNGs under the
+renderer's temp directory, cached with byte-accounted LRU eviction where each
+cache entry owns exactly one directory. Every frame carries a stable content
+key, which is what the Lua side keys terminal uploads by — shared across
+sessions and across renderer restarts, freed with the data-releasing delete
+when no live session references them. Playback is a per-terminal strategy
+(`lua/md-viewer/animation.lua`): the Kitty protocol's own animation extension
+where qualified, a shared duration-preserving frame-swap timer elsewhere, the
+still frame always underneath.
 
 ## Preview surface and coordinates
 
@@ -190,11 +212,20 @@ is unreachable as a consequence: a cell must floor to at least one pixel, and
 every crop must be at least one pixel and wholly inside its image, before anything
 is emitted.
 
-Viewport calibration is explicit when `MD_VIEWER_CELL_WIDTH_PX` and
-`MD_VIEWER_CELL_HEIGHT_PX` exist; otherwise the renderer chooses a bounded
-high-DPI viewport from `estimated_cell_width_px` and the cell aspect ratio.
-Screenshots are capped at 1920×1440 logical pixels, a device scale of at most 3,
-and 32 MiB on the Lua boundary.
+Viewport calibration has three tiers, in precedence order: `env` when
+`MD_VIEWER_CELL_WIDTH_PX` and `MD_VIEWER_CELL_HEIGHT_PX` both exist,
+`measured` when `cellpixels.measure()` answers, and `estimated` otherwise.
+The measurement is the same `TIOCGWINSZ` read the placement path already
+trusts, and it reports *device* pixels; the viewport is CSS pixels, so
+`coordinates.cell_metrics` divides by `device_scale_factor` — which is what
+makes the captured PNG land exactly `cells × measured` device pixels, the same
+count the terminal draws it into. The estimated tier chooses a bounded
+high-DPI viewport from `estimated_cell_width_px` and the cell aspect ratio
+instead, and the terminal scales the result. Screenshots are capped at
+1920×1440 logical pixels — a bound `coordinates.viewport` mirrors from
+`browser.js`, along with its 320×240 floor, so the reported viewport is always
+the one the page received — a device scale of at most 3, and 32 MiB on the Lua
+boundary.
 
 ## Backends
 

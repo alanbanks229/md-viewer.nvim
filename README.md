@@ -18,10 +18,9 @@ graphics protocol. The source buffer stays a normal, editable Neovim buffer.
 >
 > Nothing opens an external browser window, starts an HTTP server, or listens on
 > a port. Runtime browser network requests are always blocked; remote images
-> render only when you allowlist their hosts, and even then they are fetched by
-> the renderer process and inlined, never loaded by the browser. Playwright
-> browser downloads are disabled; the plugin uses an existing Chrome or Chromium
-> installation.
+> are fetched by the renderer process and inlined, never loaded by the browser.
+> Playwright browser downloads are disabled; the plugin uses an existing Chrome
+> or Chromium installation.
 
 ## Features
 
@@ -39,7 +38,12 @@ graphics protocol. The source buffer stays a normal, editable Neovim buffer.
   honestly to line- or block-level precision rather than guessing
 - Pinned previews that stay visible while the source split shows another file
 - Local PNG, JPEG, GIF, and WebP images constrained to a document root, and
-  opt-in remote images from an explicit host allowlist
+  remote images from any public HTTPS host — no configuration needed
+- Animated GIFs and animated WebP can actually animate, with their own frame
+  timing, drawn by the terminal on their own layer over the browser-painted
+  still frame — terminal-driven playback where qualified, client-driven frame
+  placement elsewhere. Off by default (`render.animate`); with it off the still
+  first frame is what shows, so turning it on adds motion and nothing else
 - Visible placeholders that say why an image was refused or failed instead of
   hiding it
 - A text-cell fallback when no graphical backend is available
@@ -163,12 +167,19 @@ option and default alongside the reasoning behind each non-obvious one. That is
 the reference — this README does not duplicate it. `:help md-viewer-config`
 describes the option groups and the handful that need more than a default value.
 
-For a sharper image, supply exact terminal cell dimensions (measure your own
-profile rather than copying these):
+Terminal cell dimensions need no configuration: md-viewer measures them from
+the operating system and sizes the render to match, which `:MdViewerHealth`
+reports as `viewport calibration: measured`. Where nothing can be measured —
+tmux and screen do not propagate pixel geometry — it reports `estimated` and
+falls back to a bounded guess, which still renders but is not pixel-exact.
+
+To override the measurement, supply the cell size in **CSS** pixels, which is
+the measured size divided by `render.device_scale_factor` (so a 2x display
+measuring 14×32 wants 7 and 16):
 
 ```sh
-export MD_VIEWER_CELL_WIDTH_PX=10
-export MD_VIEWER_CELL_HEIGHT_PX=20
+export MD_VIEWER_CELL_WIDTH_PX=7
+export MD_VIEWER_CELL_HEIGHT_PX=16
 ```
 
 ## Usage
@@ -253,18 +264,25 @@ graphical bug or claiming a terminal works.
 ## Security
 
 Runtime browser requests are always blocked, JavaScript is disabled in the
-render context, and raw Markdown HTML is off. Remote images render only from
-hosts allowlisted in `security.remote_images` (off by default) — fetched over
+render context, and raw Markdown HTML is off. Remote images are fetched over
 https by the renderer process, validated, and inlined, so the browser still
-makes no requests. Local images and local links are confined to a canonical
-document root — by default the project enclosing the document — with symlinks
-resolved. Interaction adds no new attack surface: nothing re-parses Markdown or
-touches the filesystem on a click, and diagnostics report selection and search
-state as lengths and counts only.
+makes no requests; requests to loopback, private, link-local, and other
+non-public network destinations are refused, on the initial URL and on every
+redirect hop — not something to configure, just how it works. Local images and
+local links are confined to a canonical document root — by default the project
+enclosing the document — with symlinks resolved. Interaction adds no new
+attack surface: nothing re-parses Markdown or touches the filesystem on a
+click, and diagnostics report selection and search state as lengths and counts
+only.
 
-Read [SECURITY.md](SECURITY.md) before setting `security.remote_images` or
-enabling `security.raw_html`; both are reported as overrides by
-`:MdViewerHealth`.
+Both `![alt](url)` and a bare `<img src="url">` go through that same path; an
+`<img>` is parsed into an ordinary Markdown image whether or not
+`security.raw_html` is on, and carries only `src`, `alt`, `title`, and integer
+`width`/`height`. The screenshot at the top of this file is one, fetched from
+GitHub's attachment host with no setup required.
+
+Read [SECURITY.md](SECURITY.md) before enabling `security.raw_html`; it is
+reported as an override by `:MdViewerHealth`.
 
 ## Known limitations
 
@@ -274,7 +292,14 @@ enabling `security.raw_html`; both are reported as overrides by
 - Graphical confirmation is partial: image rendering and the drag overlay have
   been watched on real hardware, but most placement and occlusion behavior is
   covered by headless tests only.
-- The drag-highlight overlay is off on WezTerm pending an upstream fix.
+- The drag-highlight overlay is off on WezTerm pending an upstream fix, and
+  animated images are off there for the same reason.
+- Animated images are decoded by the same Chromium that renders the preview,
+  at the size they are actually drawn. Typical GIFs start moving in well under
+  a second; a very long retina-scale recording can take a few, and the still
+  frame shows throughout. Long recordings are thinned to a fixed pixel budget
+  (duration preserved, motion choppier) rather than allowed to grow terminal
+  memory without bound.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.

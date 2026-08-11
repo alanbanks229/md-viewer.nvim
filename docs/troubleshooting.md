@@ -34,17 +34,27 @@ installation. Renderer stderr and request serials are in `:MdViewerDebug`.
 
 ## The image is stretched, soft, or the wrong size
 
-`:MdViewerHealth` reports `viewport calibration` as `estimated`. Set the actual
-cell size of your terminal profile — measure it rather than copying these:
+Check `viewport calibration` in `:MdViewerHealth`. `measured` means the cell
+size came from the terminal itself and the render is already built to match it;
+`estimated` means nothing could be measured — tmux and screen do not propagate
+pixel geometry, and neither does a Neovim without LuaJIT — and the render is
+sized from a guess the terminal then scales.
+
+Health prints the numbers beside the tier: `measured cell` is what the
+operating system reported, in device pixels, and `viewport cell (CSS px)` is
+that divided by `render.device_scale_factor`, which is what the browser
+viewport is actually built from.
+
+To override the measurement, set the cell size in **CSS** pixels — the measured
+size divided by `device_scale_factor`, so a 2x display measuring 14×32 wants:
 
 ```sh
-export MD_VIEWER_CELL_WIDTH_PX=10
-export MD_VIEWER_CELL_HEIGHT_PX=20
+export MD_VIEWER_CELL_WIDTH_PX=7
+export MD_VIEWER_CELL_HEIGHT_PX=16
 ```
 
-Health should then report `viewport calibration: explicit`.
-
-If the typography is smaller than you expect, the estimated cell width is
+Health should then report `viewport calibration: env`. On the `estimated` tier
+only, if the typography is smaller than you expect, the estimated cell width is
 probably too large, causing the terminal to scale the whole screenshot down.
 Lower `render.estimated_cell_width_px` gradually, or prefer the exact values
 above.
@@ -53,17 +63,29 @@ above.
 
 An image that cannot render shows a visible placeholder naming the reason;
 nothing is silently hidden. A dashed border means it was refused by policy:
-the host is not in `security.remote_images` (remote images are off by
-default), the URL is not https, the file sits outside
-`security.document_root`, or it is an unsupported format — SVG is intentionally
-excluded, see [SECURITY.md](../SECURITY.md). A solid border means the image was
-attempted and failed: the host was unreachable or timed out, the response was
-not a valid image, or the size exceeds `max_local_image_bytes`. A symlink
-pointing outside the document root is rejected like any other escape.
+the URL resolves to a non-public network address (loopback, private,
+link-local, or another reserved range — see [SECURITY.md](../SECURITY.md)),
+the URL is not https, the file sits outside `security.document_root`, or it
+is an unsupported format — SVG is intentionally excluded. A solid border means
+the image was attempted and failed: the host was unreachable or timed out, the
+response was not a valid image, or the size exceeds `max_local_image_bytes`. A
+symlink pointing outside the document root is rejected like any other escape.
 
 Remote fetches do not honor proxy environment variables; behind a mandatory
-proxy they fail to a placeholder. A failed remote fetch is retried on the
-next render after about a minute.
+proxy they fail to a placeholder. A definitive failure (a 404, or bytes that
+are not a valid image) is retried on the next render after about a minute. A
+timeout or an unresolved host is treated as more likely transient — the same
+process launching Chromium can briefly starve a fetch of CPU — and is retried
+within a few seconds instead.
+
+A GitHub attachment URL — `https://github.com/user-attachments/…`, the form
+GitHub produces when you paste an image into an issue, and what this
+project's own README uses — 302-redirects to a signed S3 URL. That and
+similar redirect chains resolve with no configuration; the renderer follows
+up to three hops, and the destination check above applies to each hop, not
+just the URL as written. The placeholder always names the reason and, for a
+non-public destination, the address it resolved to, so there is nothing to
+look up if a redirect target ever changes.
 
 ## The mouse wheel does not scroll the preview
 
@@ -155,10 +177,12 @@ is currently visible.
 
 ## A click lands on the wrong character
 
-Confirm `viewport calibration` reads `explicit`, not `estimated` — an estimated
-cell size is a real source of click-position error on a terminal/font combination
-the estimate does not match well. Setting `MD_VIEWER_CELL_WIDTH_PX` and
-`MD_VIEWER_CELL_HEIGHT_PX` removes the estimate entirely.
+Confirm `viewport calibration` reads `measured` or `env`, not `estimated` — an
+estimated cell size is a real source of click-position error on a terminal/font
+combination the estimate does not match well. `estimated` normally means the
+terminal reports no pixel geometry, which is what a multiplexer does; running
+outside tmux or screen is the fix. Setting `MD_VIEWER_CELL_WIDTH_PX` and
+`MD_VIEWER_CELL_HEIGHT_PX` removes the estimate by hand.
 
 `interaction_last_precision` reports what the last interaction actually resolved
 at: `exact`, `line`, `block`, or `none`. A `none` where you expected an exact hit
@@ -243,3 +267,42 @@ When reporting a graphical bug, record the exact backend, terminal and Neovim
 versions, statusline/winbar configuration, and a minimal reproduction, and
 confirm it reproduces outside any multiplexer. See
 [terminal-support.md](terminal-support.md) for the per-terminal status.
+
+## An animated image is not moving
+
+**Animation is off by default.** `:MdViewerHealth` reports
+`animation: off -- render.animate=false`; turn it on with
+`render.animate = true`. Nothing is broken in the meantime: the preview is a
+browser-rendered PNG surface, so an animated image is a still frame until the
+terminal is given the frames to draw itself, and that still frame is the
+picture you are already looking at.
+
+With it on, `:MdViewerHealth` reports `animation` with the strategy in use --
+`native (terminal-driven)` or `frames (client-driven)` -- or off with the
+reason.
+
+Off is normal in several other cases, and none of them lose the picture: the `cells`
+and `nvim_img` backends cannot place frames at all, the terminal's pixel cell
+size has to be measurable (the same precondition as the drag-highlight
+overlay), and only iTerm2, Kitty and Ghostty are qualified for it. WezTerm is
+deliberately excluded -- see [terminal support](terminal-support.md).
+
+On, but still not moving, is usually one of three things. Decoding runs in the
+renderer's Chromium and a long retina-scale recording can take a few seconds
+to start; `:MdViewerDebug` lists each animation as `materializing`,
+`uploading`, `playing`, or with a per-frame count once frames are in. Animation
+is suspended while a drag or visual selection is in progress, while the preview
+is occluded by a floating window, and while the completion popup is up --
+`animation_suppressed_reason` in `:MdViewerDebug` names whichever applies. And
+an image the renderer *refused* -- a still, one past the size or frame caps,
+or one whose drawn size leaves no frame budget -- stays a still frame with the
+refusal recorded in the same list.
+
+A non-looping GIF that has finished is not stuck: it froze on its last frame,
+exactly as a browser leaves it.
+
+Set `render.animate = false` to turn animation back off, `render.animate_fps`
+to cap the client-driven swap rate (frames are skipped under the cap, never
+stretched), or `terminal.animation` to force a strategy -- including
+`"native"` to qualify terminal-driven playback in a terminal the profile
+table does not yet trust.

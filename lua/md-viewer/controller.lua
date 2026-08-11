@@ -9,6 +9,7 @@ local state = require("md-viewer.state")
 local sync = require("md-viewer.sync")
 local process = require("md-viewer.process")
 local debounce = require("md-viewer.debounce")
+local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
@@ -61,6 +62,7 @@ local function clear_image(session)
   if session.image_id and session.backend then session.backend.clear(session.image_id) end
   session.image_id = nil
   session.last_placement = nil
+  animation.clear(session)
 end
 
 ---Must the image be off screen right now? Every path that shows, restores or
@@ -175,6 +177,11 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- there was nothing to place one on until now.
   M.clear_caret_overlay(session)
   M.place_caret(session)
+  -- After the caret, because both draw over the base that has just landed and
+  -- the animation is the lower of the two layers. `adopt` re-places the current
+  -- step in this same tick, so a scroll frame does not drop the animation for
+  -- 200ms on its way past.
+  animation.adopt(session)
   return true
 end
 
@@ -406,6 +413,10 @@ local function show_cached(session)
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- This path does not go through `apply_image`, so nothing else would put the
+  -- frames back: a preview restored from cache after an occlusion would show a
+  -- still image and never start again.
+  animation.repaint(session)
   -- A render that was dropped while the image could not be displayed left the
   -- cached PNG a frame behind the source. Now that it can be displayed again,
   -- catch up rather than leaving the restored frame stale indefinitely --
@@ -483,6 +494,26 @@ function M.refresh(session, render_options)
     session.viewport_width_px = result.viewport.widthPx
     session.viewport_height_render_px = result.viewport.heightPx
     session.viewport_calibration_tier = result.viewport.tier
+    -- The cell the viewport was actually built from, in CSS pixels, and nil on
+    -- the estimated tier. Recorded rather than re-derived for :MdViewerDebug:
+    -- the measurement is uncached and follows a font-size change, so asking
+    -- again later answers about the terminal now, not about this render.
+    session.viewport_cell_css_width_px = result.viewport.cellWidthPx
+    session.viewport_cell_css_height_px = result.viewport.cellHeightPx
+    -- Animation geometry travels with the render it was measured against, so
+    -- it inherits this callback's staleness handling wholesale: rects and the
+    -- base they overlay can never disagree. animation.adopt() reads it after
+    -- apply_image lands this same frame.
+    session.animation_geometry = meta.animations
+    -- Some animated image had no measurable box yet when this render laid the
+    -- document out. The renderer will re-measure, but only on a render, and an
+    -- idle preview issues none -- so without this the first attempt would be
+    -- the only one and the document would keep its still frames until a resize
+    -- or an edit happened along. Debounced under its own timer name, and the
+    -- renderer stops asking after a bounded number of attempts, so a genuinely
+    -- unmeasurable image costs a handful of renders rather than a loop.
+    session.animation_geometry_incomplete = meta.animationsIncomplete == true
+    if session.animation_geometry_incomplete then M.schedule(session, 120, "animation_geometry_timer") end
     session.last_image_bytes = result.image
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
@@ -567,6 +598,7 @@ local function close_session(session)
     "resize_timer",
     "scroll_settle_timer",
     "cursor_scroll_timer",
+    "animation_geometry_timer",
     "ui_poll_timer",
     "selection_debounce_timer",
     "selection_settle_timer",
@@ -588,6 +620,7 @@ local function close_session(session)
   if not next(state.all()) then process.stop() end
   interaction.forget(session)
   interaction.forget_selection(session)
+  animation.forget(session)
   mouse.detach_if_unused()
 end
 
@@ -957,6 +990,9 @@ local function reconcile_placement(session, force)
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.
   session.last_placement = placement
+  -- Animation frames are positioned against the placement, so a float opening
+  -- over the preview would otherwise leave them painted across it and offset.
+  animation.repaint(session)
   -- The caret surface is sized from the placement, so it has to follow it here
   -- too. A re-render would resize it via `apply_image`, but the callers that
   -- reach this without one -- a float opening, `cmdheight = 0` shrinking the
@@ -1107,6 +1143,10 @@ function M.setup_autocmds()
   -- the cached Lua-side flags describing it would go stale silently.
   process.on_exit(function()
     each_session(function(session) interaction.forget_selection(session) end)
+    -- Frame paths died with the renderer's temp directory; the animation
+    -- module drops them and re-materializes, while terminal-resident uploads
+    -- survive by stable content key.
+    animation.renderer_exited()
   end)
   group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {

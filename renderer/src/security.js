@@ -72,9 +72,9 @@ export function sniffImageType(buffer) {
 // Unconditional by design: the browser never makes a network request, full
 // stop. Remote images do not relax this -- they are fetched by the Node
 // process (remote-images.js) and arrive at the page as data: URIs, so this
-// route is the enforcement that keeps `security.remote_images` scoped to
-// image bytes rather than becoming general page networking. There is
-// deliberately no parameter to loosen it.
+// route is the enforcement that keeps remote image fetching scoped to image
+// bytes rather than becoming general page networking. There is deliberately
+// no parameter to loosen it.
 export function installNetworkPolicy(context) {
   return context.route("**/*", async (route) => {
     const url = route.request().url();

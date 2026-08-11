@@ -4,6 +4,30 @@ return function(t)
   local preview = require("md-viewer.preview")
   local cfg = config.get()
 
+  -- ---------------------------------------------------------------------
+  -- Every tier assertion below depends on whether the terminal running the
+  -- suite reports pixel geometry, and `nvim --headless -l` leaves stdout on
+  -- the real terminal -- so an unstubbed answer differs between a developer's
+  -- machine and a piped CI run, and the estimated-tier assertions would pass
+  -- in one and fail in the other. Substituting the single ioctl read makes the
+  -- tier a property of the test. `winsize = nil` is an unmeasurable terminal.
+  -- ---------------------------------------------------------------------
+  local cellpixels = require("md-viewer.cellpixels")
+  local real_read_winsize = cellpixels.read_winsize
+  local winsize = nil
+  cellpixels.read_winsize = function()
+    if not winsize then return nil end
+    return winsize.cols, winsize.rows, winsize.xpixel, winsize.ypixel
+  end
+  -- LuaJIT ffi or the platform constant may be missing, in which case `measure`
+  -- short-circuits before the reader and the measured tier is unreachable here.
+  local measurable = (function()
+    winsize = { cols = 100, rows = 40, xpixel = 800, ypixel = 640 }
+    local reachable = cellpixels.measure() ~= nil
+    winsize = nil
+    return reachable
+  end)()
+
   local viewport = coords.viewport({ width = 80, height = 30 }, cfg.render)
   t.ok(viewport.widthPx <= cfg.render.max_width_px, "bounded viewport width")
   t.ok(viewport.heightPx <= cfg.render.max_height_px, "bounded viewport height")
@@ -49,6 +73,97 @@ return function(t)
   local clamped = coords.viewport({ width = 1000, height = 1000 }, cfg.render)
   t.eq(cfg.render.max_height_px, clamped.heightPx, "oversized viewport clamps its binding dimension exactly")
   t.ok(clamped.widthPx <= cfg.render.max_width_px, "clamped width never exceeds max_width_px")
+
+  -- The configured caps are themselves bounded by what browser.js will honour
+  -- (it re-clamps to 1920x1440 on its own), so raising them cannot produce a
+  -- viewport that disagrees with the page the numbers describe.
+  local generous = vim.tbl_extend("force", cfg.render, { max_width_px = 4000, max_height_px = 4000 })
+  local over_capped = coords.viewport({ width = 1000, height = 1000 }, generous)
+  t.ok(over_capped.widthPx <= 1920, "a raised max_width_px is still bounded by the renderer's own cap")
+  t.eq(1440, over_capped.heightPx, "a raised max_height_px is still bounded by the renderer's own cap")
+
+  -- browser.js also *floors* the page viewport, at 320x240 CSS px. Mirroring
+  -- that is what keeps `viewport()`'s numbers equal to the ones the page used:
+  -- they become session.viewport_width_px/viewport_height_render_px, the
+  -- denominator of every hit test, overlay scale and animation frame. A
+  -- 32x10-cell preview used to report 320x200 against a page 240 pixels tall.
+  local shallow = coords.viewport({ width = 32, height = 10 }, cfg.render)
+  t.eq(320, shallow.widthPx, "a narrow viewport reports the page's own width floor")
+  t.eq(240, shallow.heightPx, "a short viewport reports the page's own height floor")
+
+  -- ---------------------------------------------------------------------
+  -- The measured tier: env > measured > estimated.
+  --
+  -- `cellpixels.measure()` reports *device* pixels, which is the unit a
+  -- placement rectangle is drawn in. A viewport is CSS pixels and browser.js
+  -- captures it back at `device_scale_factor`, so the conversion is a
+  -- division. Inverting it doubles the CSS viewport and quadruples the PNG,
+  -- and the 1920x1440 caps then hide the mistake by silently downscaling.
+  -- ---------------------------------------------------------------------
+  if measurable then
+    vim.env.MD_VIEWER_CELL_WIDTH_PX = nil
+    vim.env.MD_VIEWER_CELL_HEIGHT_PX = nil
+    -- 100x40 cells over 1400x1280 device pixels: the 14x32 cell actually read
+    -- from the 2x display that motivated this tier.
+    winsize = { cols = 100, rows = 40, xpixel = 1400, ypixel = 1280 }
+
+    local retina = vim.tbl_extend("force", cfg.render, { device_scale_factor = 2 })
+    t.eq("measured", coords.calibration_tier(retina), "a terminal reporting pixel geometry measures its own cell")
+    local measured = coords.viewport({ width = 60, height = 30 }, retina)
+    t.eq("measured", measured.tier, "viewport reports the measured tier")
+    t.eq(7, measured.cellWidthPx, "a 14px device cell is 7 CSS px at a device scale of 2")
+    t.eq(16, measured.cellHeightPx, "a 32px device cell is 16 CSS px at a device scale of 2")
+    t.eq(60 * 7, measured.widthPx, "measured width is cells times the CSS cell width")
+    t.eq(30 * 16, measured.heightPx, "measured height is cells times the CSS cell height")
+
+    -- The divisor is the configured scale, not a hardcoded 2. A non-Retina
+    -- terminal measures the same cell it draws.
+    local unscaled = vim.tbl_extend("force", cfg.render, { device_scale_factor = 1 })
+    local plain = coords.viewport({ width = 60, height = 30 }, unscaled)
+    t.eq(14, plain.cellWidthPx, "a device scale of 1 leaves device pixels as CSS pixels")
+    t.eq(60 * 14, plain.widthPx, "the conversion divides by the configured scale, not by 2 (scale 1)")
+
+    local dense_cfg = vim.tbl_extend("force", cfg.render, { device_scale_factor = 3 })
+    local dense = coords.viewport({ width = 100, height = 40 }, dense_cfg)
+    t.near(14 / 3, dense.cellWidthPx, 1e-9, "a device scale of 3 divides by 3")
+    t.eq(math.floor(100 * 14 / 3 + 0.5), dense.widthPx, "the conversion divides by the configured scale (scale 3)")
+
+    -- Explicit configuration still outranks the measurement, so a terminal
+    -- that reports geometry nobody can correct stays correctable by hand.
+    vim.env.MD_VIEWER_CELL_WIDTH_PX = "8"
+    vim.env.MD_VIEWER_CELL_HEIGHT_PX = "17"
+    local overridden = coords.viewport({ width = 60, height = 30 }, retina)
+    t.eq("env", overridden.tier, "an explicit env override outranks a measurable terminal")
+    t.eq(8, overridden.cellWidthPx, "the env override supplies the cell, and is not divided by the device scale")
+    t.eq(60 * 8, overridden.widthPx, "the env override sizes the viewport")
+    vim.env.MD_VIEWER_CELL_WIDTH_PX = nil
+    vim.env.MD_VIEWER_CELL_HEIGHT_PX = nil
+
+    -- A terminal is free to report a pixel size its grid does not divide
+    -- evenly. Rounding the cell would put back the error this tier removes;
+    -- only the finished viewport is rounded.
+    winsize = { cols = 3, rows = 2, xpixel = 43, ypixel = 65 }
+    local fractional = coords.viewport({ width = 60, height = 30 }, retina)
+    t.near(43 / 6, fractional.cellWidthPx, 1e-9, "a fractional cell survives the device-to-CSS conversion")
+    t.eq(430, fractional.widthPx, "the fractional cell is rounded once, at the viewport")
+    t.eq(488, fractional.heightPx, "the fractional cell height is rounded once, at the viewport")
+
+    -- Degrade, never fail: tmux and screen do not propagate pixel geometry.
+    winsize = { cols = 100, rows = 40, xpixel = 0, ypixel = 0 }
+    t.eq("estimated", coords.calibration_tier(retina), "a terminal reporting zero pixel geometry falls back")
+
+    winsize = nil
+    t.eq("estimated", coords.calibration_tier(retina), "a refused ioctl falls back to the estimated tier")
+    local fallback = coords.viewport({ width = 80, height = 30 }, cfg.render)
+    t.eq("estimated", fallback.tier, "the estimated tier still renders when nothing can be measured")
+    t.eq(nil, fallback.cellWidthPx, "the estimated tier has no exact cell to report")
+    t.eq(viewport.widthPx, fallback.widthPx, "adding the measured tier left the estimated width unchanged")
+    t.eq(viewport.heightPx, fallback.heightPx, "adding the measured tier left the estimated height unchanged")
+  else
+    t.ok(true, "cellpixels is unavailable on this platform; the measured tier cannot be exercised")
+  end
+  cellpixels.read_winsize = real_read_winsize
+  vim.env.MD_VIEWER_CELL_WIDTH_PX, vim.env.MD_VIEWER_CELL_HEIGHT_PX = original_cell_w, original_cell_h
 
   -- Real window geometry.
   local original_win = vim.api.nvim_get_current_win()

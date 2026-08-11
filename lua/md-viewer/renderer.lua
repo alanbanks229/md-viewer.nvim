@@ -62,7 +62,11 @@ function M.request(session, markdown, options, callback)
     rawHtml = cfg.security.raw_html,
     localImages = cfg.render.local_images,
     maxLocalImageBytes = cfg.render.max_local_image_bytes,
-    remoteImages = cfg.security.remote_images,
+    -- Whether animated GIFs are marked for the terminal to draw. It joins the
+    -- render request rather than the animation one because it changes the
+    -- markup -- an animated image carries an opaque animation id or it does
+    -- not -- and the renderer's markdown cache keys on it.
+    animate = cfg.render.animate == true,
     browser = cfg.browser,
   }
   if not capture_only then params.markdown = markdown end

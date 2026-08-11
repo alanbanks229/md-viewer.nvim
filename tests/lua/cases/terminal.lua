@@ -130,12 +130,12 @@ return function(t)
     local capability = terminal.capability({ profile = profile }, {})
     t.eq(want.overlay, capability.selection_overlay, ("selection_overlay for the %s profile"):format(profile))
     t.eq(want.encoding, capability.overlay_encoding, ("overlay_encoding for the %s profile"):format(profile))
-    -- Every Kitty-protocol profile draws its base at -2 so the overlay always
-    -- has -1 to itself. The two layers must not coincide: the protocol breaks
-    -- a z-index tie by image id, and md-viewer re-uploads the base on every
-    -- full frame, so a shared layer lets the base climb above the highlight
-    -- and stay there.
-    t.eq(-2, capability.default_raw_zindex, ("%s leaves -1 free for the overlay"):format(profile))
+    -- Every Kitty-protocol profile draws its base at -3 so animation frames
+    -- always have -2 to themselves and the overlay -1. The layers must not
+    -- coincide: the protocol breaks a z-index tie by image id, and md-viewer
+    -- re-uploads the base on every full frame, so a shared layer lets the base
+    -- climb above the highlight and stay there.
+    t.eq(-3, capability.default_raw_zindex, ("%s leaves the frame and overlay layers free"):format(profile))
   end
 
   -- The flag and the evidence are different grades, and neither may stand in
@@ -182,5 +182,21 @@ return function(t)
   local backends = require("md-viewer.backends")
   local selected = assert(backends.select("auto"))
   t.eq("cells", selected.name, "unknown terminal falls back to cells through auto selection")
+  config.reset()
+
+  -- detect() memoizes its snapshot -- it walks the whole environment and is
+  -- reached on every placement and animation gate -- and a config change is
+  -- the one event that must drop it.
+  config.setup({ terminal = { profile = "kitty" } })
+  local first = terminal.detect()
+  t.ok(first == terminal.detect(), "repeated detect() returns the same snapshot, not a re-walk")
+  config.setup({ terminal = { profile = "ghostty" } })
+  local second = terminal.detect()
+  t.eq("ghostty", second.profile_id, "config.setup invalidates the snapshot so the new profile is seen")
+  config.reset()
+  -- After reset the profile is "auto" and detection reads the real process
+  -- environment, whose contents this test cannot assume -- so assert only that
+  -- the snapshot was dropped, by identity.
+  t.ok(terminal.detect() ~= second, "config.reset drops the snapshot as well")
   config.reset()
 end

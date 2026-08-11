@@ -13,6 +13,11 @@ local next_placement_id = 0x5d000000 + (vim.uv.os_getpid() % 0xffff) * 256
 -- what keeps the highlight on top if the layers are ever pinned together.
 -- Base ids would need ~536M frames to climb this far.
 local next_sheet_id = 0x6d000000 + (vim.uv.os_getpid() % 0xffff) * 256
+-- Animation frames sit between the base and the tint sheets in the id space
+-- for the same reason they sit between them in z: if a terminal ever ignored
+-- z-index entirely, the protocol's own id tie-break would still order them
+-- base < animation < sheet. Base ids would need ~285M frames to reach this.
+local next_animation_id = 0x5e000000 + (vim.uv.os_getpid() % 0xffff) * 256
 
 local function command(control, payload) return "\27_G" .. control .. ";" .. (payload or "") .. "\27\\" end
 
@@ -63,10 +68,10 @@ local function resolve_double_buffer()
   return default, ("profile default (%s)"):format(profile_id)
 end
 
----The two layers this backend draws on -- the base image, and the selection
----overlay one step above it -- derived together so that they can never collide.
----Returns base, overlay (nil when the overlay is disabled outright), and where
----the configured value came from.
+---The layers this backend draws on -- the base image, animation frames above
+---it, and the selection overlay above those -- derived together so that they can
+---never collide. Returns base, animation, overlay (nil when the overlay is
+---disabled outright), and where the configured value came from.
 ---
 ---They have to be derived together because the Kitty graphics protocol breaks a
 ---z-index tie by *image id*: "if two images with the same z-index overlap then
@@ -82,32 +87,46 @@ end
 ---iTerm2 happens to draw the later-created placement on top, which is the only
 ---reason a shared layer ever appeared to work (probe check 4c).
 ---
----The overlay is always `base + 1`, and that is only ever a problem at exactly
----one value. A base at -1 would put the overlay at 0, where the Kitty protocol
----draws it *over* Neovim's own text rather than under it -- so at -1, and only
----at -1, the base gives way to -2 instead. Both sit in the same "under text,
+---The base keeps the layer it was configured onto, and the others stack upward
+---from it one at a time. The single thing that can move it is a stack that
+---would reach z=0, where the Kitty protocol draws *over* Neovim's own text
+---rather than under it: then the whole stack slides down just far enough for
+---its top to land on -1. Every layer involved sits in the same "under text,
 ---over background" band (only z < INT32_MIN/2 goes beneath a non-default cell
----background), so that shift is invisible. A base deliberately put above the
----text keeps its layer and takes the overlay up with it, which is the only
----place the highlight can be seen from there.
+---background), so that slide is invisible. A base deliberately put above the
+---text keeps its layer and takes the others up with it, which is the only place
+---a highlight can be seen from there.
 ---
----`interaction.selection_overlay = "off"` leaves an explicit `image.raw_zindex`
----exactly where it was put: with no overlay there is nothing to make room for.
----The gate is that config value rather than `M.overlay_supported()` so the
----base's layer cannot shift mid-session when a resize costs us the cell
----measurement.
+---The animation layer is reserved whether or not anything is animating, and
+---whether or not `render.animate` is on. It costs nothing to reserve, and a
+---layer that appears only when a document happens to contain an animated GIF is
+---a stack that changes shape under the user -- which is the one property this
+---function exists to deny.
+---
+---`interaction.selection_overlay = "off"` drops the overlay layer and nothing
+---else, so an explicit `image.raw_zindex` still lands the base exactly where it
+---was put unless the animation layer above it would reach the text. The gate is
+---that config value rather than `M.overlay_supported()` so the base's layer
+---cannot shift mid-session when a resize costs us the cell measurement.
 local function resolve_layers()
   local configured, source = resolve_zindex()
-  if config.get().interaction.selection_overlay == "off" then return configured, nil, source end
-  if configured == -1 then
-    return -2, -1, ("%s, lowered from -1 to leave the selection overlay its own layer"):format(source)
+  local overlay_enabled = config.get().interaction.selection_overlay ~= "off"
+  local top = configured + (overlay_enabled and 2 or 1)
+  -- Only a stack that would collide with the text is moved, and only far enough
+  -- to clear it. A base already placed above the text asked to be there.
+  local shift = (configured < 0 and top >= 0) and top + 1 or 0
+  local base = configured - shift
+  if shift > 0 then
+    source = ("%s, lowered from %d to leave the layers above it their own"):format(source, configured)
   end
-  return configured, configured + 1, source
+  return base, base + 1, overlay_enabled and base + 2 or nil, source
 end
 
 local function zindex() return (resolve_layers()) end
 
-local function overlay_zindex() return (select(2, resolve_layers())) end
+local function animation_zindex() return (select(2, resolve_layers())) end
+
+local function overlay_zindex() return (select(3, resolve_layers())) end
 
 local function png_dimensions(bytes)
   if type(bytes) ~= "string" or #bytes < 24 or bytes:sub(1, 8) ~= "\137PNG\r\n\26\n" or bytes:sub(13, 16) ~= "IHDR" then
@@ -370,13 +389,18 @@ end
 ---display at natural pixel size, and without the real cell there is no way to
 ---know what a pixel is worth on screen. Getting that wrong does not degrade
 ---the highlight, it misdraws it -- see `cellpixels.lua`.
-function M.overlay_supported()
-  local mode = config.get().interaction.selection_overlay
-  if mode == "off" then return false, "interaction.selection_overlay=off (explicit override)" end
+---The half of `M.overlay_supported` that is about correctness rather than
+---about the selection feature, factored out so animation placements can require
+---exactly the same thing without restating it. Both draw crops at natural pixel
+---size, so both need to know what a pixel is worth; neither can be talked into
+---it by configuration.
+local function placement_precondition()
   local cell, cell_reason = cellpixels.measure()
   if not cell then
     return false,
-      ("the terminal's pixel cell size is unknown (%s), and overlay rectangles are sized in pixels"):format(cell_reason)
+      ("the terminal's pixel cell size is unknown (%s), and placement rectangles are sized in pixels"):format(
+        cell_reason
+      )
   end
   -- Also a correctness precondition rather than a capability judgement, and on
   -- WezTerm 20240203 a safety one: a cell that floors to zero pixels is the
@@ -388,6 +412,14 @@ function M.overlay_supported()
         math.floor(cell.height)
       )
   end
+  return true
+end
+
+function M.overlay_supported()
+  local mode = config.get().interaction.selection_overlay
+  if mode == "off" then return false, "interaction.selection_overlay=off (explicit override)" end
+  local ok, reason = placement_precondition()
+  if not ok then return false, reason end
   if mode == "on" then return true, "interaction.selection_overlay=on (explicit override)" end
   local profile, profile_id = active_profile()
   if profile.selection_overlay == true then return true, ("profile default (%s)"):format(profile_id) end
@@ -609,8 +641,10 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   -- *captured* at, which is all `item.width_px` knows.
   --
   -- Those two differ by however much the render viewport mis-estimated the
-  -- cell: with `coordinates.viewport`'s "estimated" tier guessing 10x20 CSS px
-  -- against a real 7x16, a 1980x2040 capture is drawn into 1386x1632, and
+  -- cell: with `coordinates.viewport` on its "estimated" tier -- now the
+  -- fallback for a terminal that reports no pixel geometry, but once the
+  -- default -- guessing 10x20 CSS px against a real 7x16, a 1980x2040 capture
+  -- is drawn into 1386x1632, and
   -- rectangles sized against the capture come out 1.41x too wide and 1.24x too
   -- tall while still sitting at the right place (cells being exact either
   -- way). That is precisely the defect the operator reported on 2026-08-08.
@@ -751,6 +785,403 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
     }
 end
 
+-- ---------------------------------------------------------------------------
+-- Animation frames
+-- ---------------------------------------------------------------------------
+--
+-- An animated GIF cannot animate through the base image: a frame of the
+-- preview is one Chromium screenshot, so whatever the browser painted is
+-- frozen there by construction. Instead the renderer decodes the GIF's frames
+-- to PNGs and the terminal draws them itself, on their own layer, over the
+-- still frame the base already carries.
+--
+-- Mechanically this is the selection overlay with the tint sheet swapped for
+-- one image per frame: a crop placed at natural pixel size, positioned to the
+-- sub-cell with X/Y, clipped to the preview and punched through by the same
+-- exclusions. The differences are that each item carries its own image id, and
+-- that Node has already encoded every frame at exactly the size it is drawn --
+-- so the crop is 1:1 and there is no scale factor to get wrong.
+
+local animations = {} -- set id -> { placements = { key -> { pid, image_id } } }
+local ordered_animation_placements
+local animation_images = {} -- content key -> image id
+local next_animation_set = 0
+
+---The animation mode the resolved terminal capability grants, with its
+---evidence string. "native" drives the terminal's own animation player,
+---"frames" swaps placements from the client, "off" leaves the still frame.
+---The mode itself -- profile default or `terminal.animation` override --
+---resolves in terminal.capability(); this only reads the answer.
+local function animation_mode()
+  local capability = terminal.detect()
+  local animation = capability.animation
+  if type(animation) ~= "table" or type(animation.mode) ~= "string" then return "off", nil end
+  return animation.mode, animation.evidence
+end
+
+---Whether this terminal may be driven with animation placements at all.
+---
+---Gated on the capability mode the same way the overlay is gated on its
+---profile flag, and off by default everywhere it has not been watched.
+---WezTerm is off for a specific, measured reason rather than caution:
+---`assign_image_to_cells` clones a cell that already holds attachments and
+---writes it back through a merging `set_cell`, so every repeat placement over
+---a covered cell duplicates that cell's attachment list (wezterm/wezterm#7953).
+---That is per placement, not per second -- a slower tick does not make it
+---safe, only slower, and unlike a drag that lasts seconds a preview stays
+---open for as long as the file does.
+function M.animation_supported()
+  if config.get().render.animate ~= true then return false, "render.animate=false" end
+  local ok, reason = placement_precondition()
+  if not ok then return false, reason end
+  local mode, evidence = animation_mode()
+  local _, profile_id = active_profile()
+  if mode == "off" then
+    return false, evidence or ("profile %s is not validated for animation frame placements"):format(profile_id)
+  end
+  return true, evidence or ("profile default (%s)"):format(profile_id)
+end
+
+---Whether the terminal's own animation player may be driven: `a=f` frame data
+---with per-frame gaps, `a=a` playback control, the terminal owning every tick
+---thereafter. Requires everything `animation_supported` does, plus a mode
+---that says this specific extension was actually qualified -- implementing
+---the graphics protocol's placements says nothing about implementing its
+---player, which is why "frames" is not promoted to this by reasoning.
+function M.animation_native_supported()
+  local ok, reason = M.animation_supported()
+  if not ok then return false, reason end
+  local mode, evidence = animation_mode()
+  if mode ~= "native" then
+    return false,
+      ("animation mode %q swaps frames from the client; the terminal-driven player is unverified here"):format(mode)
+  end
+  return true, evidence
+end
+
+---Upload one frame PNG, or return the id it already has.
+---
+---`key` is the renderer's stable content key -- a hash of source bytes, drawn
+---size and frame index, never a temp path -- so the same frame at the same
+---drawn size is uploaded once no matter how many times the loop comes round,
+---how many previews show it, or how many renderer restarts have re-written it
+---to new paths. This is what makes a tick cost placement bytes only.
+function M.animation_upload(key, bytes)
+  local existing = animation_images[key]
+  if existing then return existing.id end
+  local width, height = png_dimensions(bytes)
+  if not width then return nil, "frame is not a usable PNG" end
+  next_animation_id = next_animation_id + 1
+  local id = next_animation_id
+  send(chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
+  animation_images[key] = { id = id, complete = true, width_px = width, height_px = height }
+  return id, { width_px = width, height_px = height }
+end
+
+---The id already uploaded under `key`, or nil. Lets a caller skip reading
+---frame bytes from disk at all for content the terminal already holds --
+---the common case for every loop iteration after the first, and for every
+---session after the first showing the same content at the same size.
+function M.animation_uploaded(key)
+  local entry = animation_images[key]
+  return entry and entry.id or nil
+end
+
+---Begin a terminal-driven animation upload: transmit the root frame, set its
+---gap, and start playback in *loading* mode -- the terminal plays whatever
+---frames have arrived and waits at the end for more, so a long upload shows
+---motion from its first placement rather than after its last byte.
+---
+---`key` names the whole animation (the renderer derives it from source bytes
+---and drawn size). A complete upload under the same key is returned as-is with
+---a second return of true -- same content, same terminal-side data, whether
+---the asker is a second preview or the same one after a renderer restart. An
+---*incomplete* entry under the key (an upload abandoned mid-flight) is freed
+---and restarted; appending to it would splice two animations together.
+function M.animation_native_begin(key, bytes, gap_ms)
+  local entry = animation_images[key]
+  if entry and entry.complete and entry.native then return entry.id, true end
+  if entry then M.animation_free({ key }) end
+  local width, height = png_dimensions(bytes)
+  if not width then return nil, "root frame is not a usable PNG" end
+  next_animation_id = next_animation_id + 1
+  local id = next_animation_id
+  local parts = { chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)) }
+  -- The root frame is created by the plain transmission above, which carries
+  -- no gap of its own; the protocol sets the root's gap through the control
+  -- action (a=a, frame r=1) instead.
+  local gap = math.floor(tonumber(gap_ms) or 0)
+  if gap > 0 then parts[#parts + 1] = command(("a=a,q=2,i=%d,r=1,z=%d"):format(id, gap)) end
+  parts[#parts + 1] = command(("a=a,q=2,i=%d,s=2"):format(id))
+  send(table.concat(parts))
+  animation_images[key] = { id = id, native = true, complete = false, width_px = width, height_px = height }
+  return id, false
+end
+
+---Transmit one additional frame of a native animation, with its display gap.
+---
+---One frame is one atomic send(), and must stay one: the protocol associates
+---m=1 continuation chunks with the transmission in progress, so interleaving
+---*any* other graphics command between one frame's chunks corrupts it. Pacing
+---therefore happens at whole-frame granularity -- the caller spreads frames
+---across ticks, never bytes of one frame.
+function M.animation_native_frame(key, bytes, gap_ms)
+  local entry = animation_images[key]
+  if not entry or not entry.native then return nil, "no native upload in progress under this key" end
+  if entry.complete then return nil, "this animation's upload already finished" end
+  if type(bytes) ~= "string" or bytes == "" then return nil, "frame bytes are empty" end
+  local gap = math.floor(tonumber(gap_ms) or 0)
+  local control = gap > 0 and ("a=f,f=100,t=d,q=2,i=%d,z=%d"):format(entry.id, gap)
+    or ("a=f,f=100,t=d,q=2,i=%d"):format(entry.id)
+  send(chunks(vim.base64.encode(bytes), control))
+  return true
+end
+
+---Every frame has arrived: leave loading mode and let the terminal loop.
+---
+---`loop` is the decoder's repetition count -- "infinite", or the number of
+---repeats after the first play. The protocol reads the v key as: v=1 loop
+---forever, v=0 ignored, any other value "loop v-1 times". Whether that counts
+---plays or repeats is ambiguous in the spec; the mapping errs toward one
+---extra play rather than one missing, and the scripts/animation checklist
+---pins the terminal's actual behavior.
+function M.animation_native_finish(key, loop)
+  local entry = animation_images[key]
+  if not entry or not entry.native then return nil, "no native upload in progress under this key" end
+  local v = 1
+  local finite = loop ~= "infinite" and tonumber(loop) or nil
+  if finite then v = math.max(2, math.floor(finite) + 2) end
+  send(command(("a=a,q=2,i=%d,s=3,v=%d"):format(entry.id, v)))
+  entry.complete = true
+  return true
+end
+
+---Free uploaded animation data by content key: the uppercase delete removes
+---any placements *and* releases the stored frames, which is the half a
+---placement-only delete leaves resident. Which keys are still wanted is the
+---caller's knowledge -- sessions share this cache, so the caller frees
+---exactly the keys no live session references, and clear_all remains the
+---exit-time backstop for whatever that bookkeeping missed.
+function M.animation_free(keys)
+  local deletions = {}
+  for _, key in ipairs(keys or {}) do
+    local entry = animation_images[key]
+    if entry then
+      deletions[#deletions + 1] = command(("a=d,d=I,q=2,i=%d"):format(entry.id))
+      animation_images[key] = nil
+    end
+  end
+  if #deletions > 0 then send(table.concat(deletions)) end
+  return #deletions
+end
+
+---Compose (but do not send) one animation frame placement.
+---
+---No `c`/`r` keys, so the frame displays at its natural pixel size. Using them
+---would let the terminal scale the frame to fill whole cells, which quantizes
+---its *position* to the cell grid -- 7 to 20 pixels of visible misregistration
+---against the still frame painted underneath it. That the frame arrives
+---pre-sized is what makes this expressible at all.
+local function animation_placement_sequence(item, piece, placement, cell_w, cell_h, calibration)
+  local col, x_offset = overlay_cell_position(piece.x, cell_w, placement.col, calibration.x)
+  local row, y_offset = overlay_cell_position(piece.y, cell_h, placement.row, calibration.y)
+  local crop_x = math.floor(piece.x - item.x + 0.5)
+  local crop_y = math.floor(piece.y - item.y + 0.5)
+  -- `piece.x` and `piece.width` were each rounded to whole pixels on their own,
+  -- so a frame whose drawn origin lands exactly halfway between two pixels
+  -- rounds its origin up while its width stays put, and the crop then ends one
+  -- pixel past the frame it is taken from. Clamp, where the rule everywhere
+  -- else in this file is to refuse: nothing about this rectangle is wrong, it
+  -- is one rounding step from exact, and the refusal is not local -- it drops
+  -- *every* animation in the preview, because animation_apply abandons the
+  -- whole diff on the first frame it cannot express. A document froze at one
+  -- pane width and played at the next entirely on this half pixel.
+  --
+  -- Genuinely wrong geometry still refuses below: the clamp floors at zero, so
+  -- a piece larger than its own frame keeps failing `crop_within` as before.
+  crop_x = math.max(0, math.min(crop_x, math.floor(item.width) - piece.width))
+  crop_y = math.max(0, math.min(crop_y, math.floor(item.height) - piece.height))
+  local crop_w, crop_h = crop_within(item.width, item.height, crop_x, crop_y, piece.width, piece.height)
+  if not crop_w then return nil end
+  local offset = ""
+  if x_offset ~= 0 or y_offset ~= 0 then offset = (",X=%d,Y=%d"):format(x_offset, y_offset) end
+  local pid = new_placement_id()
+  local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,z=%d%s"):format(
+    item.image_id,
+    pid,
+    crop_x,
+    crop_y,
+    crop_w,
+    crop_h,
+    animation_zindex(),
+    offset
+  )
+  return pid, at({ row = row, col = col }, command(control))
+end
+
+---Place (or re-place) one preview's animation frames.
+---
+---`items` are `{ image_id, x, y, width, height }` in the pixels the base image
+---is *drawn* at, relative to the placement's top-left corner. `width`/`height`
+---are the frame PNG's own dimensions, which the caller must have obtained from
+---`animation_upload`, because they are what the crop is validated against.
+---
+---Returns the set id to pass back next tick, plus counters. A refusal returns
+---nil and a reason, and the caller simply leaves the still frame showing --
+---which is the whole safety property of drawing animation *over* a painted
+---image rather than into a hole cut for it.
+function M.animation_apply(set_id, items, placement)
+  local cell = cellpixels.measure()
+  if not cell_is_placeable(cell) then return nil, "the terminal's pixel cell size is unknown" end
+
+  local cell_w, cell_h = cell.width, cell.height
+  local drawn_w = placement.width * cell_w
+  local drawn_h = placement.height * cell_h
+  local offset_cfg = config.get().image.raw_cell_offset_px or {}
+  -- The same calibration the base placement applies. Anything else detaches
+  -- the animation from the picture underneath it by exactly the difference.
+  local calibration = {
+    x = math.max(0, math.floor(tonumber(offset_cfg.x) or 0)),
+    y = math.max(0, math.floor(tonumber(offset_cfg.y) or 0)),
+  }
+
+  local cuts = {}
+  for _, exclusion in ipairs(placement.exclusions or {}) do
+    cuts[#cuts + 1] = {
+      x = (exclusion.col - placement.col) * cell_w,
+      y = (exclusion.row - placement.row) * cell_h,
+      width = exclusion.width * cell_w,
+      height = exclusion.height * cell_h,
+    }
+  end
+
+  local set = set_id and animations[set_id] or nil
+  if not set then
+    next_animation_set = next_animation_set + 1
+    set_id = next_animation_set
+    set = { placements = {} }
+    animations[set_id] = set
+  end
+
+  local order, wanted = {}, {}
+  for _, item in ipairs(items or {}) do
+    local ix, iy = coord(item.x, 0), coord(item.y, 0)
+    local iw, ih = coord(item.width, 0), coord(item.height, 0)
+    if ix and iy and iw and ih and item.image_id then
+      -- Clipping to the placement box is what handles an image scrolled half
+      -- off the top or bottom, and it honours `raw_statusline_guard_cells` for
+      -- free: preview.placement has already taken the guard out of
+      -- `placement.height`.
+      local x0, y0 = math.max(0, ix), math.max(0, iy)
+      local x1, y1 = math.min(drawn_w, ix + iw), math.min(drawn_h, iy + ih)
+      if x1 > x0 and y1 > y0 then
+        local pieces = { { x = x0, y = y0, width = x1 - x0, height = y1 - y0 } }
+        for _, cut in ipairs(cuts) do
+          local next_pieces = {}
+          for _, piece in ipairs(pieces) do
+            for _, kept in ipairs(subtract(piece, cut)) do
+              next_pieces[#next_pieces + 1] = kept
+            end
+          end
+          pieces = next_pieces
+        end
+        for _, piece in ipairs(pieces) do
+          piece.x = math.floor(piece.x + 0.5)
+          piece.y = math.floor(piece.y + 0.5)
+          piece.width = math.max(1, math.floor(piece.width + 0.5))
+          piece.height = math.max(1, math.floor(piece.height + 0.5))
+          -- Keyed by image *and* rectangle: a tick changes the image id while
+          -- the rectangle stays put, which is exactly the case that must count
+          -- as a new placement rather than an unchanged one.
+          local key = ("%d:%d:%d:%d:%d"):format(item.image_id, piece.x, piece.y, piece.width, piece.height)
+          if not wanted[key] then
+            wanted[key] = { item = item, piece = piece }
+            order[#order + 1] = key
+          end
+        end
+      end
+    end
+  end
+
+  -- `set.placements` is read, never written, until every sequence has been
+  -- built: a refusal partway through a diff that had already moved entries out
+  -- of it would strand those placements live in the terminal with nothing left
+  -- tracking them, and `animation_clear` would never delete them. Same hazard
+  -- `overlay_apply` documents above its pre-pass; here the refusal depends on
+  -- caller-supplied fractional geometry, so the fix is to keep the diff
+  -- read-only rather than to prove the refusal unreachable.
+  local additions, fresh = {}, {}
+  for _, key in ipairs(order) do
+    local existing = set.placements[key]
+    if existing then
+      fresh[key] = existing
+    else
+      local entry = wanted[key]
+      local pid, sequence =
+        animation_placement_sequence(entry.item, entry.piece, placement, cell_w, cell_h, calibration)
+      -- A crop that cannot be expressed leaves this frame unplaced rather than
+      -- drawing a wrong one. The still image underneath is already correct,
+      -- and the set is exactly as it was before this call.
+      if not pid then return nil, "an animation frame could not be expressed as a crop" end
+      additions[#additions + 1] = sequence
+      fresh[key] = { pid = pid, image_id = entry.item.image_id }
+    end
+  end
+
+  local leftovers = {}
+  for key, entry in pairs(set.placements) do
+    if not fresh[key] then leftovers[key] = entry end
+  end
+  local deletions = {}
+  for _, leftover in ipairs(ordered_animation_placements(leftovers)) do
+    deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(leftover.image_id, leftover.pid))
+  end
+
+  -- New frame first, then the previous one's deletions, in one write. The
+  -- reverse order is what md-render.nvim found necessary on WezTerm, where a
+  -- placement is removed as the TUI rewrites the cells under it -- but this
+  -- backend's own measured evidence runs the other way on the terminals it
+  -- actually drives (see `M.move`: delete-first is a visible blink and a
+  -- one-row roll), and WezTerm is gated off for animation entirely. Do not
+  -- "fix" this to match theirs without re-running probe check 5.
+  local payload = table.concat(additions) .. table.concat(deletions)
+  if payload ~= "" then send(payload) end
+  set.placements = fresh
+
+  return set_id, { placed = #additions, deleted = #deletions, bytes = #payload, items = #order }
+end
+
+---One animation set's placements in a stable order, for the same reason
+---`ordered_pids` exists: an unordered `pairs` walk makes the emitted stream
+---unassertable.
+function ordered_animation_placements(placements)
+  local keys = {}
+  for key in pairs(placements or {}) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys)
+  local out = {}
+  for _, key in ipairs(keys) do
+    out[#out + 1] = placements[key]
+  end
+  return out
+end
+
+---Remove one animation set's placements. The frame images stay uploaded: the
+---loop will come round to them again, and re-uploading a frame every time the
+---preview is occluded would give back the whole reason this is cheap.
+function M.animation_clear(set_id)
+  local set = set_id and animations[set_id] or nil
+  if not set then return false end
+  local deletions = {}
+  for _, entry in ipairs(ordered_animation_placements(set.placements)) do
+    deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(entry.image_id, entry.pid))
+  end
+  if #deletions > 0 then send(table.concat(deletions)) end
+  animations[set_id] = nil
+  return true
+end
+
 ---Remove one selection-highlight set's placements. The tint sheet stays
 ---uploaded for the next gesture; `M.clear_all` frees it.
 function M.overlay_clear(set_id)
@@ -844,6 +1275,13 @@ function M.clear_all()
   for set_id in pairs(overlays) do
     M.overlay_clear(set_id)
   end
+  for set_id in pairs(animations) do
+    M.animation_clear(set_id)
+  end
+  for key, entry in pairs(animation_images) do
+    send(command(("a=d,d=I,q=2,i=%d"):format(entry.id)))
+    animation_images[key] = nil
+  end
   for key, sheet in pairs(sheets) do
     send(command(("a=d,d=I,q=2,i=%d"):format(sheet.id)))
     sheets[key] = nil
@@ -857,10 +1295,20 @@ function M.health()
   for _, item in pairs(owned) do
     placements = placements + #(item.placement_ids or {})
   end
-  local zindex_value, overlay_zindex_value, zindex_source = resolve_layers()
+  local zindex_value, animation_zindex_value, overlay_zindex_value, zindex_source = resolve_layers()
   local double_buffer_value, double_buffer_source = resolve_double_buffer()
   local offset = config.get().image.raw_cell_offset_px or {}
   local overlay_supported, overlay_reason = M.overlay_supported()
+  local animation_supported, animation_reason = M.animation_supported()
+  local animation_native, animation_native_reason = M.animation_native_supported()
+  local animation_current_mode = (animation_mode())
+  local animation_sets, animation_placements = 0, 0
+  for _, set in pairs(animations) do
+    animation_sets = animation_sets + 1
+    for _ in pairs(set.placements) do
+      animation_placements = animation_placements + 1
+    end
+  end
   local overlay_sets, overlay_placements = 0, 0
   for _, set in pairs(overlays) do
     overlay_sets = overlay_sets + 1
@@ -874,9 +1322,21 @@ function M.health()
     -- What a pixel is worth on screen. Overlay rectangles are sized in these,
     -- so "unmeasured" here is exactly why the overlay is off.
     cell_pixels = cellpixels.describe(),
-    -- Reported beside `zindex` rather than alone: the pair is the diagnostic.
-    -- Two equal numbers mean the highlight is ordered by image id instead of by
-    -- layer, which is how the Ghostty defect presented (see `resolve_layers`).
+    -- Reported beside `zindex` rather than alone: the whole stack is the
+    -- diagnostic. Two equal numbers anywhere in it mean something is ordered by
+    -- image id instead of by layer, which is how the Ghostty defect presented
+    -- (see `resolve_layers`).
+    animation_supported = animation_supported,
+    animation_reason = animation_reason,
+    -- The resolved mode plus whether the native gate opens, so health can say
+    -- which strategy a session will pick before one exists to ask.
+    animation_mode = animation_current_mode,
+    animation_native_supported = animation_native,
+    animation_native_reason = animation_native_reason,
+    animation_zindex = animation_zindex_value,
+    animation_images = vim.tbl_count(animation_images),
+    animation_sets = animation_sets,
+    animation_placements = animation_placements,
     overlay_zindex = overlay_zindex_value,
     overlay_sheets = vim.tbl_count(sheets),
     overlay_sets = overlay_sets,

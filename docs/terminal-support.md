@@ -30,11 +30,35 @@ fixed were each invisible to every headless test that existed at the time.
 
 | Terminal | Status | Evidence |
 |---|---|---|
-| iTerm2 3.5+ | `Supported` for image rendering and the drag-highlight overlay | Operator-driven, 2026-08-07. The rest of the feature set is `Protocol-compatible but unvalidated`. |
-| Kitty | `Supported` for the drag-highlight overlay | Operator-driven, 2026-08-08, across repeated drags. |
-| Ghostty 1.3.1 | `Supported` for the drag-highlight overlay | Operator-driven, 2026-08-08, across repeated drags. |
-| WezTerm | `Supported` for image rendering; the overlay is deliberately **off** | See below. |
+| iTerm2 3.5+ | `Supported` for image rendering and the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-07. The rest of the feature set is `Protocol-compatible but unvalidated`. |
+| Kitty | `Supported` for the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
+| Ghostty 1.3.1 | `Supported` for the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
+| WezTerm | `Supported` for image rendering; the overlay **and animation** are deliberately off | See below. |
 | Warp | `Protocol-compatible but unvalidated` | Never launched. Its Kitty-graphics support is newer than the others'. |
+
+## Animated images
+
+Playback is off by default (`render.animate = false`), and with it off the
+still first frame the screenshot captured is what shows — the table below
+describes what happens once it is turned on. Two playback strategies exist,
+selected per profile and overridable with `terminal.animation`:
+
+| Strategy | What it is | Status |
+|---|---|---|
+| `frames` (client-driven) | A shared Neovim timer swaps natural-size frame placements — the same operation as an overlay crop, one placement diff per frame shown. | The default on iTerm2, Kitty and Ghostty, riding the overlay qualification above. |
+| `native` (terminal-driven) | The Kitty graphics protocol's animation extension (`a=f` frame data, `a=a` playback control): frames upload once with their own gaps and the terminal owns every tick. | `Protocol-compatible but unvalidated`, everywhere — including Kitty itself, whose spec defines the extension. Implemented and covered by golden escape-sequence tests; not yet watched on hardware. |
+
+To qualify `native` on a terminal: run the checklist in `scripts/animation/`
+in that terminal, watch it, and if it holds, set `terminal.animation =
+"native"` — and open an issue or PR with what you saw so the profile default
+can carry the evidence. Nothing here is promoted on protocol compatibility
+alone: implementing placements says nothing about implementing the player.
+
+WezTerm's exclusion is the overlay's, and firmer: wezterm/wezterm#7953
+duplicates a covered cell's attachment list on every repeat placement — per
+placement, not per second, so a slower swap rate does not make it safe. A
+preview stays open far longer than a drag. Re-qualify with
+`scripts/animation/` once a fixed build ships.
 
 Most of md-viewer's placement and occlusion behavior — the notification cut-out,
 the atomic placement swap, tabpage teardown — is covered by headless tests only.

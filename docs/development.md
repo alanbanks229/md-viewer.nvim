@@ -249,8 +249,9 @@ Preserve these unless a proposal explicitly revisits them:
 
 - renderer transport remains child-process stdin/stdout, with no listening port
 - runtime browser networking remains blocked unconditionally; remote images are
-  fetched only by the Node renderer process, only from hosts the user allowlists
-  in `security.remote_images`
+  fetched only by the Node renderer process, and only from public network
+  destinations -- never loopback, private, or link-local, on the initial URL or
+  a redirect hop
 - Playwright uses an existing browser and does not manage browser downloads
 - raw image cleanup targets only plugin-owned image and placement IDs
 - local image access remains canonicalized and confined to a document root

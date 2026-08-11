@@ -26,7 +26,12 @@ function crc32(buffer) {
   return (c ^ -1) >>> 0;
 }
 
-function chunk(type, data) {
+/// One length-type-data-CRC PNG chunk.
+///
+/// Once shared with a hand-written GIF-to-PNG encoder; animation frames are
+/// PNG-encoded by Chromium now (decode-context.js), so the tint sheet below is
+/// the one remaining producer.
+export function chunk(type, data) {
   const length = Buffer.alloc(4);
   length.writeUInt32BE(data.length, 0);
   const body = Buffer.concat([Buffer.from(type, "latin1"), data]);

@@ -35,6 +35,79 @@ export function attachSourceMaps(tokens, env, docLines) {
   return tokens;
 }
 
+/// Where each animated image sits, in **document** coordinates.
+///
+/// A sibling of collectBlockGeometry() rather than an extension of it. That
+/// function answers one question -- where does source range [a, b) live -- and
+/// dedupes by source range keeping the shortest box, which is the wrong rule
+/// here; it also carries no `x` or `width`, which an image rect needs. Folding
+/// the two together would put a nullable animation id on every block in the
+/// path scroll sync reads on every frame.
+///
+/// Document rather than viewport coordinates on purpose: the screen rect is
+/// then `rect - scrollY`, arithmetic Lua can do on its own. That is what lets
+/// the animation follow a scroll without a re-render or a round trip.
+///
+/// `knownIds` is the set this render actually minted. An id outside it, or a
+/// second element claiming one already seen, is dropped -- so a document that
+/// forges `data-md-anim-id` cannot conjure a placement or multiply an existing
+/// one.
+///
+/// Returns `{ rects, complete }`. `complete` is false when the deadline below
+/// expired with ids still unmeasured, and it exists because the two ways this
+/// can return fewer rects than `knownIds` are not the same fact: an image that
+/// genuinely has no box is settled, while one Chromium has not sized yet is a
+/// measurement that has to be taken again. Returning the short array alone made
+/// those indistinguishable, and the caller cached the timed-out one as though
+/// the document simply had no animations -- permanently, for that layout.
+export async function collectAnimationGeometry(page, knownIds, { deadlineMs = 750 } = {}) {
+  const allowed = [...knownIds];
+  if (allowed.length === 0) return { rects: [], complete: true };
+  const collect = () =>
+    page.evaluate((ids) => {
+      const known = new Set(ids);
+      const seen = new Set();
+      const out = [];
+      for (const element of document.querySelectorAll("img[data-md-anim-id]")) {
+        const id = element.getAttribute("data-md-anim-id");
+        if (!known.has(id) || seen.has(id)) continue;
+        const rect = element.getBoundingClientRect();
+        // A zero-area image has no placement to make, and a sub-pixel one
+        // would round to an empty crop the terminal would reject.
+        if (!(rect.width >= 1 && rect.height >= 1)) continue;
+        seen.add(id);
+        out.push({
+          id,
+          xPx: rect.left + window.scrollX,
+          yPx: rect.top + window.scrollY,
+          widthPx: rect.width,
+          heightPx: rect.height,
+        });
+      }
+      return out;
+    }, allowed);
+
+  // setContent settles at domcontentloaded, and an <img> without width/height
+  // attributes has a zero layout box until Chromium has parsed enough of its
+  // data URI to know the intrinsic size -- asynchronous, and for a document
+  // carrying a many-megabyte animation, measurably later than DOM-ready. One
+  // early measurement then reported every animation in the document as
+  // zero-area and dropped them all. Poll from the Node side (the render page
+  // runs no JavaScript, so no in-page timer can wait for us) until every
+  // minted id has a real box or a bounded deadline passes; typical documents
+  // exit on the first probe.
+  // `deadlineMs: 0` is one probe and no waiting -- what a caller re-measuring
+  // on a later render wants, since it already has a whole render between
+  // attempts and must not add three quarters of a second to each one.
+  const deadline = Date.now() + deadlineMs;
+  let rects = await collect();
+  while (rects.length < allowed.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    rects = await collect();
+  }
+  return { rects, complete: rects.length === allowed.length };
+}
+
 export async function collectBlockGeometry(page) {
   return page.evaluate(() => {
     const unique = new Map();

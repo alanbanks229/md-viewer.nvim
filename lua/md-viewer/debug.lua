@@ -39,8 +39,46 @@ function M.snapshot()
       retina_image_update_ms = session.retina_image_update_ms,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
       viewport_width_px = session.viewport_width_px,
+      -- How many animated images the last render *measured*, beside how many
+      -- became assets. Without the first number a document whose geometry pass
+      -- timed out reads exactly like a document with no animated images in it
+      -- at all -- which is how that failure stayed invisible for so long. A
+      -- count here with `animation_count = 0` means the rects never arrived;
+      -- `incomplete` means the renderer is still trying to measure them.
+      animation_geometry_count = session.animation_geometry and #session.animation_geometry or 0,
+      animation_geometry_incomplete = session.animation_geometry_incomplete or false,
+      animation_count = session.animation_assets and vim.tbl_count(session.animation_assets) or 0,
+      animation_strategy = session.animation_strategy,
+      animation_assets = (function()
+        if not session.animation_assets then return nil end
+        local lines = {}
+        for id, asset in pairs(session.animation_assets) do
+          lines[#lines + 1] = ("%s %s %dx%d %s%s"):format(
+            id,
+            asset.strategy,
+            asset.target_w,
+            asset.target_h,
+            asset.refused and ("refused: " .. asset.refused)
+              or (asset.frames and (asset.strategy == "native" and (asset.native_ready and "playing" or "uploading") or (#asset.frames .. " frames")))
+              or "materializing",
+            asset.decode_ms and (" (decoded in " .. asset.decode_ms .. "ms)") or ""
+          )
+        end
+        table.sort(lines)
+        return lines
+      end)(),
+      animation_ticks = session.animation_ticks,
+      animation_last_bytes = session.animation_last_bytes,
+      animation_last_error = session.animation_last_error,
+      animation_suppressed_reason = session.animation_suppressed_reason,
       viewport_height_px = session.viewport_height_render_px,
       viewport_calibration_tier = session.viewport_calibration_tier,
+      -- The cell this render was sized against, so the tier above can be
+      -- checked rather than trusted: `viewport_width_px` should be
+      -- `preview_width_cells` times this. nil on the estimated tier, where no
+      -- exact cell exists and the aspect ratio stands in for one.
+      viewport_cell_css_px = session.viewport_cell_css_width_px
+        and ("%.2fx%.2f"):format(session.viewport_cell_css_width_px, session.viewport_cell_css_height_px),
       preview_width_cells = session.preview_width_cells,
       preview_height_cells = session.preview_height_cells,
       occluded = session.occluded,
@@ -118,6 +156,14 @@ function M.show()
   process.request("health", { browser = config.get().browser }, function(result, err)
     local lines = { "md-viewer.nvim debug", ("="):rep(20) }
     vim.list_extend(lines, health.environment_lines(health.collect(result, err)))
+    -- The renderer has always computed and sent these counters; nothing read
+    -- them, so decode failures, refusals and frame-store evictions were
+    -- invisible on this side while being one field away the whole time.
+    if type(result) == "table" and type(result.animationStore) == "table" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "-- Renderer animation store --"
+      vim.list_extend(lines, vim.split(vim.inspect(result.animationStore), "\n", { plain = true }))
+    end
     lines[#lines + 1] = ""
     lines[#lines + 1] = "-- Sessions & Events --"
     vim.list_extend(lines, vim.split(vim.inspect(M.snapshot()), "\n", { plain = true }))

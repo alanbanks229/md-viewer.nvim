@@ -10,17 +10,22 @@
 -- cropped placements around a passive float, one tint sheet, two overlay crops
 -- (the first carrying a sub-cell X/Y remainder), a diffed frame that emits its
 -- replacement *before* the deletion it supersedes, a re-crop, then teardown.
+--
+-- The base's `z=-3` was `z=-2` until the animation layer was reserved between
+-- the base and the selection overlay. That is the only difference, it was
+-- deliberate, and the overlay's own `z=-1` is unchanged -- which is the point:
+-- the highlight did not move, the base made room under it.
 local GOLDEN_VALIDATED_STREAM = "<ESC>_Ga=t,f=100,t=d,q=2,i=<0>,m=0;iVBORw0KGgoAAAANSUhEUgAAAGQAAABk<ESC>\\"
-  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<0>,x=0,y=0,w=100,h=20,c=10,r=2,z=-2;<ESC>\\<ESC>[u"
-  .. "<ESC>[s<ESC>[9;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<1>,x=0,y=40,w=100,h=60,c=10,r=6,z=-2;<ESC>\\<ESC>[u"
-  .. "<ESC>[s<ESC>[7;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<2>,x=0,y=20,w=30,h=20,c=3,r=2,z=-2;<ESC>\\<ESC>[u"
-  .. "<ESC>[s<ESC>[7;9H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<3>,x=60,y=20,w=40,h=20,c=4,r=2,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<0>,x=0,y=0,w=100,h=20,c=10,r=2,z=-3;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[9;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<1>,x=0,y=40,w=100,h=60,c=10,r=6,z=-3;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[7;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<2>,x=0,y=20,w=30,h=20,c=3,r=2,z=-3;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[7;9H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<3>,x=60,y=20,w=40,h=20,c=4,r=2,z=-3;<ESC>\\<ESC>[u"
   .. "<ESC>_Ga=t,f=100,t=d,q=2,i=<1>,m=0;iVBORw0KGgoAAAANSUhEUgAAAGQAAABk<ESC>\\"
   .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<4>,x=0,y=0,w=20,h=10,z=-1,X=6,Y=7;<ESC>\\<ESC>[u"
   .. "<ESC>[s<ESC>[11;7H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<5>,x=0,y=0,w=33,h=12,z=-1;<ESC>\\<ESC>[u"
   .. "<ESC>[s<ESC>[11;7H<ESC>_Ga=p,q=2,C=1,i=<1>,p=<6>,x=0,y=0,w=33,h=12,z=-1,X=1,Y=0;<ESC>\\<ESC>[u"
   .. "<ESC>_Ga=d,d=i,q=2,i=<1>,p=<5>;<ESC>\\"
-  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<7>,x=0,y=0,w=100,h=100,c=10,r=10,z=-2;<ESC>\\<ESC>[u"
+  .. "<ESC>[s<ESC>[5;3H<ESC>_Ga=p,q=2,C=1,i=<0>,p=<7>,x=0,y=0,w=100,h=100,c=10,r=10,z=-3;<ESC>\\<ESC>[u"
   .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<0>;<ESC>\\"
   .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<1>;<ESC>\\"
   .. "<ESC>_Ga=d,d=i,q=2,i=<0>,p=<2>;<ESC>\\"
@@ -84,43 +89,63 @@ return function(t)
   config.reset()
   config.setup({ terminal = { profile = "kitty" } })
   local kitty_health = raw_backend.health()
-  t.eq(-2, kitty_health.zindex, "profile default zindex for kitty")
+  t.eq(-3, kitty_health.zindex, "profile default zindex for kitty")
   t.ok(kitty_health.zindex_source:match("profile default"), "profile default is named as the source")
   t.ok(kitty_health.zindex_source:match("kitty"), "source names the active profile")
+  -- The profile default declares the whole stack's base directly, so nothing
+  -- was moved and nothing may claim to have been: a "lowered" note on an
+  -- untouched configuration teaches readers to skim past the one that matters.
+  t.eq(nil, kitty_health.zindex_source:match("lowered"), "an untouched default reports no move")
 
-  -- The base and the selection overlay are derived together and must never
-  -- coincide: the Kitty protocol breaks a z-index tie by image id, so a base
-  -- sharing the overlay's layer overtakes it the first time it is re-uploaded
-  -- (the 2026-08-08 Ghostty defect -- one instant highlight, then none).
+  -- Base, animation frames and the selection overlay are derived together and
+  -- no two may ever coincide: the Kitty protocol breaks a z-index tie by image
+  -- id, so a base sharing another layer overtakes it the first time it is
+  -- re-uploaded (the 2026-08-08 Ghostty defect -- one instant highlight, then
+  -- none). Asserting all three from one health call is the check; two equal
+  -- numbers anywhere in the stack is the bug.
   for _, profile in ipairs({ "iterm2", "kitty", "ghostty", "wezterm", "warp", "generic_kitty" }) do
     config.reset()
     config.setup({ terminal = { profile = profile } })
     local layered = raw_backend.health()
-    t.eq(-2, layered.zindex, ("%s draws its base at -2"):format(profile))
+    t.eq(-3, layered.zindex, ("%s draws its base at -3"):format(profile))
+    t.eq(-2, layered.animation_zindex, ("%s leaves -2 to animation frames"):format(profile))
     t.eq(-1, layered.overlay_zindex, ("%s leaves -1 to the selection overlay"):format(profile))
   end
 
-  -- An explicit -1 is the one value that has to move: the overlay would land on
-  -- 0, where the protocol draws it over Neovim's text instead of under it. The
-  -- base gives way, and the health report says so rather than silently
-  -- disagreeing with the configured value.
-  config.reset()
-  config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = -1 } })
-  local pinned = raw_backend.health()
-  t.eq(-2, pinned.zindex, "an explicit raw_zindex=-1 is lowered to -2")
-  t.eq(-1, pinned.overlay_zindex, "so the overlay still gets its own layer")
-  t.ok(pinned.zindex_source:match("lowered from %-1"), "and the health report explains the move")
+  -- An explicit value only moves when the stack above it would reach 0, where
+  -- the protocol draws over Neovim's text instead of under it. Then the whole
+  -- stack slides down just far enough for its top to land on -1, and the health
+  -- report says so rather than silently disagreeing with the configured value.
+  for _, configured in ipairs({ -1, -2 }) do
+    config.reset()
+    config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = configured } })
+    local pinned = raw_backend.health()
+    t.eq(-3, pinned.zindex, ("an explicit raw_zindex=%d is lowered to -3"):format(configured))
+    t.eq(-2, pinned.animation_zindex, "so animation frames still get their own layer")
+    t.eq(-1, pinned.overlay_zindex, "and so does the overlay")
+    t.ok(pinned.zindex_source:match("lowered from %-?%d"), "and the health report explains the move")
+  end
 
-  -- Every other explicit value keeps its layer and takes the overlay with it.
-  -- A base deliberately put above the text is the only place a highlight over
-  -- that base can be seen from.
+  -- A stack that already clears the text is left alone entirely.
+  config.reset()
+  config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = -3 } })
+  local exact = raw_backend.health()
+  t.eq(-3, exact.zindex, "a base with room for the whole stack keeps the layer it asked for")
+  t.eq(nil, exact.zindex_source:match("lowered"), "and nothing is reported as moved")
+
+  -- Every explicit value above the text keeps its layer and takes the others
+  -- with it. A base deliberately put above the text is the only place a
+  -- highlight over that base can be seen from.
   config.reset()
   config.setup({ terminal = { profile = "ghostty" }, image = { raw_zindex = 5 } })
   local above = raw_backend.health()
   t.eq(5, above.zindex, "a base above the text keeps the layer it asked for")
-  t.eq(6, above.overlay_zindex, "and the overlay follows it up rather than hiding under it")
+  t.eq(6, above.animation_zindex, "and animation frames follow it up")
+  t.eq(7, above.overlay_zindex, "and so does the overlay, rather than hiding under it")
 
-  -- With the overlay disabled outright there is nothing to make room for.
+  -- With the overlay disabled outright there is one fewer layer to make room
+  -- for -- but the animation layer is reserved whether or not anything is
+  -- animating, so an explicit -1 still has to give way by exactly one.
   config.reset()
   config.setup({
     terminal = { profile = "ghostty" },
@@ -130,8 +155,21 @@ return function(t)
     },
   })
   local unlayered = raw_backend.health()
-  t.eq(-1, unlayered.zindex, "selection_overlay=off leaves an explicit -1 exactly where it was put")
+  t.eq(-2, unlayered.zindex, "selection_overlay=off still leaves the animation layer its own")
+  t.eq(-1, unlayered.animation_zindex, "which is the layer an explicit -1 was asking for")
   t.eq(nil, unlayered.overlay_zindex, "and reports no overlay layer at all")
+
+  -- ...and with the overlay off, a base that already has room above it does not
+  -- move at all, which is what keeps an explicit raw_zindex meaningful.
+  config.reset()
+  config.setup({
+    terminal = { profile = "ghostty" },
+    image = { raw_zindex = -2 },
+    interaction = { selection_overlay = "off" },
+  })
+  local unlayered_roomy = raw_backend.health()
+  t.eq(-2, unlayered_roomy.zindex, "selection_overlay=off leaves an explicit -2 exactly where it was put")
+  t.eq(-1, unlayered_roomy.animation_zindex, "with the animation layer above it")
 
   -- An explicit override still beats a different profile's default.
   config.reset()
@@ -139,6 +177,225 @@ return function(t)
   local overridden_health = raw_backend.health()
   t.eq(9, overridden_health.zindex, "explicit override wins over a non-default profile")
   t.ok(overridden_health.zindex_source:match("explicit override"), "override source names itself, not the profile")
+
+  -- Animation frames: the same natural-size crop placement the overlay uses,
+  -- on the layer between the base and the selection tint. What this pins is
+  -- the shape of one tick -- upload once, then place-before-delete -- and the
+  -- three keys that must never appear: `c` and `r` (which would quantize the
+  -- frame's position to whole cells) and any z other than the animation layer.
+  config.reset()
+  config.setup({ terminal = { profile = "kitty" }, render = { animate = true } })
+  stub_cell(10, 20)
+  reset_sequences()
+
+  local frame_a = raw_backend.animation_upload("frame-a", fake_png())
+  local anim_placement = { row = 4, col = 2, width = 20, height = 10, exclusions = {} }
+  -- x = 25 drawn px is cell 2 remainder 5; y = 33 is cell 1 remainder 13.
+  local anim_set = raw_backend.animation_apply(
+    nil,
+    { { image_id = frame_a, x = 25, y = 33, width = 100, height = 50 } },
+    anim_placement
+  )
+  t.ok(anim_set ~= nil, "a frame at a sub-cell offset places")
+  local first_tick = output()
+  t.ok(first_tick:match("a=p[^;]*,z=%-2"), "frames are placed on the animation layer, not the base or overlay one")
+  t.eq(nil, first_tick:match("a=p[^;]*,c=%d"), "no c key: cell scaling would quantize the frame's position")
+  t.eq(nil, first_tick:match("a=p[^;]*,r=%d"), "no r key, for the same reason")
+  t.ok(first_tick:match("X=5,Y=13"), "the sub-cell remainder is carried in X/Y")
+  t.ok(first_tick:match("\27%[6;5H"), "and the cell part positions the cursor (row 4+1, col 2+2, one-based)")
+  t.ok(first_tick:match("x=0,y=0,w=100,h=50"), "the crop is the whole frame, which Node already sized to the box")
+
+  reset_sequences()
+  local frame_b = raw_backend.animation_upload("frame-b", fake_png())
+  raw_backend.animation_apply(
+    anim_set,
+    { { image_id = frame_b, x = 25, y = 33, width = 100, height = 50 } },
+    anim_placement
+  )
+  local second_tick = output()
+  local placed_at = second_tick:find("a=p", 1, true)
+  local deleted_at = second_tick:find("a=d,d=i", 1, true)
+  t.ok(placed_at and deleted_at, "a later tick both places and deletes")
+  t.ok(placed_at < deleted_at, "the new frame is emitted before the one it supersedes, or the image blinks")
+
+  -- An unchanged rectangle with an unchanged image is not re-placed: that is
+  -- what makes a paused animation cost nothing.
+  reset_sequences()
+  raw_backend.animation_apply(
+    anim_set,
+    { { image_id = frame_b, x = 25, y = 33, width = 100, height = 50 } },
+    anim_placement
+  )
+  t.eq("", output(), "re-applying the identical frame emits nothing at all")
+
+  -- The same frame bytes are uploaded once per session, however often the loop
+  -- comes round: a tick must cost placement bytes, not an image.
+  reset_sequences()
+  t.eq(frame_a, raw_backend.animation_upload("frame-a", fake_png()), "an uploaded frame keeps its id")
+  t.eq("", output(), "and is not re-transmitted")
+
+  -- A refused apply must leave the set exactly as it was. The old diff moved
+  -- matched entries out of `set.placements` as it walked, so a refusal partway
+  -- stranded them: live in the terminal, tracked by nothing, never deleted.
+  -- A frame narrower than one pixel forces the refusal -- its clipped piece
+  -- rounds up to the 1px placement minimum, which cannot crop from a 0.4px
+  -- source -- and the valid item ahead of it is the one that must survive.
+  reset_sequences()
+  local refused_set, refusal = raw_backend.animation_apply(anim_set, {
+    { image_id = frame_b, x = 25, y = 33, width = 100, height = 50 },
+    { image_id = frame_a, x = 0, y = 0, width = 0.4, height = 50 },
+  }, anim_placement)
+  t.eq(nil, refused_set, "a frame that cannot be expressed refuses the whole apply")
+  t.ok(refusal:find("crop", 1, true), "and says why")
+  t.eq("", output(), "a refused apply sends nothing at all")
+
+  -- A frame whose drawn origin lands exactly halfway between two pixels. The
+  -- piece's origin rounds up while its width does not, so the crop derived from
+  -- the two used to end one pixel past the frame and refuse -- and since a
+  -- refusal abandons the entire diff, one such frame left every animation in
+  -- the document sitting on its still frame. Whether any frame lands on a half
+  -- pixel is arithmetic on the drawn scale, which is why this reproduced at one
+  -- preview width and disappeared at the next.
+  reset_sequences()
+  local half_set = raw_backend.animation_apply(
+    nil,
+    { { image_id = frame_a, x = 25.5, y = 33.5, width = 100, height = 50 } },
+    anim_placement
+  )
+  local half_tick = output()
+  t.ok(half_set ~= nil, "a frame sitting on a half pixel places instead of refusing")
+  t.ok(half_tick:match("x=0,y=0,w=100,h=50"), "and crops the whole frame rather than one pixel past it")
+  raw_backend.animation_clear(half_set)
+
+  reset_sequences()
+  raw_backend.animation_clear(anim_set)
+  t.ok(
+    output():find("a=d,d=i", 1, true) ~= nil,
+    "the placement the refused apply walked over is still tracked, so clear deletes it"
+  )
+
+  -- Native animation: the terminal owns playback. The wire contract is the
+  -- protocol's animation extension -- root frame as a plain transmission, the
+  -- root's gap set by control action (a=t carries no gap of its own), loading
+  -- mode while frames stream, per-frame a=f with the gap as z, then s=3 with
+  -- the loop count. Everything below is q=2 like the rest of this backend:
+  -- Neovim owns terminal input, so no response could ever be read.
+
+  -- The gate first. A kitty profile grants "frames" until the hardware run
+  -- promotes it, so native must refuse -- and say it is the mode, not the
+  -- terminal, that refused.
+  local native_ok, native_reason = raw_backend.animation_native_supported()
+  t.eq(false, native_ok, "the kitty profile does not grant native until someone watched it")
+  t.ok(native_reason:find("frames", 1, true), "and the refusal names the mode that stands instead")
+  t.eq(true, (raw_backend.animation_supported()), "while client-driven frames remain granted")
+
+  config.reset()
+  config.setup({ terminal = { profile = "kitty", animation = "native" }, render = { animate = true } })
+  stub_cell(10, 20)
+  local overridden_ok, overridden_evidence = raw_backend.animation_native_supported()
+  t.eq(true, overridden_ok, "terminal.animation=native opens the gate")
+  t.ok(overridden_evidence:find("explicit override", 1, true), "and the evidence says who opened it")
+
+  config.reset()
+  config.setup({ terminal = { profile = "wezterm" }, render = { animate = true } })
+  stub_cell(10, 20)
+  local wez_ok, wez_reason = raw_backend.animation_native_supported()
+  t.eq(false, wez_ok, "wezterm refuses native along with everything else")
+  t.ok(wez_reason:find("7953", 1, true), "for its own measured reason, not generic caution")
+
+  config.reset()
+  config.setup({ terminal = { profile = "kitty", animation = "native" }, render = { animate = true } })
+  stub_cell(10, 20)
+
+  -- The upload sequence, exactly.
+  reset_sequences()
+  local native_key = "sha-abc:100x50"
+  local native_id, native_existing = raw_backend.animation_native_begin(native_key, fake_png(), 70)
+  t.ok(native_id ~= nil and native_existing == false, "a fresh key begins an upload")
+  local begin_out = output()
+  local root_at = begin_out:find("a=t,f=100,t=d,q=2,i=" .. native_id, 1, true)
+  local gap_at = begin_out:find("a=a,q=2,i=" .. native_id .. ",r=1,z=70", 1, true)
+  local loading_at = begin_out:find("a=a,q=2,i=" .. native_id .. ",s=2", 1, true)
+  t.ok(root_at, "the root frame is a plain transmission")
+  t.ok(gap_at and root_at < gap_at, "the root gap follows it, set through the control action")
+  t.ok(loading_at and gap_at < loading_at, "and playback starts in loading mode, ready to show frames as they land")
+
+  reset_sequences()
+  t.eq(true, (raw_backend.animation_native_frame(native_key, fake_png(), 200)))
+  t.eq(1, #sequences, "one frame is one send -- interleaving another graphics command between chunks corrupts it")
+  t.ok(output():find("a=f,f=100,t=d,q=2,i=" .. native_id .. ",z=200", 1, true), "frame data carries its gap as z")
+
+  reset_sequences()
+  raw_backend.animation_native_frame(native_key, fake_png(), 0)
+  t.eq(nil, output():match("z=%d"), "a zero gap omits the z key entirely -- the protocol ignores z=0")
+
+  reset_sequences()
+  t.eq(true, (raw_backend.animation_native_finish(native_key, "infinite")))
+  t.ok(output():find("a=a,q=2,i=" .. native_id .. ",s=3,v=1", 1, true), "infinite runs looping with v=1")
+
+  -- A finished key is terminal-resident content: a re-begin hands back the
+  -- same id and transmits nothing, whichever session (or renderer process)
+  -- asks.
+  reset_sequences()
+  local reused_id, reused_existing = raw_backend.animation_native_begin(native_key, fake_png(), 70)
+  t.eq(native_id, reused_id, "a complete upload is reused by key")
+  t.eq(true, reused_existing, "and says so")
+  t.eq("", output(), "with nothing re-transmitted")
+  t.eq(
+    nil,
+    (raw_backend.animation_native_frame(native_key, fake_png(), 10)),
+    "a finished animation accepts no more frames"
+  )
+
+  -- Placement rides the exact machinery the frame-swap path uses -- one item
+  -- whose image id happens to be an animated image. Multiple placements of an
+  -- animated image animate in sync per the protocol, so nothing else is needed.
+  reset_sequences()
+  local native_set = raw_backend.animation_apply(
+    nil,
+    { { image_id = native_id, x = 25, y = 33, width = 100, height = 50 } },
+    anim_placement
+  )
+  t.ok(native_set ~= nil, "a native animation places through the shared clip/exclusion pipeline")
+  t.ok(output():find("a=p", 1, true) and output():match("z=%-2"), "on the animation layer like any frame")
+  raw_backend.animation_clear(native_set)
+
+  -- Freeing releases the terminal's copy of the data (uppercase delete), and
+  -- the key becomes fresh: the next begin uploads anew under a new id.
+  reset_sequences()
+  t.eq(1, raw_backend.animation_free({ native_key }))
+  t.ok(output():find("a=d,d=I,q=2,i=" .. native_id, 1, true), "free deletes image data, not only placements")
+  reset_sequences()
+  local fresh_id, fresh_existing = raw_backend.animation_native_begin(native_key, fake_png(), 70)
+  t.ok(fresh_id ~= native_id and fresh_existing == false, "a freed key uploads again under a new id")
+
+  -- Finite loop counts: repetitionCount 0 is "play once". The protocol's
+  -- "loop v-1 times" is ambiguous about plays versus repeats; the mapping errs
+  -- toward one extra play and scripts/animation pins the hardware truth.
+  reset_sequences()
+  raw_backend.animation_native_finish(native_key, 0)
+  t.ok(output():find("s=3,v=2", 1, true), "repetitionCount 0 maps to v=2")
+  raw_backend.animation_free({ native_key })
+
+  -- An upload abandoned mid-flight must not be appended to: a re-begin frees
+  -- the half and starts over.
+  reset_sequences()
+  local half_id = raw_backend.animation_native_begin("half-done", fake_png(), 10)
+  local replacement_id, replacement_existing = raw_backend.animation_native_begin("half-done", fake_png(), 10)
+  t.ok(replacement_id ~= half_id, "an incomplete upload is not resumed")
+  t.eq(false, replacement_existing, "it is restarted")
+  t.ok(output():find("a=d,d=I,q=2,i=" .. half_id, 1, true), "and the abandoned half is freed first")
+  raw_backend.animation_free({ "half-done" })
+
+  t.eq(nil, (raw_backend.animation_native_frame("never-began", fake_png(), 10)), "a frame for an unknown key refuses")
+  t.eq(nil, (raw_backend.animation_native_finish("never-began", "infinite")), "as does a finish")
+
+  config.reset()
+  config.setup({ terminal = { profile = "kitty" }, render = { animate = true } })
+  stub_cell(10, 20)
+  -- Put the shared 10x10 stub back: everything after this point was written
+  -- against it, and a 10x20 cell silently changes what those placements encode.
+  stub_cell(10, 10)
 
   -- Double buffering: profile default is true (place-then-delete). An
   -- explicit false flips the order to delete-then-place.
