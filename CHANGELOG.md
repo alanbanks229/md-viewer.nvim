@@ -3,6 +3,45 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-08-11
+
+Terminal detection over SSH. v0.1.0 identified terminals only from variables
+SSH does not forward, so a remote Neovim reached from a fully supported
+terminal identified nothing and fell back to the text-cell preview — with a
+diagnostic that pointed at the renderer, which was working fine.
+
+### Added
+
+- **Terminal detection over SSH.** iTerm2 and WezTerm are now identified from
+  `LC_TERMINAL`, which OpenSSH forwards by default, so a remote Neovim reached
+  from either terminal renders images instead of dropping to the text fallback.
+  Previously detection relied solely on variables SSH does not forward, and
+  every SSH session identified no terminal at all. The forwarded value is ranked
+  below every native variable and ignored when another terminal has set
+  `TERM_PROGRAM`, so an inherited `LC_TERMINAL` cannot misidentify a nested
+  terminal that has no graphics support.
+- **`$MD_VIEWER_TERMINAL_PROFILE`.** Selects a terminal profile from the
+  environment, for terminals that export no SSH-forwardable identity and for one
+  Neovim config shared across many hosts. `terminal.profile` still outranks it;
+  an unrecognized value is ignored and reported in `:MdViewerDebug` rather than
+  dropped silently.
+- **SSH awareness in diagnostics.** `:MdViewerDebug` and `:MdViewerHealth` report
+  whether the session is remote, and an unidentified terminal on an SSH session
+  now carries a warning naming the fixes. `:MdViewerDebug`'s `terminal` field
+  falls back to `LC_TERMINAL` instead of reporting `unknown` beside a correctly
+  identified profile. The evidence names the SSH variable but never its value,
+  which holds the client's IP address.
+- **SSH documentation** in the README, `:help md-viewer-ssh`, and a
+  troubleshooting section covering the exact `profile: unknown` /
+  `backend: cells` signature — including why a working Chromium and a forced
+  `image.backend` are both the wrong lever.
+
+### Fixed
+
+- An invalid `terminal.profile` passed directly to `terminal.capability()`
+  reported the literal string `"unknown"` as the offending value instead of the
+  value actually given.
+
 ## [0.1.0] - 2026-08-11
 
 First public release.
@@ -43,4 +82,5 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.0
