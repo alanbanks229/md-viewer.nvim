@@ -27,7 +27,28 @@ then unlinks it. Both sides reject or supersede stale work.
 No WebSocket, deliberately: the renderer is already persistent, no connection is
 re-established per edit, and a WebSocket would require a listening HTTP/TCP
 endpoint while leaving browser layout, PNG capture, and terminal image transfer
-untouched. Scroll-only work reuses cached HTML, the live DOM, document geometry
+untouched.
+
+**Invariant:** on the machine running Neovim, md-viewer opens no listening port
+of any kind. `renderer/src/main.js` is the entrypoint the plugin spawns and it
+binds nothing; `tests/node/no-listening-port.test.js` asserts that against the
+real subprocess and its real Chromium child. `client_render.address` does not
+change this — it makes the plugin a *client*, dialling out to an address it was
+given. When that address is a forwarded port, the listener on the near end
+belongs to sshd because a user asked for a forward.
+
+What that address may reach is `renderer/src/companion.js`: the same renderer,
+the same `LineProtocol`, bound to a **unix domain socket with mode 0600** on the
+machine the user's terminal is on. It exists so rasterization can happen where
+the pixels do not have to cross a throttled link
+([local-render-design.md](local-render-design.md) has the measurements). Both
+entrypoints share `renderer/src/service.js`, which owns every request's meaning
+and — **invariant** — opens, listens on and connects to nothing, so "the
+renderer speaks to nothing over the network" stays a property of the renderer
+rather than of one entrypoint. A companion serves one connection at a time,
+because a service owns one browser, one page and one serial queue; and it
+forgets a disconnected session's documents, because document ids are buffer
+numbers and the next session would otherwise inherit them. Scroll-only work reuses cached HTML, the live DOM, document geometry
 and the token source map, then performs a page scroll and viewport screenshot
 alone.
 

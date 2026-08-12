@@ -396,6 +396,22 @@ local function verbose_raw_graphics(report)
   }
 end
 
+---Which renderer answered this session, and how it got chosen.
+---
+---Both halves are needed and neither implies the other: an address that was
+---configured says what was asked for, and the transport in force says what
+---actually happened. A companion that was configured and then unreachable is
+---the case worth reading at a glance, because everything still works and the
+---whole reason for configuring one has quietly gone away.
+local function transport_text(process)
+  process = process or {}
+  if process.transport == "socket" then
+    return ("companion socket %s (%s)"):format(process.address or "?", process.address_source or "configured")
+  end
+  if process.companion_refused then return ("child process beside Neovim -- %s"):format(process.companion_refused) end
+  return "child process beside Neovim"
+end
+
 local function verbose_renderer(report)
   local process = report.renderer_process or {}
   local process_text = process.running and ("running (pid %s)"):format(process.pid or "unknown")
@@ -410,6 +426,7 @@ local function verbose_renderer(report)
     { "chromium launch", report.chromium_launch },
     { "temp dir writable", yes_no(report.temporary_directory_writable) },
     { "process", process_text },
+    { "transport", transport_text(process) },
   }
 end
 
@@ -542,7 +559,11 @@ end
 
 local function process_summary(process)
   process = process or {}
-  if process.running then return "running" end
+  -- Named, not implied. A session rendering on a companion and a session that
+  -- silently fell back to the child look identical in every other row, and the
+  -- difference is the entire point of having configured one.
+  local where = process.transport == "socket" and (" on the companion at %s"):format(process.address or "?") or ""
+  if process.running then return "running" .. where end
   if process.last_error then return "stopped: " .. split_lines(process.last_error)[1] end
   return "not started yet"
 end
@@ -586,6 +607,24 @@ end
 ---repeat the same diagnosis across a caveat, a reason, and a warning.
 local function build_warnings(report, status, status_reason)
   local warnings = {}
+  -- Actionable, and invisible without saying so: everything still renders, on
+  -- the machine Neovim is on, exactly as it did before a companion was
+  -- configured. The only symptom is that the reason for configuring one --
+  -- keeping pixels off a slow link -- silently is not happening.
+  local renderer = report.renderer_process or {}
+  if renderer.companion_refused then
+    warnings[#warnings + 1] = {
+      text = "a companion renderer was configured but could not be reached",
+      severity = "warn",
+      detail = {
+        renderer.companion_refused,
+        "Rendering fell back to the process beside Neovim, which is correct and merely local.",
+        "Check the companion is running and that its socket is reachable from this host;",
+        "over SSH that means the reverse forward is up. Changing client_render.address",
+        "makes md-viewer try again.",
+      },
+    }
+  end
   if status ~= "healthy" then
     -- status_reason can be a multi-paragraph Playwright launch-failure
     -- message; keep the full text, just split so no single buffer line

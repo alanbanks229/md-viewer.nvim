@@ -29,6 +29,15 @@ they would help were measured making it worse.
   as "stopped" and bought a full-size transfer — half a second of transit on the
   link this was measured against — that the next notch immediately made stale.
   Local sessions are unchanged.
+- **A renderer that can run somewhere other than beside Neovim.**
+  `renderer/src/companion.js` serves the existing renderer protocol over a unix
+  domain socket (mode 0600, never TCP), and `client_render.address` points the
+  plugin at one instead of spawning a child. The machine running Neovim still
+  opens no listening port — it dials out, and when the address is a forwarded
+  port the listener belongs to sshd. A companion that cannot be reached is
+  reported in `:MdViewerHealth` and falls back to the local renderer rather than
+  failing the preview. Groundwork: rendering across two machines needs the
+  transmission tokens that come next, so this is not yet useful remotely.
 - **A design record for client-side rendering**, in
   [docs/local-render-design.md](docs/local-render-design.md): the measurements
   behind the slow-link case and the architecture for rendering on the machine

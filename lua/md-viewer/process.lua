@@ -1,4 +1,5 @@
 local protocol = require("md-viewer.protocol")
+local config = require("md-viewer.config")
 
 local M = {}
 local instance
@@ -9,6 +10,13 @@ local instance
 -- specific in-flight request and would otherwise go stale silently across a
 -- renderer restart.
 local exit_listeners = {}
+-- Why a configured companion was given up on, or nil while it is still worth
+-- trying. Set once and never cleared for the session: a companion that was not
+-- there when the preview opened is not going to appear, and retrying the
+-- connect on every scroll frame would cost a timeout each. `config.setup()`
+-- clearing it is the documented way back, since changing the address is the
+-- only thing that makes another attempt meaningful.
+local companion_refused = nil
 
 local function plugin_root()
   local source = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
@@ -53,11 +61,142 @@ local function consume(proc, data)
   end
 end
 
-function M.start()
-  if instance and instance.running then return instance end
+---Where a companion renderer is listening, and which setting said so.
+---
+---Configuration outranks the environment, matching terminal.profile: a value
+---written into a config file is a decision about this machine, while the
+---variable exists for one config shared across many hosts.
+local function companion_address()
+  local configured = config.get().client_render.address
+  if type(configured) == "string" and configured ~= "" then return configured, "client_render.address" end
+  local from_env = vim.env.MD_VIEWER_CLIENT_ADDR
+  if type(from_env) == "string" and from_env ~= "" then return from_env, "$MD_VIEWER_CLIENT_ADDR" end
+  return nil, nil
+end
+
+---Split a companion address into host and port, or nil when it names a unix
+---socket. A path is the unambiguous case -- it contains a separator -- so the
+---host:port reading is only taken when there is none.
+local function tcp_target(address)
+  if address:find("/", 1, true) then return nil end
+  local host, port = address:match("^(.*):(%d+)$")
+  if not host or host == "" then return nil end
+  -- An IPv6 literal arrives bracketed, the way a URL writes it; libuv wants the
+  -- address on its own.
+  host = host:gsub("^%[(.*)%]$", "%1")
+  return host, tonumber(port)
+end
+
+---Give up on the companion for the rest of the session, failing everything
+---already in flight and saying why exactly once.
+local function refuse_companion(proc, reason)
+  companion_refused = reason
+  proc.running, proc.connected = false, false
+  proc.last_error = reason
+  if instance == proc then instance = nil end
+  deliver_error(proc, reason)
+  if proc.stream and not proc.stream:is_closing() then
+    pcall(proc.stream.read_stop, proc.stream)
+    proc.stream:close()
+  end
+  vim.schedule(
+    function()
+      vim.notify(("md-viewer: %s. Falling back to the renderer beside Neovim."):format(reason), vim.log.levels.WARN)
+    end
+  )
+  for _, listener in ipairs(exit_listeners) do
+    vim.schedule(listener)
+  end
+end
+
+---Connect to a companion. Returns immediately with the connection still in
+---progress: requests made before it completes are held in `outbox` and flushed
+---on connect, so a caller never has to know whether the socket is up yet.
+local function start_socket(address, source)
+  local host, port = tcp_target(address)
+  local stream = host and vim.uv.new_tcp() or vim.uv.new_pipe(false)
+  if not stream then return nil, "failed to create a socket handle" end
+
+  local proc = {
+    transport = "socket",
+    address = address,
+    address_source = source,
+    running = true,
+    connected = false,
+    callbacks = {},
+    stdout_buffer = "",
+    stderr = {},
+    next_id = 0,
+    outbox = {},
+    stream = stream,
+  }
+
+  local settled = false
+  local timer = vim.uv.new_timer()
+  local function stop_timer()
+    if timer and not timer:is_closing() then
+      timer:stop()
+      timer:close()
+    end
+    timer = nil
+  end
+
+  timer:start(config.get().client_render.connect_timeout_ms, 0, function()
+    if settled then return end
+    settled = true
+    stop_timer()
+    refuse_companion(proc, ("no companion renderer answered at %s"):format(address))
+  end)
+
+  local function on_connect(err)
+    if settled then return end
+    settled = true
+    stop_timer()
+    if err then
+      refuse_companion(proc, ("could not reach a companion renderer at %s (%s)"):format(address, tostring(err)))
+      return
+    end
+    proc.connected = true
+    stream:read_start(function(read_err, data)
+      if read_err then
+        proc.last_error = read_err
+        return
+      end
+      if data == nil then
+        -- The companion hung up. In flight work cannot be answered, and the
+        -- next request re-decides the transport from scratch.
+        proc.running, proc.connected = false, false
+        if instance == proc then instance = nil end
+        deliver_error(proc, "companion renderer disconnected")
+        if proc.stream and not proc.stream:is_closing() then proc.stream:close() end
+        for _, listener in ipairs(exit_listeners) do
+          vim.schedule(listener)
+        end
+        return
+      end
+      consume(proc, data)
+    end)
+    local queued = proc.outbox
+    proc.outbox = {}
+    for _, item in ipairs(queued) do
+      stream:write(item.data, item.callback)
+    end
+  end
+
+  if host then
+    stream:connect(host, port, on_connect)
+  else
+    stream:connect(address, on_connect)
+  end
+  return proc
+end
+
+local function start_child()
   local stdin, stdout, stderr = vim.uv.new_pipe(false), vim.uv.new_pipe(false), vim.uv.new_pipe(false)
   local proc = {
+    transport = "stdio",
     running = false,
+    connected = true,
     callbacks = {},
     stdout_buffer = "",
     stderr = {},
@@ -95,6 +234,7 @@ function M.start()
     return nil, "failed to start renderer: " .. tostring(pid_or_err)
   end
   proc.handle, proc.pid, proc.running = handle, pid_or_err, true
+  proc.stream = stdin
   stdout:read_start(function(err, data)
     if err then
       proc.last_error = err
@@ -108,6 +248,22 @@ function M.start()
       if #proc.stderr > 20 then table.remove(proc.stderr, 1) end
     end
   end)
+  return proc
+end
+
+function M.start()
+  if instance and instance.running then return instance end
+  local address, source = companion_address()
+  if address and not companion_refused then
+    local proc, err = start_socket(address, source)
+    if proc then
+      instance = proc
+      return proc
+    end
+    companion_refused = err
+  end
+  local proc, err = start_child()
+  if not proc then return nil, err end
   instance = proc
   return proc
 end
@@ -118,6 +274,23 @@ end
 ---Neovim session.
 function M.on_exit(callback) exit_listeners[#exit_listeners + 1] = callback end
 
+---Clear the "this companion is not there" latch, so the next request tries the
+---configured address again. Called by config.setup(), because changing the
+---address is the only event that makes another attempt worth a timeout.
+function M.reset_companion() companion_refused = nil end
+
+local function write(proc, data, callback)
+  -- Held rather than dropped while a socket is still connecting: the preview
+  -- issues its first render immediately on open, and failing it because the
+  -- handshake had not finished would make every companion session start with a
+  -- visible error it would then silently recover from.
+  if proc.transport == "socket" and not proc.connected then
+    proc.outbox[#proc.outbox + 1] = { data = data, callback = callback }
+    return
+  end
+  proc.stream:write(data, callback)
+end
+
 function M.request(method, params, callback)
   local proc, err = M.start()
   if not proc then
@@ -127,7 +300,7 @@ function M.request(method, params, callback)
   proc.next_id = proc.next_id + 1
   local id = proc.next_id
   proc.callbacks[id] = callback
-  proc.stdin:write(protocol.encode({ id = id, method = method, params = params }), function(write_err)
+  write(proc, protocol.encode({ id = id, method = method, params = params }), function(write_err)
     if write_err and proc.callbacks[id] then
       local cb = proc.callbacks[id]
       proc.callbacks[id] = nil
@@ -138,13 +311,21 @@ function M.request(method, params, callback)
 end
 
 function M.status()
-  if not instance then return { running = false } end
+  if not instance then return { running = false, companion_refused = companion_refused } end
   return {
     running = instance.running,
     pid = instance.pid,
     last_error = instance.last_error,
     exit_code = instance.exit_code,
     stderr = table.concat(instance.stderr, ""),
+    -- Which renderer is answering, and how it was chosen. A session that
+    -- silently fell back to the child would otherwise look identical to one
+    -- that was never configured for a companion at all.
+    transport = instance.transport,
+    address = instance.address,
+    address_source = instance.address_source,
+    connected = instance.connected,
+    companion_refused = companion_refused,
   }
 end
 
@@ -152,6 +333,18 @@ function M.stop()
   local proc = instance
   instance = nil
   if not proc then return end
+  if proc.transport == "socket" then
+    -- Tell the companion this session is over, then let go of the socket. It is
+    -- not ours to kill: it serves whatever Neovim connects next, and holding a
+    -- browser warm between sessions is the reason it is a long-lived process.
+    if proc.running and proc.stream and not proc.stream:is_closing() then
+      write(proc, protocol.encode({ id = 0, method = "shutdown", params = {} }))
+      pcall(proc.stream.read_stop, proc.stream)
+      proc.stream:close()
+    end
+    proc.running, proc.connected = false, false
+    return
+  end
   if proc.running and proc.stdin and not proc.stdin:is_closing() then
     proc.stdin:write(protocol.encode({ id = 0, method = "shutdown", params = {} }))
     proc.stdin:shutdown()

@@ -78,6 +78,7 @@ grouped:
     sync        Source-following and preview navigation
     security    Local document root and raw HTML sanitization
     terminal    Terminal profile detection and capability overrides
+    client_render  Reaching a renderer that is not beside Neovim
     interaction Mouse/keyboard interaction: selection, search, links, caret
 
 The options below need more than a default value to use.

@@ -176,6 +176,24 @@ M.defaults = {
     -- handler *is* the success case.
     external_open_timeout_ms = 5000,
   },
+  client_render = {
+    -- Where a companion renderer is already listening, or nil to spawn the
+    -- ordinary child renderer beside Neovim -- which is what every session
+    -- does unless this is set, and is unchanged by this option existing.
+    --
+    -- A path ("/run/user/501/md-viewer-501.sock") is a unix socket; a
+    -- "host:port" is a loopback TCP address, which is what an `ssh -R
+    -- <port>:<companion socket>` forward looks like from the Neovim side.
+    -- $MD_VIEWER_CLIENT_ADDR sets the same thing and outranks nothing: config
+    -- wins, for the same reason terminal.profile outranks its variable.
+    --
+    -- The point of connecting outward rather than listening: on the machine
+    -- running Neovim md-viewer still opens no port at all. Whatever is
+    -- listening on the near end of that forward belongs to sshd because
+    -- someone asked for it. See docs/local-render-design.md.
+    address = nil,
+    connect_timeout_ms = 2000,
+  },
   terminal = {
     profile = "auto",
     kitty_graphics = "auto",
@@ -330,6 +348,15 @@ local function validate(cfg)
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
   local animation_modes = { auto = true, native = true, frames = true, off = true }
   assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
+  assert(
+    cfg.client_render.address == nil
+      or (type(cfg.client_render.address) == "string" and cfg.client_render.address ~= ""),
+    "md-viewer: client_render.address must be a socket path or host:port string, or nil to spawn the child renderer"
+  )
+  assert(
+    type(cfg.client_render.connect_timeout_ms) == "number" and cfg.client_render.connect_timeout_ms > 0,
+    "md-viewer: client_render.connect_timeout_ms must be positive"
+  )
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(
     vim.islist(cfg.security.document_root_markers),
@@ -400,12 +427,24 @@ local function invalidate_terminal()
   if terminal and terminal.invalidate then terminal.invalidate() end
 end
 
+-- A companion that failed to answer is not retried for the rest of the session,
+-- because a connect attempt costs a timeout and one that was not there when the
+-- preview opened will not appear. Changing the configuration is the one event
+-- that makes another attempt meaningful. Guarded on package.loaded for the same
+-- reason as the terminal cache: configuring md-viewer must not drag the process
+-- module in as a side effect.
+local function reset_companion()
+  local process = package.loaded["md-viewer.process"]
+  if process and process.reset_companion then process.reset_companion() end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_terminal()
+  reset_companion()
   return current
 end
 
@@ -414,6 +453,7 @@ function M.get() return current end
 function M.reset()
   current = vim.deepcopy(M.defaults)
   invalidate_terminal()
+  reset_companion()
 end
 
 return M

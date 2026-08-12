@@ -8,7 +8,9 @@
   display backends
 - `plugin/md-viewer.lua`: runtime entry point and default highlights
 - `renderer/src/`: persistent Node.js renderer, Markdown pipeline, browser
-  lifecycle, protocol, source maps, and security policy
+  lifecycle, protocol, source maps, and security policy. `service.js` is what a
+  request *means*; `main.js` (stdin/stdout child) and `companion.js` (unix
+  socket) are the two entrypoints that decide where requests arrive from
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`, `tests/node/`: headless suites
 - `tests/fixtures/`: Markdown documents both suites and the manual checklist use
@@ -256,7 +258,10 @@ at `1.0.0`.
 
 Preserve these unless a proposal explicitly revisits them:
 
-- renderer transport remains child-process stdin/stdout, with no listening port
+- the machine running Neovim opens no listening port: the default transport is a
+  child process on stdin/stdout, and the opt-in companion transport dials out
+  rather than accepting. A companion listens only on a 0600 unix socket, never
+  on TCP, and only on the machine its user started it on
 - runtime browser networking remains blocked unconditionally; remote images are
   fetched only by the Node renderer process, and only from public network
   destinations -- never loopback, private, or link-local, on the initial URL or
