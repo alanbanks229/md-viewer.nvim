@@ -119,13 +119,32 @@ local function ms(value)
   return ("%d ms"):format(value)
 end
 
----Frame-interval time that is not capture, not encode-and-send, and not
----transit. Large means the constraint is somewhere none of those three
----measure, and therefore somewhere neither this option nor client-side
----rendering can reach -- which is worth knowing before building the latter.
-local function unaccounted(phase)
-  if not (phase.interval_min and phase.fast_png_bytes) then return nil end
-  return math.max(0, phase.interval_min - (phase.capture_ms or 0) - (phase.send_ms or 0) - wire_ms(phase.fast_png_bytes))
+---How much of the link's capacity a phase actually used: every byte it sent,
+---as base64, over the seconds it took, against the 0.80 MB/s ceiling.
+---
+---This is the number that says whether transit is the constraint, and it is
+---the one to trust. `interval_min` cannot say it, because `nvim_ui_send` is
+---asynchronous: Lua hands a frame to the UI queue and returns, so frames are
+---*produced* far faster than the wire *drains* them and the production floor
+---says nothing about when a picture reaches the screen. Near 100% here means
+---frames are queueing and the queue is the lag the reader sees.
+local function saturation(phase)
+  if not (phase.seconds and phase.seconds > 0) then return nil end
+  local sent = (phase.fast_total + phase.retina_total) * 4 / 3
+  return sent / phase.seconds / BYTES_PER_SECOND * 100
+end
+
+---Whether this phase produced frames faster than the link could carry them.
+---An earlier version of this harness subtracted the parts of a frame from the
+---interval and clamped the remainder at zero, which reported 0 ms of
+---"unaccounted" time in exactly the case that matters -- a 51 ms interval
+---carrying 62 ms of capture and 224 ms of transit is not accounted for, it is
+---oversubscribed by a factor of five, and the clamp turned the finding into a
+---row of zeroes.
+local function overrun(phase)
+  if not (phase.interval_min and phase.fast_png_bytes and phase.interval_min > 0) then return nil end
+  local per_frame = (phase.capture_ms or 0) + (phase.send_ms or 0) + wire_ms(phase.fast_png_bytes)
+  return per_frame / phase.interval_min
 end
 
 local function number(value)
@@ -155,11 +174,26 @@ local function report()
     -- The floor, not frames-over-wall-clock: a hand-driven scroll has pauses in
     -- it, and dividing by elapsed time charges the pipeline for a reader who
     -- stopped to look at something.
-    ("%-26s %14s %14s"):format("fastest frame interval", ms(a.interval_min), ms(b.interval_min)),
+    ("%-26s %14s %14s"):format(
+      "  delivered rate",
+      ("%.1f/s"):format(a.fast_frames / math.max(a.seconds, 0.001)),
+      ("%.1f/s"):format(b.fast_frames / math.max(b.seconds, 0.001))
+    ),
+    -- The headline. Everything else on this page is a component of it.
+    ("%-26s %14s %14s"):format(
+      "WIRE SATURATION",
+      saturation(a) and ("%.0f%%"):format(saturation(a)) or "--",
+      saturation(b) and ("%.0f%%"):format(saturation(b)) or "--"
+    ),
+    ("%-26s %14s %14s"):format("frame produced every", ms(a.interval_min), ms(b.interval_min)),
     ("%-26s %14s %14s"):format("  capture (VM Chromium)", ms(a.capture_ms), ms(b.capture_ms)),
     ("%-26s %14s %14s"):format("  encode + hand to UI", ms(a.send_ms), ms(b.send_ms)),
-    ("%-26s %14s %14s"):format("  transit", ms(wire_ms(a.fast_png_bytes)), ms(wire_ms(b.fast_png_bytes))),
-    ("%-26s %14s %14s"):format("  UNACCOUNTED", ms(unaccounted(a)), ms(unaccounted(b))),
+    ("%-26s %14s %14s"):format("  transit (async, queues)", ms(wire_ms(a.fast_png_bytes)), ms(wire_ms(b.fast_png_bytes))),
+    ("%-26s %14s %14s"):format(
+      "  oversubscribed by",
+      overrun(a) and ("%.1fx"):format(overrun(a)) or "--",
+      overrun(b) and ("%.1fx"):format(overrun(b)) or "--"
+    ),
     ("%-26s %14s %14s"):format("retina_png_bytes", number(a.retina_png_bytes), number(b.retina_png_bytes)),
     ("%-26s %14s %14s"):format("settle frames taken", number(a.retina_frames), number(b.retina_frames)),
     ("%-26s %14s %14s"):format(
@@ -213,27 +247,35 @@ local function report()
     -- scrolling smoother if bytes were what the loop was waiting on; if most of
     -- a frame interval is unaccounted, they were not, and neither this option
     -- nor moving rasterization off the far end will change how it feels.
-    local idle = unaccounted(b)
-    local share
-    if idle and b.interval_min and b.interval_min > 0 then
-      share = idle / b.interval_min * 100
-      lines[#lines + 1] = ("%.0f%% of the frame interval is unaccounted (%s of %s)"):format(
-        share,
-        ms(idle),
-        ms(b.interval_min)
+    local before_sat, after_sat = saturation(a), saturation(b)
+    if before_sat and after_sat then
+      lines[#lines + 1] = ("wire saturation %.0f%% -> %.0f%%; delivered rate %.1f/s -> %.1f/s"):format(
+        before_sat,
+        after_sat,
+        a.fast_frames / math.max(a.seconds, 0.001),
+        b.fast_frames / math.max(b.seconds, 0.001)
       )
-      if share >= 50 then
-        lines[#lines + 1] = "  -> transit is NOT the constraint at this frame rate. Fewer bytes cannot"
-        lines[#lines + 1] = "     speed this up further, and neither would client-side rendering."
+      if before_sat >= 70 then
+        lines[#lines + 1] = "  -> transit WAS the constraint: the baseline had the link near capacity."
+      end
+      if after_sat < 55 and b.retina_frames > 0 then
+        local settle_share = b.retina_total * 4 / 3 / BYTES_PER_SECOND / b.seconds * 100
+        lines[#lines + 1] = ("  -> the settle frame is now the biggest single item: %d of them, %.0f%% of the link."):format(
+          b.retina_frames,
+          settle_share
+        )
       end
     end
     lines[#lines + 1] = ""
-    if ratio >= 2.0 and share and share >= 50 then
-      -- Both true at once, and saying only the first would be the flattering
-      -- half. The option does exactly what it claims to bytes; bytes are simply
-      -- not what this loop is waiting on.
-      verdict = ("BYTES REDUCED %.2fx as designed, but the frame rate is gated elsewhere -- "):format(ratio)
-        .. "see UNACCOUNTED above. Report this table before building on it."
+    if ratio >= 2.0 and before_sat and before_sat < 50 then
+      -- Both true at once, and reporting only the first would be the flattering
+      -- half: the option did what it claims to bytes, but a baseline that never
+      -- filled the link was never waiting on bytes, so nothing about how it
+      -- feels can be concluded from this run.
+      verdict = ("BYTES REDUCED %.2fx as designed, but the baseline used only %.0f%% of the link -- "):format(
+        ratio,
+        before_sat
+      ) .. "it was not transit-bound, so scroll harder or for longer and run it again."
     elseif ratio >= 2.0 then
       verdict = "WORKING as designed (expected about 2.6x)."
     elseif ratio > 1.2 then
