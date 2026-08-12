@@ -125,11 +125,21 @@ local function report()
       .. "nothing on this host. Report this -- it also affects the client-render design."
   else
     local ratio = a.fast_png_bytes / b.fast_png_bytes
-    local saved_ms = wire_ms(a.fast_png_bytes) - wire_ms(b.fast_png_bytes)
-    lines[#lines + 1] = ("moving frame is %.2fx smaller, saving %d ms of transit per frame"):format(ratio, saved_ms)
-    lines[#lines + 1] = ("across %d coalesced frames that is %.1f s less waiting"):format(
-      a.coalesced,
-      saved_ms * a.coalesced / 1000
+    local before, after = wire_ms(a.fast_png_bytes), wire_ms(b.fast_png_bytes)
+    lines[#lines + 1] = ("moving frame is %.2fx smaller: %d ms of transit instead of %d"):format(
+      ratio,
+      after,
+      before
+    )
+    -- Deliberately a rate rather than a total. Multiplying the per-frame saving
+    -- by coalesced_scroll_events looks like the obvious summary and is wrong by
+    -- construction: a coalesced event is one that was superseded *before* it was
+    -- captured, so no frame was ever produced for it and no bytes were ever sent.
+    -- The saving is real per frame transmitted, and what a reader feels is how
+    -- often the picture can be replaced -- which is what this says instead.
+    lines[#lines + 1] = ("transit alone caps preview updates at %.1f/s, was %.1f/s"):format(
+      1000 / after,
+      1000 / before
     )
     lines[#lines + 1] = ""
     if ratio >= 2.0 then

@@ -52,6 +52,28 @@ during a scroll cuts roughly 2.6× off the moving frame while the existing settl
 restores sharpness the moment the wheel stops. This needs no new process, no new transport
 and no new trust boundary; it is on by default over SSH and off everywhere else.
 
+Confirmed on the measured link, operator-driven through `scripts/scroll-scale/ab.lua`,
+2026-08-12, Rocky Linux 8.10 VM reached from iTerm2 over AWS SSM:
+
+| | baseline 1.0× | treatment 0.5× |
+|---|---:|---:|
+| `fast_png_bytes` | 134,851 | 44,766 |
+| transit at 0.80 MB/s | 224 ms | 74 ms |
+| `retina_png_bytes` | 304,666 | 304,666 |
+| `capture_encoder` | `cdp_fast_png` | `cdp_fast_png` |
+
+**3.01×**, against 2.58× measured on a macOS development machine at a narrower pane. The
+exponent is not a constant: this content came out at `pixels^0.795` where the original
+investigation and the development machine both sat near `^0.69`. Fonts, Chromium build and
+layout all move it, so treat 2.6× as the conservative figure and anything above it as
+content-dependent luck. The settle frame is byte-identical across the two phases, which is
+the invariant that mattered.
+
+Two things this does not fix, and they are why the second lever exists. The settle frame is
+still 304,666 bytes — **508 ms** of transit every time scrolling pauses. And transit alone
+still caps preview updates at 13.4/s where it capped them at 4.4/s: better, but a ceiling
+that exists only because pixels are crossing the link at all.
+
 **Invariant:** only the *moving* frame is scaled. The settle capture stays at full
 `device_scale_factor`, or an idle preview would sit at reduced sharpness indefinitely —
 which is the one state a reader actually looks at.

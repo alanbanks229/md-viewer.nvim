@@ -18,10 +18,11 @@ they would help were measured making it worse.
 - **`render.scroll_scale` and `render.ssh_scroll_scale`.** The moving frame of a
   scroll is now captured at a fraction of its natural size, halved by default on
   an SSH session and unchanged on a local one. PNG bytes go as `pixels^0.69`, so
-  half scale measures about 2.6× fewer bytes per frame; the settle capture that
-  lands when scrolling stops is never reduced, so the picture being read is
-  still full `render.device_scale_factor`. `:MdViewerDebug` reports the factor
-  in force and where it came from.
+  half scale measures 2.6× fewer bytes per frame locally and 3.0× on the SSM
+  link it was built for — 224 ms of transit per moving frame down to 74 ms. The
+  settle capture that lands when scrolling stops is never reduced, so the
+  picture being read is still full `render.device_scale_factor`.
+  `:MdViewerDebug` reports the factor in force and where it came from.
 - **A design record for client-side rendering**, in
   [docs/local-render-design.md](docs/local-render-design.md): the measurements
   behind the slow-link case and the architecture for rendering on the machine
