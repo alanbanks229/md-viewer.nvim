@@ -67,6 +67,118 @@ return function(t)
   end
   t.ok(mentions_tmux, "multiplexer presence is warned about in caveats")
 
+  -- LC_TERMINAL is the only terminal evidence that survives SSH: OpenSSH
+  -- forwards LC_* by default and forwards TERM_PROGRAM never, so without this
+  -- branch every remote session identifies no terminal and drops to `cells`.
+  local lc_id, lc_evidence = terminal.match_profile({ LC_TERMINAL = "iTerm2" })
+  t.eq("iterm2", lc_id, "iTerm2 detected from LC_TERMINAL when TERM_PROGRAM did not survive SSH")
+  t.eq("LC_TERMINAL=iTerm2", lc_evidence[1], "LC_TERMINAL evidence names the matched variable")
+
+  local lc_versioned = select(2, terminal.match_profile({ LC_TERMINAL = "iTerm2", LC_TERMINAL_VERSION = "3.6.11" }))
+  t.eq(2, #lc_versioned, "a forwarded version is recorded as evidence alongside the name")
+  t.eq("LC_TERMINAL_VERSION=3.6.11", lc_versioned[2], "and names the version variable it came from")
+
+  t.eq("wezterm", (terminal.match_profile({ LC_TERMINAL = "WezTerm" })), "WezTerm also identifies itself over SSH")
+
+  -- The gate. LC_TERMINAL is exported, so it is inherited by whatever the
+  -- terminal launches: a VS Code window started from iTerm2 really does report
+  -- TERM_PROGRAM=vscode beside a stale LC_TERMINAL=iTerm2, and VS Code's
+  -- terminal speaks no graphics protocol. Trusting the stale value there would
+  -- enable Kitty graphics against a terminal that has none -- a visibly broken
+  -- preview, which is strictly worse than the text fallback.
+  local nested = terminal.match_profile({ TERM_PROGRAM = "vscode", LC_TERMINAL = "iTerm2" })
+  t.eq("unknown", nested, "an inherited LC_TERMINAL is not believed once another terminal claims the session")
+
+  t.eq(
+    "kitty",
+    (terminal.match_profile({ KITTY_WINDOW_ID = "3", LC_TERMINAL = "iTerm2" })),
+    "native evidence outranks a forwarded LC_TERMINAL"
+  )
+  t.eq(
+    "iterm2",
+    (terminal.match_profile({ TERM = "xterm-kitty", LC_TERMINAL = "iTerm2" })),
+    "but LC_TERMINAL is more specific than a bare TERM advertisement"
+  )
+  t.eq("unknown", (terminal.match_profile({ LC_TERMINAL = "Terminal.app" })), "an unrecognized LC_TERMINAL is ignored")
+
+  -- SSH detection. The evidence deliberately names the variable and not its
+  -- value: SSH_CONNECTION and SSH_CLIENT carry the client's IP address, and
+  -- this feeds :MdViewerDebug, which exists to be pasted into public issues.
+  for _, key in ipairs({ "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT" }) do
+    local present, evidence = terminal.ssh({ [key] = "10.0.0.4 51000 10.0.0.9 22" })
+    t.eq(true, present, ("%s marks the session as remote"):format(key))
+    t.eq(key, evidence, ("%s evidence names the variable without its value"):format(key))
+  end
+  local local_session, local_evidence = terminal.ssh({})
+  t.eq(false, local_session, "no SSH variables means a local session")
+  t.eq(nil, local_evidence, "and no evidence to report")
+
+  -- An unidentified terminal is ordinary locally and a specific, fixable defect
+  -- over SSH, so only the remote case earns a warning -- and it has to name the
+  -- fixes, because the debug dump otherwise points at the renderer, which is
+  -- working fine.
+  local remote_env = { SSH_CONNECTION = "10.0.0.4 51000 10.0.0.9 22", TERM = "xterm-256color" }
+  local remote_blind = terminal.capability({}, remote_env)
+  t.eq(true, remote_blind.ssh, "capability report includes SSH state")
+  t.eq("SSH_CONNECTION", remote_blind.ssh_evidence, "and the variable that established it")
+  local ssh_warning
+  for _, caveat in ipairs(remote_blind.caveats) do
+    if caveat.kind == "warn" and caveat.text:match("SSH") then ssh_warning = caveat.text end
+  end
+  t.ok(ssh_warning, "an unidentified terminal over SSH is warned about")
+  t.ok(ssh_warning:match("LC_TERMINAL"), "the warning names the variable that would have identified it")
+  t.ok(ssh_warning:match("MD_VIEWER_TERMINAL_PROFILE"), "and the environment override that fixes it")
+  t.ok(ssh_warning:match("terminal%.profile"), "and the config override that also fixes it")
+
+  local function warns_about_ssh(capability)
+    for _, caveat in ipairs(capability.caveats) do
+      if caveat.kind == "warn" and caveat.text:match("SSH") then return true end
+    end
+    return false
+  end
+
+  local remote_known = terminal.capability({}, { SSH_TTY = "/dev/pts/3", LC_TERMINAL = "iTerm2" })
+  t.eq("iterm2", remote_known.profile_id, "a forwarded LC_TERMINAL identifies the terminal over SSH")
+  t.eq("inferred", remote_known.graphics, "which is enough to infer graphics and leave the cells fallback")
+  t.eq(false, warns_about_ssh(remote_known), "an identified SSH session is not warned about")
+
+  local local_blind = terminal.capability({}, { TERM = "xterm-256color" })
+  t.eq(false, local_blind.ssh, "a local session is reported as such")
+  t.eq(false, warns_about_ssh(local_blind), "and an unidentified local terminal gets no SSH advice")
+
+  -- MD_VIEWER_TERMINAL_PROFILE exists for one `~/.config/nvim` copied across
+  -- many hosts: a profile hardcoded in that shared config is wrong the moment
+  -- the terminal in front of you changes, but an environment variable travels
+  -- with the session.
+  local env_override = terminal.capability({}, { MD_VIEWER_TERMINAL_PROFILE = "kitty" })
+  t.eq("kitty", env_override.profile_id, "MD_VIEWER_TERMINAL_PROFILE selects a profile")
+  t.eq("inferred", env_override.graphics, "and that is enough to leave the cells fallback")
+  t.ok(env_override.evidence[1]:match("MD_VIEWER_TERMINAL_PROFILE"), "the evidence names the override")
+
+  local both = terminal.capability({ profile = "ghostty" }, { MD_VIEWER_TERMINAL_PROFILE = "kitty" })
+  t.eq("ghostty", both.profile_id, "an explicit terminal.profile still outranks the environment override")
+
+  local beats_inference = terminal.capability(
+    { profile = "auto" },
+    { MD_VIEWER_TERMINAL_PROFILE = "kitty", TERM_PROGRAM = "iTerm.app" }
+  )
+  t.eq("kitty", beats_inference.profile_id, "but the environment override outranks inference")
+
+  -- A typo falls through to inference rather than erroring or pinning
+  -- "unknown", and says so: it is set on the far side of an SSH connection,
+  -- where a silently ignored variable is the hardest symptom to chase.
+  local typo = terminal.capability({}, { MD_VIEWER_TERMINAL_PROFILE = "iterm", TERM_PROGRAM = "iTerm.app" })
+  t.eq("iterm2", typo.profile_id, "an unknown MD_VIEWER_TERMINAL_PROFILE value falls through to inference")
+  local reported = false
+  for _, entry in ipairs(typo.evidence) do
+    if entry:match("MD_VIEWER_TERMINAL_PROFILE") and entry:match("ignored") then reported = true end
+  end
+  t.ok(reported, "and the rejected value is reported rather than silently dropped")
+
+  local empty = terminal.capability({}, { MD_VIEWER_TERMINAL_PROFILE = "", TERM_PROGRAM = "iTerm.app" })
+  t.eq("iterm2", empty.profile_id, "an empty MD_VIEWER_TERMINAL_PROFILE is absent, not invalid")
+  t.eq(1, #empty.evidence, "and is not reported as a rejected value")
+
   -- Every static profile caveat is classified, and the classification is not
   -- vacuous: the terminals md-viewer has actually validated carry no warnings
   -- at all, so a warning in the concise report always means something.

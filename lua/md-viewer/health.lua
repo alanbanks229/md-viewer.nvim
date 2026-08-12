@@ -91,6 +91,32 @@ local function document_buf()
   return current
 end
 
+---Non-empty environment variable, or nil. `vim.env` yields nil when unset, but
+---an exported-and-emptied variable is just as absent for these purposes.
+local function env_value(name)
+  local value = vim.env[name]
+  if value == nil or value == "" then return nil end
+  return value
+end
+
+local function terminal_program_label()
+  local direct = env_value("TERM_PROGRAM")
+  if direct then return direct end
+  local forwarded = env_value("LC_TERMINAL")
+  if forwarded then return ("%s (via LC_TERMINAL)"):format(forwarded) end
+  return "unknown"
+end
+
+---iTerm2's version, from whichever variable reached this session. The version
+---is load-bearing -- Kitty graphics support starts at iTerm2 3.5 -- so an SSH
+---session reporting "not detected" while LC_TERMINAL_VERSION sits in the
+---environment hides the one number a reader needs to check.
+local function iterm2_version_label()
+  if env_value("TERM_PROGRAM") == "iTerm.app" then return env_value("TERM_PROGRAM_VERSION") or "undetectable" end
+  if env_value("LC_TERMINAL") == "iTerm2" then return env_value("LC_TERMINAL_VERSION") or "undetectable" end
+  return "not detected"
+end
+
 function M.collect(renderer_result, renderer_error)
   local cfg = config.get()
   local backend = backends.health()
@@ -102,11 +128,18 @@ function M.collect(renderer_result, renderer_error)
     neovim = ("%d.%d.%d"):format(version.major, version.minor, version.patch),
     vim_ui_img = type(vim.ui and vim.ui.img) == "table",
     tui_attached = #vim.api.nvim_list_uis() > 0,
-    terminal_program = vim.env.TERM_PROGRAM or "unknown",
-    iterm2_version = vim.env.TERM_PROGRAM == "iTerm.app" and (vim.env.TERM_PROGRAM_VERSION or "undetectable")
-      or "not detected",
+    -- TERM_PROGRAM does not survive SSH but LC_TERMINAL does, and over SSH the
+    -- latter is what identified the terminal -- so report whichever actually
+    -- exists. Printing "unknown" next to a correctly-identified iTerm2 profile
+    -- reads as a contradiction and sends the reader looking for a fault.
+    terminal_program = terminal_program_label(),
+    iterm2_version = iterm2_version_label(),
     platform = capability.platform,
     multiplexer = capability.multiplexer,
+    -- Named because it changes which evidence is even reachable: SSH forwards
+    -- LC_* and almost nothing else, so TERM_PROGRAM-based identification is
+    -- unavailable by construction rather than merely absent.
+    ssh = capability.ssh and ("yes (%s)"):format(capability.ssh_evidence) or "no",
     terminal_profile = capability.profile_id .. " (" .. capability.label .. ")",
     terminal_profile_evidence = #capability.evidence > 0 and table.concat(capability.evidence, "; ") or "none",
     graphics_confidence = capability.graphics,
@@ -289,6 +322,7 @@ local function verbose_terminal(report)
   return {
     { "platform", report.platform },
     { "multiplexer", report.multiplexer },
+    { "ssh session", report.ssh },
     { "terminal profile", ("%s -- graphics %s"):format(report.terminal_profile, report.graphics_confidence) },
     { "identified by", report.terminal_profile_evidence },
   }
@@ -519,6 +553,11 @@ local function build_sections(report, cfg)
   }
   if report.multiplexer and report.multiplexer ~= "none" then
     terminal_rows[#terminal_rows + 1] = { label = "Multiplexer", value = report.multiplexer, level = "info" }
+  end
+  -- Shown only when true, like Multiplexer above: it is context for the Profile
+  -- row directly over it, not a fact worth a line in the common local case.
+  if report.ssh and report.ssh ~= "no" then
+    terminal_rows[#terminal_rows + 1] = { label = "SSH session", value = report.ssh, level = "info" }
   end
   return {
     {

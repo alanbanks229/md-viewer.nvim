@@ -7,6 +7,7 @@ local function base_report()
     iterm2_version = "3.5.0",
     platform = "darwin",
     multiplexer = "none",
+    ssh = "no",
     terminal_profile = "iterm2 (iTerm2)",
     terminal_profile_evidence = "TERM_PROGRAM=iTerm.app",
     graphics_confidence = "inferred",

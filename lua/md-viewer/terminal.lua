@@ -391,6 +391,23 @@ function M.multiplexer(env)
   return "none", nil
 end
 
+--- Report whether this Neovim is running on the far side of an SSH connection.
+--- Returns a boolean and the matched evidence string (or nil).
+---
+--- The evidence names the variable but never its value. SSH_CONNECTION and
+--- SSH_CLIENT hold the client's IP address and both ends' ports, and this
+--- feeds :MdViewerDebug, whose whole purpose is to be pasted into a public
+--- issue. Which variable was set is the entire diagnostic value here; the
+--- addresses in it are not.
+function M.ssh(env)
+  env = env or default_env()
+  for _, key in ipairs({ "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT" }) do
+    local value = env[key]
+    if value and value ~= "" then return true, key end
+  end
+  return false, nil
+end
+
 --- Report the host platform: "macos", "linux", "windows", or the raw
 --- lower-cased sysname if unrecognized.
 function M.platform()
@@ -409,6 +426,38 @@ local function warp_evidence(env)
   end
   table.sort(found)
   return found
+end
+
+-- iTerm2 and WezTerm both export LC_TERMINAL (and LC_TERMINAL_VERSION) for one
+-- reason: OpenSSH forwards LC_* by default -- `SendEnv LANG LC_*` ships in the
+-- stock client config, `AcceptEnv LANG LC_*` in the stock sshd config -- while
+-- nothing forwards TERM_PROGRAM. Over SSH it is the only terminal evidence that
+-- survives the hop, and without reading it a remote Neovim identifies no
+-- terminal at all and drops to the text-cell fallback on a session whose
+-- terminal supports graphics perfectly well.
+--
+-- It is weaker than the native variables above in one specific way, so it is
+-- checked after all of them. LC_TERMINAL is exported, which means it is
+-- *inherited* by whatever the terminal launches: a VS Code window started from
+-- iTerm2 reports TERM_PROGRAM=vscode alongside a stale LC_TERMINAL=iTerm2, and
+-- VS Code's terminal speaks no graphics protocol. Believing LC_TERMINAL there
+-- would turn on Kitty graphics against a terminal that has none. So it is only
+-- trusted when nothing else has claimed the session -- TERM_PROGRAM absent or
+-- empty, which is exactly the SSH case and never the nested-terminal one.
+-- A terminal that sets both agrees with itself and has already matched above.
+local LC_TERMINAL_PROFILES = { iTerm2 = "iterm2", WezTerm = "wezterm" }
+
+local function lc_terminal_profile(env)
+  local name = env.LC_TERMINAL
+  if not name or name == "" then return nil end
+  if env.TERM_PROGRAM and env.TERM_PROGRAM ~= "" then return nil end
+  local profile_id = LC_TERMINAL_PROFILES[name]
+  if not profile_id then return nil end
+  local evidence = { "LC_TERMINAL=" .. name }
+  if env.LC_TERMINAL_VERSION and env.LC_TERMINAL_VERSION ~= "" then
+    evidence[#evidence + 1] = "LC_TERMINAL_VERSION=" .. env.LC_TERMINAL_VERSION
+  end
+  return profile_id, evidence
 end
 
 --- Infer a terminal profile id purely from environment evidence. Returns the
@@ -438,6 +487,8 @@ function M.match_profile(env)
     vim.list_extend(evidence, warp)
     return "warp", evidence
   end
+  local lc_profile, lc_evidence = lc_terminal_profile(env)
+  if lc_profile then return lc_profile, lc_evidence end
   if env.TERM and env.TERM:match("kitty") then return "generic_kitty", { "TERM=" .. env.TERM } end
   return "unknown", {}
 end
@@ -453,22 +504,49 @@ end
 --- 3. a safe asynchronous probe — unimplemented; `cfg.probe` stays "off".
 --- 4. conservative profile inference from environment evidence.
 --- 5. text-cell fallback (graphics = "unavailable").
+---
+--- The profile itself resolves `terminal.profile` > `$MD_VIEWER_TERMINAL_PROFILE`
+--- > inference. The environment override exists for the case config cannot
+--- serve: one `~/.config/nvim` copied to many remote hosts, reached from
+--- whichever terminal is in front of you that day. A profile hardcoded in that
+--- shared config is wrong the moment the terminal changes, whereas an
+--- environment variable travels with the session. Same reasoning, and the same
+--- precedence, as MD_VIEWER_CELL_WIDTH_PX in md-viewer.cellpixels.
 function M.capability(cfg, env)
   cfg = cfg or {}
   env = env or default_env()
+
+  -- A misspelled override is reported rather than silently ignored: it is set
+  -- on the far end of an SSH connection, where "nothing happened" is the
+  -- hardest possible symptom to chase.
+  local env_profile, rejected_env_profile = env.MD_VIEWER_TERMINAL_PROFILE, nil
+  if env_profile == "" then env_profile = nil end
+  if env_profile and not M.profiles[env_profile] then
+    env_profile, rejected_env_profile = nil, env_profile
+  end
 
   local profile_id, evidence
   if cfg.profile and cfg.profile ~= "auto" then
     profile_id = cfg.profile
     evidence = { ("terminal.profile=%s (explicit override)"):format(cfg.profile) }
+  elseif env_profile then
+    profile_id = env_profile
+    evidence = { ("MD_VIEWER_TERMINAL_PROFILE=%s (environment override)"):format(env_profile) }
   else
     profile_id, evidence = M.match_profile(env)
   end
 
   local profile = M.profiles[profile_id]
   if not profile then
+    local requested = profile_id
     profile_id, profile = "unknown", M.profiles.unknown
-    evidence = { ("terminal.profile=%q is not a known profile; defaulted to unknown"):format(tostring(profile_id)) }
+    evidence = { ("terminal.profile=%q is not a known profile; defaulted to unknown"):format(tostring(requested)) }
+  end
+
+  if rejected_env_profile then
+    evidence[#evidence + 1] = ("MD_VIEWER_TERMINAL_PROFILE=%q is not a known profile; ignored"):format(
+      rejected_env_profile
+    )
   end
 
   local graphics, reason
@@ -507,6 +585,7 @@ function M.capability(cfg, env)
   end
 
   local mux, mux_evidence = M.multiplexer(env)
+  local ssh, ssh_evidence = M.ssh(env)
   local caveats = vim.deepcopy(profile.caveats or {})
   if mux ~= "none" then
     caveats[#caveats + 1] = {
@@ -515,6 +594,23 @@ function M.capability(cfg, env)
         "Running inside %s (%s); md-viewer does not adjust placement for "
         .. "multiplexers and image position may be wrong."
       ):format(mux, mux_evidence),
+    }
+  end
+
+  -- An unidentified terminal is ordinary and self-explanatory locally; over
+  -- SSH it is a specific, fixable defect with a non-obvious cause, and the
+  -- diagnostic that says only "unknown" sends the reader after the wrong
+  -- thing entirely -- usually the renderer, which is running fine.
+  if ssh and profile_id == "unknown" then
+    caveats[#caveats + 1] = {
+      kind = "warn",
+      text = (
+        "Running over SSH (%s) with no terminal evidence: SSH does not forward "
+        .. "TERM_PROGRAM, so the terminal could not be identified and the preview "
+        .. "falls back to text. iTerm2 and WezTerm are recognized through LC_TERMINAL "
+        .. "when this host's sshd accepts it (AcceptEnv LANG LC_*); for any other "
+        .. "terminal set MD_VIEWER_TERMINAL_PROFILE or terminal.profile on this host."
+      ):format(ssh_evidence),
     }
   end
 
@@ -535,6 +631,8 @@ function M.capability(cfg, env)
     placement = profile.placement,
     multiplexer = mux,
     multiplexer_evidence = mux_evidence,
+    ssh = ssh,
+    ssh_evidence = ssh_evidence,
     validation = profile.validation,
     caveats = caveats,
   }
