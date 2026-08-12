@@ -77,10 +77,43 @@ pauses between reading and scrolling again, so it is paid for a reader who has a
 stopped rather than one mid-flick. The cost is that sharpness arrives about 240 ms later
 when they do stop, which is only worth it when the frame itself takes half a second.
 
-What neither lever removes is the ceiling. Transit alone still caps preview updates at
-13.4/s where it capped them at 4.4/s, and the settle frame still costs half a second
-whenever it is taken. Both numbers exist only because pixels cross the link at all, which
-is what the second lever is for.
+### An unresolved contradiction, recorded rather than smoothed over
+
+Operator-driven, 2026-08-12, second run: the byte reduction landed exactly as designed —
+average moving frame 100,116 → 27,810 bytes (**3.6×**), total traffic 5.03 MB → 2.16 MB —
+and **the frame rate did not move**: 35 frames in 20 s became 34 in 20 s. Wire utilisation
+was 42% and then 18% of the 0.80 MB/s ceiling, so the link was never saturated in either
+arm.
+
+That is not consistent with transit being the constraint on the scroll loop. The per-frame
+arithmetic at the top of this document still holds — a frame's transit really is several
+times its capture — but a loop turning over every ~520 ms is not a loop bounded by 74 ms
+of transit. Something else accounts for roughly 350 ms per frame:
+
+| | |
+|---|---|
+| Full renderer + Lua path, measured with no network at all (request → capture → PNG read → base64) | **32 ms**, ~31 fps |
+| Observed frame interval over the link | ~520 ms |
+| Of which transit | 74 ms |
+
+**This matters for everything below.** If the missing time is the TUI blocking while it
+writes base64 into a pty the far end drains at 0.80 MB/s, it is still caused by bytes, just
+not by the bytes anyone was counting — and client-side rendering removes essentially all of
+them from that pty, so it would fix this too. If it is anything else — VM scheduling,
+Neovim's redraw cycle, the input path — then client-side rendering buys latency per frame
+and does not buy smoothness, and the case for building it is much weaker than the byte
+table suggests.
+
+`scripts/scroll-scale/ab.lua` now reports the decomposition, and the discriminating row is
+**encode + hand to UI**: `nvim_ui_send` happens inside it, so pty back-pressure lands there
+rather than in UNACCOUNTED. **Do not build the client-render architecture before that number
+has been read.** The byte case for it is sound and the smoothness case is currently
+unproven.
+
+What neither lever removes is the transit ceiling itself. Transit alone caps preview updates
+at 13.4/s where it capped them at 4.4/s, and the settle frame still costs half a second
+whenever it is taken. Those numbers exist only because pixels cross the link at all — but as
+of this run they are not the numbers a reader is waiting on.
 
 **Invariant:** only the *moving* frame is scaled. The settle capture stays at full
 `device_scale_factor`, or an idle preview would sit at reduced sharpness indefinitely —
