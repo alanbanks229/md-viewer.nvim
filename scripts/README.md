@@ -8,7 +8,9 @@ covered without one — run those first.
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
 fully prove: the **drag-highlight overlay** (`overlay/`) and **animated
-images** (`animation/`).
+images** (`animation/`). A third, `scroll-scale/`, needs neither a display nor
+a browser -- it needs a *slow link*, which is the one piece of hardware no test
+machine has.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -98,6 +100,34 @@ geometry and stress harnesses above.
 
 [issue]: https://github.com/wezterm/wezterm/issues/7953
 [pr]: https://github.com/wezterm/wezterm/pull/8035
+
+## `scroll-scale/ab.lua` — does a smaller moving frame actually help?
+
+Run inside a real Neovim, on the far end of the connection you care about,
+with a preview already open (`:MdViewerToggle`) on a document long enough to
+scroll for a few seconds:
+
+```vim
+:runtime scripts/scroll-scale/ab.lua   " arms phase 1, full-size frames
+"  ...wheel-scroll the whole document...
+:ScrollAB                              " arms phase 2, half-size frames
+"  ...wheel-scroll the same way again...
+:ScrollAB                              " prints the comparison
+```
+
+Reports `fast_png_bytes` for each phase, the transit each implies at the
+0.80 MB/s ceiling `docs/local-render-design.md` was measured against, and a
+verdict. `:ScrollABCancel` abandons a run partway. The configuration in force
+is saved before the first phase and restored after the last, including by the
+error path -- nothing is written to disk and no file is edited.
+
+Use the plugin's own README as the document if you want numbers comparable to
+the ones recorded in `docs/local-render-design.md`.
+
+The verdict worth watching for is **INERT**: `capture_encoder` is
+`playwright_png` rather than `cdp_fast_png`. Playwright's own `scale` is a
+two-value enum, so the numeric factor cannot reach the capture on that path and
+`render.scroll_scale` does nothing on that host, whatever it is set to.
 
 ## `animation/` — animated-image qualification
 
