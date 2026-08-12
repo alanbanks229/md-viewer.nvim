@@ -40,7 +40,9 @@ REQUIREMENTS                                          *md-viewer-requirements*
 - Neovim 0.12+. The graphical backend writes to the terminal through
   |nvim_ui_send()|, a 0.12 API; there is no graphical path without it.
 - Node.js 22.12+
-- an existing Chrome, Chromium, or Microsoft Edge installation
+- an existing Chrome, Chromium, or Microsoft Edge installation, on whichever
+  machine Neovim itself runs on -- over SSH that is the remote host, not the
+  machine your terminal is running on. See |md-viewer-ssh|.
 - a terminal that advertises the Kitty graphics protocol, used without a
   multiplexer -- see |md-viewer-terminals|
 - locked renderer dependencies installed with npm ci
@@ -131,6 +133,26 @@ measuring 14x32 device pixels wants 7 and 16: >sh
 <
 Measure the active terminal profile rather than copying those values;
 :MdViewerDebug prints both the measurement and its CSS conversion.
+
+                                                               *md-viewer-env*
+ENVIRONMENT VARIABLES ~
+
+Three settings are read from the environment as well as from `setup()`. They
+exist for the case configuration cannot serve: one Neovim config shared across
+several machines, where the right answer depends on the session rather than on
+the config file. Each is overridden by its explicit config option.
+
+MD_VIEWER_TERMINAL_PROFILE
+        Terminal profile to use, bypassing environment inference. Accepts the
+        same values as `terminal.profile`: iterm2, kitty, wezterm, ghostty,
+        warp, generic_kitty, unknown. An explicit `terminal.profile` outranks
+        it; a value that is not a known profile is ignored, and the rejected
+        value is reported in :MdViewerDebug's `identified by` field rather
+        than failing silently. Chiefly useful over SSH -- see |md-viewer-ssh|.
+
+MD_VIEWER_CELL_WIDTH_PX, MD_VIEWER_CELL_HEIGHT_PX
+        Cell size in CSS pixels, overriding the TIOCGWINSZ measurement. Both
+        must be set. See |md-viewer-calibration| above.
 
                                                  *md-viewer-overlay-alignment*
 NOTIFICATIONS OVER THE PREVIEW ~
@@ -531,6 +553,35 @@ docs/terminal-support.md holds the per-terminal status, the four evidence
 labels this project uses, and what qualifying a new terminal requires. Set
 `interaction.selection_overlay` to "on" to try your own, after reading that
 option's notes in lua/md-viewer/config.lua.
+
+                                                               *md-viewer-ssh*
+REMOTE SESSIONS OVER SSH ~
+
+md-viewer works over SSH. Node.js and Chrome/Chromium must be installed on the
+remote host, because the renderer runs wherever Neovim runs; it produces a PNG
+which Neovim then writes to your terminal as Kitty graphics escape sequences,
+travelling down the SSH connection. A browser on the local machine is never
+consulted and cannot be substituted -- there is no option to drive one across
+the connection, and the renderer opens no port.
+
+The part that needs care is terminal identification, because SSH does not
+forward TERM_PROGRAM. It does forward LC_* by default, and iTerm2 and WezTerm
+both export LC_TERMINAL for exactly that reason, so those two are recognized
+automatically -- provided the remote sshd accepts the variable. Nearly every
+distribution ships `AcceptEnv LANG LC_*` already; check with `echo
+$LC_TERMINAL` on the remote host.
+
+Kitty, Ghostty and Warp export no forwardable identity, so name the profile on
+the remote host: >sh
+
+    export MD_VIEWER_TERMINAL_PROFILE=kitty
+<
+See |md-viewer-env| for that variable, and `terminal.profile` for the config
+equivalent. :MdViewerDebug reports `ssh session` and, when the terminal could
+not be identified on an SSH session, a caveat naming these fixes.
+
+Every refresh sends a full-page PNG down the connection as base64. On a slow
+link, lower `render.device_scale_factor` to 1 and raise `render.debounce_ms`.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*

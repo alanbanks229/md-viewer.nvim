@@ -13,10 +13,12 @@ graphical backend was available. `:MdViewerHealth`'s `Reason` names which:
 
 - **No Kitty-graphics evidence in the environment.** md-viewer recognises a
   terminal by `TERM_PROGRAM`, `KITTY_WINDOW_ID`, `WEZTERM_EXECUTABLE`,
-  `GHOSTTY_RESOURCES_DIR`, `WARP_*`, or a `TERM` containing `kitty`. macOS
-  Terminal.app and Alacritty match none of these and correctly get `cells`.
-  If your terminal does speak the protocol but is not recognised, set
-  `terminal.profile` or `terminal.kitty_graphics = "on"`.
+  `GHOSTTY_RESOURCES_DIR`, `WARP_*`, `LC_TERMINAL`, or a `TERM` containing
+  `kitty`. macOS Terminal.app and Alacritty match none of these and correctly
+  get `cells`. If your terminal does speak the protocol but is not recognised,
+  set `terminal.profile` or `terminal.kitty_graphics = "on"`. Over SSH this is
+  a distinct problem with a distinct fix — see
+  [The preview falls back to text over SSH](#the-preview-falls-back-to-text-over-ssh).
 - **`vim.ui.img` was absent or incomplete.** That is a build/API availability
   issue, not a Kitty.app dependency, and it only matters when nothing else is
   available.
@@ -378,11 +380,66 @@ pointer (through `OSC 22`), and support proved inconsistent enough across
 terminals that the feature was removed rather than left half-working. Neovim's
 global `'mousemoveevent'` is left alone as a result.
 
+## The preview falls back to text over SSH
+
+The signature, in `:MdViewerDebug`:
+
+```
+ssh session:              yes (SSH_CONNECTION)
+terminal profile:         unknown (Unknown terminal) -- graphics unavailable
+identified by:            none
+selected backend:         cells
+```
+
+This is a terminal-identification failure, not a renderer failure. If the
+`Renderer Process` section reports `chromium launch: succeeded` and
+`process: running`, the renderer is fine and is not the thing to investigate —
+it only produces a PNG. Painting that PNG is Neovim's job, and Neovim declines
+to emit graphics escape sequences at a terminal it cannot identify.
+
+The cause is that SSH does not forward `TERM_PROGRAM`, which is how iTerm2,
+Warp and others are normally recognised. Fixes, best first:
+
+1. **Let `LC_TERMINAL` through.** iTerm2 and WezTerm export `LC_TERMINAL` (and
+   `LC_TERMINAL_VERSION`) precisely so identity survives SSH, and OpenSSH
+   forwards `LC_*` by default. Run `echo $LC_TERMINAL` on the remote host. If it
+   is empty, the remote `sshd` is dropping it: add `AcceptEnv LANG LC_*` to
+   `/etc/ssh/sshd_config` and reload `sshd`. Nothing else is needed — detection
+   is automatic once the variable arrives, and `identified by` will read
+   `LC_TERMINAL=iTerm2; LC_TERMINAL_VERSION=3.6.11`.
+2. **Name the profile in the environment**, for terminals that export no
+   forwardable identity of their own (Kitty, Ghostty, Warp):
+   `export MD_VIEWER_TERMINAL_PROFILE=kitty` on the remote host. This is
+   preferable to the config option when one `~/.config/nvim` is shared across
+   hosts and reached from different terminals: the variable travels with the
+   session, a hardcoded profile does not. A value that is not a known profile is
+   ignored and reported in `identified by`, so check there for typos.
+3. **Set `terminal.profile`** in the remote Neovim config, if that config is
+   only ever used from one terminal.
+
+Two things that will not help, both common first guesses:
+
+- **Pointing at a local browser.** `browser.executable_path` names a binary on
+  the machine running Neovim. There is no option to drive a browser across the
+  SSH connection, and there will not be: the renderer opens no port and speaks
+  to nothing over the network.
+- **Forcing `image.backend = "kitty_raw"`.** Backend selection still calls the
+  backend's `detect()`, which fails for the same reason `auto` did, so this
+  converts the fallback into a hard error without changing the outcome.
+  `terminal.kitty_graphics = "on"` is the switch that actually moves this,
+  though naming the profile is better — it also gets the right z-index,
+  double-buffer and overlay defaults.
+
+If the preview renders but feels sluggish, that is bandwidth rather than
+detection: every refresh sends a full-page PNG as base64 down the connection.
+Lower `render.device_scale_factor` to `1` and raise `render.debounce_ms`.
+
 ## The wrong terminal profile was detected
 
 `:MdViewerHealth`'s Terminal/Profile row names what was detected;
 `:MdViewerDebug`'s `identified by` field shows exactly why. If it is wrong,
-override it with `terminal.profile` rather than relying on `"auto"`;
+override it with `terminal.profile` rather than relying on `"auto"`, or with
+`$MD_VIEWER_TERMINAL_PROFILE` when the config is shared across machines;
 `terminal.kitty_graphics` and `terminal.probe` are the finer-grained overrides
 beneath it. A wrong profile most commonly affects the default z-index and
 double-buffer values and the calibration tier's defaults, not whether the preview

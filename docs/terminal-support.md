@@ -31,6 +31,21 @@ compatible, or because a headless test passed. Only what a human watched happen 
 a real screen earns it — three graphical defects this project has shipped and
 fixed were each invisible to every headless test that existed at the time.
 
+**Which variable identified the terminal is a separate axis from status.** Each
+profile below is matched from the terminal's own native variable — `TERM_PROGRAM`,
+`KITTY_WINDOW_ID`, `WEZTERM_EXECUTABLE`, `GHOSTTY_RESOURCES_DIR`, `WARP_*` — none
+of which SSH forwards. iTerm2 and WezTerm additionally export `LC_TERMINAL`
+(and `LC_TERMINAL_VERSION`), which OpenSSH does forward by default, and
+md-viewer reads it as a secondary source so those two identify themselves on
+remote hosts. It is deliberately ranked below every native variable and ignored
+outright when another terminal has set `TERM_PROGRAM`: `LC_TERMINAL` is exported
+and therefore inherited, so a VS Code window launched from iTerm2 carries a stale
+`LC_TERMINAL=iTerm2` into a terminal with no graphics support at all. A wrong
+profile there would emit graphics escape sequences as visible garbage, which is
+worse than the text fallback. Terminals with no forwardable identity need
+`$MD_VIEWER_TERMINAL_PROFILE` or `terminal.profile` set on the remote host; see
+the SSH section of [troubleshooting.md](troubleshooting.md).
+
 ## Per-terminal status
 
 | Terminal | Status | Evidence |

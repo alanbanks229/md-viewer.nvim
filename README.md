@@ -29,9 +29,11 @@ The renderer opens no window, starts no HTTP server, and listens on no port.
   `nvim_ui_send()`, which is a 0.12 API. On anything older there is no graphical
   path at all, so the plugin refuses to load.
 - **Node.js 22.12+**, for the renderer process.
-- **An existing Google Chrome, Chromium, or Microsoft Edge installation.**
-  md-viewer never downloads a browser: Playwright's browser download is disabled
-  in the install hook and no test or runtime path re-enables it.
+- **An existing Google Chrome, Chromium, or Microsoft Edge installation**, on
+  whichever machine Neovim itself runs on — see
+  [Remote sessions over SSH](#remote-sessions-over-ssh). md-viewer never
+  downloads a browser: Playwright's browser download is disabled in the install
+  hook and no test or runtime path re-enables it.
 - **A terminal that speaks the Kitty graphics protocol, used directly** — see
   [Terminal support](#terminal-support). Kitty.app and the `kitty`/`kitten`
   executables are not required; any terminal implementing the protocol works.
@@ -60,6 +62,53 @@ geometry, which the preview is sized against.
 [docs/terminal-support.md](docs/terminal-support.md) holds the evidence behind
 each row — read it before reporting a graphical bug or claiming a terminal works.
 
+### Remote sessions over SSH
+
+md-viewer works over SSH, with one thing to install and one thing to know.
+
+**Node.js and Chrome/Chromium go on the remote host, not on your laptop.** The
+renderer runs wherever Neovim runs. It produces a PNG, and Neovim then writes
+that PNG to your terminal as Kitty graphics escape sequences, which travel down
+the SSH connection and are drawn by the terminal in front of you. A browser on
+the local machine is never consulted and cannot be substituted.
+
+**Terminal identification is the part that needs care.** md-viewer identifies
+your terminal from environment variables, and SSH does not forward
+`TERM_PROGRAM`. It does forward `LC_*` by default, so:
+
+| Terminal | Over SSH |
+|---|---|
+| iTerm2, WezTerm | Detected automatically — both export `LC_TERMINAL`, which is forwarded |
+| Kitty, Ghostty, Warp | Not detected — set the profile explicitly (below) |
+
+Automatic detection needs the remote `sshd` to accept the forwarded variable.
+Nearly every distribution ships `AcceptEnv LANG LC_*` in `/etc/ssh/sshd_config`
+already; if yours does not, add it and reload `sshd`. Confirm with
+`echo $LC_TERMINAL` on the remote host.
+
+For anything not auto-detected, name the profile on the remote host — as an
+environment variable, which travels with the session:
+
+```sh
+export MD_VIEWER_TERMINAL_PROFILE=kitty
+```
+
+or in the remote Neovim config, if that config is only ever used from one
+terminal:
+
+```lua
+opts = { terminal = { profile = "kitty" } }
+```
+
+`:MdViewerDebug` reports `ssh session`, the detected profile, and the evidence
+that produced it. If the profile is `unknown` on an SSH session it also prints a
+caveat naming these fixes.
+
+**Bandwidth.** Every refresh ships a full-page PNG down the connection as
+base64. On a slow or distant link, `render.device_scale_factor = 1` roughly
+quarters the bytes at the cost of a softer image, and `render.debounce_ms`
+raised above its 200 ms default cuts the number of refreshes.
+
 ## Installation
 
 The build hook installs the locked renderer dependencies. Both flags are
@@ -71,7 +120,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.1.0",
+  version = "v0.1.1",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -122,7 +171,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.1.0" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.1.1" },
 })
 
 require("md-viewer").setup({})
