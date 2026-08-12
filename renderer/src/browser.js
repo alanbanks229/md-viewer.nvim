@@ -239,7 +239,21 @@ export class BrowserRenderer {
   /// and reproduces what `page.screenshot` does -- a test asserts the two paths
   /// return byte-identical files. If anything fails, the Playwright call is
   /// still the fallback, so a browser without the option renders normally.
-  async captureViewportPng(pngPath, scale) {
+  async captureViewportPng(pngPath, scale, scaleFactor) {
+    // The moving frame of a scroll may be captured below its natural size. PNG
+    // bytes against real content go as pixels^0.69, so half scale is about 2.6x
+    // fewer bytes -- which is the whole of the lag on a link that is throughput
+    // limited rather than latency limited, where one 80KB frame is ~134ms of
+    // pure wire time and a wheel spin queues a hundred of them.
+    //
+    // Only ever applied to the `css` capture, which is the *moving* frame. The
+    // `device` capture is the settle frame that lands when the wheel stops, and
+    // a permanently soft idle preview is the one thing this must not produce.
+    // Clamped here as well as in config.lua for the same reason
+    // `deviceScaleFactor` is: this side does not trust the caller's arithmetic.
+    const base = scale === "css" ? 1 : this.deviceScaleFactor;
+    const factor = Number.isFinite(scaleFactor) ? Math.max(0.25, Math.min(1, scaleFactor)) : 1;
+    const clipScale = scale === "css" ? base * factor : base;
     const usable = this.cdp && this.fastPngEncode && !this.cdpCaptureUnavailable && this.viewport;
     if (usable) {
       try {
@@ -276,7 +290,7 @@ export class BrowserRenderer {
               y: origin.y,
               width: this.viewport.width,
               height: this.viewport.height,
-              scale: scale === "css" ? 1 : this.deviceScaleFactor,
+              scale: clipScale,
             },
           }),
           this.cdpCaptureTimeoutMs,
@@ -288,6 +302,11 @@ export class BrowserRenderer {
         this.cdpCaptureUnavailable = String(error?.message ?? error);
       }
     }
+    // Playwright's `scale` is the two-value enum, so a sub-1x scroll factor
+    // cannot be expressed on this path. The frame comes back at its natural
+    // size instead: correct, and merely as large as it was before
+    // `render.scroll_scale` existed. `captureEncoder` in :MdViewerDebug is what
+    // says which path a session is on.
     await this.page.screenshot({ path: pngPath, type: "png", fullPage: false, animations: "disabled", scale });
     return "playwright_png";
   }
@@ -295,15 +314,27 @@ export class BrowserRenderer {
   /// Screenshot the current viewport. Shared by render() and by any interaction
   /// that mutates visible state, so the mutation and its frame are produced by
   /// the same queued operation and Lua never has to follow up with a capture.
-  async captureViewport({ documentId, requestId, captureScale }) {
+  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor }) {
     const safeDocument = String(documentId ?? "document").replace(/[^a-zA-Z0-9_-]/g, "_");
     const pngPath = path.join(this.tempDir, `${safeDocument}-${requestId}.png`);
     const scale = captureScale === "css" ? "css" : "device";
     const started = performance.now();
-    const captureEncoder = await this.captureViewportPng(pngPath, scale);
+    const captureEncoder = await this.captureViewportPng(pngPath, scale, captureScaleFactor);
     const captureMs = performance.now() - started;
     const pngBytes = fs.statSync(pngPath).size;
-    return { pngPath, captureScale: scale, pngBytes, captureMs: round(captureMs), captureEncoder };
+    // `captureScale` stays the two-value tier the Lua side keys its fast/settle
+    // bookkeeping off; the factor rides alongside it rather than replacing it,
+    // so `apply_image`'s "css" and "device" comparisons keep meaning what they
+    // meant. Echoed back for :MdViewerDebug -- a frame that asked for 0.5 and
+    // came back at 1 is the Playwright fallback path, and nothing else says so.
+    return {
+      pngPath,
+      captureScale: scale,
+      captureScaleFactor: scale === "css" ? captureScaleFactor : undefined,
+      pngBytes,
+      captureMs: round(captureMs),
+      captureEncoder,
+    };
   }
 
   rememberDocument(documentId, record) {
@@ -396,6 +427,7 @@ export class BrowserRenderer {
     const scrollY = await this.applyScroll(documentHeight, height, params.scrollY);
     const capture = await this.captureViewport({
       documentId: params.documentId, requestId, captureScale: params.captureScale,
+      captureScaleFactor: params.captureScaleFactor,
     });
 
     // The rehydration record. Written on every successful render so an
@@ -433,6 +465,7 @@ export class BrowserRenderer {
       animationsIncomplete: this.layout.animationsComplete === false,
       layoutReused,
       captureScale: capture.captureScale,
+      captureScaleFactor: capture.captureScaleFactor,
       captureEncoder: capture.captureEncoder,
       pngBytes: capture.pngBytes,
       layoutMs: round(layoutMs),

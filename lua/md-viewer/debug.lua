@@ -26,6 +26,14 @@ function M.snapshot()
       layout_reused = session.last_layout_reused,
       markdown_reused = session.last_markdown_reused,
       capture_scale = session.last_capture_scale,
+      -- The fraction of its natural size the moving frame is captured at, and
+      -- why. Both nil on a local session, which is the case where nothing is
+      -- reduced. Reported beside `capture_encoder` on purpose: the Playwright
+      -- fallback path cannot express a sub-1x scale, so a session asking for
+      -- 0.5 whose frames are not shrinking is answered by those two rows
+      -- together and by neither alone.
+      scroll_scale = session.scroll_scale,
+      scroll_scale_source = session.scroll_scale_source,
       capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,

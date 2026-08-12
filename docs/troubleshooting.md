@@ -228,7 +228,17 @@ values, especially `fast_capture_ms`, `fast_png_bytes`, and
 `fast_image_update_ms`. `coalesced_scroll_events` shows how much repeated input
 was collapsed to the newest position; completed frames are never deliberately
 discarded. If terminal transfer still dominates, lowering
-`render.device_scale_factor` to `1` is the final quality/performance trade.
+`render.scroll_scale` is the lever: it captures the moving frame at a fraction
+of its natural size, which the settle frame undoes as soon as scrolling stops.
+`scroll_scale` in `:MdViewerDebug` reports the factor in force and where it came
+from — over SSH it is `render.ssh_scroll_scale` (default `0.5`) without any
+configuration. Read it beside `capture_encoder`: the numeric factor needs the
+`cdp_fast_png` path, and a session on `playwright_png` gets full-size frames no
+matter what is set.
+
+Do **not** lower `render.device_scale_factor` for this. It is a calibration
+divisor, not a size knob — see the note under "The preview falls back to text
+over SSH" for what it actually does to the byte count.
 
 ## A notification over the preview shows Markdown through its background
 
@@ -420,9 +430,11 @@ Warp and others are normally recognised. Fixes, best first:
 Two things that will not help, both common first guesses:
 
 - **Pointing at a local browser.** `browser.executable_path` names a binary on
-  the machine running Neovim. There is no option to drive a browser across the
-  SSH connection, and there will not be: the renderer opens no port and speaks
-  to nothing over the network.
+  the machine running Neovim; it cannot reach across the SSH connection, and the
+  renderer that reads it opens no port and speaks to nothing over the network.
+  Rendering on the machine your *terminal* runs on is a different design rather
+  than a setting — [local-render-design.md](local-render-design.md) covers what
+  it takes and why the bytes make it worth considering.
 - **Forcing `image.backend = "kitty_raw"`.** Backend selection still calls the
   backend's `detect()`, which fails for the same reason `auto` did, so this
   converts the fallback into a hard error without changing the outcome.
@@ -431,8 +443,29 @@ Two things that will not help, both common first guesses:
   double-buffer and overlay defaults.
 
 If the preview renders but feels sluggish, that is bandwidth rather than
-detection: every refresh sends a full-page PNG as base64 down the connection.
-Lower `render.device_scale_factor` to `1` and raise `render.debounce_ms`.
+detection: every refresh sends a full-page PNG as base64 down the connection,
+and on a throttled link the wire time per frame is larger than everything else
+put together. On an AWS SSM tunnel — a flat 0.80 MB/s ceiling — one 80 KB moving
+frame measured ~134 ms of pure transit, and a single wheel spin queues over a
+hundred of them, so the backlog is the lag.
+
+md-viewer already halves the moving frame on an SSH session
+(`render.ssh_scroll_scale`, default `0.5`, about 2.6× fewer bytes); lower it to
+`0.25` if the link is slower. Raising `render.debounce_ms` cuts how many
+refreshes an edit produces.
+
+`render.device_scale_factor = 1` is the tempting one and it makes this **worse**.
+It is a calibration divisor: lowering it stops dividing the terminal cell down,
+so the CSS viewport doubles and the frame grows — measured at 80 KB → 224 KB on
+the same document and pane. It also collapses the moving and settle captures
+into the same picture, so the cheap scroll frame stops existing at all. Both
+were A/B'd on a live SSM link and both felt equal or worse; the defaults are
+already the fastest configuration available.
+
+When even that is not enough, the pixels themselves are the cost and no setting
+removes them. [local-render-design.md](local-render-design.md) records what it
+would take to render on the machine your terminal runs on and send only the
+Markdown source across the link.
 
 ## The wrong terminal profile was detected
 

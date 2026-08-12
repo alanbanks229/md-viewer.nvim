@@ -7,6 +7,7 @@ local preview = require("md-viewer.preview")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
 local sync = require("md-viewer.sync")
+local terminal = require("md-viewer.terminal")
 local process = require("md-viewer.process")
 local debounce = require("md-viewer.debounce")
 local animation = require("md-viewer.animation")
@@ -559,9 +560,36 @@ function M.schedule(session, delay, timer_name, render_options)
   end)
 end
 
+---The pixel scale for the *moving* frame of a scroll, as a fraction of its
+---natural size, and where the number came from.
+---
+---An explicit `render.scroll_scale` pins it everywhere. Left unset it is full
+---size locally and `render.ssh_scroll_scale` over SSH, because what it trades
+---sharpness for is wire time, and wire time only exists over SSH: a local
+---terminal pays nothing to receive a larger frame, so shrinking one there would
+---give up sharpness and buy nothing.
+---
+---Returns nil when there is no separate moving frame to scale at all
+---(`fast_scroll = false` makes every frame the settle frame), which keeps the
+---"never scale the frame a reader is looking at" rule in one place rather than
+---restated at each caller. nil also means the request carries no factor field,
+---so a local session's bytes are exactly what they were before this existed.
+local function scroll_capture_scale(render)
+  if not render.fast_scroll then return nil, "render.fast_scroll=false (no moving frame)" end
+  if render.scroll_scale ~= nil then return render.scroll_scale, "explicit override (render.scroll_scale)" end
+  if terminal.detect().ssh then return render.ssh_scroll_scale, "SSH session (render.ssh_scroll_scale)" end
+  return nil, "local session (full size)"
+end
+
 function M.schedule_scroll(session)
   local render = config.get().render
   local fast_scale = render.fast_scroll and "css" or "device"
+  local scale_factor, scale_source = scroll_capture_scale(render)
+  -- Recorded rather than re-derived in :MdViewerDebug: the answer depends on
+  -- the SSH capability snapshot, and a reader asking later wants to know what
+  -- this session's frames were actually captured at.
+  session.scroll_scale = scale_factor
+  session.scroll_scale_source = scale_source
   if session.scroll_render_in_flight then
     session.scroll_render_pending = true
     session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
@@ -569,6 +597,7 @@ function M.schedule_scroll(session)
     session.scroll_render_in_flight = true
     M.refresh(session, {
       capture_scale = fast_scale,
+      capture_scale_factor = scale_factor,
       capture_only = true,
       scroll_frame = true,
       on_complete = function()
@@ -1469,5 +1498,14 @@ function M.setup_autocmds()
   })
   vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = M.close_all })
 end
+
+-- Exported for `tests/lua/cases/scroll_scale.lua` only.
+--
+-- The rule this resolves depends on a live SSH capability snapshot, so a test
+-- driven through `M.schedule_scroll` would need a preview window, a backend and
+-- a renderer to reach three lines of arithmetic. Asserting it directly is what
+-- makes "a local session sends exactly what it sent before" a fact rather than
+-- an intention.
+M._scroll_capture_scale = scroll_capture_scale
 
 return M

@@ -24,6 +24,27 @@ M.defaults = {
     scroll_past_end_offset_px = 22,
     fast_scroll = true,
     scroll_settle_ms = 160,
+    -- How much of its natural size the *moving* frame of a scroll is captured
+    -- at. nil defers to `ssh_scroll_scale` over SSH and to full size locally;
+    -- set it to pin one factor everywhere.
+    --
+    -- Only the moving frame is affected. The settle capture that lands when
+    -- the wheel stops is always full `device_scale_factor`, so the picture a
+    -- reader actually looks at is never the reduced one. With
+    -- `fast_scroll = false` there is no separate moving frame and this does
+    -- nothing, deliberately: scaling the only frame there is would leave the
+    -- preview permanently soft.
+    scroll_scale = nil,
+    -- What `scroll_scale` resolves to when Neovim is running over SSH.
+    --
+    -- 0.5 rather than something smaller because PNG bytes against real content
+    -- go as pixels^0.69: quartering the pixels costs about 2.6x fewer bytes,
+    -- and bytes are the entire cost on a throughput-limited link. Measured on
+    -- an AWS SSM tunnel with a flat 0.80 MB/s ceiling, one 80KB moving frame is
+    -- ~134ms of pure wire time and a single wheel spin queues over a hundred of
+    -- them -- so the backlog, not the render, is the lag. See
+    -- docs/local-render-design.md.
+    ssh_scroll_scale = 0.5,
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.
     -- Playback is expensive when sending constant PNG screenshots.
@@ -210,6 +231,27 @@ local function validate(cfg)
   assert(
     type(cfg.render.animate_fps) == "number" and cfg.render.animate_fps >= 1 and cfg.render.animate_fps <= 30,
     "md-viewer: render.animate_fps must be between 1 and 30"
+  )
+  -- Both bounded at 0.25: below that the moving frame stops being legible even
+  -- in motion, which defeats the point of drawing one. Bounded at 1 because
+  -- this only ever *reduces* -- capturing the moving frame above its natural
+  -- size spends bytes to gain nothing, `device_scale_factor` being the knob
+  -- that decides what natural means.
+  assert(
+    cfg.render.scroll_scale == nil
+      or (
+        type(cfg.render.scroll_scale) == "number"
+        and cfg.render.scroll_scale >= 0.25
+        and cfg.render.scroll_scale <= 1
+      ),
+    "md-viewer: render.scroll_scale must be a number between 0.25 and 1, or nil to follow "
+      .. "render.ssh_scroll_scale over SSH"
+  )
+  assert(
+    type(cfg.render.ssh_scroll_scale) == "number"
+      and cfg.render.ssh_scroll_scale >= 0.25
+      and cfg.render.ssh_scroll_scale <= 1,
+    "md-viewer: render.ssh_scroll_scale must be a number between 0.25 and 1"
   )
   assert(
     cfg.image.raw_zindex == nil

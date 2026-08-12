@@ -20,6 +20,10 @@ return function(t)
   -- still frame the screenshot captured is what stays on screen.
   t.eq(false, cfg.render.animate, "animated image playback is off by default")
   t.eq(5, cfg.render.animate_fps, "client-driven frame swaps are capped at 5fps")
+  -- Unset rather than 1: nil is what lets the SSH default apply without making
+  -- "the user asked for full size" and "the user said nothing" the same value.
+  t.eq(nil, cfg.render.scroll_scale, "the moving scroll frame follows the session by default")
+  t.eq(0.5, cfg.render.ssh_scroll_scale, "an SSH session halves the moving scroll frame")
   config.reset()
   local bad_font_ok, bad_font_err = pcall(config.setup, { render = { font_size_px = 0 } })
   t.eq(false, bad_font_ok, "non-positive render.font_size_px is rejected")
@@ -48,6 +52,28 @@ return function(t)
   config.reset()
   local scaled_cfg = config.setup({ render = { device_scale_factor = 1 } })
   t.eq(1, scaled_cfg.render.device_scale_factor, "a non-Retina device scale is accepted")
+  config.reset()
+  -- Bounded at both ends, and the upper bound matters as much as the lower one:
+  -- this knob only ever *reduces* the moving frame, so a value above 1 would
+  -- spend bytes to gain nothing over what device_scale_factor already decided.
+  local low_scroll_ok, low_scroll_err = pcall(config.setup, { render = { scroll_scale = 0.1 } })
+  t.eq(false, low_scroll_ok, "a scroll scale below the legibility floor is rejected")
+  t.ok(tostring(low_scroll_err):match("scroll_scale"), "the scroll scale error names the offending option")
+  config.reset()
+  local high_scroll_ok = pcall(config.setup, { render = { scroll_scale = 2 } })
+  t.eq(false, high_scroll_ok, "a scroll scale above natural size is rejected")
+  config.reset()
+  local scroll_cfg = config.setup({ render = { scroll_scale = 0.5 } })
+  t.eq(0.5, scroll_cfg.render.scroll_scale, "render.scroll_scale is overridable")
+  config.reset()
+  local bad_ssh_scroll_ok, bad_ssh_scroll_err = pcall(config.setup, { render = { ssh_scroll_scale = 0 } })
+  t.eq(false, bad_ssh_scroll_ok, "a zero SSH scroll scale is rejected")
+  t.ok(tostring(bad_ssh_scroll_err):match("ssh_scroll_scale"), "the SSH scroll scale error names the option")
+  config.reset()
+  -- nil is a value here, not an omission: it is how "follow the session" is
+  -- spelled, so it has to survive validation rather than being defaulted away.
+  local unset_scroll_cfg = config.setup({ render = { scroll_scale = nil } })
+  t.eq(nil, unset_scroll_cfg.render.scroll_scale, "an unset scroll scale stays unset")
   config.reset()
   local bad_aspect_ok, bad_aspect_err = pcall(config.setup, { render = { cell_aspect_ratio = 0 } })
   t.eq(false, bad_aspect_ok, "a zero cell aspect ratio is rejected before it divides by zero")

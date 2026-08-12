@@ -15,7 +15,8 @@
 - `scripts/overlay/`: harnesses needing a real browser or a real terminal window
   — see [../scripts/README.md](../scripts/README.md)
 - `doc/md-viewer.txt`: `:help md-viewer`
-- `docs/`: architecture, terminal support, troubleshooting, development
+- `docs/`: architecture, terminal support, troubleshooting, development, and
+  the client-side rendering design record
 
 ## Bootstrap
 
@@ -84,6 +85,9 @@ not tell you.
 | Cursor follow | Move through the source | The preview scrolls to match |
 | Scrolling | `j`/`k`, `Ctrl-d`/`u`, `Ctrl-f`/`b`, `gg`/`G`, wheel over the preview | Smooth, no flicker, no stray image. The wheel does nothing when the pointer is outside the preview |
 | Resize and font size | Resize the window, then change the terminal's font size | Re-renders at the new geometry and stays aligned |
+| Scroll scale, locally | Wheel-scroll, then `:MdViewerDebug` | `scroll_scale = nil`, source `local session`. Nothing about a local preview may change: this is the byte-identical path |
+| Scroll scale, over SSH | The same from an SSH session | `scroll_scale = 0.5`, source naming `ssh_scroll_scale`, and `fast_png_bytes` roughly 2.5× below what the same pane reports locally |
+| Settle sharpness | Scroll hard over SSH, then stop and look | The moving frame may be visibly soft; the frame that lands after `render.scroll_settle_ms` is sharp. A preview that stays soft at rest is the failure this option can cause |
 
 ### The preview caret
 

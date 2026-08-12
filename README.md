@@ -105,9 +105,25 @@ that produced it. If the profile is `unknown` on an SSH session it also prints a
 caveat naming these fixes.
 
 **Bandwidth.** Every refresh ships a full-page PNG down the connection as
-base64. On a slow or distant link, `render.device_scale_factor = 1` roughly
-quarters the bytes at the cost of a softer image, and `render.debounce_ms`
-raised above its 200 ms default cuts the number of refreshes.
+base64, so on a throttled link the picture arrives late and scrolling lags
+behind the wheel. md-viewer already halves the moving frame of a scroll on an
+SSH session — `render.ssh_scroll_scale`, default `0.5`, which is about 2.6×
+fewer bytes per frame while the sharp image comes back the moment scrolling
+stops. Lower it to `0.25` on a slower link, or set `render.scroll_scale` to pin
+one value regardless of session. `render.debounce_ms` above its 200 ms default
+cuts how many refreshes an edit produces.
+
+> [!IMPORTANT]
+> Do **not** reach for `render.device_scale_factor = 1` here. It is a
+> calibration divisor, not a size knob: lowering it doubles the CSS viewport and
+> makes the frame *larger* — measured at 80 KB → 224 KB — and it collapses the
+> moving and settle frames into one capture, so the cheap scroll frame stops
+> existing. The defaults are already the fastest configuration.
+
+If the link is slow enough that this is still not comfortable, the bytes
+themselves are the problem rather than any setting, and
+[docs/local-render-design.md](docs/local-render-design.md) covers what it would
+take to stop sending pixels over the connection at all.
 
 ## Installation
 
@@ -323,6 +339,8 @@ boundary is never something you have to infer from a config file.
 - [Contributing](CONTRIBUTING.md) — how to open a change
 - [Development](docs/development.md) — tests, manual verification, releasing
 - [Architecture](docs/architecture.md) — how it works, and which invariants matter
+- [Client-side rendering](docs/local-render-design.md) — why a preview lags on a
+  throttled link, and the design for rendering where the terminal is
 - [Changelog](CHANGELOG.md)
 
 ## License

@@ -3,6 +3,40 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Scrolling over a throttled SSH link. On a connection whose ceiling is low
+enough — an AWS SSM tunnel is a flat 0.80 MB/s — the wire time for one scroll
+frame is larger than the render and the terminal decode put together, and a
+wheel spin queues frames faster than the link drains them. The preview then
+catches up about half a second late. Nothing was wrong with the pipeline; the
+frames were simply too big for the pipe, and the two settings that looked like
+they would help were measured making it worse.
+
+### Added
+
+- **`render.scroll_scale` and `render.ssh_scroll_scale`.** The moving frame of a
+  scroll is now captured at a fraction of its natural size, halved by default on
+  an SSH session and unchanged on a local one. PNG bytes go as `pixels^0.69`, so
+  half scale measures about 2.6× fewer bytes per frame; the settle capture that
+  lands when scrolling stops is never reduced, so the picture being read is
+  still full `render.device_scale_factor`. `:MdViewerDebug` reports the factor
+  in force and where it came from.
+- **A design record for client-side rendering**, in
+  [docs/local-render-design.md](docs/local-render-design.md): the measurements
+  behind the slow-link case and the architecture for rendering on the machine
+  the terminal runs on, sending Markdown across the link instead of pixels.
+
+### Fixed
+
+- **Documentation recommended a setting that makes slow links worse.** The
+  README, `:help md-viewer-ssh` and the troubleshooting guide all suggested
+  lowering `render.device_scale_factor` on a slow connection. It is a
+  calibration divisor rather than a size knob: lowering it doubles the CSS
+  viewport and grows the frame — 80 KB to 224 KB on the document it was measured
+  against — while collapsing the moving and settle captures into one, so the
+  cheap scroll frame stops existing. All three now say so.
+
 ## [0.1.1] - 2026-08-11
 
 Terminal detection over SSH. v0.1.0 identified terminals only from variables
