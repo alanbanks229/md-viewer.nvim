@@ -55,6 +55,15 @@ function M.snapshot()
       -- only fields that answer "how much went down the wire".
       fast_frame_count = session.fast_frame_count or 0,
       fast_bytes_total = session.fast_bytes_total or 0,
+      -- The fastest and the average this loop turned over. Compare the minimum
+      -- against fast_capture_ms + fast_image_update_ms + the frame's transit to
+      -- see what the per-frame cost is actually made of; a minimum far above
+      -- their sum means the constraint is somewhere none of them measure.
+      fast_interval_min_ms = session.fast_interval_min_ms,
+      fast_interval_mean_ms = session.fast_interval_count
+          and session.fast_interval_count > 0
+          and (session.fast_interval_sum_ms / session.fast_interval_count)
+        or nil,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
       retina_image_update_ms = session.retina_image_update_ms,

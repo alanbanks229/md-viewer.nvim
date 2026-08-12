@@ -135,6 +135,21 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
     session.fast_image_update_ms = session.last_image_update_ms
     session.fast_frame_count = (session.fast_frame_count or 0) + 1
     session.fast_bytes_total = (session.fast_bytes_total or 0) + (session.last_png_bytes or 0)
+    -- Interval between consecutive moving frames, which is the only honest
+    -- measure of how fast this pipeline can actually turn. Frames divided by
+    -- wall-clock is not: a scroll driven by hand has pauses in it, and they
+    -- land in the denominator as though the pipeline had been busy. The
+    -- *minimum* is the floor -- the fastest this loop went when it was
+    -- genuinely saturated -- and it is what a per-frame cost has to be compared
+    -- against to say whether transit is the constraint or something else is.
+    local now = vim.uv.hrtime()
+    if session.fast_last_ns then
+      local interval = (now - session.fast_last_ns) / 1e6
+      session.fast_interval_min_ms = math.min(session.fast_interval_min_ms or interval, interval)
+      session.fast_interval_sum_ms = (session.fast_interval_sum_ms or 0) + interval
+      session.fast_interval_count = (session.fast_interval_count or 0) + 1
+    end
+    session.fast_last_ns = now
   elseif capture_scale == "device" then
     session.retina_png_bytes = session.last_png_bytes
     session.retina_capture_ms = session.last_capture_ms

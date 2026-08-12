@@ -67,6 +67,10 @@ local function reset_counters(current)
   current.fast_bytes_total = 0
   current.retina_frame_count = 0
   current.retina_bytes_total = 0
+  current.fast_interval_min_ms = nil
+  current.fast_interval_sum_ms = nil
+  current.fast_interval_count = nil
+  current.fast_last_ns = nil
   phase_started = vim.uv.hrtime()
 end
 
@@ -100,7 +104,28 @@ local function collect(current)
     retina_frames = current.retina_frame_count or 0,
     retina_total = current.retina_bytes_total or 0,
     seconds = (vim.uv.hrtime() - phase_started) / 1e9,
+    -- The pipeline's floor, and what is known to be in it. Everything not in
+    -- capture or encode-and-send or transit is unaccounted, and a large
+    -- unaccounted share is the finding -- it means the constraint is not any
+    -- of the three things this change or its successor can move.
+    interval_min = current.fast_interval_min_ms,
+    capture_ms = current.fast_capture_ms,
+    send_ms = current.fast_image_update_ms,
   }
+end
+
+local function ms(value)
+  if not value then return "--" end
+  return ("%d ms"):format(value)
+end
+
+---Frame-interval time that is not capture, not encode-and-send, and not
+---transit. Large means the constraint is somewhere none of those three
+---measure, and therefore somewhere neither this option nor client-side
+---rendering can reach -- which is worth knowing before building the latter.
+local function unaccounted(phase)
+  if not (phase.interval_min and phase.fast_png_bytes) then return nil end
+  return math.max(0, phase.interval_min - (phase.capture_ms or 0) - (phase.send_ms or 0) - wire_ms(phase.fast_png_bytes))
 end
 
 local function number(value)
@@ -127,11 +152,14 @@ local function report()
       ("%d in %.0fs"):format(a.fast_frames, a.seconds),
       ("%d in %.0fs"):format(b.fast_frames, b.seconds)
     ),
-    ("%-26s %14s %14s"):format(
-      "  update rate",
-      ("%.1f/s"):format(a.fast_frames / math.max(a.seconds, 0.001)),
-      ("%.1f/s"):format(b.fast_frames / math.max(b.seconds, 0.001))
-    ),
+    -- The floor, not frames-over-wall-clock: a hand-driven scroll has pauses in
+    -- it, and dividing by elapsed time charges the pipeline for a reader who
+    -- stopped to look at something.
+    ("%-26s %14s %14s"):format("fastest frame interval", ms(a.interval_min), ms(b.interval_min)),
+    ("%-26s %14s %14s"):format("  capture (VM Chromium)", ms(a.capture_ms), ms(b.capture_ms)),
+    ("%-26s %14s %14s"):format("  encode + hand to UI", ms(a.send_ms), ms(b.send_ms)),
+    ("%-26s %14s %14s"):format("  transit", ms(wire_ms(a.fast_png_bytes)), ms(wire_ms(b.fast_png_bytes))),
+    ("%-26s %14s %14s"):format("  UNACCOUNTED", ms(unaccounted(a)), ms(unaccounted(b))),
     ("%-26s %14s %14s"):format("retina_png_bytes", number(a.retina_png_bytes), number(b.retina_png_bytes)),
     ("%-26s %14s %14s"):format("settle frames taken", number(a.retina_frames), number(b.retina_frames)),
     ("%-26s %14s %14s"):format(
@@ -142,7 +170,11 @@ local function report()
     ("%-26s %14s %14s"):format("coalesced (never sent)", number(a.coalesced), number(b.coalesced)),
     ("%-26s %14s %14s"):format("capture_encoder", a.encoder or "--", b.encoder or "--"),
     ("%-26s %14s %14s"):format("scroll_scale", tostring(a.scroll_scale), tostring(b.scroll_scale)),
-    ("%-26s %14s %14s"):format("settle delay", ("%sms"):format(a.settle_ms), ("%sms"):format(b.settle_ms)),
+    "",
+    -- Stated rather than tabulated: it is identical in both arms by
+    -- construction, so a column for it would imply it was under test when this
+    -- run says nothing about it at all.
+    ("settle delay was %sms in both arms -- this A/B varies scroll_scale only."):format(tostring(a.settle_ms)),
     "",
   }
 
@@ -177,8 +209,32 @@ local function report()
     -- get through in the same time, so the wire stays about as busy; what
     -- changes is how much of the document that traffic actually shows you.
     lines[#lines + 1] = "(total bytes need not drop -- smaller frames mean more frames, not less traffic)"
+    -- The question this harness now exists to answer. Fewer bytes only make
+    -- scrolling smoother if bytes were what the loop was waiting on; if most of
+    -- a frame interval is unaccounted, they were not, and neither this option
+    -- nor moving rasterization off the far end will change how it feels.
+    local idle = unaccounted(b)
+    local share
+    if idle and b.interval_min and b.interval_min > 0 then
+      share = idle / b.interval_min * 100
+      lines[#lines + 1] = ("%.0f%% of the frame interval is unaccounted (%s of %s)"):format(
+        share,
+        ms(idle),
+        ms(b.interval_min)
+      )
+      if share >= 50 then
+        lines[#lines + 1] = "  -> transit is NOT the constraint at this frame rate. Fewer bytes cannot"
+        lines[#lines + 1] = "     speed this up further, and neither would client-side rendering."
+      end
+    end
     lines[#lines + 1] = ""
-    if ratio >= 2.0 then
+    if ratio >= 2.0 and share and share >= 50 then
+      -- Both true at once, and saying only the first would be the flattering
+      -- half. The option does exactly what it claims to bytes; bytes are simply
+      -- not what this loop is waiting on.
+      verdict = ("BYTES REDUCED %.2fx as designed, but the frame rate is gated elsewhere -- "):format(ratio)
+        .. "see UNACCOUNTED above. Report this table before building on it."
+    elseif ratio >= 2.0 then
       verdict = "WORKING as designed (expected about 2.6x)."
     elseif ratio > 1.2 then
       verdict = ("PARTIAL: %.2fx, below the ~2.6x expected. Report the table."):format(ratio)
