@@ -122,14 +122,25 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- one falls back silently and permanently on its first failure, so without
   -- this a browser that refused it would just look inexplicably slow.
   if capture_encoder then session.last_capture_encoder = capture_encoder end
+  -- The `*_png_bytes` fields above are the *last* frame of each kind; the
+  -- counters below are every one of them. Both are needed and neither implies
+  -- the other: the size says what a frame costs, the count says how many were
+  -- actually paid for. Without the count the only available stand-in was
+  -- `coalesced_scroll_events`, which counts the opposite thing -- events
+  -- superseded *before* capture, so frames that were never produced and never
+  -- transmitted -- and reading it as frames sent overstates the traffic badly.
   if capture_scale == "css" then
     session.fast_png_bytes = session.last_png_bytes
     session.fast_capture_ms = session.last_capture_ms
     session.fast_image_update_ms = session.last_image_update_ms
+    session.fast_frame_count = (session.fast_frame_count or 0) + 1
+    session.fast_bytes_total = (session.fast_bytes_total or 0) + (session.last_png_bytes or 0)
   elseif capture_scale == "device" then
     session.retina_png_bytes = session.last_png_bytes
     session.retina_capture_ms = session.last_capture_ms
     session.retina_image_update_ms = session.last_image_update_ms
+    session.retina_frame_count = (session.retina_frame_count or 0) + 1
+    session.retina_bytes_total = (session.retina_bytes_total or 0) + (session.last_png_bytes or 0)
   end
   session.image_id = image_id
   session.last_placement = placement
@@ -581,6 +592,27 @@ local function scroll_capture_scale(render)
   return nil, "local session (full size)"
 end
 
+---How long scrolling must be idle before the sharp settle capture is taken, and
+---where the number came from.
+---
+---`render.ssh_scroll_settle_ms` replaces `render.scroll_settle_ms` outright on
+---an SSH session rather than being combined with it, so the two values are
+---simply the two answers and neither has to be read in terms of the other. One
+---delay everywhere means setting both to the same number: a nil here is still
+---honoured, but `setup()` cannot express one -- `vim.tbl_deep_extend` reads an
+---absent key as "keep the default" -- so it is not the documented route.
+---
+---Separate from `scroll_capture_scale` above even though both are SSH-gated,
+---because they are gated on different things: the scale trades sharpness for
+---bytes, this trades latency for *not spending the bytes at all* on a reader
+---who has not finished scrolling.
+local function scroll_settle_delay(render)
+  if render.ssh_scroll_settle_ms ~= nil and terminal.detect().ssh then
+    return render.ssh_scroll_settle_ms, "SSH session (render.ssh_scroll_settle_ms)"
+  end
+  return render.scroll_settle_ms, "render.scroll_settle_ms"
+end
+
 function M.schedule_scroll(session)
   local render = config.get().render
   local fast_scale = render.fast_scroll and "css" or "device"
@@ -616,7 +648,10 @@ function M.schedule_scroll(session)
     })
   end
   if render.fast_scroll then
-    M.schedule(session, render.scroll_settle_ms, "scroll_settle_timer", {
+    local settle_ms, settle_source = scroll_settle_delay(render)
+    session.scroll_settle_ms = settle_ms
+    session.scroll_settle_source = settle_source
+    M.schedule(session, settle_ms, "scroll_settle_timer", {
       capture_scale = "device",
       capture_only = true,
     })
@@ -1507,5 +1542,6 @@ end
 -- makes "a local session sends exactly what it sent before" a fact rather than
 -- an intention.
 M._scroll_capture_scale = scroll_capture_scale
+M._scroll_settle_delay = scroll_settle_delay
 
 return M

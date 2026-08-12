@@ -106,12 +106,22 @@ caveat naming these fixes.
 
 **Bandwidth.** Every refresh ships a full-page PNG down the connection as
 base64, so on a throttled link the picture arrives late and scrolling lags
-behind the wheel. md-viewer already halves the moving frame of a scroll on an
-SSH session — `render.ssh_scroll_scale`, default `0.5`, which is about 2.6×
-fewer bytes per frame while the sharp image comes back the moment scrolling
-stops. Lower it to `0.25` on a slower link, or set `render.scroll_scale` to pin
-one value regardless of session. `render.debounce_ms` above its 200 ms default
-cuts how many refreshes an edit produces.
+behind the wheel. md-viewer already does two things about this on an SSH session, both without
+configuration:
+
+- **`render.ssh_scroll_scale`** (default `0.5`) captures the moving frame of a
+  scroll at half size — measured 2.6× to 3× fewer bytes per frame, while the
+  sharp image comes back the moment scrolling stops. Lower it to `0.25` on a
+  slower link, or set `render.scroll_scale` to pin one value regardless of
+  session.
+- **`render.ssh_scroll_settle_ms`** (default `400`, against `160` locally) waits
+  longer before spending the expensive sharp capture. A mouse wheel delivers
+  notches 50–150 ms apart, so a shorter delay reads an ordinary gap between two
+  flicks as "stopped" and buys a full-size transfer the next notch immediately
+  makes stale.
+
+`render.debounce_ms` above its 200 ms default cuts how many refreshes an edit
+produces.
 
 > [!IMPORTANT]
 > Do **not** reach for `render.device_scale_factor = 1` here. It is a

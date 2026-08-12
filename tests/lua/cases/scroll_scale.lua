@@ -68,6 +68,54 @@ return function(t)
   t.eq(nil, no_fast_scale, "with fast_scroll off there is no moving frame to reduce")
   t.ok(no_fast_source:match("fast_scroll"), "the refusal names the option that caused it")
 
+  -- ---------------------------------------------------------------------
+  -- The settle delay
+  -- ---------------------------------------------------------------------
+
+  local settle = controller._scroll_settle_delay
+
+  config.reset()
+  stub_ssh(false)
+  local local_settle, local_settle_source = settle(config.get().render)
+  t.eq(160, local_settle, "a local session settles on the ordinary delay")
+  t.ok(local_settle_source:match("scroll_settle_ms"), "the local settle answer names the option")
+
+  stub_ssh(true)
+  local ssh_settle, ssh_settle_source = settle(config.get().render)
+  t.eq(400, ssh_settle, "an SSH session waits longer before paying for the sharp frame")
+  t.ok(ssh_settle_source:match("ssh_scroll_settle_ms"), "the SSH settle answer names the option it came from")
+
+  -- Replacement, not a maximum: an explicit SSH delay is used as written and is
+  -- never floored by the local one, so someone who wants the sharp frame sooner
+  -- over SSH than locally can have it.
+  config.reset()
+  config.setup({ render = { scroll_settle_ms = 900, ssh_scroll_settle_ms = 90 } })
+  stub_ssh(true)
+  t.eq(90, (settle(config.get().render)), "an SSH delay below the local one is honoured, not clamped up")
+  stub_ssh(false)
+  t.eq(900, (settle(config.get().render)), "and the local delay is untouched by it")
+
+  -- One delay everywhere means setting both, because `setup()` cannot express
+  -- an absent key: vim.tbl_deep_extend reads a nil as "keep the default". The
+  -- resolver's nil branch is still reachable for a table built by hand, and
+  -- must fall back rather than re-defaulting -- asserted directly, since the
+  -- supported configuration path cannot produce it.
+  config.reset()
+  config.setup({ render = { scroll_settle_ms = 90, ssh_scroll_settle_ms = 90 } })
+  stub_ssh(true)
+  t.eq(90, (settle(config.get().render)), "setting both gives one delay over SSH")
+  stub_ssh(false)
+  t.eq(90, (settle(config.get().render)), "and the same one locally")
+  stub_ssh(true)
+  t.eq(160, (settle({ scroll_settle_ms = 160 })), "a hand-built config with no SSH delay falls back to the local one")
+
+  config.reset()
+  config.setup({ render = { ssh_scroll_settle_ms = 0 } })
+  stub_ssh(true)
+  -- 0 is a value, not an omission: it means "settle immediately", and reading it
+  -- as absent would silently restore the 400ms default it was set to escape.
+  t.eq(0, (settle(config.get().render)), "a zero SSH settle delay is honoured rather than treated as unset")
+
   terminal.detect = real_detect
   config.reset()
 

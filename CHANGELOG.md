@@ -23,6 +23,12 @@ they would help were measured making it worse.
   settle capture that lands when scrolling stops is never reduced, so the
   picture being read is still full `render.device_scale_factor`.
   `:MdViewerDebug` reports the factor in force and where it came from.
+- **`render.ssh_scroll_settle_ms`.** An SSH session now waits 400 ms rather than
+  160 ms before taking the sharp settle capture. A mouse wheel delivers notches
+  50–150 ms apart, so the shorter delay read an ordinary gap between two flicks
+  as "stopped" and bought a full-size transfer — half a second of transit on the
+  link this was measured against — that the next notch immediately made stale.
+  Local sessions are unchanged.
 - **A design record for client-side rendering**, in
   [docs/local-render-design.md](docs/local-render-design.md): the measurements
   behind the slow-link case and the architecture for rendering on the machine

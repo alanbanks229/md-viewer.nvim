@@ -450,8 +450,11 @@ frame measured ~134 ms of pure transit, and a single wheel spin queues over a
 hundred of them, so the backlog is the lag.
 
 md-viewer already halves the moving frame on an SSH session
-(`render.ssh_scroll_scale`, default `0.5`, about 2.6× fewer bytes); lower it to
-`0.25` if the link is slower. Raising `render.debounce_ms` cuts how many
+(`render.ssh_scroll_scale`, default `0.5`, 2.6× to 3× fewer bytes); lower it to
+`0.25` if the link is slower. It also waits `render.ssh_scroll_settle_ms`
+(default `400`, against `160` locally) before taking the expensive sharp
+capture, so a gap between two wheel flicks does not buy a full-size transfer
+that the next notch makes stale. Raising `render.debounce_ms` cuts how many
 refreshes an edit produces.
 
 `render.device_scale_factor = 1` is the tempting one and it makes this **worse**.

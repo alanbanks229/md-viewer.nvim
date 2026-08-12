@@ -69,10 +69,18 @@ layout all move it, so treat 2.6× as the conservative figure and anything above
 content-dependent luck. The settle frame is byte-identical across the two phases, which is
 the invariant that mattered.
 
-Two things this does not fix, and they are why the second lever exists. The settle frame is
-still 304,666 bytes — **508 ms** of transit every time scrolling pauses. And transit alone
-still caps preview updates at 13.4/s where it capped them at 4.4/s: better, but a ceiling
-that exists only because pixels are crossing the link at all.
+The settle frame is untouched by this, deliberately, and it is still 304,666 bytes —
+**508 ms** of transit. What can be done cheaply is spending it less often:
+`render.ssh_scroll_settle_ms` raises the idle time before that capture from 160 ms to
+400 ms on an SSH session, above the 50–150 ms gaps between wheel notches and below the
+pauses between reading and scrolling again, so it is paid for a reader who has actually
+stopped rather than one mid-flick. The cost is that sharpness arrives about 240 ms later
+when they do stop, which is only worth it when the frame itself takes half a second.
+
+What neither lever removes is the ceiling. Transit alone still caps preview updates at
+13.4/s where it capped them at 4.4/s, and the settle frame still costs half a second
+whenever it is taken. Both numbers exist only because pixels cross the link at all, which
+is what the second lever is for.
 
 **Invariant:** only the *moving* frame is scaled. The settle capture stays at full
 `device_scale_factor`, or an idle preview would sit at reduced sharpness indefinitely —

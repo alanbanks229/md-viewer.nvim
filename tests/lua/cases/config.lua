@@ -24,6 +24,8 @@ return function(t)
   -- "the user asked for full size" and "the user said nothing" the same value.
   t.eq(nil, cfg.render.scroll_scale, "the moving scroll frame follows the session by default")
   t.eq(0.5, cfg.render.ssh_scroll_scale, "an SSH session halves the moving scroll frame")
+  t.eq(160, cfg.render.scroll_settle_ms, "the local settle delay is unchanged")
+  t.eq(400, cfg.render.ssh_scroll_settle_ms, "an SSH session waits longer before the sharp frame")
   config.reset()
   local bad_font_ok, bad_font_err = pcall(config.setup, { render = { font_size_px = 0 } })
   t.eq(false, bad_font_ok, "non-positive render.font_size_px is rejected")
@@ -69,6 +71,15 @@ return function(t)
   local bad_ssh_scroll_ok, bad_ssh_scroll_err = pcall(config.setup, { render = { ssh_scroll_scale = 0 } })
   t.eq(false, bad_ssh_scroll_ok, "a zero SSH scroll scale is rejected")
   t.ok(tostring(bad_ssh_scroll_err):match("ssh_scroll_scale"), "the SSH scroll scale error names the option")
+  config.reset()
+  local bad_settle_ok, bad_settle_err = pcall(config.setup, { render = { ssh_scroll_settle_ms = -1 } })
+  t.eq(false, bad_settle_ok, "a negative SSH settle delay is rejected")
+  t.ok(tostring(bad_settle_err):match("ssh_scroll_settle_ms"), "the SSH settle error names the offending option")
+  config.reset()
+  -- Unlike the scale, nil here means "use one delay everywhere" rather than
+  -- "follow the session", so it has to survive validation as a real choice.
+  local no_ssh_settle = config.setup({ render = { ssh_scroll_settle_ms = nil } })
+  t.eq(400, no_ssh_settle.render.ssh_scroll_settle_ms, "omitting the SSH settle delay keeps the default")
   config.reset()
   -- nil is a value here, not an omission: it is how "follow the session" is
   -- spelled, so it has to survive validation rather than being defaulted away.

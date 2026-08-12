@@ -586,16 +586,25 @@ Measured on an AWS SSM tunnel with a flat 0.80 MB/s ceiling, one 80 KB moving
 frame is about 134 ms of pure transit and a single wheel spin queues over a
 hundred of them -- the backlog is the lag, not the render.
 
-md-viewer therefore captures the moving frame of a scroll at half size on an
-SSH session, and restores full sharpness the moment scrolling stops: >lua
+md-viewer therefore does two things differently on an SSH session, both
+without configuration. It captures the moving frame of a scroll at half size,
+restoring full sharpness once scrolling stops; and it waits longer before
+spending that sharp capture, because a mouse wheel delivers notches 50-150 ms
+apart and a short delay reads an ordinary gap between two flicks as "stopped",
+buying a full-size transfer the next notch immediately makes stale. >lua
 
     opts = {
       render = {
         -- What an SSH session uses when scroll_scale is unset.
-        -- 0.5 is roughly 2.6x fewer bytes per moving frame.
+        -- 0.5 is 2.6x to 3x fewer bytes per moving frame.
         ssh_scroll_scale = 0.25,
         -- Pin one factor regardless of session, if preferred.
         scroll_scale = nil,
+        -- Idle time before the sharp capture. These are two independent
+        -- answers, not a base and an adjustment: for one delay everywhere
+        -- set both to the same number.
+        scroll_settle_ms = 160,
+        ssh_scroll_settle_ms = 400,
       },
     }
 <

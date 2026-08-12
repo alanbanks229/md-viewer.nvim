@@ -24,6 +24,26 @@ M.defaults = {
     scroll_past_end_offset_px = 22,
     fast_scroll = true,
     scroll_settle_ms = 160,
+    -- What an SSH session waits instead. These are two independent answers
+    -- rather than a base and an adjustment, so for one delay everywhere set
+    -- both to the same number -- writing `nil` here does nothing, because a
+    -- key absent from `setup()` means "keep the default" and cannot mean
+    -- "clear it".
+    --
+    -- The settle capture is the expensive one -- full `device_scale_factor`,
+    -- measured at 304,666 bytes and ~508 ms of transit on the link this was
+    -- built for -- and it fires whenever scrolling stops for this long. A mouse
+    -- wheel does not deliver a smooth stream: notches arrive 50-150 ms apart,
+    -- so at 160 ms an ordinary gap between two flicks reads as "stopped" and
+    -- buys a half-second transfer that the next notch immediately makes stale.
+    -- 400 ms sits above the gaps inside a scroll and below the pauses between
+    -- them, so the sharp frame is spent on a reader who has actually stopped.
+    --
+    -- The cost is real and is the reason this is not simply raised everywhere:
+    -- when you do stop, sharpness arrives about 240 ms later than it used to.
+    -- That trade is only worth making when the frame itself takes half a second
+    -- to arrive, which is why it is gated on the session rather than global.
+    ssh_scroll_settle_ms = 400,
     -- How much of its natural size the *moving* frame of a scroll is captured
     -- at. nil defers to `ssh_scroll_scale` over SSH and to full size locally;
     -- set it to pin one factor everywhere.
@@ -252,6 +272,15 @@ local function validate(cfg)
       and cfg.render.ssh_scroll_scale >= 0.25
       and cfg.render.ssh_scroll_scale <= 1,
     "md-viewer: render.ssh_scroll_scale must be a number between 0.25 and 1"
+  )
+  assert(
+    type(cfg.render.scroll_settle_ms) == "number" and cfg.render.scroll_settle_ms >= 0,
+    "md-viewer: render.scroll_settle_ms must be non-negative"
+  )
+  assert(
+    cfg.render.ssh_scroll_settle_ms == nil
+      or (type(cfg.render.ssh_scroll_settle_ms) == "number" and cfg.render.ssh_scroll_settle_ms >= 0),
+    "md-viewer: render.ssh_scroll_settle_ms must be non-negative, or nil to use render.scroll_settle_ms over SSH"
   )
   assert(
     cfg.image.raw_zindex == nil

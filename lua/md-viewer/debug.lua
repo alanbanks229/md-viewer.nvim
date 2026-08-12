@@ -34,6 +34,13 @@ function M.snapshot()
       -- together and by neither alone.
       scroll_scale = session.scroll_scale,
       scroll_scale_source = session.scroll_scale_source,
+      -- How long scrolling must be idle before the expensive settle capture is
+      -- taken. Reported beside the scale because the two are the whole of what
+      -- an SSH session does differently, and a reader chasing scroll cost needs
+      -- to see both: the scale decides what a moving frame costs, this decides
+      -- how often the sharp one is paid for at all.
+      scroll_settle_ms = session.scroll_settle_ms,
+      scroll_settle_source = session.scroll_settle_source,
       capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,
@@ -42,9 +49,17 @@ function M.snapshot()
       fast_png_bytes = session.fast_png_bytes,
       fast_capture_ms = session.fast_capture_ms,
       fast_image_update_ms = session.fast_image_update_ms,
+      -- How many frames of each kind were actually captured and transmitted,
+      -- and their total bytes. `coalesced_scroll_events` below counts the
+      -- opposite -- scroll events dropped before capture -- so these are the
+      -- only fields that answer "how much went down the wire".
+      fast_frame_count = session.fast_frame_count or 0,
+      fast_bytes_total = session.fast_bytes_total or 0,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
       retina_image_update_ms = session.retina_image_update_ms,
+      retina_frame_count = session.retina_frame_count or 0,
+      retina_bytes_total = session.retina_bytes_total or 0,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
       viewport_width_px = session.viewport_width_px,
       -- How many animated images the last render *measured*, beside how many

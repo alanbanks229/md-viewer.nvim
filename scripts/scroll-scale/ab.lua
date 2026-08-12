@@ -55,6 +55,7 @@ end
 ---Clear the per-scroll counters so each phase reports only its own frames.
 ---These are diagnostics rather than state, so blanking them changes nothing
 ---about what is on screen.
+local phase_started = 0
 local function reset_counters(current)
   current.fast_png_bytes = nil
   current.fast_capture_ms = nil
@@ -62,6 +63,11 @@ local function reset_counters(current)
   current.retina_png_bytes = nil
   current.retina_capture_ms = nil
   current.coalesced_scroll_events = 0
+  current.fast_frame_count = 0
+  current.fast_bytes_total = 0
+  current.retina_frame_count = 0
+  current.retina_bytes_total = 0
+  phase_started = vim.uv.hrtime()
 end
 
 local function apply_scale(scale)
@@ -84,7 +90,16 @@ local function collect(current)
     coalesced = current.coalesced_scroll_events or 0,
     encoder = current.last_capture_encoder,
     scroll_scale = current.scroll_scale,
-    scroll_scale_source = current.scroll_scale_source,
+    settle_ms = current.scroll_settle_ms,
+    -- Frames actually captured and sent, and the seconds they were sent over.
+    -- The duration is what makes the two phases comparable at all: a hand-driven
+    -- scroll is never the same length twice, so counts alone say nothing and a
+    -- rate says everything.
+    fast_frames = current.fast_frame_count or 0,
+    fast_total = current.fast_bytes_total or 0,
+    retina_frames = current.retina_frame_count or 0,
+    retina_total = current.retina_bytes_total or 0,
+    seconds = (vim.uv.hrtime() - phase_started) / 1e9,
   }
 end
 
@@ -107,10 +122,27 @@ local function report()
       a.fast_png_bytes and ("%d ms"):format(wire_ms(a.fast_png_bytes)) or "--",
       b.fast_png_bytes and ("%d ms"):format(wire_ms(b.fast_png_bytes)) or "--"
     ),
+    ("%-26s %14s %14s"):format(
+      "moving frames delivered",
+      ("%d in %.0fs"):format(a.fast_frames, a.seconds),
+      ("%d in %.0fs"):format(b.fast_frames, b.seconds)
+    ),
+    ("%-26s %14s %14s"):format(
+      "  update rate",
+      ("%.1f/s"):format(a.fast_frames / math.max(a.seconds, 0.001)),
+      ("%.1f/s"):format(b.fast_frames / math.max(b.seconds, 0.001))
+    ),
     ("%-26s %14s %14s"):format("retina_png_bytes", number(a.retina_png_bytes), number(b.retina_png_bytes)),
-    ("%-26s %14s %14s"):format("coalesced_scroll_events", number(a.coalesced), number(b.coalesced)),
+    ("%-26s %14s %14s"):format("settle frames taken", number(a.retina_frames), number(b.retina_frames)),
+    ("%-26s %14s %14s"):format(
+      "total bytes sent",
+      number(a.fast_total + a.retina_total),
+      number(b.fast_total + b.retina_total)
+    ),
+    ("%-26s %14s %14s"):format("coalesced (never sent)", number(a.coalesced), number(b.coalesced)),
     ("%-26s %14s %14s"):format("capture_encoder", a.encoder or "--", b.encoder or "--"),
     ("%-26s %14s %14s"):format("scroll_scale", tostring(a.scroll_scale), tostring(b.scroll_scale)),
+    ("%-26s %14s %14s"):format("settle delay", ("%sms"):format(a.settle_ms), ("%sms"):format(b.settle_ms)),
     "",
   }
 
@@ -141,6 +173,10 @@ local function report()
       1000 / after,
       1000 / before
     )
+    -- And do not expect total bytes to fall. Smaller frames mean *more* of them
+    -- get through in the same time, so the wire stays about as busy; what
+    -- changes is how much of the document that traffic actually shows you.
+    lines[#lines + 1] = "(total bytes need not drop -- smaller frames mean more frames, not less traffic)"
     lines[#lines + 1] = ""
     if ratio >= 2.0 then
       verdict = "WORKING as designed (expected about 2.6x)."
