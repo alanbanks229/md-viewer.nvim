@@ -160,11 +160,43 @@ response was not a valid image, or the size exceeds `max_local_image_bytes`. A
 symlink pointing outside the document root is rejected like any other escape.
 
 Remote fetches do not honor proxy environment variables; behind a mandatory
-proxy they fail to a placeholder. A definitive failure (a 404, or bytes that
-are not a valid image) is retried on the next render after about a minute. A
-timeout or an unresolved host is treated as more likely transient — the same
-process launching Chromium can briefly starve a fetch of CPU — and is retried
-within a few seconds instead.
+proxy they fail to a placeholder — see the next section. A definitive failure
+(a 404, or bytes that are not a valid image) is retried on the next render
+after about a minute. A timeout or an unresolved host is treated as more likely
+transient — the same process launching Chromium can briefly starve a fetch of
+CPU — and is retried within a few seconds instead.
+
+An image that is merely slow shows the same placeholder while it is still being
+fetched. The document is not held back for it: the render goes ahead with the
+placeholder in place, and the picture appears on its own once the bytes land.
+
+## Remote images never load, and the network needs a proxy
+
+`$HTTP_PROXY` and `$HTTPS_PROXY` are not consulted, deliberately, so on a
+network where the only route out is a proxy every `https` image fails to its
+placeholder. Nothing is misconfigured and there is no setting that changes it.
+
+The reason is the SSRF defence. `buildRequestOptions` in
+`renderer/src/remote-images.js` resolves the hostname, validates every returned
+address against the blocklist, and then **pins** the connection to the address
+it validated, with `agent: false` so no keep-alive pool or shared agent object
+can quietly reconnect somewhere else. Pinning the resolved address is what
+closes the gap between the check and the connection — without it, a hostname
+can answer with a public address for the check and a private one for the fetch.
+A proxy makes pinning impossible: the connection goes to the proxy, and where
+it goes after that is the proxy's decision, not something this process can
+verify. Reaching remote images through a proxy while keeping the guarantee that
+makes the check meaningful is **an open design question, not an oversight**.
+
+What did change: this no longer costs you the whole preview. Fetches used to
+resolve in a pre-pass before the document was rendered, so on a proxied network
+one unreachable image paid the full 20-second timeout *before anything
+appeared*. The render no longer waits — the placeholder is drawn immediately,
+the fetch keeps running, and a later render picks it up if it ever lands. On a
+proxied network it will not, so what you get is the placeholder, at once,
+instead of a twenty-second stall and then the placeholder.
+
+Local images and links are unaffected: they never touch the network.
 
 A GitHub attachment URL — `https://github.com/user-attachments/…`, the form
 GitHub produces when you paste an image into an issue, and what this

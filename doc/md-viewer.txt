@@ -217,6 +217,18 @@ connection is attempted (see |md-viewer-security|). Redirects are otherwise
 followed at most three hops. Fetched images are cached in the renderer
 process, so live-preview re-renders do not refetch them.
 
+A fetch never holds the document back. An image that has not arrived by the
+time the page is laid out renders as its placeholder, the fetch continues, and
+a later render replaces it once the bytes land -- so a slow or unreachable
+image costs that one picture rather than the whole preview.
+
+$HTTP_PROXY and $HTTPS_PROXY are deliberately not consulted, so on a network
+whose only route out is a proxy, remote images do not load at all: they fail
+to their placeholder immediately. The request pins the address it validated,
+which is what makes the check above meaningful and what a proxy makes
+impossible. See docs/troubleshooting.md, "Remote images never load, and the
+network needs a proxy".
+
                                                          *md-viewer-animation*
 ANIMATED IMAGES ~
 
