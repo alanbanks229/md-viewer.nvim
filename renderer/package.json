@@ -1,9 +1,12 @@
 {
   "name": "md-viewer-renderer",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Persistent local Markdown renderer for md-viewer.nvim",
+  "engines": {
+    "node": ">=22.12"
+  },
   "scripts": {
     "start": "node src/main.js",
     "test": "node --test --test-concurrency=2 --test-timeout=90000 ../tests/node/*.test.js"

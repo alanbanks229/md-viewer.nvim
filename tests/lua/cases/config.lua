@@ -20,6 +20,12 @@ return function(t)
   -- still frame the screenshot captured is what stays on screen.
   t.eq(false, cfg.render.animate, "animated image playback is off by default")
   t.eq(5, cfg.render.animate_fps, "client-driven frame swaps are capped at 5fps")
+  -- Unset rather than 1: nil is what lets the SSH default apply without making
+  -- "the user asked for full size" and "the user said nothing" the same value.
+  t.eq(nil, cfg.render.scroll_scale, "the moving scroll frame follows the session by default")
+  t.eq(0.5, cfg.render.ssh_scroll_scale, "an SSH session halves the moving scroll frame")
+  t.eq(160, cfg.render.scroll_settle_ms, "the local settle delay is unchanged")
+  t.eq(400, cfg.render.ssh_scroll_settle_ms, "an SSH session waits longer before the sharp frame")
   config.reset()
   local bad_font_ok, bad_font_err = pcall(config.setup, { render = { font_size_px = 0 } })
   t.eq(false, bad_font_ok, "non-positive render.font_size_px is rejected")
@@ -48,6 +54,37 @@ return function(t)
   config.reset()
   local scaled_cfg = config.setup({ render = { device_scale_factor = 1 } })
   t.eq(1, scaled_cfg.render.device_scale_factor, "a non-Retina device scale is accepted")
+  config.reset()
+  -- Bounded at both ends, and the upper bound matters as much as the lower one:
+  -- this knob only ever *reduces* the moving frame, so a value above 1 would
+  -- spend bytes to gain nothing over what device_scale_factor already decided.
+  local low_scroll_ok, low_scroll_err = pcall(config.setup, { render = { scroll_scale = 0.1 } })
+  t.eq(false, low_scroll_ok, "a scroll scale below the legibility floor is rejected")
+  t.ok(tostring(low_scroll_err):match("scroll_scale"), "the scroll scale error names the offending option")
+  config.reset()
+  local high_scroll_ok = pcall(config.setup, { render = { scroll_scale = 2 } })
+  t.eq(false, high_scroll_ok, "a scroll scale above natural size is rejected")
+  config.reset()
+  local scroll_cfg = config.setup({ render = { scroll_scale = 0.5 } })
+  t.eq(0.5, scroll_cfg.render.scroll_scale, "render.scroll_scale is overridable")
+  config.reset()
+  local bad_ssh_scroll_ok, bad_ssh_scroll_err = pcall(config.setup, { render = { ssh_scroll_scale = 0 } })
+  t.eq(false, bad_ssh_scroll_ok, "a zero SSH scroll scale is rejected")
+  t.ok(tostring(bad_ssh_scroll_err):match("ssh_scroll_scale"), "the SSH scroll scale error names the option")
+  config.reset()
+  local bad_settle_ok, bad_settle_err = pcall(config.setup, { render = { ssh_scroll_settle_ms = -1 } })
+  t.eq(false, bad_settle_ok, "a negative SSH settle delay is rejected")
+  t.ok(tostring(bad_settle_err):match("ssh_scroll_settle_ms"), "the SSH settle error names the offending option")
+  config.reset()
+  -- Unlike the scale, nil here means "use one delay everywhere" rather than
+  -- "follow the session", so it has to survive validation as a real choice.
+  local no_ssh_settle = config.setup({ render = { ssh_scroll_settle_ms = nil } })
+  t.eq(400, no_ssh_settle.render.ssh_scroll_settle_ms, "omitting the SSH settle delay keeps the default")
+  config.reset()
+  -- nil is a value here, not an omission: it is how "follow the session" is
+  -- spelled, so it has to survive validation rather than being defaulted away.
+  local unset_scroll_cfg = config.setup({ render = { scroll_scale = nil } })
+  t.eq(nil, unset_scroll_cfg.render.scroll_scale, "an unset scroll scale stays unset")
   config.reset()
   local bad_aspect_ok, bad_aspect_err = pcall(config.setup, { render = { cell_aspect_ratio = 0 } })
   t.eq(false, bad_aspect_ok, "a zero cell aspect ratio is rejected before it divides by zero")
@@ -82,4 +119,37 @@ return function(t)
   local bad_raw_html_ok, bad_raw_html_err = pcall(config.setup, { security = { raw_html = "yes" } })
   t.eq(false, bad_raw_html_ok, "a non-boolean security.raw_html is rejected")
   t.ok(tostring(bad_raw_html_err):match("raw_html"), "the raw_html error names the offending option")
+
+  -- Every option is documented, or it exists only for its author. The same
+  -- pin commands.lua applies to the command surface: `:help md-viewer-options`
+  -- is the canonical reference, and a table nothing checks is stale within a
+  -- release. An option added without a row here fails on the next run rather
+  -- than shipping undocumented.
+  --
+  -- Derived from this file rather than the working directory, so the check
+  -- holds wherever the suite is invoked from.
+  local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
+  local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(here))))
+  local help = table.concat(vim.fn.readfile(root .. "/doc/md-viewer.txt"), "\n")
+  -- Bounded at the sentence that closes the table, not at the next section
+  -- rule: the subsections after it discuss individual options in prose, and
+  -- letting those count would pass an option that had been dropped from the
+  -- table itself.
+  local options_section = help:match("%*md%-viewer%-options%*(.-)\nThe options in the rest of this section")
+  t.ok(options_section ~= nil, "the help file has an *md-viewer-options* section")
+
+  -- Every row is four spaces, the option name, then padding, so anchoring on
+  -- the indent and requiring a trailing space keeps `scroll_scale` from being
+  -- satisfied by `ssh_scroll_scale`.
+  local documented, missing = 0, {}
+  for group, options in pairs(config.defaults) do
+    t.ok(options_section:find("\n" .. group .. " ~", 1, true) ~= nil, ("the %s group has a heading"):format(group))
+    for name in pairs(options) do
+      documented = documented + 1
+      if not options_section:find("\n    " .. name .. " ", 1, true) then table.insert(missing, group .. "." .. name) end
+    end
+  end
+  table.sort(missing)
+  t.eq(0, #missing, "every option appears in *md-viewer-options*: " .. table.concat(missing, ", "))
+  t.ok(documented > 60, ("the option table covers the whole surface (%d options)"):format(documented))
 end

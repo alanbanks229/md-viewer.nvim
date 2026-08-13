@@ -7,8 +7,8 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 
-// Part 7 §7.2 / policy §3: "No HTTP server, no WebSocket server, no listening
-// TCP port. Ever." This asserts it against the real renderer subprocess and
+// The standing guarantee: no HTTP server, no WebSocket server, no listening
+// TCP port, ever. This asserts it against the real renderer subprocess and
 // its real Chromium child, rather than trusting that nothing in the code
 // happens to call `net.createServer`/`http.createServer` -- a dependency
 // (Playwright's own CDP transport, in particular) could introduce one without

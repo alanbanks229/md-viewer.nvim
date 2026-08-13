@@ -31,22 +31,24 @@ Fixes are provided for `main` and the latest tagged release.
   URL as written and on every redirect hop, before a connection is attempted.
   There is no allowlist and no way to widen it. The resolved address is the one
   connected to, pinned at resolution time, so a second lookup cannot substitute
-  a different address in between validating and connecting.
+  a different address in between validating and connecting. `$HTTP_PROXY` and
+  `$HTTPS_PROXY` are deliberately not consulted: a proxied connection goes where
+  the proxy sends it, which this process cannot verify, so pinning — and with it
+  the whole check — would become decorative. The cost is that remote images do
+  not load on a network that requires a proxy; reconciling the two is an open
+  design question rather than an omission.
 - Containment in `security.document_root` is checked lexically and against
   `realpath`, so neither `../` nor a symlink escapes. The lexical check runs
   before the filesystem is consulted, so "does not exist" and "outside the
   document root" cannot be told apart to probe for files.
 - Animated images are decoded in a second browser context, never the render
   context. That context does enable JavaScript, because WebCodecs requires a
-  page, but its boundary is explicit (`renderer/src/decode-context.js`): the
-  only code that runs is the project's own decode function, the page is one
-  synthetic internal URL served from an inline constant with a deny-all CSP,
-  every other request is aborted, and the context is offline. Image bytes enter
-  as data, staged through a renderer-owned file, so attacker-influenced
-  GIF/WebP is parsed by Chromium's sandboxed, continuously fuzzed decoders
-  rather than by hand-written LZW in the Node process. Anything malformed,
-  oversized, or over the frame caps falls back to the still frame the base
-  screenshot already carries.
+  page, but its boundary is explicit (`renderer/src/decode-context.js`): one
+  synthetic internal URL with a deny-all CSP, offline, every other request
+  aborted, and the project's own decode function the only code that runs.
+  Attacker-influenced GIF/WebP is therefore parsed by Chromium's sandboxed
+  decoders rather than by hand-written LZW in the Node process, and anything
+  malformed or past the caps falls back to the still frame.
 
 ## Deliberate trade-offs
 

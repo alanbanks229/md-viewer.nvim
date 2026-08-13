@@ -167,7 +167,7 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- Link dispatch (§4.4): every classified type, unsafe rejection, and the
+  -- Link dispatch: every classified type, unsafe rejection, and the
   -- document-root escape guard.
   -- ---------------------------------------------------------------------
   do

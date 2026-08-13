@@ -8,14 +8,17 @@
   display backends
 - `plugin/md-viewer.lua`: runtime entry point and default highlights
 - `renderer/src/`: persistent Node.js renderer, Markdown pipeline, browser
-  lifecycle, protocol, source maps, and security policy
+  lifecycle, protocol, source maps, and security policy. `service.js` is what a
+  request *means*; `main.js` is the stdin/stdout entrypoint that decides where
+  requests arrive from
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`, `tests/node/`: headless suites
 - `tests/fixtures/`: Markdown documents both suites and the manual checklist use
 - `scripts/overlay/`: harnesses needing a real browser or a real terminal window
   — see [../scripts/README.md](../scripts/README.md)
 - `doc/md-viewer.txt`: `:help md-viewer`
-- `docs/`: architecture, terminal support, troubleshooting, development
+- `docs/`: architecture, terminal support, troubleshooting, development, and
+  one rejected-design record
 
 ## Bootstrap
 
@@ -84,6 +87,9 @@ not tell you.
 | Cursor follow | Move through the source | The preview scrolls to match |
 | Scrolling | `j`/`k`, `Ctrl-d`/`u`, `Ctrl-f`/`b`, `gg`/`G`, wheel over the preview | Smooth, no flicker, no stray image. The wheel does nothing when the pointer is outside the preview |
 | Resize and font size | Resize the window, then change the terminal's font size | Re-renders at the new geometry and stays aligned |
+| Scroll scale, locally | Wheel-scroll, then `:MdViewerDebug` | `scroll_scale = nil`, source `local session`. Nothing about a local preview may change: this is the byte-identical path |
+| Scroll scale, over SSH | The same from an SSH session | `scroll_scale = 0.5`, source naming `ssh_scroll_scale`, and `fast_png_bytes` roughly 2.5× below what the same pane reports locally |
+| Settle sharpness | Scroll hard over SSH, then stop and look | The moving frame may be visibly soft; the frame that lands after `render.ssh_scroll_settle_ms` (400 ms, against 160 locally) is sharp. A preview that stays soft at rest is the failure this option can cause |
 
 ### The preview caret
 
@@ -239,26 +245,29 @@ at `1.0.0`.
 5. Confirm no browser binary, `node_modules`, log, screenshot, generated PNG, or
    local profile is tracked. Run `git diff --check`. Review dependency licenses
    and advisories.
-6. Tag the tested commit with an **annotated** tag, then publish the release from
-   the matching changelog section:
+6. Confirm the README's install snippets pin the version being tagged — both
+   the lazy.nvim `version` and the `vim.pack` `version`.
+7. Tag the tested commit with an **annotated** tag, then publish the release
+   from the matching changelog section. The section is extracted verbatim, so a
+   malformed heading or a missing link reference breaks the release notes:
 
    ```sh
-   git tag -a v0.1.0 -m "v0.1.0: <summary>"
-   git push origin v0.1.0
-   gh release create v0.1.0 --title "v0.1.0" --notes-file <notes>
+   git tag -a v0.2.0 -m "v0.2.0: <summary>"
+   git push origin v0.2.0
+   awk '/^## \[0\.2\.0\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes.md
+   gh release create v0.2.0 --title "v0.2.0" --notes-file /tmp/notes.md
    ```
 
 ## Design constraints
 
-Preserve these unless a proposal explicitly revisits them:
+Preserve these unless a proposal explicitly revisits them. Each is stated with
+its mechanism in [SECURITY.md](../SECURITY.md) or
+[architecture.md](architecture.md):
 
-- renderer transport remains child-process stdin/stdout, with no listening port
-- runtime browser networking remains blocked unconditionally; remote images are
-  fetched only by the Node renderer process, and only from public network
-  destinations -- never loopback, private, or link-local, on the initial URL or
-  a redirect hop
-- Playwright uses an existing browser and does not manage browser downloads
+- no listening port; renderer transport is child-process stdin/stdout
+- browser networking blocked unconditionally; remote images fetched only by the
+  Node process, only from public destinations, on every redirect hop
+- Playwright uses an existing browser and manages no downloads
 - raw image cleanup targets only plugin-owned image and placement IDs
-- local image access remains canonicalized and confined to a document root
-- the graphical preview remains a read-only raster surface; editing belongs to
-  the source buffer
+- local file access canonicalized and confined to a document root
+- the graphical preview stays a read-only raster surface

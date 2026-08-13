@@ -7,6 +7,7 @@ local preview = require("md-viewer.preview")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
 local sync = require("md-viewer.sync")
+local terminal = require("md-viewer.terminal")
 local process = require("md-viewer.process")
 local debounce = require("md-viewer.debounce")
 local animation = require("md-viewer.animation")
@@ -121,14 +122,40 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- one falls back silently and permanently on its first failure, so without
   -- this a browser that refused it would just look inexplicably slow.
   if capture_encoder then session.last_capture_encoder = capture_encoder end
+  -- The `*_png_bytes` fields above are the *last* frame of each kind; the
+  -- counters below are every one of them. Both are needed and neither implies
+  -- the other: the size says what a frame costs, the count says how many were
+  -- actually paid for. Without the count the only available stand-in was
+  -- `coalesced_scroll_events`, which counts the opposite thing -- events
+  -- superseded *before* capture, so frames that were never produced and never
+  -- transmitted -- and reading it as frames sent overstates the traffic badly.
   if capture_scale == "css" then
     session.fast_png_bytes = session.last_png_bytes
     session.fast_capture_ms = session.last_capture_ms
     session.fast_image_update_ms = session.last_image_update_ms
+    session.fast_frame_count = (session.fast_frame_count or 0) + 1
+    session.fast_bytes_total = (session.fast_bytes_total or 0) + (session.last_png_bytes or 0)
+    -- Interval between consecutive moving frames, which is the only honest
+    -- measure of how fast this pipeline can actually turn. Frames divided by
+    -- wall-clock is not: a scroll driven by hand has pauses in it, and they
+    -- land in the denominator as though the pipeline had been busy. The
+    -- *minimum* is the floor -- the fastest this loop went when it was
+    -- genuinely saturated -- and it is what a per-frame cost has to be compared
+    -- against to say whether transit is the constraint or something else is.
+    local now = vim.uv.hrtime()
+    if session.fast_last_ns then
+      local interval = (now - session.fast_last_ns) / 1e6
+      session.fast_interval_min_ms = math.min(session.fast_interval_min_ms or interval, interval)
+      session.fast_interval_sum_ms = (session.fast_interval_sum_ms or 0) + interval
+      session.fast_interval_count = (session.fast_interval_count or 0) + 1
+    end
+    session.fast_last_ns = now
   elseif capture_scale == "device" then
     session.retina_png_bytes = session.last_png_bytes
     session.retina_capture_ms = session.last_capture_ms
     session.retina_image_update_ms = session.last_image_update_ms
+    session.retina_frame_count = (session.retina_frame_count or 0) + 1
+    session.retina_bytes_total = (session.retina_bytes_total or 0) + (session.last_png_bytes or 0)
   end
   session.image_id = image_id
   session.last_placement = placement
@@ -525,6 +552,18 @@ function M.refresh(session, render_options)
     -- unmeasurable image costs a handful of renders rather than a loop.
     session.animation_geometry_incomplete = meta.animationsIncomplete == true
     if session.animation_geometry_incomplete then M.schedule(session, 120, "animation_geometry_timer") end
+    -- An image the renderer is still fetching. The document has already been
+    -- shown with a placeholder in its place rather than waiting for it -- one
+    -- unreachable image used to cost the whole preview a 20 second stall before
+    -- anything appeared -- so this is the nudge that puts the picture in once it
+    -- lands. Nothing else would: an idle preview issues no renders at all.
+    --
+    -- 400ms rather than the animation retry's 120: a fetch crossing a network is
+    -- not going to finish in a tenth of a second, and each attempt costs a full
+    -- re-render of the document. The renderer's own timeout bounds how long this
+    -- can go on, and a failure caches as a failure, so this stops on its own.
+    session.remote_images_pending = meta.remoteImagesPending == true
+    if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
     session.last_image_bytes = result.image
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
@@ -559,9 +598,57 @@ function M.schedule(session, delay, timer_name, render_options)
   end)
 end
 
+---The pixel scale for the *moving* frame of a scroll, as a fraction of its
+---natural size, and where the number came from.
+---
+---An explicit `render.scroll_scale` pins it everywhere. Left unset it is full
+---size locally and `render.ssh_scroll_scale` over SSH, because what it trades
+---sharpness for is wire time, and wire time only exists over SSH: a local
+---terminal pays nothing to receive a larger frame, so shrinking one there would
+---give up sharpness and buy nothing.
+---
+---Returns nil when there is no separate moving frame to scale at all
+---(`fast_scroll = false` makes every frame the settle frame), which keeps the
+---"never scale the frame a reader is looking at" rule in one place rather than
+---restated at each caller. nil also means the request carries no factor field,
+---so a local session's bytes are exactly what they were before this existed.
+local function scroll_capture_scale(render)
+  if not render.fast_scroll then return nil, "render.fast_scroll=false (no moving frame)" end
+  if render.scroll_scale ~= nil then return render.scroll_scale, "explicit override (render.scroll_scale)" end
+  if terminal.detect().ssh then return render.ssh_scroll_scale, "SSH session (render.ssh_scroll_scale)" end
+  return nil, "local session (full size)"
+end
+
+---How long scrolling must be idle before the sharp settle capture is taken, and
+---where the number came from.
+---
+---`render.ssh_scroll_settle_ms` replaces `render.scroll_settle_ms` outright on
+---an SSH session rather than being combined with it, so the two values are
+---simply the two answers and neither has to be read in terms of the other. One
+---delay everywhere means setting both to the same number: a nil here is still
+---honoured, but `setup()` cannot express one -- `vim.tbl_deep_extend` reads an
+---absent key as "keep the default" -- so it is not the documented route.
+---
+---Separate from `scroll_capture_scale` above even though both are SSH-gated,
+---because they are gated on different things: the scale trades sharpness for
+---bytes, this trades latency for *not spending the bytes at all* on a reader
+---who has not finished scrolling.
+local function scroll_settle_delay(render)
+  if render.ssh_scroll_settle_ms ~= nil and terminal.detect().ssh then
+    return render.ssh_scroll_settle_ms, "SSH session (render.ssh_scroll_settle_ms)"
+  end
+  return render.scroll_settle_ms, "render.scroll_settle_ms"
+end
+
 function M.schedule_scroll(session)
   local render = config.get().render
   local fast_scale = render.fast_scroll and "css" or "device"
+  local scale_factor, scale_source = scroll_capture_scale(render)
+  -- Recorded rather than re-derived in :MdViewerDebug: the answer depends on
+  -- the SSH capability snapshot, and a reader asking later wants to know what
+  -- this session's frames were actually captured at.
+  session.scroll_scale = scale_factor
+  session.scroll_scale_source = scale_source
   if session.scroll_render_in_flight then
     session.scroll_render_pending = true
     session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
@@ -569,6 +656,7 @@ function M.schedule_scroll(session)
     session.scroll_render_in_flight = true
     M.refresh(session, {
       capture_scale = fast_scale,
+      capture_scale_factor = scale_factor,
       capture_only = true,
       scroll_frame = true,
       on_complete = function()
@@ -587,7 +675,10 @@ function M.schedule_scroll(session)
     })
   end
   if render.fast_scroll then
-    M.schedule(session, render.scroll_settle_ms, "scroll_settle_timer", {
+    local settle_ms, settle_source = scroll_settle_delay(render)
+    session.scroll_settle_ms = settle_ms
+    session.scroll_settle_source = settle_source
+    M.schedule(session, settle_ms, "scroll_settle_timer", {
       capture_scale = "device",
       capture_only = true,
     })
@@ -610,6 +701,7 @@ local function close_session(session)
     "scroll_settle_timer",
     "cursor_scroll_timer",
     "animation_geometry_timer",
+    "remote_image_timer",
     "ui_poll_timer",
     "selection_debounce_timer",
     "selection_settle_timer",
@@ -1469,5 +1561,15 @@ function M.setup_autocmds()
   })
   vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = M.close_all })
 end
+
+-- Exported for `tests/lua/cases/scroll_scale.lua` only.
+--
+-- The rule this resolves depends on a live SSH capability snapshot, so a test
+-- driven through `M.schedule_scroll` would need a preview window, a backend and
+-- a renderer to reach three lines of arithmetic. Asserting it directly is what
+-- makes "a local session sends exactly what it sent before" a fact rather than
+-- an intention.
+M._scroll_capture_scale = scroll_capture_scale
+M._scroll_settle_delay = scroll_settle_delay
 
 return M

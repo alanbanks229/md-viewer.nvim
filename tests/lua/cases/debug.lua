@@ -1,8 +1,8 @@
 return function(t)
-  -- :MdViewerDebug had zero automated coverage before Part 2 added new
-  -- per-session fields (placement rectangle, calibration tier) to its
-  -- snapshot. Exercise the real command end to end, the same lesson Part 1
-  -- learned the hard way with :MdViewerHealth (see health.lua's test).
+  -- :MdViewerDebug went uncovered until its per-session snapshot grew fields
+  -- (placement rectangle, calibration tier) that could silently stop being
+  -- reported. Exercise the real command end to end, the same lesson
+  -- :MdViewerHealth taught first (see health.lua's test).
   require("md-viewer").setup({ image = { backend = "cells" } })
 
   local source = vim.api.nvim_create_buf(true, false)
@@ -18,8 +18,9 @@ return function(t)
     { row = 1, col = 2, width = 40, height = 20, exclusions = { { row = 3, col = 4, width = 5, height = 1 } } }
   session.viewport_calibration_tier = "env"
 
-  -- Part 7 §7.4: selection/find state (length only, never the text itself),
-  -- interaction request/stale/coalesced counters, and the content revision
+  -- The diagnostics privacy rule: selection/find state as lengths only, never
+  -- the text itself. That, the request/stale/coalesced counters, and the
+  -- content revision
   -- the cached frame is pinned to must all be visible, and a selected
   -- string must never appear verbatim in the diagnostics buffer.
   session.renderer_revision = "9:1"

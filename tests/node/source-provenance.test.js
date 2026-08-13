@@ -390,7 +390,7 @@ test("provenance changes the markup only by adding its own attributes", () => {
 });
 
 test("the source map carries keys, never Markdown, into the page", () => {
-  // §5.2: ids are opaque. Nothing derived from the document body may appear in
+  // Source ids are opaque. Nothing derived from the document body may appear in
   // an attribute, because attributes are the one part of the map the page sees.
   for (const match of FIXTURE_HTML.matchAll(/data-md-source-id="([^"]*)"/g)) {
     assert.match(match[1], /^s\d+$/, `non-opaque source id: ${match[1]}`);

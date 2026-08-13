@@ -8,7 +8,9 @@ covered without one — run those first.
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
 fully prove: the **drag-highlight overlay** (`overlay/`) and **animated
-images** (`animation/`).
+images** (`animation/`). Two others need neither a display nor a browser:
+`scroll-scale/` needs a *slow link*, and `remote-images/` needs a *network with
+no direct route out* -- the two pieces of hardware no test machine has.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -98,6 +100,64 @@ geometry and stress harnesses above.
 
 [issue]: https://github.com/wezterm/wezterm/issues/7953
 [pr]: https://github.com/wezterm/wezterm/pull/8035
+
+## `scroll-scale/ab.lua` — does a smaller moving frame actually help?
+
+Run inside a real Neovim, on the far end of the connection you care about,
+with a preview already open (`:MdViewerToggle`) on a document long enough to
+scroll for a few seconds:
+
+```vim
+:runtime scripts/scroll-scale/ab.lua   " arms phase 1, full-size frames
+"  ...wheel-scroll the whole document...
+:ScrollAB                              " arms phase 2, half-size frames
+"  ...wheel-scroll the same way again...
+:ScrollAB                              " prints the comparison
+```
+
+Reports `fast_png_bytes` for each phase, the transit each implies at the
+0.80 MB/s ceiling `docs/local-render-design.md` was measured against, and a
+verdict. `:ScrollABCancel` abandons a run partway. The configuration in force
+is saved before the first phase and restored after the last, including by the
+error path -- nothing is written to disk and no file is edited.
+
+Use the plugin's own README as the document if you want numbers comparable to
+the ones recorded in `docs/local-render-design.md`.
+
+The verdict worth watching for is **INERT**: `capture_encoder` is
+`playwright_png` rather than `cdp_fast_png`. Playwright's own `scale` is a
+two-value enum, so the numeric factor cannot reach the capture on that path and
+`render.scroll_scale` does nothing on that host, whatever it is set to.
+
+## `remote-images/probe.lua` — does a blocked image still cost the whole preview?
+
+Answers one question: when a document contains an https image this host cannot
+fetch, how long until the **document** appears? Before v0.2.0 that was the
+renderer's full 20-second timeout, paid before anything was drawn, because
+remote images resolved in a pre-pass between parse and render.
+
+Needs a network where the connection cannot complete — which in practice means
+one whose only route out is a proxy. `remote-images.js` pins the address it
+validated and deliberately never consults `HTTP_PROXY`, because that pinning is
+what makes the SSRF check meaningful, so a proxied network reproduces this
+exactly and a developer machine cannot.
+
+```vim
+:runtime scripts/remote-images/probe.lua
+:RemoteImageProbe
+```
+
+It writes its own two scratch documents — one with a remote image, one with
+none — opens a preview on each, and reports first-frame time for both with a
+verdict against the 20-second stall. The control is what makes the number
+readable: what matters is that the two are close, not that either is fast.
+
+Each run appends a unique query to the image URL, because the renderer caches a
+failure for a minute and a success for as long as it holds it — without that, a
+second run would measure the cache rather than the network. A `true` in the
+`still fetching` column is the expected steady state on a network that cannot
+reach the host: the image stays a placeholder and the document does not wait
+for it.
 
 ## `animation/` — animated-image qualification
 

@@ -88,9 +88,9 @@ export function createInteractError(code, message, detail) {
   return error;
 }
 
-/// Classify a link for Part 4's dispatch table. Metadata only -- the renderer
-/// never follows a link, and the hidden page never navigates away from the
-/// generated document.
+/// Classify a link for the Lua side's dispatch table. Metadata only -- the
+/// renderer never follows a link, and the hidden page never navigates away
+/// from the generated document.
 ///
 /// The sanitizer already restricts `a` schemes to http/https/mailto, so most of
 /// this is defence in depth against a future change to that allowlist.
@@ -112,8 +112,8 @@ export function classifyLink(href) {
     case "mailto":
       return { href: trimmed, type: "mailto" };
     case "file":
-      // Part 4 decides whether it is inside the configured document root; that
-      // is the only place that knows the root.
+      // `lua/md-viewer/security.lua` decides whether it is inside the
+      // configured document root; that is the only place that knows the root.
       return { href: trimmed, type: "local_file" };
     default:
       return { href: trimmed, type: "unsafe" };
@@ -168,7 +168,7 @@ function requireFiniteNumber(value, name) {
 
 /// Validate and normalize an `interact` envelope. Pure and synchronous, so the
 /// caller can run it before its first `await` -- see the lane-stamping ordering
-/// requirement in main.js.
+/// requirement in service.js.
 export function validateEnvelope(params) {
   const envelope = params ?? {};
   if (typeof envelope.documentId !== "string" || envelope.documentId === "") {
@@ -686,8 +686,8 @@ export function normalizeHit(raw, sourceMap) {
 
 /// Shape the normalized hit into the action's result. `activate_at` reports a
 /// link when the point is over one and falls back to source semantics
-/// otherwise, so Part 4's "an unmodified click on a link still navigates to
-/// source" needs no second round trip.
+/// otherwise, so "an unmodified click on a link still navigates to source"
+/// needs no second round trip.
 export function buildActionResult(action, hit) {
   if (action === "activate_at" && hit.link) {
     return { kind: "link", link: hit.link, sourcePosition: hit.sourcePosition, hit };
@@ -2322,7 +2322,7 @@ export function buildFindResult(raw, sourceMap, query) {
     matchCount: raw.matchCount ?? 0,
     activeIndex,
     activeSourcePosition,
-    // Internal only: main.js reads this to populate per-document find state for
+    // Internal only: service.js reads this to populate per-document find state for
     // find_next/find_previous, then strips it before the result reaches Lua --
     // a document with thousands of matches must not serialize thousands of
     // source positions to Lua on every keystroke of a search.

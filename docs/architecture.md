@@ -39,6 +39,25 @@ moving capture plus one newest pending position, and every completed frame is
 shown — there is no fixed frame limiter, since screenshot and terminal-transfer
 completion provide the pacing.
 
+The moving frame carries a third dimension, `render.scroll_scale`, resolved by
+`controller.schedule_scroll` from the session rather than from configuration
+alone: unset it is full size locally and `render.ssh_scroll_scale` over SSH,
+because the cost it trades sharpness against is wire time and wire time only
+exists over SSH. It reaches the CDP screenshot's `clip.scale` as a numeric
+factor; Playwright's own `scale` is a two-value enum, so the fallback path
+silently produces the full-size frame instead. **Invariant:** the factor applies
+only to the moving capture. The settle frame is the picture a reader is actually
+looking at, and a preview left permanently soft is the one defect this
+optimization could plausibly introduce — so the renderer refuses the factor on
+the `device` tier as well as the Lua side never sending it there, and
+`fast_scroll = false` (which leaves no separate moving frame) resolves to no
+factor at all. **Invariant:** placement geometry is independent of capture scale.
+The rectangle comes from cells and the CSS viewport, so a frame captured at 0.5×
+is placed into the same cells with the same `c`/`r` keys and the terminal scales
+it; `tests/lua/cases/scroll_scale.lua` asserts the two streams' cell geometry is
+identical. Why the obvious alternative is wrong, and what it would take to stop
+sending pixels altogether, is in [local-render-design.md](local-render-design.md).
+
 **Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
 allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
 route aborts every browser request that is not `data:`/`about:`

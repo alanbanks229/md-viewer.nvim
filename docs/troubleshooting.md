@@ -45,72 +45,67 @@ Do not run `playwright install`. Confirm the Chrome path `:MdViewerHealth` shows
 exists, and set `browser.executable_path` if automatic discovery misses your
 installation. Renderer stderr and request serials are in `:MdViewerDebug`.
 
-## The image is stretched, soft, or the wrong size
+## The image is stretched or soft, or the text is about twice the size it should be
 
-Check `viewport calibration` in `:MdViewerDebug`. `measured` means the cell size
-came from the terminal itself and the render is already built to match it;
-`estimated` means nothing could be measured — tmux and screen do not propagate
-pixel geometry, and neither does a Neovim without LuaJIT — and the render is
-sized from a guess the terminal then scales.
+Both are the same fault: the terminal's cell was converted to CSS pixels with
+the wrong divisor, or could not be measured at all. `render.font_size_px` is
+honoured exactly at every viewport width, so text at the wrong size is never a
+font setting.
 
-Three lines sit beside the tier. `measured cell` is what the operating system
-reported. `viewport cell (CSS px)` is what the browser viewport is actually
-built from. `cell unit` says how one became the other.
+Check `viewport calibration` in `:MdViewerDebug`, and the three lines beside it.
+`measured cell` is what the operating system reported, `viewport cell (CSS px)`
+is what the browser viewport was built from, and `cell unit` says how one became
+the other.
+
+- **`measured`** — the cell came from the terminal and the render is built to
+  match it.
+- **`env`** — `MD_VIEWER_CELL_WIDTH_PX` and `MD_VIEWER_CELL_HEIGHT_PX` are both
+  set and nothing is inferred.
+- **`estimated`** — nothing could be measured. tmux and screen do not propagate
+  pixel geometry, and neither does a Neovim without LuaJIT; the render is sized
+  from a guess the terminal then scales.
 
 The reported number is *supposed* to be device pixels, in which case the CSS
 cell is that divided by `render.device_scale_factor`. Not every terminal means
 that, and not every display matches the configured scale, so md-viewer tries
 both divisors and keeps whichever yields a cell a font could plausibly have —
 roughly 5–30 CSS px wide and 10–60 tall. `cell unit` names the divisor it
-settled on and whether the choice was the default or a repair. If neither
-divisor works, `:MdViewerHealth` says so as a warning rather than picking one
-silently.
+settled on and whether the choice was the default or a repair. If neither works,
+`:MdViewerHealth` says so as a warning rather than picking one silently.
 
-To override the measurement, set the cell size in **CSS** pixels — the measured
-size divided by `device_scale_factor`, so a 2x display measuring 14×32 wants:
-
-```sh
-export MD_VIEWER_CELL_WIDTH_PX=7
-export MD_VIEWER_CELL_HEIGHT_PX=16
-```
-
-`viewport calibration` should then read `env`. On the `estimated` tier only, if
-the typography is smaller than you expect, the estimated cell width is probably
-too large, causing the terminal to scale the whole screenshot down. Lower
-`render.estimated_cell_width_px` gradually, or prefer the exact values above.
-
-## Preview text is about twice the size it should be
-
-`render.font_size_px` is honoured exactly, at every viewport width, so text at
-the wrong size is a measurement fault rather than a font setting. Check `cell
-unit` in `:MdViewerDebug`.
-
-The chain is short: the CSS viewport is the preview's cell rectangle times the
-CSS cell size, the page is captured at `render.device_scale_factor`, and the
-terminal scales the result into those same cells. A CSS cell that comes out half
-its true size therefore halves the viewport, and the terminal magnifies the PNG
-to fill the cells anyway — so the glyphs double while the layout stays put.
-
-Two things get it there, and md-viewer now detects both:
+**Doubled glyphs specifically.** The CSS viewport is the preview's cell
+rectangle times the CSS cell size, the page is captured at
+`render.device_scale_factor`, and the terminal scales the result back into those
+same cells. A CSS cell that comes out half its true size therefore halves the
+viewport while the terminal magnifies the PNG to fill the cells anyway — so the
+glyphs double and the layout stays put. Two things get it there, and md-viewer
+detects both:
 
 - The terminal fills `ws_xpixel`/`ws_ypixel` with **logical points** rather than
   device pixels, so dividing by the device scale divides a second time. Warp
   does this.
 - The display is **1x** while `render.device_scale_factor` is left at its
   default of `2`. No terminal bug required; setting `render.device_scale_factor
-  = 1` is the direct fix, and also stops the renderer capturing four times the
-  pixels it needs.
+  = 1` is the direct fix, and it also stops the renderer capturing four times
+  the pixels it needs.
 
-If the detection gets it wrong — a genuinely tiny terminal font on a HiDPI
-display is the case to watch, since a real cell can then fall below the
-plausible band — pin the cell by hand in **CSS** pixels:
+**Overriding the measurement.** Give the cell size in **CSS** pixels — the
+measured size divided by `device_scale_factor`, so a 2x display measuring 14×32
+wants:
 
 ```sh
 export MD_VIEWER_CELL_WIDTH_PX=7
 export MD_VIEWER_CELL_HEIGHT_PX=16
 ```
 
-`viewport calibration` then reads `env` and nothing is inferred.
+`viewport calibration` then reads `env`. Worth doing when the detection gets it
+wrong — a genuinely tiny terminal font on a HiDPI display is the case to watch,
+since a real cell can fall below the plausible band.
+
+On the `estimated` tier only, if the typography is smaller than you expect, the
+estimated cell width is probably too large and the terminal is scaling the whole
+screenshot down. Lower `render.estimated_cell_width_px` gradually, or prefer the
+exact values above.
 
 ## The caret or the drag highlight is a huge grey block
 
@@ -160,11 +155,40 @@ response was not a valid image, or the size exceeds `max_local_image_bytes`. A
 symlink pointing outside the document root is rejected like any other escape.
 
 Remote fetches do not honor proxy environment variables; behind a mandatory
-proxy they fail to a placeholder. A definitive failure (a 404, or bytes that
-are not a valid image) is retried on the next render after about a minute. A
-timeout or an unresolved host is treated as more likely transient — the same
-process launching Chromium can briefly starve a fetch of CPU — and is retried
-within a few seconds instead.
+proxy they fail to a placeholder — see the next section. A definitive failure
+(a 404, or bytes that are not a valid image) is retried on the next render
+after about a minute. A timeout or an unresolved host is treated as more likely
+transient — the same process launching Chromium can briefly starve a fetch of
+CPU — and is retried within a few seconds instead.
+
+An image that is merely slow shows the same placeholder while it is still being
+fetched. The document is not held back for it: the render goes ahead with the
+placeholder in place, and the picture appears on its own once the bytes land.
+
+## Remote images never load, and the network needs a proxy
+
+`$HTTP_PROXY` and `$HTTPS_PROXY` are not consulted, deliberately, so on a
+network where the only route out is a proxy every `https` image fails to its
+placeholder. Nothing is misconfigured and there is no setting that changes it.
+
+The reason is the SSRF defence. `buildRequestOptions` in
+`renderer/src/remote-images.js` resolves the hostname, validates every returned
+address against the blocklist, and then **pins** the connection to the address
+it validated, with `agent: false` so no keep-alive pool or shared agent object
+can quietly reconnect somewhere else. Pinning the resolved address is what
+closes the gap between the check and the connection — without it, a hostname
+can answer with a public address for the check and a private one for the fetch.
+A proxy makes pinning impossible: the connection goes to the proxy, and where
+it goes after that is the proxy's decision, not something this process can
+verify. Reaching remote images through a proxy while keeping the guarantee that
+makes the check meaningful is **an open design question, not an oversight**.
+
+This costs you that one picture and nothing else. The render does not wait for
+a fetch: the placeholder is drawn immediately, and a later render picks the
+image up if it ever lands. On a proxied network it will not, so what you get is
+the placeholder, at once.
+
+Local images and links are unaffected: they never touch the network.
 
 A GitHub attachment URL — `https://github.com/user-attachments/…`, the form
 GitHub produces when you paste an image into an issue, and what this
@@ -228,7 +252,18 @@ values, especially `fast_capture_ms`, `fast_png_bytes`, and
 `fast_image_update_ms`. `coalesced_scroll_events` shows how much repeated input
 was collapsed to the newest position; completed frames are never deliberately
 discarded. If terminal transfer still dominates, lowering
-`render.device_scale_factor` to `1` is the final quality/performance trade.
+`render.scroll_scale` is the lever: it captures the moving frame at a fraction
+of its natural size, which the settle frame undoes as soon as scrolling stops.
+`scroll_scale` in `:MdViewerDebug` reports the factor in force and where it came
+from — over SSH it is `render.ssh_scroll_scale` (default `0.5`) without any
+configuration. Read it beside `capture_encoder`: the numeric factor needs the
+`cdp_fast_png` path, and a session on `playwright_png` gets full-size frames no
+matter what is set.
+
+Do **not** lower `render.device_scale_factor` for this. It is a calibration
+divisor, not a size knob: lowering it doubles the CSS viewport and makes the
+frame *larger*, and it collapses the moving and settle captures into one so the
+cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
 ## A notification over the preview shows Markdown through its background
 
@@ -265,8 +300,9 @@ placement options.
 
 `:MdViewerDebug` reports `occluded = true` while an overlapping *focusable* float
 is visible; the overlap guard removes the image only for those. If a provider
-creates windows with `noautocmd = true`, confirm `ui_polling = true` — the
-default 50 ms poll discovers them without provider-specific hooks.
+creates windows with `noautocmd = true`, confirm `:MdViewerDebug` reports
+`ui_polling: true` — the poll discovers them without provider-specific hooks,
+on the interval `image.ui_poll_ms` sets (default 50 ms; `0` disables it).
 
 If a stray image persists over another plugin's windows while `tabpage_hidden` is
 `false`, that plugin most likely resized or repositioned the preview split
@@ -420,9 +456,8 @@ Warp and others are normally recognised. Fixes, best first:
 Two things that will not help, both common first guesses:
 
 - **Pointing at a local browser.** `browser.executable_path` names a binary on
-  the machine running Neovim. There is no option to drive a browser across the
-  SSH connection, and there will not be: the renderer opens no port and speaks
-  to nothing over the network.
+  the machine running Neovim; it cannot reach across the SSH connection, and the
+  renderer that reads it opens no port and speaks to nothing over the network.
 - **Forcing `image.backend = "kitty_raw"`.** Backend selection still calls the
   backend's `detect()`, which fails for the same reason `auto` did, so this
   converts the fallback into a hard error without changing the outcome.
@@ -430,9 +465,10 @@ Two things that will not help, both common first guesses:
   though naming the profile is better — it also gets the right z-index,
   double-buffer and overlay defaults.
 
-If the preview renders but feels sluggish, that is bandwidth rather than
-detection: every refresh sends a full-page PNG as base64 down the connection.
-Lower `render.device_scale_factor` to `1` and raise `render.debounce_ms`.
+A preview that renders but feels *sluggish* is a different problem — bandwidth
+rather than detection — and is covered under
+[Scrolling feels slow](#scrolling-feels-slow), with the settings and the
+measurements behind them in `:help md-viewer-ssh`.
 
 ## The wrong terminal profile was detected
 

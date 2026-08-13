@@ -39,9 +39,7 @@ kitty.detect = function() return true, "faked for the live drive (headless Neovi
 -- tests/lua/cases/cellpixels.lua owns the reader's own behaviour.
 -- 10x20 is iTerm2's default cell, matching the profile below.
 local cellpixels = require("md-viewer.cellpixels")
-cellpixels.read_winsize = function()
-  return vim.o.columns, vim.o.lines, vim.o.columns * 10, vim.o.lines * 20
-end
+cellpixels.read_winsize = function() return vim.o.columns, vim.o.lines, vim.o.columns * 10, vim.o.lines * 20 end
 
 require("md-viewer").setup({
   image = { backend = "kitty_raw" },

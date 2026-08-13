@@ -55,6 +55,11 @@ function M.request(session, markdown, options, callback)
     viewport = viewport,
     scrollY = session.scroll_y or 0,
     captureScale = options.capture_scale or "device",
+    -- The tier above says which of the two frames this is; this says how much
+    -- of its natural size to actually capture. Absent on everything but a
+    -- moving scroll frame, and ignored by the renderer on the "device" tier --
+    -- see `captureViewportPng` for why the settle frame is never scaled.
+    captureScaleFactor = options.capture_scale_factor,
     fontSizePx = cfg.render.font_size_px,
     scrollPastEnd = cfg.render.scroll_past_end,
     scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,

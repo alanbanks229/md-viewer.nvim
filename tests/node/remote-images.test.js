@@ -41,10 +41,15 @@ function publicHost(address = "93.184.216.34", family = 4) {
 }
 
 async function resolveOne(source, overrides = {}) {
-  const results = await resolveRemoteImages([source], {
+  // `blockingMs` is what these tests are asserting *through*: resolution is
+  // non-blocking by default now, so a test that wants the settled answer has to
+  // say so. The production caller deliberately does not -- see the header of
+  // resolveRemoteImages.
+  const { results } = await resolveRemoteImages([source], {
     maxLocalImageBytes: overrides.maxBytes ?? 1024 * 1024,
     fetchImpl: overrides.fetchImpl ?? (async () => new Response(png, { status: 200 })),
     resolveHost: overrides.resolveHost ?? publicHost(),
+    blockingMs: 5000,
     ...overrides.settings,
   });
   return results.get(source);
@@ -432,13 +437,91 @@ test("the default transport requests the URL it was actually given, not Node's c
     return { on() {}, end() {} };
   });
 
-  const results = await resolveRemoteImages(["https://cdn.example/a.png"], {
+  const { results } = await resolveRemoteImages(["https://cdn.example/a.png"], {
     maxLocalImageBytes: 1024 * 1024,
     resolveHost: async () => [{ address: "1.2.3.4", family: 4 }],
+    blockingMs: 5000,
   });
   const result = results.get("https://cdn.example/a.png");
   assert.equal(result.ok, true, result.label);
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], "https://cdn.example/a.png",
     "the resolved URL must be the request target, not left for https.request to default");
+});
+
+// ---------------------------------------------------------------------------
+// Nobody waits for an image.
+//
+// The failure this fixes, measured on a corporate VM with no direct egress:
+// `buildRequestOptions` connects straight out with a pinned address and never
+// consults HTTP_PROXY, so on that network the connection cannot complete -- and
+// the 20 second timeout was paid *before the document appeared at all*. One
+// unreachable image made every preview of that document hang for 20 seconds.
+// The timeout is unchanged; what changed is that the render stopped waiting.
+// ---------------------------------------------------------------------------
+
+test("a slow image does not delay the render, and is reported as still pending", async () => {
+  let release;
+  const stalled = new Promise((resolve) => { release = resolve; });
+  const started = Date.now();
+  const { results, pending } = await resolveRemoteImages(["https://cdn.example/slow.png"], {
+    maxLocalImageBytes: 1024 * 1024,
+    fetchImpl: async () => { await stalled; return new Response(png, { status: 200 }); },
+    resolveHost: publicHost(),
+  });
+  assert.equal(Date.now() - started < 500, true, "the render is not held up by a fetch that has not answered");
+  assert.equal(pending, 1);
+  const result = results.get("https://cdn.example/slow.png");
+  assert.equal(result.ok, false);
+  assert.equal(result.kind, "pending", "and it is 'pending', never 'failed' -- a slow image is not a broken one");
+  release();
+});
+
+test("an image already held renders complete on the first pass, with no wait", async () => {
+  // The common case, and the one that must not regress: a document reopened
+  // after its images have been fetched once has to come up whole immediately,
+  // exactly as it did before any of this.
+  const source = "https://cdn.example/cached.png";
+  const warm = await resolveRemoteImages([source], {
+    maxLocalImageBytes: 1024 * 1024,
+    fetchImpl: async () => new Response(png, { status: 200 }),
+    resolveHost: publicHost(),
+    blockingMs: 5000,
+  });
+  assert.equal(warm.pending, 0);
+  assert.equal(warm.results.get(source).ok, true);
+
+  const again = await resolveRemoteImages([source], {
+    maxLocalImageBytes: 1024 * 1024,
+    fetchImpl: async () => { throw new Error("a cached image must not be re-fetched"); },
+    resolveHost: publicHost(),
+  });
+  assert.equal(again.pending, 0, "a cache hit settles within the microtask turn, so nothing is left pending");
+  assert.equal(again.results.get(source).ok, true);
+});
+
+test("a pending result is never cached as a failure", async () => {
+  // The trap: caching "pending" as a negative would pin the placeholder for the
+  // whole negative TTL, so the retry that is meant to replace it would be
+  // answered with the thing it is replacing.
+  const source = "https://cdn.example/eventually.png";
+  let release;
+  const stalled = new Promise((resolve) => { release = resolve; });
+  const first = await resolveRemoteImages([source], {
+    maxLocalImageBytes: 1024 * 1024,
+    fetchImpl: async () => { await stalled; return new Response(png, { status: 200 }); },
+    resolveHost: publicHost(),
+  });
+  assert.equal(first.pending, 1);
+  release();
+  // The fetch was never abandoned -- it is still running in the module cache --
+  // so the next pass finds it done rather than starting over.
+  const second = await resolveRemoteImages([source], {
+    maxLocalImageBytes: 1024 * 1024,
+    fetchImpl: async () => { throw new Error("the in-flight fetch must be reused, not restarted"); },
+    resolveHost: publicHost(),
+    blockingMs: 5000,
+  });
+  assert.equal(second.pending, 0);
+  assert.equal(second.results.get(source).ok, true, "and the image lands on the retry");
 });

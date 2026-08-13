@@ -24,6 +24,47 @@ M.defaults = {
     scroll_past_end_offset_px = 22,
     fast_scroll = true,
     scroll_settle_ms = 160,
+    -- What an SSH session waits instead. These are two independent answers
+    -- rather than a base and an adjustment, so for one delay everywhere set
+    -- both to the same number -- writing `nil` here does nothing, because a
+    -- key absent from `setup()` means "keep the default" and cannot mean
+    -- "clear it".
+    --
+    -- The settle capture is the expensive one -- full `device_scale_factor`,
+    -- measured at 304,666 bytes and ~508 ms of transit on the link this was
+    -- built for -- and it fires whenever scrolling stops for this long. A mouse
+    -- wheel does not deliver a smooth stream: notches arrive 50-150 ms apart,
+    -- so at 160 ms an ordinary gap between two flicks reads as "stopped" and
+    -- buys a half-second transfer that the next notch immediately makes stale.
+    -- 400 ms sits above the gaps inside a scroll and below the pauses between
+    -- them, so the sharp frame is spent on a reader who has actually stopped.
+    --
+    -- The cost is real and is the reason this is not simply raised everywhere:
+    -- when you do stop, sharpness arrives about 240 ms later than it used to.
+    -- That trade is only worth making when the frame itself takes half a second
+    -- to arrive, which is why it is gated on the session rather than global.
+    ssh_scroll_settle_ms = 400,
+    -- How much of its natural size the *moving* frame of a scroll is captured
+    -- at. nil defers to `ssh_scroll_scale` over SSH and to full size locally;
+    -- set it to pin one factor everywhere.
+    --
+    -- Only the moving frame is affected. The settle capture that lands when
+    -- the wheel stops is always full `device_scale_factor`, so the picture a
+    -- reader actually looks at is never the reduced one. With
+    -- `fast_scroll = false` there is no separate moving frame and this does
+    -- nothing, deliberately: scaling the only frame there is would leave the
+    -- preview permanently soft.
+    scroll_scale = nil,
+    -- What `scroll_scale` resolves to when Neovim is running over SSH.
+    --
+    -- 0.5 rather than something smaller because PNG bytes against real content
+    -- go as pixels^0.69: quartering the pixels costs about 2.6x fewer bytes,
+    -- and bytes are the entire cost on a throughput-limited link. Measured on
+    -- an AWS SSM tunnel with a flat 0.80 MB/s ceiling, one 80KB moving frame is
+    -- ~134ms of pure wire time and a single wheel spin queues over a hundred of
+    -- them -- so the backlog, not the render, is the lag. See
+    -- docs/local-render-design.md.
+    ssh_scroll_scale = 0.5,
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.
     -- Playback is expensive when sending constant PNG screenshots.
@@ -31,7 +72,6 @@ M.defaults = {
     animate_fps = 5,
   },
   browser = {
-    channel = "chrome",
     executable_path = nil,
     launch_timeout_ms = 10000,
     -- Set false to fall back to Playwright's default encoding.
@@ -39,7 +79,6 @@ M.defaults = {
   },
   image = {
     backend = "auto",
-    zindex = 20,
     -- nil defers to the terminal profile's default (see md-viewer.terminal);
     -- set explicitly to override every profile.
     double_buffer = nil,
@@ -210,6 +249,36 @@ local function validate(cfg)
   assert(
     type(cfg.render.animate_fps) == "number" and cfg.render.animate_fps >= 1 and cfg.render.animate_fps <= 30,
     "md-viewer: render.animate_fps must be between 1 and 30"
+  )
+  -- Both bounded at 0.25: below that the moving frame stops being legible even
+  -- in motion, which defeats the point of drawing one. Bounded at 1 because
+  -- this only ever *reduces* -- capturing the moving frame above its natural
+  -- size spends bytes to gain nothing, `device_scale_factor` being the knob
+  -- that decides what natural means.
+  assert(
+    cfg.render.scroll_scale == nil
+      or (
+        type(cfg.render.scroll_scale) == "number"
+        and cfg.render.scroll_scale >= 0.25
+        and cfg.render.scroll_scale <= 1
+      ),
+    "md-viewer: render.scroll_scale must be a number between 0.25 and 1, or nil to follow "
+      .. "render.ssh_scroll_scale over SSH"
+  )
+  assert(
+    type(cfg.render.ssh_scroll_scale) == "number"
+      and cfg.render.ssh_scroll_scale >= 0.25
+      and cfg.render.ssh_scroll_scale <= 1,
+    "md-viewer: render.ssh_scroll_scale must be a number between 0.25 and 1"
+  )
+  assert(
+    type(cfg.render.scroll_settle_ms) == "number" and cfg.render.scroll_settle_ms >= 0,
+    "md-viewer: render.scroll_settle_ms must be non-negative"
+  )
+  assert(
+    cfg.render.ssh_scroll_settle_ms == nil
+      or (type(cfg.render.ssh_scroll_settle_ms) == "number" and cfg.render.ssh_scroll_settle_ms >= 0),
+    "md-viewer: render.ssh_scroll_settle_ms must be non-negative, or nil to use render.scroll_settle_ms over SSH"
   )
   assert(
     cfg.image.raw_zindex == nil

@@ -26,6 +26,21 @@ function M.snapshot()
       layout_reused = session.last_layout_reused,
       markdown_reused = session.last_markdown_reused,
       capture_scale = session.last_capture_scale,
+      -- The fraction of its natural size the moving frame is captured at, and
+      -- why. Both nil on a local session, which is the case where nothing is
+      -- reduced. Reported beside `capture_encoder` on purpose: the Playwright
+      -- fallback path cannot express a sub-1x scale, so a session asking for
+      -- 0.5 whose frames are not shrinking is answered by those two rows
+      -- together and by neither alone.
+      scroll_scale = session.scroll_scale,
+      scroll_scale_source = session.scroll_scale_source,
+      -- How long scrolling must be idle before the expensive settle capture is
+      -- taken. Reported beside the scale because the two are the whole of what
+      -- an SSH session does differently, and a reader chasing scroll cost needs
+      -- to see both: the scale decides what a moving frame costs, this decides
+      -- how often the sharp one is paid for at all.
+      scroll_settle_ms = session.scroll_settle_ms,
+      scroll_settle_source = session.scroll_settle_source,
       capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,
@@ -34,9 +49,26 @@ function M.snapshot()
       fast_png_bytes = session.fast_png_bytes,
       fast_capture_ms = session.fast_capture_ms,
       fast_image_update_ms = session.fast_image_update_ms,
+      -- How many frames of each kind were actually captured and transmitted,
+      -- and their total bytes. `coalesced_scroll_events` below counts the
+      -- opposite -- scroll events dropped before capture -- so these are the
+      -- only fields that answer "how much went down the wire".
+      fast_frame_count = session.fast_frame_count or 0,
+      fast_bytes_total = session.fast_bytes_total or 0,
+      -- The fastest and the average this loop turned over. Compare the minimum
+      -- against fast_capture_ms + fast_image_update_ms + the frame's transit to
+      -- see what the per-frame cost is actually made of; a minimum far above
+      -- their sum means the constraint is somewhere none of them measure.
+      fast_interval_min_ms = session.fast_interval_min_ms,
+      fast_interval_mean_ms = session.fast_interval_count
+          and session.fast_interval_count > 0
+          and (session.fast_interval_sum_ms / session.fast_interval_count)
+        or nil,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
       retina_image_update_ms = session.retina_image_update_ms,
+      retina_frame_count = session.retina_frame_count or 0,
+      retina_bytes_total = session.retina_bytes_total or 0,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
       viewport_width_px = session.viewport_width_px,
       -- How many animated images the last render *measured*, beside how many
@@ -47,6 +79,7 @@ function M.snapshot()
       -- `incomplete` means the renderer is still trying to measure them.
       animation_geometry_count = session.animation_geometry and #session.animation_geometry or 0,
       animation_geometry_incomplete = session.animation_geometry_incomplete or false,
+      remote_images_pending = session.remote_images_pending or false,
       animation_count = session.animation_assets and vim.tbl_count(session.animation_assets) or 0,
       animation_strategy = session.animation_strategy,
       animation_assets = (function()

@@ -76,7 +76,7 @@ local SESSION = [[
 ]]
 
 io.write("== live overlay drive ==\n")
-rx(([[vim.cmd.edit(%q); vim.cmd("MdViewerOpen")]]):format(repo .. "/tests/fixtures/kitchen-sink.md"))
+rx(([[vim.cmd.edit(%q); vim.cmd("MdViewerToggle")]]):format(repo .. "/tests/fixtures/kitchen-sink.md"))
 
 io.write("waiting for the first real render+capture (Chromium launch included)...\n")
 local ready = poll("first rendered frame", 60000, SESSION .. [[
@@ -86,22 +86,22 @@ local ready = poll("first rendered frame", 60000, SESSION .. [[
   return nil
 ]])
 local placement = ready.placement
-io.write(("rendered: revision %s, placement %dx%d cells at (%d,%d)\n"):format(
-  ready.revision,
-  placement.width,
-  placement.height,
-  placement.row,
-  placement.col
-))
+io.write(
+  ("rendered: revision %s, placement %dx%d cells at (%d,%d)\n"):format(
+    ready.revision,
+    placement.width,
+    placement.height,
+    placement.row,
+    placement.col
+  )
+)
 
 -- The drag: press inside the upper text, then a diagonal sweep of drag
 -- points, all through the real input queue. Coordinates are 0-based screen
 -- cells for nvim_input_mouse.
 local press_row = placement.row + math.floor(placement.height * 0.2)
 local press_col = placement.col + 6
-local function mouse(action, row, col)
-  vim.rpcrequest(chan, "nvim_input_mouse", "left", action, "", 0, row, col)
-end
+local function mouse(action, row, col) vim.rpcrequest(chan, "nvim_input_mouse", "left", action, "", 0, row, col) end
 mouse("press", press_row, press_col)
 vim.uv.sleep(80)
 -- Sample the overlay stats mid-gesture, while the selection is still
@@ -143,8 +143,14 @@ if mid == nil then
 end
 check(mid.frames >= 1, ("overlay frames displayed during the drag (%d)"):format(mid.frames))
 check((mid.rects or 0) >= 1, ("overlay rectangles on screen mid-drag (%d)"):format(mid.rects or 0))
-check(mid.health.overlay_placements >= 1, ("backend holds live overlay placements mid-drag (%d)"):format(mid.health.overlay_placements))
-check((mid.bytes or 0) > 0 and (mid.bytes or 0) < 20000, ("a changed overlay frame cost %s bytes on the wire"):format(tostring(mid.bytes)))
+check(
+  mid.health.overlay_placements >= 1,
+  ("backend holds live overlay placements mid-drag (%d)"):format(mid.health.overlay_placements)
+)
+check(
+  (mid.bytes or 0) > 0 and (mid.bytes or 0) < 20000,
+  ("a changed overlay frame cost %s bytes on the wire"):format(tostring(mid.bytes))
+)
 
 mouse("release", press_row + 10, press_col + 56)
 
@@ -153,6 +159,9 @@ local settled = poll("settle after release", 20000, SESSION .. [[
     return {
       selection_len = session.selection_text_length,
       retina_bytes = session.retina_png_bytes,
+      capture_scale = session.last_capture_scale,
+      viewport_w = session.viewport_width_px,
+      viewport_h = session.viewport_height_render_px,
       capture_ms = session.retina_capture_ms,
       overlay_frames = session.overlay_frames,
       health = require("md-viewer.backends.kitty_raw").health(),
@@ -164,8 +173,27 @@ local settled = poll("settle after release", 20000, SESSION .. [[
 ]])
 check(settled.health.overlay_placements == 0, "every overlay placement is deleted after the settle frame")
 check(settled.health.overlay_sheets >= 1, "the tint sheet stays cached for the next gesture")
-check((settled.selection_len or 0) > 0, ("the committed selection has real text (%d chars)"):format(settled.selection_len or 0))
-check(settled.retina_bytes > 100000, ("the settle frame is a true device-scale capture (%d bytes)"):format(settled.retina_bytes))
+check(
+  (settled.selection_len or 0) > 0,
+  ("the committed selection has real text (%d chars)"):format(settled.selection_len or 0)
+)
+-- Not an absolute byte count: PNG size is a function of the fixture, the pane
+-- and the font, so a threshold picked on one machine reads as a regression on
+-- the next. What "a true device-scale capture" means is that the frame on
+-- screen is the device tier and carries the full device-pixel viewport, which
+-- is checkable without knowing how well this particular page compresses.
+check(
+  settled.capture_scale == "device",
+  ("the settle frame is the device tier, not the CSS one (%s)"):format(tostring(settled.capture_scale))
+)
+check(
+  settled.retina_bytes > 20000,
+  ("and it is a real full-viewport picture (%d bytes over %dx%d px)"):format(
+    settled.retina_bytes,
+    settled.viewport_w or -1,
+    settled.viewport_h or -1
+  )
+)
 
 -- Envelope audit: recorded from the real gesture, answered by the real
 -- renderer. Moving frames opt out of capture; the commit does not.
@@ -187,27 +215,53 @@ check(sheets >= 1 and sheets <= 2, ("the tint sheet was requested once, not per 
 check(commits == 1, ("release produced exactly one settle commit (%d)"):format(commits))
 check(commits_no_capture == 0, "the commit frame captured a real browser frame")
 
--- The exact user commands a user would run, since both report overlay fields.
-local debug_lines = rx([[
-  vim.cmd("MdViewerDebug")
-  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  vim.cmd("bwipeout!")
-  return table.concat(lines, "\n")
-]])
+-- The exact commands a user would run, since both report overlay fields.
+--
+-- Both are asynchronous: each issues a `health` request to the renderer and
+-- writes its buffer in the callback, so reading buffer 0 on the next line reads
+-- whatever was already current and finds nothing. Wait for the named buffer
+-- instead. A `pcall` around `vim.cmd` proves nothing here for the same reason --
+-- the command returns long before the report exists.
+local function command_output(command, name)
+  rx(("vim.cmd(%q)"):format(command))
+  return poll(
+    command,
+    30000,
+    ([[
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(b) and vim.api.nvim_buf_get_name(b):find(%q, 1, true) then
+        local text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+        if #text > 0 then
+          pcall(vim.api.nvim_buf_delete, b, { force = true })
+          return text
+        end
+      end
+    end
+    return nil
+  ]]):format(name)
+  )
+end
+
+local debug_lines = command_output("MdViewerDebug", "md-viewer://debug")
 check(debug_lines:find("overlay_frames", 1, true) ~= nil, ":MdViewerDebug reports the overlay diagnostics")
 check(debug_lines:find("overlay_last_bytes", 1, true) ~= nil, ":MdViewerDebug reports the per-frame overlay bytes")
-local health_ok = pcall(rx, [[vim.cmd("MdViewerHealth"); vim.cmd("bwipeout!")]])
-check(health_ok, ":MdViewerHealth runs to completion with the overlay fields present")
+local health_lines = command_output("MdViewerHealth", "md-viewer://health")
+check(#health_lines > 0, ":MdViewerHealth runs to completion with the overlay fields present")
 
-io.write(("\nui sink: %d writes, %d total bytes (base upload + overlay traffic)\n"):format(settled.ui.writes, settled.ui.bytes))
-io.write(("overlay frames %d, last frame %s bytes / %.2f ms; settle capture %d bytes\n"):format(
-  settled.overlay_frames,
-  tostring(mid.bytes),
-  tonumber(mid.ms) or -1,
-  settled.retina_bytes
-))
+io.write(
+  ("\nui sink: %d writes, %d total bytes (base upload + overlay traffic)\n"):format(settled.ui.writes, settled.ui.bytes)
+)
+io.write(
+  ("overlay frames %d, last frame %s bytes / %.2f ms; settle capture %d bytes\n"):format(
+    settled.overlay_frames,
+    tostring(mid.bytes),
+    tonumber(mid.ms) or -1,
+    settled.retina_bytes
+  )
+)
 
-pcall(rx, [[vim.cmd("MdViewerClose")]])
+-- `MdViewerToggle` is the only visibility command; there is no MdViewerClose.
+pcall(rx, [[vim.cmd("MdViewerToggle")]])
 pcall(vim.rpcrequest, chan, "nvim_command", "qa!")
 vim.uv.sleep(200)
 server:kill(15)

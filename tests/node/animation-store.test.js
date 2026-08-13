@@ -123,7 +123,7 @@ test("renderMarkdown mints data-md-anim-id through the image rule, capped per do
     assert.match(meta.sha, /^[0-9a-f]{64}$/, "the registry carries the sha the media lane is addressed by");
   }
   // Without a store the markup is byte-for-byte what it was: no ids at all.
-  // This is the `render.animate = false` path -- main.js passes a null store --
+  // This is the `render.animate = false` path -- service.js passes a null store --
   // and it is why turning animation off costs motion and never a picture. The
   // GIF is still inlined and still painted, so the screenshot keeps the first
   // frame; the only difference is the attribute the terminal would have used

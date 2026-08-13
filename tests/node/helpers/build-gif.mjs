@@ -4,8 +4,9 @@
 // LZW below emits literal codes with correct dictionary growth and clear-code
 // resets, so a consumer sees a genuine stream rather than a special case.
 //
-// Lifted out of tests/node/gif.test.js when the Chromium decode context needed
-// the same inputs the hand-written decoder was tested against.
+// Shared rather than inlined because three suites need the same inputs the
+// hand-written decoder is tested against: media, decode-context and
+// animation-store.
 
 export function lzwEncodeLiterals(indices, minimumCodeSize) {
   const clearCode = 1 << minimumCodeSize;

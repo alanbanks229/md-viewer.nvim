@@ -3,6 +3,65 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-08-13
+
+Scrolling over a throttled SSH link, and previews that no longer stall on a
+remote image.
+
+On a connection whose ceiling is low enough — an AWS SSM tunnel is a flat
+0.80 MB/s — one scroll frame spends more time on the wire than the render and
+the terminal decode put together, and a wheel spin queues frames faster than the
+link drains them. Nothing was wrong with the pipeline; the frames were simply too
+big for the pipe, and the two settings that looked like they would help were
+measured making it worse.
+
+### Added
+
+- **`render.scroll_scale` and `render.ssh_scroll_scale`.** The moving frame of a
+  scroll is now captured at a fraction of its natural size — halved by default
+  on an SSH session, unchanged locally — for roughly 3× fewer bytes per frame on
+  the link this was built for. The settle capture that lands when scrolling stops
+  is never reduced, so the picture being read is still full
+  `render.device_scale_factor`. `:MdViewerDebug` reports the factor in force and
+  where it came from. See `:help md-viewer-ssh`.
+- **`render.ssh_scroll_settle_ms`.** An SSH session now waits 400 ms rather than
+  160 ms before spending the sharp settle capture, because a mouse wheel delivers
+  notches 50–150 ms apart and the shorter delay read an ordinary gap between two
+  flicks as "stopped". The cost is that sharpness arrives about 240 ms later when
+  you do stop. Local sessions are unchanged.
+- **`:help md-viewer-options`.** Every configuration option with its default and
+  its accepted values, in one place. The help had been documenting nine option
+  groups and a handful of individual options out of more than seventy.
+
+### Fixed
+
+- **One unreachable image no longer costs the whole preview twenty seconds.**
+  Remote images resolved in a pre-pass between parsing and rendering, so on a
+  network with no direct route out the full fetch timeout was paid *before the
+  document appeared at all*. Nothing waits for a fetch now: an image that has not
+  arrived renders as its placeholder, and the picture appears on its own once the
+  bytes land. Remote images still do not load behind a mandatory proxy — they now
+  fail fast instead of hanging, because the fetch pins the address it validated
+  and a proxy makes pinning impossible. `:help md-viewer-remote-images` and
+  [SECURITY.md](SECURITY.md) say so rather than leaving it to be read as an
+  omission.
+- **Four stray entries in Neovim's global help index.** `:help source`,
+  `:help run`, `:help project` and `:help CSS` all resolved into this plugin's
+  help file, because emphasis had been written as `*word*` — which `:helptags`
+  reads as a tag definition.
+- **Documentation recommended a setting that makes slow links worse.** The
+  README, `:help md-viewer-ssh` and the troubleshooting guide all suggested
+  lowering `render.device_scale_factor` on a slow connection. It is a calibration
+  divisor rather than a size knob: lowering it doubles the CSS viewport, grows
+  the frame, and collapses the moving and settle captures into one, so the cheap
+  scroll frame stops existing. All three now say so.
+
+### Removed
+
+- **`browser.channel` and `image.zindex`**, neither of which was read by
+  anything. Setting either has never had an effect, and leaving either in a
+  `setup()` call is harmless.
+
 ## [0.1.1] - 2026-08-11
 
 Terminal detection over SSH. v0.1.0 identified terminals only from variables
@@ -82,5 +141,6 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.0

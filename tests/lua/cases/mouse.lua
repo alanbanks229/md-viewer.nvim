@@ -3,7 +3,8 @@ return function(t)
   local state = require("md-viewer.state")
   local interaction = require("md-viewer.interaction")
 
-  -- §4.5: interaction must never be enabled for the `cells` backend. Opening
+  -- Interaction must never be enabled for the `cells` backend -- there is no
+  -- DOM to hit-test against. Opening
   -- a preview with the default (cells, in a headless test) backend must not
   -- install any of the new gesture mappings.
   require("md-viewer").setup({})

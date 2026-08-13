@@ -13,11 +13,13 @@ import { sniffImageType } from "./security.js";
 /// can loosen.
 export const REMOTE_IMAGES = Symbol("md-viewer.remote-images");
 
-// All renders share one serial queue (main.js), so a slow host would freeze
-// every interaction for its duration. The deadline is shared by the whole
-// batch of a render's fetches -- N hanging hosts still stall one render by at
-// most FETCH_TIMEOUT_MS, not N times it. Failures are remembered briefly so a
-// dead host costs one stall per minute, not one per keystroke.
+// This bounds how long a fetch may run, not how long a render waits for one:
+// since `resolveRemoteImages` stopped blocking, no render is held for any of
+// this. What the timeout still decides is when an outstanding fetch gives up
+// and becomes a cached failure, and the deadline is shared by the whole batch
+// of a render's fetches, so N hanging hosts cost one timeout rather than N.
+// Failures are remembered briefly so a dead host is re-attempted about once a
+// minute rather than once per keystroke.
 //
 // 20s, not 5s: measured against a real multi-megabyte GitHub-attachment GIF
 // (the shape this project's own README uses) resolving through two hops --
@@ -170,7 +172,7 @@ export function buildRequestOptions(addresses, signal) {
 
 // url -> { promise } while in flight, then { ok: true, dataUri, bytes } or
 // { ok: false, kind, label, expiresAt }. Insertion order is the LRU order
-// (delete-then-set on hit, evict from the front), the same idiom as main.js's
+// (delete-then-set on hit, evict from the front), the same idiom as service.js's
 // markdownCache. A positive entry needs no re-validation on a cache hit: it
 // holds already-fetched, already-checked bytes, not a live connection, so
 // replaying it exposes nothing further.
@@ -302,16 +304,34 @@ async function resolveOne(source, deadline, settings) {
   return promise;
 }
 
-/// Resolves every source in parallel under one shared deadline and returns
-/// `Map<source, result>` with the same tagged shape `resolveLocalImage` uses.
+/// Starts every source in parallel under one shared deadline and returns
+/// `{ results, pending }`, where `results` is a `Map<source, result>` carrying
+/// the same tagged shape `resolveLocalImage` uses.
+///
 /// `fetchImpl`, `resolveHost`, `timeoutMs`, `negativeTtlMs`, and
 /// `transientNegativeTtlMs` exist so tests can run with no real sockets or DNS
 /// queries (tests/node/no-listening-port forbids a listener) and no real
 /// clocks.
+///
+/// `pending` is the count of sources still being fetched when this returned,
+/// and it exists because waiting for them was making the preview unusable. A
+/// fetch is given `blockingMs` to finish; anything slower is reported as
+/// `kind: "pending"` and the render proceeds without it, while the fetch keeps
+/// running in the module cache below. The next render picks up whatever has
+/// landed, and the Lua side asks for one because the response says something is
+/// still outstanding -- the same mechanism `animationsIncomplete` already uses.
+///
+/// Measured on a corporate VM with no direct egress: `buildRequestOptions`
+/// connects straight out with a pinned address and deliberately never consults
+/// `HTTP_PROXY`, so on that network the connection cannot complete and the
+/// 20-second timeout was paid *before the document appeared at all*. One
+/// unreachable image made every preview of that document hang for 20 seconds.
+/// The timeout is still 20 seconds, because a slow image on a working network
+/// deserves it; what changed is that nobody waits for it.
 export async function resolveRemoteImages(sources, options) {
   const results = new Map();
   const unique = [...new Set(sources)];
-  if (unique.length === 0) return results;
+  if (unique.length === 0) return { results, pending: 0 };
   const settings = {
     maxBytes: options.maxLocalImageBytes,
     fetchImpl: options.fetchImpl ?? defaultFetchImpl,
@@ -323,8 +343,29 @@ export async function resolveRemoteImages(sources, options) {
     maxCacheEntries: options.maxCacheEntries ?? MAX_CACHE_ENTRIES,
   };
   const deadline = Date.now() + settings.timeoutMs;
-  await Promise.all(unique.map(async (source) => {
-    results.set(source, await resolveOne(source, deadline, settings));
-  }));
-  return results;
+  // Default 0: do not block at all. A cache hit still lands, because
+  // `resolveOne` returns an already-settled promise for one and a zero-delay
+  // timer fires only after the microtask queue has drained -- so a document
+  // whose images are already held renders complete on the first pass, exactly
+  // as it did before. Tests and any caller that genuinely wants to wait pass a
+  // number.
+  const blockingMs = Math.max(0, Number(options.blockingMs) || 0);
+  const outstanding = new Set(unique);
+  const jobs = unique.map(async (source) => {
+    const result = await resolveOne(source, deadline, settings);
+    results.set(source, result);
+    outstanding.delete(source);
+  });
+  // `Promise.all` is awaited either way rather than abandoned: an unhandled
+  // rejection from a fetch nobody is waiting for would take the process down.
+  const settled = Promise.all(jobs).catch(() => {});
+  await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, blockingMs))]);
+  for (const source of outstanding) {
+    // Not "failed": a failure is a fact about the image and is cached and
+    // shown as such, while this is a fact about *when this render happened*.
+    // Conflating them would cache a negative result for an image that is
+    // merely slow, and the placeholder would then stick for its whole TTL.
+    results.set(source, { ok: false, kind: "pending", label: "loading" });
+  }
+  return { results, pending: outstanding.size };
 }
