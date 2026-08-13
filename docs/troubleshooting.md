@@ -483,7 +483,7 @@ slow. `:MdViewerHealth` names which one, on the `client rendering` row of
 |---|---|
 | `no companion renderer (client_render.address / $MD_VIEWER_CLIENT_ADDR is unset)` | The remote plugin has no address to dial. Pass `--md-viewer-addr <host:port>` to the wrapper, or set `MD_VIEWER_CLIENT_ADDR` / `client_render.address` on the remote host. |
 | `companion unreachable: ...` | The address exists but nothing answered. Check the reverse forward is actually up — `ssh -R` is silent when the remote-side bind fails unless `ExitOnForwardFailure` is set. |
-| `no splicer in front of the terminal ($LC_MD_VIEWER is unset...)` | The variable did not survive the hop. The remote `sshd` needs `AcceptEnv LANG LC_*` — the same requirement `LC_TERMINAL` has. Confirm with `echo $LC_MD_VIEWER` on the remote host. If it cannot be forwarded, set `client_render.enabled = "on"`, which waives the handshake and nothing else. |
+| `no splicer in front of the terminal ($LC_MD_VIEWER is unset...)` | The variable did not survive the hop — see the section below, which is the single most likely thing to go wrong. |
 | `the cells backend is handed pixels, not transmission commands` | This is the terminal-detection problem above, not a client-rendering one. Fix the profile first. |
 
 `:MdViewerDebug` answers the same question from the other end:
@@ -495,6 +495,45 @@ The wrapper writes a log to `$TMPDIR/md-viewer-ssh-<pid>.log` (or wherever
 `--md-viewer-log` points), which records the companion's socket path, every
 splicer event, and the frame-store statistics at exit. Nothing is written to the
 terminal mid-session, because that would land inside somebody's escape sequence.
+
+## `$LC_MD_VIEWER` is empty on the remote host
+
+The handshake travels as an environment variable, and **two** configurations have
+to agree to carry it — the client's `SendEnv` and the server's `AcceptEnv`.
+Both default to the glob `LANG LC_*`, which is why nothing needed configuring
+for `LC_TERMINAL`.
+
+**A working `LC_TERMINAL` does not prove `LC_MD_VIEWER` will arrive.** Plenty of
+managed environments replace the glob with an explicit list of permitted
+variables. `LC_TERMINAL` is on that list because someone put it there; a
+variable invented by this plugin is not. The symptom is exactly the confusing
+one: terminal detection works perfectly, and client rendering silently does not
+happen.
+
+Check on the remote host first — this takes one command and rules out everything
+else:
+
+```sh
+echo "[$LC_MD_VIEWER]"
+```
+
+Empty means it did not arrive. Add it explicitly at both ends:
+
+```sshconfig
+# On the machine your terminal is on, in ~/.ssh/config
+Host my-remote-host
+    SendEnv LC_MD_VIEWER
+```
+
+```sshconfig
+# On the remote host, in /etc/ssh/sshd_config, then reload sshd
+AcceptEnv LC_MD_VIEWER
+```
+
+If neither end is yours to change, set `client_render.enabled = "on"` in the
+remote Neovim config. That waives the handshake and nothing else — you still
+need a companion answering on a reachable address, which
+`client_render.address` or `$MD_VIEWER_CLIENT_ADDR` supplies.
 
 ## An image is broken, or an animation is frozen, only under `md-viewer-ssh`
 

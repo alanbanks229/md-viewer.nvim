@@ -652,7 +652,14 @@ send it. `bin/md-viewer-ssh` wraps ssh and adds three things:
     the remote plugin emits back into the Kitty graphics uploads your terminal
     expects, byte for byte identical to what it receives today;
   - LC_MD_VIEWER, which is how the remote plugin learns any of this is there.
-    SSH forwards LC_* by default -- the same mechanism LC_TERMINAL uses.
+
+A working LC_TERMINAL does NOT prove LC_MD_VIEWER will arrive. Both rely on
+SSH's SendEnv/AcceptEnv, whose defaults are the glob `LANG LC_*` -- but managed
+environments often replace that glob with an explicit list, and a variable this
+plugin invented will not be on it. Terminal detection then works while client
+rendering silently does not happen. Check `echo "[$LC_MD_VIEWER]"` on the
+remote host; if empty, add `SendEnv LC_MD_VIEWER` to the local ~/.ssh/config
+and `AcceptEnv LC_MD_VIEWER` to the remote sshd_config -- both ends.
 
 The remote plugin needs an address to dial. A reverse forward provides one: >sh
 

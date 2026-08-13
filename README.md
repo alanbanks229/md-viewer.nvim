@@ -154,8 +154,17 @@ cost. What fixes it is not sending the frame.
   plugin then emits back into the Kitty graphics uploads your terminal expects —
   byte for byte the same stream it receives today;
 - exports **`LC_MD_VIEWER`**, which is how the remote plugin finds out any of
-  this exists. SSH forwards `LC_*` by default, the same mechanism `LC_TERMINAL`
-  already relies on.
+  this exists.
+
+> [!IMPORTANT]
+> **A working `LC_TERMINAL` does not prove `LC_MD_VIEWER` will arrive.** Both
+> rely on SSH's `SendEnv`/`AcceptEnv`, whose defaults are the glob `LANG LC_*` —
+> but managed environments often replace that glob with an explicit list, and a
+> variable this plugin invented will not be on it. The symptom is the confusing
+> one: terminal detection works and client rendering silently does not happen.
+> Run `echo "[$LC_MD_VIEWER]"` on the remote host before anything else. If it is
+> empty, add `SendEnv LC_MD_VIEWER` to your local `~/.ssh/config` and
+> `AcceptEnv LC_MD_VIEWER` to the remote `sshd_config` — **both ends**.
 
 **Setup, once.** The wrapper runs on your *local* machine, so that machine needs
 a checkout of this repository with the renderer installed — the same two
