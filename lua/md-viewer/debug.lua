@@ -72,6 +72,14 @@ function M.snapshot()
       client_frame_count = session.client_frame_count or 0,
       client_bytes_deferred = session.client_bytes_deferred or 0,
       client_render = session.client_render_reason,
+      -- How many captures may be outstanding at once. One means every frame
+      -- costs a full round trip before the next is even asked for, which is
+      -- correct beside Neovim and is the whole of the lag across a link. Read
+      -- it beside `fast_interval_min_ms`: the floor should be about
+      -- `max(capture_ms, round_trip / depth)`, and a floor far above that is
+      -- something this does not measure.
+      scroll_pipeline_depth = session.scroll_pipeline_depth,
+      scroll_pipeline_source = session.scroll_pipeline_source,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
       retina_image_update_ms = session.retina_image_update_ms,

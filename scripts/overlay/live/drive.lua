@@ -86,22 +86,22 @@ local ready = poll("first rendered frame", 60000, SESSION .. [[
   return nil
 ]])
 local placement = ready.placement
-io.write(("rendered: revision %s, placement %dx%d cells at (%d,%d)\n"):format(
-  ready.revision,
-  placement.width,
-  placement.height,
-  placement.row,
-  placement.col
-))
+io.write(
+  ("rendered: revision %s, placement %dx%d cells at (%d,%d)\n"):format(
+    ready.revision,
+    placement.width,
+    placement.height,
+    placement.row,
+    placement.col
+  )
+)
 
 -- The drag: press inside the upper text, then a diagonal sweep of drag
 -- points, all through the real input queue. Coordinates are 0-based screen
 -- cells for nvim_input_mouse.
 local press_row = placement.row + math.floor(placement.height * 0.2)
 local press_col = placement.col + 6
-local function mouse(action, row, col)
-  vim.rpcrequest(chan, "nvim_input_mouse", "left", action, "", 0, row, col)
-end
+local function mouse(action, row, col) vim.rpcrequest(chan, "nvim_input_mouse", "left", action, "", 0, row, col) end
 mouse("press", press_row, press_col)
 vim.uv.sleep(80)
 -- Sample the overlay stats mid-gesture, while the selection is still
@@ -143,8 +143,14 @@ if mid == nil then
 end
 check(mid.frames >= 1, ("overlay frames displayed during the drag (%d)"):format(mid.frames))
 check((mid.rects or 0) >= 1, ("overlay rectangles on screen mid-drag (%d)"):format(mid.rects or 0))
-check(mid.health.overlay_placements >= 1, ("backend holds live overlay placements mid-drag (%d)"):format(mid.health.overlay_placements))
-check((mid.bytes or 0) > 0 and (mid.bytes or 0) < 20000, ("a changed overlay frame cost %s bytes on the wire"):format(tostring(mid.bytes)))
+check(
+  mid.health.overlay_placements >= 1,
+  ("backend holds live overlay placements mid-drag (%d)"):format(mid.health.overlay_placements)
+)
+check(
+  (mid.bytes or 0) > 0 and (mid.bytes or 0) < 20000,
+  ("a changed overlay frame cost %s bytes on the wire"):format(tostring(mid.bytes))
+)
 
 mouse("release", press_row + 10, press_col + 56)
 
@@ -164,8 +170,14 @@ local settled = poll("settle after release", 20000, SESSION .. [[
 ]])
 check(settled.health.overlay_placements == 0, "every overlay placement is deleted after the settle frame")
 check(settled.health.overlay_sheets >= 1, "the tint sheet stays cached for the next gesture")
-check((settled.selection_len or 0) > 0, ("the committed selection has real text (%d chars)"):format(settled.selection_len or 0))
-check(settled.retina_bytes > 100000, ("the settle frame is a true device-scale capture (%d bytes)"):format(settled.retina_bytes))
+check(
+  (settled.selection_len or 0) > 0,
+  ("the committed selection has real text (%d chars)"):format(settled.selection_len or 0)
+)
+check(
+  settled.retina_bytes > 100000,
+  ("the settle frame is a true device-scale capture (%d bytes)"):format(settled.retina_bytes)
+)
 
 -- Envelope audit: recorded from the real gesture, answered by the real
 -- renderer. Moving frames opt out of capture; the commit does not.
@@ -199,13 +211,17 @@ check(debug_lines:find("overlay_last_bytes", 1, true) ~= nil, ":MdViewerDebug re
 local health_ok = pcall(rx, [[vim.cmd("MdViewerHealth"); vim.cmd("bwipeout!")]])
 check(health_ok, ":MdViewerHealth runs to completion with the overlay fields present")
 
-io.write(("\nui sink: %d writes, %d total bytes (base upload + overlay traffic)\n"):format(settled.ui.writes, settled.ui.bytes))
-io.write(("overlay frames %d, last frame %s bytes / %.2f ms; settle capture %d bytes\n"):format(
-  settled.overlay_frames,
-  tostring(mid.bytes),
-  tonumber(mid.ms) or -1,
-  settled.retina_bytes
-))
+io.write(
+  ("\nui sink: %d writes, %d total bytes (base upload + overlay traffic)\n"):format(settled.ui.writes, settled.ui.bytes)
+)
+io.write(
+  ("overlay frames %d, last frame %s bytes / %.2f ms; settle capture %d bytes\n"):format(
+    settled.overlay_frames,
+    tostring(mid.bytes),
+    tonumber(mid.ms) or -1,
+    settled.retina_bytes
+  )
+)
 
 pcall(rx, [[vim.cmd("MdViewerClose")]])
 pcall(vim.rpcrequest, chan, "nvim_command", "qa!")

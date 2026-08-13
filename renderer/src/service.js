@@ -197,6 +197,10 @@ export function createService({ assetsDir, onShutdown, frames } = {}) {
       lane,
       requestId: request.id,
       contentRevision: params.contentRevision,
+      // Opt-in per request, and only ever taken by a caller that is limiting its
+      // own depth. See `admit` for why a link makes supersession the wrong
+      // default and what stays guaranteed regardless.
+      pipelined: params.pipelined === true,
     });
 
     const task = async () => {

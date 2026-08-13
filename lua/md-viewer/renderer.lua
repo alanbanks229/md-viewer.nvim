@@ -120,6 +120,11 @@ function M.request(session, markdown, options, callback)
     -- is what lets the renderer send nothing back.
     params.knownBlocksRevision = session.blocks_revision
   end
+  -- Several scroll captures may be outstanding at once across a link, and each
+  -- is a distinct position the reader passed through rather than a stale one to
+  -- be cancelled. Absent everywhere else, so the request a local session sends
+  -- is unchanged.
+  if options.pipelined then params.pipelined = true end
   if not capture_only then params.markdown = markdown end
   local request_id = process.request(capture_only and "capture" or "render", params, function(result, err)
     if M.is_stale(session, serial) then

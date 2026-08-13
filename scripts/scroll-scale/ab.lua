@@ -46,9 +46,7 @@ local results = {}
 
 local function session()
   local found = state.visible_in_tab()
-  if not found then
-    error("md-viewer: no preview is open in this tab. Run :MdViewerToggle first.", 0)
-  end
+  if not found then error("md-viewer: no preview is open in this tab. Run :MdViewerToggle first.", 0) end
   return found
 end
 
@@ -188,7 +186,11 @@ local function report()
     ("%-26s %14s %14s"):format("frame produced every", ms(a.interval_min), ms(b.interval_min)),
     ("%-26s %14s %14s"):format("  capture (VM Chromium)", ms(a.capture_ms), ms(b.capture_ms)),
     ("%-26s %14s %14s"):format("  encode + hand to UI", ms(a.send_ms), ms(b.send_ms)),
-    ("%-26s %14s %14s"):format("  transit (async, queues)", ms(wire_ms(a.fast_png_bytes)), ms(wire_ms(b.fast_png_bytes))),
+    ("%-26s %14s %14s"):format(
+      "  transit (async, queues)",
+      ms(wire_ms(a.fast_png_bytes)),
+      ms(wire_ms(b.fast_png_bytes))
+    ),
     ("%-26s %14s %14s"):format(
       "  oversubscribed by",
       overrun(a) and ("%.1fx"):format(overrun(a)) or "--",
@@ -217,28 +219,20 @@ local function report()
     verdict = "INCONCLUSIVE: no moving frame was captured in one of the phases. "
       .. "Scroll with the mouse wheel (not j/k) for a few seconds in each phase."
   elseif b.encoder ~= "cdp_fast_png" then
-    verdict = ("INERT: capture_encoder is %q, not \"cdp_fast_png\". Playwright's own scale is a "):format(
+    verdict = ('INERT: capture_encoder is %q, not "cdp_fast_png". Playwright\'s own scale is a '):format(
       tostring(b.encoder)
-    ) .. "two-value enum, so the numeric factor cannot apply on that path and this change does "
-      .. "nothing on this host. Report this -- it also affects the client-render design."
+    ) .. "two-value enum, so the numeric factor cannot apply on that path and this change does " .. "nothing on this host. Report this -- it also affects the client-render design."
   else
     local ratio = a.fast_png_bytes / b.fast_png_bytes
     local before, after = wire_ms(a.fast_png_bytes), wire_ms(b.fast_png_bytes)
-    lines[#lines + 1] = ("moving frame is %.2fx smaller: %d ms of transit instead of %d"):format(
-      ratio,
-      after,
-      before
-    )
+    lines[#lines + 1] = ("moving frame is %.2fx smaller: %d ms of transit instead of %d"):format(ratio, after, before)
     -- Deliberately a rate rather than a total. Multiplying the per-frame saving
     -- by coalesced_scroll_events looks like the obvious summary and is wrong by
     -- construction: a coalesced event is one that was superseded *before* it was
     -- captured, so no frame was ever produced for it and no bytes were ever sent.
     -- The saving is real per frame transmitted, and what a reader feels is how
     -- often the picture can be replaced -- which is what this says instead.
-    lines[#lines + 1] = ("transit alone caps preview updates at %.1f/s, was %.1f/s"):format(
-      1000 / after,
-      1000 / before
-    )
+    lines[#lines + 1] = ("transit alone caps preview updates at %.1f/s, was %.1f/s"):format(1000 / after, 1000 / before)
     -- And do not expect total bytes to fall. Smaller frames mean *more* of them
     -- get through in the same time, so the wire stays about as busy; what
     -- changes is how much of the document that traffic actually shows you.

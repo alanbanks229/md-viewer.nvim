@@ -131,7 +131,9 @@ local base_id
 local trace = {}
 ---Resident size of the terminal process, in KB, via its parent chain.
 local function terminal_rss()
-  local result = vim.system({ "sh", "-c", "ps -o rss= -p $(ps -o ppid= -p $(ps -o ppid= -p $$ | tr -d ' ') | tr -d ' ')" }, { text = true }):wait()
+  local result = vim
+    .system({ "sh", "-c", "ps -o rss= -p $(ps -o ppid= -p $(ps -o ppid= -p $$ | tr -d ' ') | tr -d ' ')" }, { text = true })
+    :wait()
   return (result.stdout or "?"):gsub("%s", "")
 end
 local samples = {}
@@ -170,7 +172,12 @@ local function run_workload(label, moving)
     if phase % 40 == 0 then
       local h = raw.health()
       trace[#trace + 1] = ("%s frame=%d live_placements=%d sets=%d sheets=%d rss_kb=%s"):format(
-        label:sub(1, 6), phase, h.overlay_placements, h.overlay_sets, h.overlay_sheets, terminal_rss()
+        label:sub(1, 6),
+        phase,
+        h.overlay_placements,
+        h.overlay_sets,
+        h.overlay_sheets,
+        terminal_rss()
       )
       vim.fn.writefile(trace, out .. "/trace.txt")
     end
@@ -199,7 +206,6 @@ vim.wait(1500, function() return false end, 100)
 local only = vim.env.MD_VIEWER_OVERLAY_WORKLOAD
 if only ~= "churn" then run_workload("diff (2 of 70 rects move -- what a drag does)", 2) end
 if only ~= "diff" then run_workload("churn (70 of 70 rects move -- worst case)", RECTS) end
-
 
 vim.fn.writefile({
   vim.json.encode({

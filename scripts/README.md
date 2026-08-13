@@ -188,3 +188,31 @@ stutter, because the uploads survive by content key.
 
 Record what you watched (terminal, version, date, play-count observed in
 item 1) in `docs/terminal-support.md` when promoting a profile.
+
+## `pipeline/ab.lua` — does keeping captures in flight raise the frame rate?
+
+The measurement that decides whether client rendering was worth building.
+Removing 13.3 MB of pixels from the link felt like no change at all, because a
+serial round trip replaced the bytes it removed: one frame cost 92 ms of link
+plus 15 ms of render, so the preview updated 4.7 times a second and the renderer
+was idle 86% of the time.
+
+Needs a session started through `bin/md-viewer-ssh`, with
+`:MdViewerHealth verbose` reporting `client rendering: yes`. Without that both
+phases run at depth 1 and the report says so rather than inventing a result.
+
+```vim
+:runtime scripts/pipeline/ab.lua   " arms phase 1, one capture in flight
+"  ...wheel-scroll the whole document, continuously...
+:PipelineAB                        " arms phase 2, three in flight
+"  ...scroll the same way again...
+:PipelineAB                        " prints the comparison
+```
+
+Reports the interval floor for each phase split into link and capture, the
+ceiling and delivered rates, and a verdict against a prediction fixed **before**
+the run: floor under 40 ms, delivery above 20/s. A result that misses it is
+reported as missing it — the point of writing the threshold down first is that
+it cannot be reinterpreted afterwards. `:PipelineABCancel` abandons a run
+partway; configuration is saved and restored exactly as `scroll-scale/ab.lua`
+does.

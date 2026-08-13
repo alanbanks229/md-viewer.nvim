@@ -14,6 +14,7 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
+local client_render = require("md-viewer.client_render")
 
 local M = {}
 local group
@@ -516,7 +517,16 @@ function M.refresh(session, render_options)
     if session.selection_content_revision and session.selection_content_revision ~= session.renderer_revision then
       interaction.forget_selection(session)
     end
-    local newer_scroll_pending = render_options and render_options.scroll_frame and session.scroll_render_pending
+    -- "Is there a position newer than this frame's that has not been shown
+    -- yet?" With several captures outstanding, the ones still in flight count as
+    -- much as the one waiting to be sent: this frame's own request has not been
+    -- released yet (`on_complete` runs after this), so `> 1` means a genuinely
+    -- newer capture is behind it. Reading only `scroll_render_pending` here let
+    -- an older frame's scrollY overwrite the desired position and snap the next
+    -- capture backwards.
+    local newer_scroll_pending = render_options
+      and render_options.scroll_frame
+      and (session.scroll_render_pending or (session.scroll_in_flight or 0) > 1)
     session.latest_blocks = meta.blocks
     session.document_height_px = meta.documentHeightPx
     session.viewport_height_px = meta.viewportHeightPx
@@ -638,11 +648,46 @@ end
 ---because they are gated on different things: the scale trades sharpness for
 ---bytes, this trades latency for *not spending the bytes at all* on a reader
 ---who has not finished scrolling.
+---Not applied when the frame never crosses the link. The whole reason to wait
+---longer is that a settle capture over SSH was half a second of transit that the
+---next wheel notch immediately made stale; a settle frame rendered on the
+---machine the terminal is on costs ~57ms and about a kilobyte, so the extra
+---240ms buys nothing and delays the moment the picture sharpens by exactly that.
 local function scroll_settle_delay(render)
   if render.ssh_scroll_settle_ms ~= nil and terminal.detect().ssh then
+    if client_render.resolve("kitty_raw") then
+      return render.scroll_settle_ms, "client rendering (the settle frame costs no wire time)"
+    end
     return render.ssh_scroll_settle_ms, "SSH session (render.ssh_scroll_settle_ms)"
   end
   return render.scroll_settle_ms, "render.scroll_settle_ms"
+end
+
+---How many scroll captures may be in flight at once, and why that number.
+---
+---One, everywhere the renderer is a pipe away: a capture and its terminal
+---transmission are then the natural pacing, and a second request in flight would
+---only queue behind the first. That is every local session and every SSH session
+---rendering on the remote host, so the default path is unchanged.
+---
+---Across a link it is the wrong answer, and measurably so. With the renderer on
+---the machine the terminal is on, one frame costs a 92ms round trip plus a 15ms
+---render, strictly serially -- so the renderer is idle 86% of the time and the
+---preview updates 9 times a second while the browser could manage 66. With N in
+---flight the floor becomes `max(render, RTT/N)`: at 3 that is ~31ms, which is
+---about what a local preview achieves, because at that point the render is the
+---constraint again rather than the link.
+---
+---The frames are not wasted work. Every one is a distinct scroll position the
+---reader passed through and every one is displayed, in order -- which is what
+---smooth scrolling is. See `admit` in renderer/src/lanes.js for what stays
+---guaranteed while several are outstanding.
+local function scroll_pipeline_depth(session)
+  local configured = config.get().client_render.scroll_pipeline
+  if not client_render.resolve(session.backend and session.backend.name) then
+    return 1, "one capture in flight (the renderer is beside Neovim)"
+  end
+  return configured, "client rendering (client_render.scroll_pipeline)"
 end
 
 function M.schedule_scroll(session)
@@ -654,24 +699,26 @@ function M.schedule_scroll(session)
   -- this session's frames were actually captured at.
   session.scroll_scale = scale_factor
   session.scroll_scale_source = scale_source
-  if session.scroll_render_in_flight then
+  local depth, depth_source = scroll_pipeline_depth(session)
+  session.scroll_pipeline_depth = depth
+  session.scroll_pipeline_source = depth_source
+  if (session.scroll_in_flight or 0) >= depth then
     session.scroll_render_pending = true
     session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
   else
-    session.scroll_render_in_flight = true
+    session.scroll_in_flight = (session.scroll_in_flight or 0) + 1
     M.refresh(session, {
       capture_scale = fast_scale,
       capture_scale_factor = scale_factor,
       capture_only = true,
       scroll_frame = true,
+      pipelined = depth > 1,
       on_complete = function()
-        session.scroll_render_in_flight = false
+        session.scroll_in_flight = math.max(0, (session.scroll_in_flight or 1) - 1)
         if not valid(session) then return end
         if session.scroll_render_pending then
           session.scroll_render_pending = false
-          -- One capture at a time is sufficient backpressure. Continue with
-          -- the newest position on the next event-loop turn; capture and
-          -- terminal transmission provide the natural pacing.
+          -- Continue with the newest position on the next event-loop turn.
           vim.schedule(function()
             if valid(session) then M.schedule_scroll(session) end
           end)
@@ -1587,5 +1634,6 @@ end
 -- an intention.
 M._scroll_capture_scale = scroll_capture_scale
 M._scroll_settle_delay = scroll_settle_delay
+M._scroll_pipeline_depth = scroll_pipeline_depth
 
 return M

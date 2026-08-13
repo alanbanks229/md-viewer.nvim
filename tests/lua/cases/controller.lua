@@ -184,9 +184,9 @@ return function(t)
   controller.schedule = function(_, delay, timer_name, options)
     scheduled[timer_name] = { delay = delay, options = options }
   end
-  session.scroll_render_in_flight = false
+  session.scroll_in_flight = 0
   controller.schedule_scroll(session)
-  session.scroll_render_in_flight = false
+  session.scroll_in_flight = 0
   controller.refresh = original_refresh
   controller.schedule = original_schedule
   t.eq("css", scheduled.scroll_timer.options.capture_scale, "moving preview uses CSS-resolution frame")
@@ -201,7 +201,7 @@ return function(t)
     latest_fast_options = options
   end
   controller.schedule = function() end
-  session.scroll_render_in_flight = false
+  session.scroll_in_flight = 0
   session.scroll_render_pending = false
   controller.schedule_scroll(session)
   controller.schedule_scroll(session)
@@ -210,7 +210,7 @@ return function(t)
   latest_fast_options.on_complete()
   vim.wait(100, function() return fast_requests == 2 end)
   t.eq(2, fast_requests, "pending scroll position renders after current capture")
-  session.scroll_render_in_flight = false
+  session.scroll_in_flight = 0
   session.scroll_render_pending = false
   controller.refresh = original_refresh
   controller.schedule = original_schedule

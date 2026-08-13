@@ -699,9 +699,19 @@ Options: >lua
         -- backend, and a splicer that announced itself via LC_MD_VIEWER.
         -- "off" never references a frame. "on" waives the handshake alone.
         enabled = "auto",
+        -- How many scroll captures may be outstanding at once. One everywhere
+        -- else, and not configurable there. Across a link one frame costs a
+        -- round trip plus a render, serially, so the renderer sits idle most
+        -- of the time; depth N makes the floor max(render, round_trip / N).
+        scroll_pipeline = 3,
       },
     }
 <
+Client rendering also stops applying `render.ssh_scroll_settle_ms`: that longer
+wait exists because a settle capture over SSH was half a second of transit, and
+a settle frame rendered where the terminal is costs about a kilobyte.
+`render.scroll_settle_ms` is used instead, so the picture sharpens sooner.
+
 :MdViewerHealth reports whether client rendering is in force and, when it is
 not, which of those preconditions is missing -- they all present identically
 otherwise, as a preview that works and is slow. :MdViewerDebug reports

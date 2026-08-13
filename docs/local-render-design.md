@@ -16,8 +16,72 @@ shipped behaviour is documented in [`../README.md`](../README.md),
 | 0 — `render.scroll_scale`, SSH-gated | **Shipped and validated on the real link.** Moving frame 134,851 → 47,469 B; delivered rate 3.8/s → 6.3/s; wire saturation 79% → 49% |
 | 1 — transport seam (`service.js`, `companion.js`, socket transport) | **Shipped.** One machine only: responses still returned a path |
 | 2 — transmission tokens, splicer, `blocks` elision | **Shipped.** `frames.js`, `splice.js`, the `transmit()` seam, `frameTransport: "ref"`, `blocksRevision` |
-| 3 — `bin/md-viewer-ssh`, `LC_MD_VIEWER`, diagnostics | **Shipped.** End-to-end on one machine; not yet run across a real link |
-| 4 — parity: overlay sheet, animation frames, local images by reference | **Not built.** See "What is still missing" below |
+| 3 — `bin/md-viewer-ssh`, `LC_MD_VIEWER`, diagnostics | **Shipped and validated on the real link.** 13.3 MB of pixels stayed put in one session; every frame referenced; zero misses |
+| **3.5 — pipelined captures** | **The remaining performance work.** See below — this is what makes 1–3 pay off |
+| 4 — parity: overlay sheet, animation frames, local images by reference | **Not built, and irrelevant to speed.** Correctness debt only |
+
+### The 2026-08-13 measurement, and what it changed
+
+Client rendering shipped and the operator reported scrolling felt **about the same**.
+The numbers agree, and the reason is worth writing down because it inverts the
+premise this document opened with.
+
+| | Phase 0 (render on the VM) | Phases 1–3 (render on the Mac) |
+|---|---|---|
+| Frame interval floor | ~56 ms | **107 ms** |
+| Mean interval, scrolling continuously | ~160 ms | **213 ms** |
+| Delivered rate | 6.3/s | **4.7/s** |
+| Moving capture | 50–62 ms | **14.9 ms** |
+| Pixels crossing the link | all of them | **none** |
+
+`coalesced_scroll_events = 1292` against 101 moving frames confirms the operator
+was scrolling continuously, so the mean is pipeline time rather than idle time —
+the mistake made once already in this project's history.
+
+**Phase 0 had already solved the throughput problem.** Wire saturation was 49%,
+which means transit had stopped being the constraint. Phases 1–3 then removed
+16.7 seconds of wire time that was no longer on the critical path, and charged a
+92 ms serial round trip per frame to do it. Net effect on the thing a reader
+feels: nothing.
+
+The byte case was real and it was already won. What is left is a *latency* problem
+in a pipeline that was designed against a *throughput* one.
+
+### Phase 3.5 — pipelined captures (the remaining performance work)
+
+```
+render on the Mac       15 ms   -> a 66 fps ceiling
+round trip              92 ms   -> paid once per frame, serially
+observed floor         107 ms   = 92 + 15, which is the whole of it
+```
+
+The Mac is busy 14% of the time. With N captures in flight the floor becomes
+`max(render, RTT/N)`: N=3 gives 31 ms (32 fps), N=4 gives 23 ms (43 fps), N=6 is
+render-bound at 15 ms. **A local non-SSH preview runs at about 30 fps**, so the
+target here is parity with a local preview — which is possible precisely because
+the render already is local.
+
+Two things stand in the way, both small and both named:
+
+1. **`controller.lua`'s `schedule_scroll` holds one capture in flight**, as a
+   boolean (`session.scroll_render_in_flight`). Its comment — *"capture and
+   terminal transmission provide the natural pacing"* — is true when the renderer
+   is a pipe away and false when it is 92 ms away. Needs a counter and a depth.
+2. **`lanes.js`'s `admit` claims the lane for every request**, so `isStale` marks
+   the older of two in-flight captures `superseded` and it renders nothing.
+   Pipelined captures must not claim the lane — **while still being invalidated by
+   `contentEpoch`**, which is the check that actually protects correctness. That
+   is the one risky edit in this phase.
+
+Falsifiable prediction, to be measured on the real link: `fast_interval_min_ms`
+drops from 107 to under 40, and the delivered rate goes from 4.7/s to above 20/s.
+If it does not, the model of this pipeline is wrong and tuning should stop.
+
+Two settings also become mistuned under client rendering, because both trade
+against wire bytes that no longer exist: `ssh_scroll_settle_ms = 400` adds 240 ms
+of pure delay before the picture sharpens, and `ssh_scroll_scale = 0.5` now trades
+sharpness for *render* time rather than for bytes — which only matters while the
+render sits in the critical path, i.e. until pipelining lands.
 
 Two details of the design below were changed during implementation, both toward
 safety, and the text has been corrected in place:
@@ -32,6 +96,11 @@ safety, and the text has been corrected in place:
   — so forwarding is strictly better: it cannot destroy somebody's output.
 
 ### What is still missing
+
+**Phase 4 does not make scrolling faster.** It is correctness debt, and it was
+mis-scoped early on as part of "parity for v1", which made it look like it sat on
+the path to a fast preview. It does not. The performance work is Phase 3.5 above
+and nothing else.
 
 - **Local images.** `resolveLocalImage` reads the renderer host's filesystem, which under
   client rendering is the wrong machine. The image renders as its failure placeholder.

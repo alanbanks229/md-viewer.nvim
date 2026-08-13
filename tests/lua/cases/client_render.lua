@@ -204,6 +204,55 @@ return function(t)
   config.setup({ terminal = { profile = "kitty" } })
 
   -- ---------------------------------------------------------------------
+  -- 4b. Pipeline depth and the settle delay both follow client rendering.
+  --
+  -- Both are settings that trade against wire bytes, and under client rendering
+  -- there are no wire bytes to trade against. The measurement that forced this:
+  -- with the renderer on the machine the terminal was on, one frame cost a 92ms
+  -- round trip plus a 15ms render, serially -- so the preview updated 4.7 times
+  -- a second where it had managed 6.3 with the renderer on the remote host, and
+  -- the operator reported it felt no different.
+  -- ---------------------------------------------------------------------
+
+  local controller = require("md-viewer.controller")
+  local kitty_session = { backend = { name = "kitty_raw" } }
+
+  stub({ version = 1 }, connected)
+  local depth, depth_source = controller._scroll_pipeline_depth(kitty_session)
+  t.eq(3, depth, "client rendering keeps three captures in flight, so the link is not idle between frames")
+  t.ok(depth_source:match("client_render.scroll_pipeline"), "and names the option that sets it")
+
+  config.setup({ client_render = { scroll_pipeline = 6 } })
+  t.eq(6, (controller._scroll_pipeline_depth(kitty_session)), "the depth is configurable")
+  config.reset()
+  config.setup({ terminal = { profile = "kitty" } })
+
+  stub(nil, { running = true, transport = "stdio", connected = true })
+  depth, depth_source = controller._scroll_pipeline_depth(kitty_session)
+  t.eq(1, depth, "a renderer beside Neovim is paced by its own capture; a second request would only queue")
+  t.ok(depth_source:match("beside Neovim"), "and says so")
+
+  -- The settle delay exists because a full-size settle capture over SSH was
+  -- half a second of transit that the next wheel notch made stale. Rendered on
+  -- the machine the terminal is on it costs ~57ms and about a kilobyte, so the
+  -- extra wait is pure delay before the picture sharpens.
+  local ssh_capability = { ssh = true, client_render = nil }
+  local original_detect_2 = terminal.detect
+  terminal.detect = function() return ssh_capability end
+  local render_cfg = { scroll_settle_ms = 160, ssh_scroll_settle_ms = 400 }
+  process.status = function() return { running = true, transport = "stdio", connected = true } end
+  local settle, settle_source = controller._scroll_settle_delay(render_cfg)
+  t.eq(400, settle, "an SSH session rendering remotely still waits longer before spending the transfer")
+  t.ok(settle_source:match("ssh_scroll_settle_ms"), "and names the option")
+
+  ssh_capability.client_render = { version = 1 }
+  process.status = function() return connected end
+  settle, settle_source = controller._scroll_settle_delay(render_cfg)
+  t.eq(160, settle, "client rendering sharpens 240ms sooner, because the settle frame costs no wire time")
+  t.ok(settle_source:match("no wire time"), "and says why rather than just changing the number")
+  terminal.detect = original_detect_2
+
+  -- ---------------------------------------------------------------------
   -- 5. The handshake itself, parsed from the environment SSH forwards.
   -- ---------------------------------------------------------------------
 

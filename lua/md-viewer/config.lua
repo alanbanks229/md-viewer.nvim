@@ -209,6 +209,22 @@ M.defaults = {
     -- A frame referenced with no splicer to substitute it does not display, so
     -- "auto" is the setting to leave alone unless you have looked.
     enabled = "auto",
+    -- How many scroll captures may be in flight at once while client rendering.
+    -- One everywhere else, and not configurable there: a renderer beside Neovim
+    -- is paced by its own capture, and a second request would only queue.
+    --
+    -- Across a link one frame costs a round trip plus a render, serially -- 92ms
+    -- and 15ms on the connection this was built for, so the renderer sits idle
+    -- 86% of the time and the preview updates 9 times a second where the browser
+    -- could manage 66. Depth N makes the floor `max(render, RTT/N)`: 3 lands
+    -- near 31ms, which is about what a local preview achieves, and beyond that
+    -- the render is the constraint rather than the link.
+    --
+    -- Every frame in flight is a distinct position the reader passed through and
+    -- every one is displayed, in order. Raising this past the point where the
+    -- render becomes the constraint buys nothing and lengthens how far the
+    -- preview keeps moving after the wheel stops.
+    scroll_pipeline = 3,
   },
   terminal = {
     profile = "auto",
@@ -376,6 +392,13 @@ local function validate(cfg)
   assert(
     cfg.client_render.enabled == "auto" or cfg.client_render.enabled == "on" or cfg.client_render.enabled == "off",
     "md-viewer: client_render.enabled must be 'auto', 'on', or 'off'"
+  )
+  assert(
+    type(cfg.client_render.scroll_pipeline) == "number"
+      and cfg.client_render.scroll_pipeline >= 1
+      and cfg.client_render.scroll_pipeline <= 8
+      and cfg.client_render.scroll_pipeline % 1 == 0,
+    "md-viewer: client_render.scroll_pipeline must be a whole number between 1 and 8"
   )
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(

@@ -89,6 +89,13 @@ return function(t)
   t.eq(nil, cfg.client_render.address, "no companion renderer until one is configured")
   t.eq(2000, cfg.client_render.connect_timeout_ms, "a companion gets two seconds to answer")
   t.eq("auto", cfg.client_render.enabled, "and referencing a frame requires everything that makes it work")
+  t.eq(3, cfg.client_render.scroll_pipeline, "three captures in flight while client rendering, one everywhere else")
+  for _, bad in ipairs({ 0, 9, 2.5, "3" }) do
+    local ok_depth, err_depth = pcall(config.setup, { client_render = { scroll_pipeline = bad } })
+    t.eq(false, ok_depth, ("a scroll_pipeline of %s is rejected"):format(vim.inspect(bad)))
+    t.ok(tostring(err_depth):match("scroll_pipeline"), "the pipeline error names the offending option")
+    config.reset()
+  end
   local bad_client_ok, bad_client_err = pcall(config.setup, { client_render = { enabled = "yes" } })
   t.eq(false, bad_client_ok, "an unrecognized client_render.enabled is rejected rather than read as off")
   t.ok(tostring(bad_client_err):match("client_render.enabled"), "the client render error names the offending option")

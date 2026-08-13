@@ -76,8 +76,26 @@ reference across the link instead of the picture.
   `$MD_VIEWER_CLIENT_ADDR` joins `client_render.address` as a way to name the
   companion from the remote side.
 
+- **`client_render.scroll_pipeline`**, default 3: how many scroll captures may
+  be outstanding at once while client rendering. One everywhere else, unchanged
+  and not configurable there — a renderer beside Neovim is paced by its own
+  capture and a second request would only queue behind the first. Across a link
+  it is the wrong answer: one frame costs a round trip plus a render, strictly
+  serially, measured at 92 ms and 15 ms on the connection this was built for, so
+  the renderer sat idle 86% of the time and the preview updated 9 times a second
+  where the browser could manage 66. Depth N makes the floor
+  `max(render, round_trip / N)`. Every frame in flight is a distinct position
+  the reader passed through, and all of them are displayed in order.
+  `scripts/pipeline/ab.lua` measures it.
+
 ### Changed
 
+- **`render.ssh_scroll_settle_ms` no longer applies while client rendering.** It
+  exists because a settle capture over SSH was half a second of transit that the
+  next wheel notch made stale; a settle frame rendered on the machine the
+  terminal is on costs ~57 ms and about a kilobyte, so the extra 240 ms only
+  delayed the moment the picture sharpened. `render.scroll_settle_ms` is used
+  there instead, and `:MdViewerDebug` says which and why.
 - **Block geometry is no longer re-sent on every frame of a scroll.** It is
   identical from one scroll frame to the next and is 10,477 B on this project's
   own README — 1.4 MB across a single wheel spin, which would have become the

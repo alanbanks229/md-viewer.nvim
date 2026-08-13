@@ -26,7 +26,7 @@ function M.create(source_buf, source_win)
     render_timer = nil,
     scroll_settle_timer = nil,
     cursor_scroll_timer = nil,
-    scroll_render_in_flight = false,
+    scroll_in_flight = 0,
     scroll_render_pending = false,
     resize_timer = nil,
     last_image_bytes = nil,
