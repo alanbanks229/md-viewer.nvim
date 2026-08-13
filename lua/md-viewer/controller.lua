@@ -691,7 +691,10 @@ local function schedule_source_scroll(session, delay)
   end)
 end
 
-local function close_session(session)
+-- `stop_opts` is forwarded to `process.stop` for the one call that actually
+-- stops the renderer -- closing the last session -- so that `close_all` at
+-- VimLeavePre can ask for the blocking teardown. Nil for every ordinary close.
+local function close_session(session, stop_opts)
   if not session or session.closed then return end
   session.closed = true
   session.request_serial = session.request_serial + 1
@@ -720,7 +723,7 @@ local function close_session(session)
   if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
     pcall(vim.api.nvim_win_close, session.preview_win, true)
   end
-  if not next(state.all()) then process.stop() end
+  if not next(state.all()) then process.stop(stop_opts) end
   interaction.forget(session)
   interaction.forget_selection(session)
   animation.forget(session)
@@ -732,18 +735,20 @@ function M.close(buf)
   close_session(session)
 end
 
-function M.close_all()
+function M.close_all(opts)
   local copy = {}
   for _, session in pairs(state.all()) do
     copy[#copy + 1] = session
   end
   for _, session in ipairs(copy) do
-    close_session(session)
+    close_session(session, opts)
   end
   for _, name in ipairs({ "nvim_img", "kitty_raw" }) do
     backends.get(name).clear_all()
   end
-  process.stop()
+  -- Usually a no-op: the last close_session already stopped the renderer, with
+  -- `opts`. This covers close_all with no sessions open at all.
+  process.stop(opts)
 end
 
 function M.open(position)
@@ -1559,7 +1564,12 @@ function M.setup_autocmds()
       end)
     end,
   })
-  vim.api.nvim_create_autocmd("VimLeavePre", { group = group, callback = M.close_all })
+  -- Wrapped rather than passed directly: an autocmd callback receives the event
+  -- table as its first argument, which `close_all` now reads as `opts`.
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = group,
+    callback = function() M.close_all({ blocking = true }) end,
+  })
 end
 
 -- Exported for `tests/lua/cases/scroll_scale.lua` only.

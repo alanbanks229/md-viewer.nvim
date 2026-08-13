@@ -3,6 +3,48 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-08-13
+
+Renderers that outlived the Neovim which started them, and burned a full CPU
+core each until they were killed by hand.
+
+Nine had collected on one machine over a week — 884% CPU across ten cores and
+four gigabytes of resident memory, the oldest spinning for six days — because
+the process could reach a state in which every route out of it was blocked,
+including the signal you would send to clear it. The fix is pinned by a test
+that launches a real renderer with a real Chromium, takes its pipes away
+mid-render, and fails if the process is still alive fifteen seconds later; it
+reproduces the spin against the previous code at 99.9% of a core.
+
+### Fixed
+
+- **A renderer whose Neovim died without warning ran forever at 100% of a
+  core.** `shutdown` awaited `service.close()` and called `process.exit(0)` only
+  after it returned. Once the editor was gone Chromium's pipe was gone too, so
+  `browser.close()` rejected — the ordinary case, not an edge case — and the
+  exit after it never ran. Node re-raised the unawaited rejection as an uncaught
+  exception; the handler re-entered `shutdown`, found `service.closing` already
+  true, and returned without exiting. The process then sat in an endless
+  throw-and-format-stack-trace loop. Exiting is now unconditional and cannot
+  itself fail: cleanup is attempted, its outcome is ignored, and the process
+  exits either way.
+- **`SIGTERM` could not stop a wedged renderer.** The same `service.closing`
+  guard swallowed the signal, so the obvious way to clear one did nothing and
+  `SIGKILL` was the only thing that worked. `SIGTERM`, `SIGINT`, and now
+  `SIGHUP` — a closed terminal window — all exit unconditionally.
+- **A renderer never noticed that its parent had gone.** Nothing watched stdin,
+  so a crashed, `SIGKILL`ed, or terminal-closed Neovim left a child with no way
+  to learn it had been orphaned. Stdin `close`, `end`, and `error`, and `EPIPE`
+  on the response pipe, now each mean the same thing and end the process.
+  Handling `EPIPE` here also keeps it from arriving as the uncaught exception
+  that started the loop above.
+- **The kill fallback at Neovim exit never ran.** `process.stop()` armed its
+  `SIGTERM` on a 1000 ms `vim.uv` timer. At `VimLeavePre` Neovim is gone within
+  milliseconds, taking its event loop and the pending signal with it — so the
+  one moment the fallback existed for was the one moment it was guaranteed not
+  to fire. `VimLeavePre` now tears the renderer down synchronously and
+  escalates `SIGTERM` → `SIGKILL` for one that will not go.
+
 ## [0.2.0] - 2026-08-13
 
 Scrolling over a throttled SSH link, and previews that no longer stall on a
@@ -141,6 +183,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.0

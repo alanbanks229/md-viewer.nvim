@@ -148,7 +148,15 @@ function M.status()
   }
 end
 
-function M.stop()
+---Stop the renderer.
+---
+---`opts.blocking` is for `VimLeavePre` and nothing else. The deferred branch
+---below arms a `vim.uv` timer 1000ms out, and at Neovim exit that timer never
+---fires -- Neovim is gone within milliseconds, taking its event loop and the
+---pending SIGTERM with it. So the one moment the safety net existed for was the
+---one moment it was guaranteed not to run, and every hard exit stranded a
+---renderer. Blocking mode waits inline instead, then escalates for real.
+function M.stop(opts)
   local proc = instance
   instance = nil
   if not proc then return end
@@ -156,6 +164,24 @@ function M.stop()
     proc.stdin:write(protocol.encode({ id = 0, method = "shutdown", params = {} }))
     proc.stdin:shutdown()
   end
+  if not proc.running then return end
+
+  if opts and opts.blocking then
+    -- Closing stdin above is itself enough for a current renderer, which exits
+    -- on EOF; the escalation is for one left over from an older version, or
+    -- wedged past listening. `vim.wait` keeps processing the event loop, so the
+    -- spawn callback still lands and clears `proc.running`.
+    vim.wait(500, function() return not proc.running end, 20)
+    if proc.running and proc.handle and not proc.handle:is_closing() then
+      pcall(proc.handle.kill, proc.handle, "sigterm")
+      vim.wait(300, function() return not proc.running end, 20)
+    end
+    -- Signalling the pid rather than the handle: by now the handle may be
+    -- closing, and SIGKILL is the only signal a wedged renderer cannot ignore.
+    if proc.running and proc.pid then pcall(vim.uv.kill, proc.pid, "sigkill") end
+    return
+  end
+
   if proc.handle and not proc.handle:is_closing() then
     local timer = vim.uv.new_timer()
     timer:start(1000, 0, function()
