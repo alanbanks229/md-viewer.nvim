@@ -21,11 +21,7 @@ DOM, which does the hit-testing, selection, search and link resolution before th
 viewport is recaptured. You get browser behaviour — but the preview is a PNG
 surface, **NOT** native terminal text and not an embedded webview.
 
-The renderer opens no window and starts no HTTP server, and the machine running
-Neovim listens on nothing — it only ever dials out. The one thing that accepts a
-connection is the optional [companion renderer](#rendering-on-the-machine-your-terminal-is-on),
-which runs on the machine your terminal is on, listens on a `0600` unix socket,
-and is never a TCP port.
+The renderer opens no window, starts no HTTP server, and listens on no port.
 
 ## Requirements
 
@@ -135,103 +131,10 @@ produces.
 > existing. The defaults are already the fastest configuration.
 
 If the link is slow enough that this is still not comfortable, the bytes
-themselves are the problem rather than any setting — and the next section is
-about not sending them.
-
-### Rendering on the machine your terminal is on
-
-On a link with a hard throughput ceiling — an AWS SSM tunnel is a flat
-0.80 MB/s — the wire time for one scroll frame is larger than the render and the
-terminal decode put together. No setting fixes that, because the frame is the
-cost. What fixes it is not sending the frame.
-
-`bin/md-viewer-ssh` is a wrapper around `ssh` that does three things:
-
-- runs a **companion renderer** on your local machine (a unix socket, mode
-  `0600`, never a TCP port), so the remote Neovim can rasterize its preview
-  where your terminal is;
-- **filters ssh's stdout**, turning the ~60-byte transmission tokens the remote
-  plugin then emits back into the Kitty graphics uploads your terminal expects —
-  byte for byte the same stream it receives today;
-- exports **`LC_MD_VIEWER`**, which is how the remote plugin finds out any of
-  this exists.
-
-> [!IMPORTANT]
-> **A working `LC_TERMINAL` does not prove `LC_MD_VIEWER` will arrive.** Both
-> rely on SSH's `SendEnv`/`AcceptEnv`, whose defaults are the glob `LANG LC_*` —
-> but managed environments often replace that glob with an explicit list, and a
-> variable this plugin invented will not be on it. The symptom is the confusing
-> one: terminal detection works and client rendering silently does not happen.
-> Run `echo "[$LC_MD_VIEWER]"` on the remote host before anything else. If it is
-> empty, add `SendEnv LC_MD_VIEWER` to your local `~/.ssh/config` and
-> `AcceptEnv LC_MD_VIEWER` to the remote `sshd_config` — **both ends**.
-
-**Setup, once.** The wrapper runs on your *local* machine, so that machine needs
-a checkout of this repository with the renderer installed — the same two
-commands the plugin's build hook runs on the remote host. Your Neovim
-configuration is not involved; the plugin is not being loaded here, only its
-renderer:
-
-```sh
-git clone https://github.com/alanbanks229/md-viewer.nvim ~/.local/share/md-viewer.nvim
-cd ~/.local/share/md-viewer.nvim
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
-ln -s "$PWD/bin/md-viewer-ssh" ~/.local/bin/md-viewer-ssh   # or wherever your PATH points
-```
-
-If you already run md-viewer locally too, point the symlink at that checkout
-instead of cloning a second one.
-
-**Then start sessions through it instead of `ssh`:**
-
-```sh
-# Straightforward case: let the wrapper set up the reverse forward.
-md-viewer-ssh -R 4445:"$(md-viewer-ssh --md-viewer-print-socket)" \
-              --md-viewer-addr 127.0.0.1:4445 my-remote-host
-```
-
-`ssh -R <port>:<local socket path>` is a supported OpenSSH form, and it is what
-keeps the invariant intact: **the machine running Neovim still opens no port.**
-It dials outward to a loopback address, and the listener on that end belongs to
-`sshd` because you asked for a forward.
-
-If the forward already exists — many organizations have a wrapper script that
-sets up a fixed set of them — reuse it and just name the remote-side address:
-
-```zsh
-# Whatever already builds your ssh command, add one entry:
-#   -R 4445:/run/user/$UID/md-viewer-$UID.sock       (or the path printed by
-#                                                     --md-viewer-print-socket)
-md-viewer-ssh --md-viewer-addr 127.0.0.1:4445 my-remote-host
-```
-
-Or set it on the remote host instead, where it travels with the session:
-
-```sh
-export MD_VIEWER_CLIENT_ADDR=127.0.0.1:4445
-```
-
-**Nothing new is installed.** The companion is the renderer this plugin already
-ships, run from the checkout on your local machine; it needs the same Node and
-Chrome/Chromium the remote host needs, and it never downloads a browser.
-
-**Nothing changes when it is not there.** No wrapper means no `LC_MD_VIEWER`,
-which means the plugin never emits a token and behaves exactly as it does today.
-A companion that dies mid-session falls back to rendering beside Neovim with one
-notification. `:MdViewerHealth` reports whether client rendering is in force
-and, when it is not, which of the four preconditions is missing;
-`:MdViewerDebug` reports `client_frame_count` and `client_bytes_deferred` — the
-pixels that stayed put.
-
-**What it does not do yet.** Two things still need the renderer to be on the
-machine the *file* is on, and fall back when it is not: a local image embedded
-in the document shows its failure placeholder, and an animated image stays on
-its still frame. Remote `https` images are fetched by your local machine
-instead of the remote one, which is usually an improvement and is a change of
-trust boundary either way — see [SECURITY.md](SECURITY.md).
-`:MdViewerHealth` notes all of this whenever client rendering is on.
-[docs/local-render-design.md](docs/local-render-design.md) has the measurements,
-the architecture and what remains.
+themselves are the problem rather than any setting.
+[docs/local-render-design.md](docs/local-render-design.md) records what it would
+take to stop sending pixels over the connection at all, and why that was built,
+measured, and removed again.
 
 ## Installation
 

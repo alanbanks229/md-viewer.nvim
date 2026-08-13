@@ -29,11 +29,8 @@ viewport is recaptured. That gives browser-like behavior on a raster surface.
 Source text remains a normal, separately editable and selectable Neovim buffer
 throughout.
 
-The renderer opens no external browser window and starts no HTTP server, and
-the machine running Neovim listens on nothing at all -- it only ever dials
-outward. The one thing that accepts a connection is the optional companion
-renderer (|md-viewer-client-render|), which runs on the machine your terminal
-is on, listens on a unix socket with mode 0600, and is never a TCP port.
+The renderer opens no external browser window, starts no HTTP server, and
+listens on no port.
 
 The browser makes no runtime network requests under any configuration; remote
 images are fetched by the renderer process and inlined
@@ -45,11 +42,8 @@ REQUIREMENTS                                          *md-viewer-requirements*
 - Neovim 0.12+. The graphical backend writes to the terminal through
   |nvim_ui_send()|, a 0.12 API; there is no graphical path without it.
 - Node.js 22.12+
-- an existing Chrome, Chromium, or Microsoft Edge installation, on whichever
-  machine does the rendering. By default that is wherever Neovim runs -- over
-  SSH, the remote host (|md-viewer-ssh|). Where the link is slow enough to
-  matter it can be the machine your terminal is on instead
-  (|md-viewer-client-render|), which needs one there as well.
+- an existing Chrome, Chromium, or Microsoft Edge installation on the machine
+  Neovim runs on -- over SSH, the remote host (|md-viewer-ssh|)
 - a terminal that advertises the Kitty graphics protocol, used without a
   multiplexer -- see |md-viewer-terminals|
 - locked renderer dependencies installed with npm ci
@@ -85,7 +79,6 @@ grouped:
     sync        Source-following and preview navigation
     security    Local document root and raw HTML sanitization
     terminal    Terminal profile detection and capability overrides
-    client_render  Reaching a renderer that is not beside Neovim
     interaction Mouse/keyboard interaction: selection, search, links, caret
 
 The options below need more than a default value to use.
@@ -145,14 +138,10 @@ Measure the active terminal profile rather than copying those values;
                                                                *md-viewer-env*
 ENVIRONMENT VARIABLES ~
 
-Four settings are read from the environment as well as from `setup()`. They
+Three settings are read from the environment as well as from `setup()`. They
 exist for the case configuration cannot serve: one Neovim config shared across
 several machines, where the right answer depends on the session rather than on
 the config file. Each is overridden by its explicit config option.
-
-A fifth, LC_MD_VIEWER, is not a setting: it is set by `bin/md-viewer-ssh` on
-the machine your terminal is on and forwarded by SSH, and it is how this
-plugin learns there is a renderer out there. See |md-viewer-client-render|.
 
 MD_VIEWER_TERMINAL_PROFILE
         Terminal profile to use, bypassing environment inference. Accepts the
@@ -165,11 +154,6 @@ MD_VIEWER_TERMINAL_PROFILE
 MD_VIEWER_CELL_WIDTH_PX, MD_VIEWER_CELL_HEIGHT_PX
         Cell size in CSS pixels, overriding the TIOCGWINSZ measurement. Both
         must be set. See |md-viewer-calibration| above.
-
-MD_VIEWER_CLIENT_ADDR
-        Where a companion renderer is listening, as a unix socket path or a
-        host:port. `client_render.address` outranks it, and both outrank the
-        address LC_MD_VIEWER announced. See |md-viewer-client-render|.
 
                                                  *md-viewer-overlay-alignment*
 NOTIFICATIONS OVER THE PREVIEW ~
@@ -579,11 +563,6 @@ remote host, because by default the renderer runs wherever Neovim runs; it
 produces a PNG which Neovim then writes to your terminal as Kitty graphics
 escape sequences, travelling down the SSH connection.
 
-On a link slow enough that those pixels are the problem, the renderer can
-instead run on the machine your terminal is on -- see
-|md-viewer-client-render| below. Either way the machine running Neovim opens
-no port: it only ever dials outward.
-
 The part that needs care is terminal identification, because SSH does not
 forward TERM_PROGRAM. It does forward LC_* by default, and iTerm2 and WezTerm
 both export LC_TERMINAL for exactly that reason, so those two are recognized
@@ -639,86 +618,6 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame larger (measured 80 KB -> 224 KB), and it collapses the moving and
 settle captures into one, so the cheap scroll frame stops existing. Raising
 `render.debounce_ms` does help, by cutting how many refreshes an edit makes.
-
-                                                      *md-viewer-client-render*
-RENDERING ON THE MACHINE YOUR TERMINAL IS ON ~
-
-When the frame itself is the cost, no setting helps and the answer is not to
-send it. `bin/md-viewer-ssh` wraps ssh and adds three things:
-
-  - a companion renderer on your local machine, on a unix socket with mode
-    0600 -- never a TCP port;
-  - a filter over ssh's stdout, which turns the ~60-byte transmission tokens
-    the remote plugin emits back into the Kitty graphics uploads your terminal
-    expects, byte for byte identical to what it receives today;
-  - LC_MD_VIEWER, which is how the remote plugin learns any of this is there.
-
-A working LC_TERMINAL does NOT prove LC_MD_VIEWER will arrive. Both rely on
-SSH's SendEnv/AcceptEnv, whose defaults are the glob `LANG LC_*` -- but managed
-environments often replace that glob with an explicit list, and a variable this
-plugin invented will not be on it. Terminal detection then works while client
-rendering silently does not happen. Check `echo "[$LC_MD_VIEWER]"` on the
-remote host; if empty, add `SendEnv LC_MD_VIEWER` to the local ~/.ssh/config
-and `AcceptEnv LC_MD_VIEWER` to the remote sshd_config -- both ends.
-
-The remote plugin needs an address to dial. A reverse forward provides one: >sh
-
-    md-viewer-ssh -R 4445:"$(md-viewer-ssh --md-viewer-print-socket)" \
-                  --md-viewer-addr 127.0.0.1:4445 my-remote-host
-<
-`ssh -R <port>:<local socket>` is a supported OpenSSH form. If the forward
-already exists -- many organizations wrap ssh with a fixed set of them -- add
-one entry for the companion socket and name only the remote-side address with
---md-viewer-addr, or set MD_VIEWER_CLIENT_ADDR on the remote host, or
-`client_render.address` in the remote Neovim config. Config outranks the
-variable, which outranks what the wrapper announced.
-
-Nothing is installed for this: the companion is the renderer this plugin
-already ships, run from the checkout on your local machine.
-
-Nothing changes when it is absent. No wrapper means no LC_MD_VIEWER, so no
-token is ever emitted and the session behaves exactly as before. A companion
-that dies mid-session falls back to the renderer beside Neovim with one
-notification.
-
-Two things still need the renderer beside the *file* and therefore fall back:
-a local image embedded in the document shows its failure placeholder, and an
-animated image stays on its still frame. Remote https images are fetched by
-the machine your terminal is on rather than the remote host, which moves a
-trust boundary -- see |md-viewer-security|.
-
-Options: >lua
-
-    opts = {
-      client_render = {
-        -- Where a companion is listening. A path is a unix socket; a
-        -- host:port is what an `ssh -R` forward looks like from here.
-        address = "127.0.0.1:4445",
-        connect_timeout_ms = 2000,
-        -- "auto" requires all of: a companion answering, the raw Kitty
-        -- backend, and a splicer that announced itself via LC_MD_VIEWER.
-        -- "off" never references a frame. "on" waives the handshake alone.
-        enabled = "auto",
-        -- How many scroll captures may be outstanding at once. One everywhere
-        -- else, and not configurable there. Across a link one frame costs a
-        -- round trip plus a render, serially, so the renderer sits idle most
-        -- of the time; depth N makes the floor max(render, round_trip / N).
-        scroll_pipeline = 3,
-      },
-    }
-<
-Client rendering also stops applying `render.ssh_scroll_settle_ms`: that longer
-wait exists because a settle capture over SSH was half a second of transit, and
-a settle frame rendered where the terminal is costs about a kilobyte.
-`render.scroll_settle_ms` is used instead, so the picture sharpens sooner.
-
-:MdViewerHealth reports whether client rendering is in force and, when it is
-not, which of those preconditions is missing -- they all present identically
-otherwise, as a preview that works and is slow. :MdViewerDebug reports
-`client_frame_count` and `client_bytes_deferred`: the frames that were named
-rather than carried, and the pixels that therefore stayed put.
-
-docs/local-render-design.md records the measurements and the architecture.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*

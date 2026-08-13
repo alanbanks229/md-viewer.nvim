@@ -9,15 +9,8 @@
 - `plugin/md-viewer.lua`: runtime entry point and default highlights
 - `renderer/src/`: persistent Node.js renderer, Markdown pipeline, browser
   lifecycle, protocol, source maps, and security policy. `service.js` is what a
-  request *means*; `main.js` (stdin/stdout child) and `companion.js` (unix
-  socket) are the two entrypoints that decide where requests arrive from.
-  `frames.js` holds rendered PNGs under a reference and `splice.js` swaps those
-  references back for real Kitty uploads — the two halves of not sending a
-  frame across a slow link
-- `bin/md-viewer-ssh`: `ssh` with the companion behind it and `splice.js` in
-  front of the terminal. The one component whose bugs cost a whole session, so
-  it inherits stdin (never a pipe — ssh reads the window size from it), filters
-  stdout only, and degrades to plain passthrough on any failure
+  request *means*; `main.js` is the stdin/stdout entrypoint that decides where
+  requests arrive from
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`, `tests/node/`: headless suites
 - `tests/fixtures/`: Markdown documents both suites and the manual checklist use
@@ -97,10 +90,6 @@ not tell you.
 | Scroll scale, locally | Wheel-scroll, then `:MdViewerDebug` | `scroll_scale = nil`, source `local session`. Nothing about a local preview may change: this is the byte-identical path |
 | Scroll scale, over SSH | The same from an SSH session | `scroll_scale = 0.5`, source naming `ssh_scroll_scale`, and `fast_png_bytes` roughly 2.5× below what the same pane reports locally |
 | Settle sharpness | Scroll hard over SSH, then stop and look | The moving frame may be visibly soft; the frame that lands after `render.scroll_settle_ms` is sharp. A preview that stays soft at rest is the failure this option can cause |
-| Client rendering is off by default | `:MdViewerToggle` from a plain `ssh` session, then `:MdViewerHealth verbose` | `client rendering: no -- no companion renderer`. `:MdViewerDebug` shows `client_frame_count = 0`. Nothing about this session may differ from before the feature existed |
-| Client rendering is on | The same through `md-viewer-ssh` with a forward up | `client rendering: yes (LC_MD_VIEWER v1)` and a rising `client_frame_count`. The preview must look **identical** — the only correct visible difference is that it keeps up |
-| Fallback is silent and correct | Kill the companion mid-session, keep scrolling | One notification, then frames render remotely again. No blank preview, no stuck image |
-| A leaked token is harmless | With the companion up, run `printf '\e_MDV1;tx;nope;a=t\e\\'` on the remote | Nothing appears and nothing breaks — the terminal discards an APC string it does not know |
 
 ### The preview caret
 
@@ -269,10 +258,7 @@ at `1.0.0`.
 
 Preserve these unless a proposal explicitly revisits them:
 
-- the machine running Neovim opens no listening port: the default transport is a
-  child process on stdin/stdout, and the opt-in companion transport dials out
-  rather than accepting. A companion listens only on a 0600 unix socket, never
-  on TCP, and only on the machine its user started it on
+- renderer transport remains child-process stdin/stdout, with no listening port
 - runtime browser networking remains blocked unconditionally; remote images are
   fetched only by the Node renderer process, and only from public network
   destinations -- never loopback, private, or link-local, on the initial URL or

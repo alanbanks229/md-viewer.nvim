@@ -1,30 +1,61 @@
-# Client-side rendering over a slow link
+# Client-side rendering over a slow link: an approach measured and rejected
 
-How md-viewer can render on the machine your *terminal* runs on rather than the machine
-Neovim runs on, why that is worth doing, and what it may not break. Statements marked
-**Invariant** are load-bearing: each has a plausible-looking simplification that
-reintroduces a real defect.
+**This describes code that no longer exists.** It was built, shipped, measured on the link
+it was designed for, and removed in v0.2.0. The record is kept because the architecture is
+a plausible idea a reader will have again, and because the reason it lost is not one
+anybody would guess from first principles.
 
-This is a design record. It describes the architecture and the evidence behind it; the
-shipped behaviour is documented in [`../README.md`](../README.md),
-`:help md-viewer-client-render` and [`troubleshooting.md`](troubleshooting.md).
+Everything below is in the past tense, including statements marked **Invariant** — those
+were load-bearing while the code existed, and each names a plausible-looking
+simplification that reintroduced a real defect.
 
-## Status
+## Verdict
 
-| Phase | State |
-|---|---|
-| 0 — `render.scroll_scale`, SSH-gated | **Shipped and validated on the real link.** Moving frame 134,851 → 47,469 B; delivered rate 3.8/s → 6.3/s; wire saturation 79% → 49% |
-| 1 — transport seam (`service.js`, `companion.js`, socket transport) | **Shipped.** One machine only: responses still returned a path |
-| 2 — transmission tokens, splicer, `blocks` elision | **Shipped.** `frames.js`, `splice.js`, the `transmit()` seam, `frameTransport: "ref"`, `blocksRevision` |
-| 3 — `bin/md-viewer-ssh`, `LC_MD_VIEWER`, diagnostics | **Shipped and validated on the real link.** 13.3 MB of pixels stayed put in one session; every frame referenced; zero misses |
-| **3.5 — pipelined captures** | **The remaining performance work.** See below — this is what makes 1–3 pay off |
-| 4 — parity: overlay sheet, animation frames, local images by reference | **Not built, and irrelevant to speed.** Correctness debt only |
+**What was built.** The renderer ran on the machine the *terminal* was on rather than the
+machine Neovim was on. A companion process (`companion.js`) served the ordinary renderer
+protocol over a `0600` unix socket; `bin/md-viewer-ssh` wrapped `ssh` with that companion
+behind it and a filter (`splice.js`) in front of the terminal; the remote plugin emitted a
+~56-byte transmission token in place of each PNG upload and the filter substituted the
+real Kitty upload back, byte for byte. Block geometry was elided from responses on the
+same path. Later, scroll captures could be pipelined so several were in flight at once.
 
-### The 2026-08-13 measurement, and what it changed
+**What it cost.** It worked. It kept 13.3 MB of pixels off the link in one measured
+session — and it made the preview *slower*:
 
-Client rendering shipped and the operator reported scrolling felt **about the same**.
-The numbers agree, and the reason is worth writing down because it inverts the
-premise this document opened with.
+| | renderer on the VM | renderer on the Mac |
+|---|---:|---:|
+| capture | 50–62 ms | 15–21 ms |
+| link, per frame | ~0 (a pipe) | **~90 ms** |
+| frame interval floor | **~56 ms** | ~107 ms |
+| delivered | **6.3/s** | 3.0–4.7/s |
+
+A ~96 ms round trip costs more than a 40 ms faster capture saves. The operator's verdict
+after using it was "about the same", then measurably worse.
+
+**Why it was removed.** The premise was wrong by the time the code landed. Phase 0 —
+`render.scroll_scale` / `render.ssh_scroll_scale` and `render.ssh_scroll_settle_ms`, a
+config change with no new process, no new transport and no new trust boundary — had
+already taken wire saturation from 79% to 49%. Transit had stopped being the constraint.
+Phases 1–3 then removed 16.7 seconds of wire time that was no longer on the critical path
+and charged a 92 ms serial round trip per frame to do it. The byte case was real, and the
+cheaper lever had already won it.
+
+Removing it also restores an invariant that had to be narrowed to accommodate it:
+**md-viewer opens no listening port**, full stop, rather than "on the machine running
+Neovim".
+
+**The one condition worth revisiting it under.** A link with **low round-trip latency but
+capped throughput** — a shaped or metered connection rather than a relayed one. There the
+bytes are the whole cost and the round trip is not, so the arithmetic that killed this
+inverts. Nothing else about the design was wrong: the seam was clean, the byte equivalence
+held, and the failure modes were all one-way. It was pointed at the wrong bottleneck.
+
+## The measurements that decided it
+
+### 2026-08-13, and what it changed
+
+Client rendering shipped and the operator reported scrolling felt **about the same**. The
+numbers agreed, and the reason inverted the premise this document had opened with.
 
 | | Phase 0 (render on the VM) | Phases 1–3 (render on the Mac) |
 |---|---|---|
@@ -34,50 +65,18 @@ premise this document opened with.
 | Moving capture | 50–62 ms | **14.9 ms** |
 | Pixels crossing the link | all of them | **none** |
 
-`coalesced_scroll_events = 1292` against 101 moving frames confirms the operator
-was scrolling continuously, so the mean is pipeline time rather than idle time —
-the mistake made once already in this project's history.
+`coalesced_scroll_events = 1292` against 101 moving frames confirms the operator was
+scrolling continuously, so the mean is pipeline time rather than idle time — the mistake
+made once already in this project's history.
 
-**Phase 0 had already solved the throughput problem.** Wire saturation was 49%,
-which means transit had stopped being the constraint. Phases 1–3 then removed
-16.7 seconds of wire time that was no longer on the critical path, and charged a
-92 ms serial round trip per frame to do it. Net effect on the thing a reader
-feels: nothing.
+At depth 1 the arithmetic closes and the round trip really is the floor: 48 ms out + 20 ms
+render + 48 ms back = 116 ms against an observed 107 ms. The Mac was busy 14% of the time.
 
-The byte case was real and it was already won. What is left is a *latency* problem
-in a pipeline that was designed against a *throughput* one.
+### Pipelining, which was the fix, and lost worse
 
-### Phase 3.5 — pipelined captures (the remaining performance work)
-
-```
-render on the Mac       15 ms   -> a 66 fps ceiling
-round trip              92 ms   -> paid once per frame, serially
-observed floor         107 ms   = 92 + 15, which is the whole of it
-```
-
-The Mac is busy 14% of the time. With N captures in flight the floor becomes
-`max(render, RTT/N)`: N=3 gives 31 ms (32 fps), N=4 gives 23 ms (43 fps), N=6 is
-render-bound at 15 ms. **A local non-SSH preview runs at about 30 fps**, so the
-target here is parity with a local preview — which is possible precisely because
-the render already is local.
-
-Two things stand in the way, both small and both named:
-
-1. **`controller.lua`'s `schedule_scroll` holds one capture in flight**, as a
-   boolean (`session.scroll_render_in_flight`). Its comment — *"capture and
-   terminal transmission provide the natural pacing"* — is true when the renderer
-   is a pipe away and false when it is 92 ms away. Needs a counter and a depth.
-2. **`lanes.js`'s `admit` claims the lane for every request**, so `isStale` marks
-   the older of two in-flight captures `superseded` and it renders nothing.
-   Pipelined captures must not claim the lane — **while still being invalidated by
-   `contentEpoch`**, which is the check that actually protects correctness. That
-   is the one risky edit in this phase.
-
-Falsifiable prediction, to be measured on the real link: `fast_interval_min_ms`
-drops from 107 to under 40, and the delivered rate goes from 4.7/s to above 20/s.
-If it does not, the model of this pipeline is wrong and tuning should stop.
-
-#### It was measured, and it failed — on a defect, not on the model
+With N captures in flight the floor becomes `max(render, RTT/N)`: N=3 predicts ~31 ms.
+The prediction was fixed before the run — floor under 40 ms, delivered above 20/s — so a
+result that missed could not be reinterpreted as a win. It missed:
 
 | | depth 1 | depth 3 |
 |---|---:|---:|
@@ -86,83 +85,34 @@ If it does not, the model of this pipeline is wrong and tuning should stop.
 | interval floor | 107 ms | **198 ms** |
 | delivered | 3.0/s | **0.4/s** |
 
-Depth 3 was **slower**, and visibly so. Eleven frames in 28.9 seconds while
-scrolling 46% longer is the signature of frames being produced and then thrown
-away, and that is exactly what happened: `renderer.lua`'s `is_stale` compared
-each response against `session.request_serial`, a session-wide "only the newest
-request may display" gate that predates the lane machinery and does the same job
-one layer up. Three concurrent captures took serials N..N+2, so N and N+1 were
-discarded **on arrival, after the link had already carried them** — three times
-the work for a third of the frames.
+Eleven frames in 28.9 seconds while scrolling 46% longer is the signature of frames being
+produced and then thrown away, and that is what happened. `renderer.lua`'s `is_stale`
+compared each response against `session.request_serial` — a session-wide "only the newest
+request may display" gate that predated the lane machinery and did the same job one layer
+up. Three concurrent captures took serials N..N+2, so N and N+1 were discarded **on
+arrival, after the link had already carried them**: three times the work for a third of
+the frames.
 
-The lane exemption was written and the identical Lua-side gate was left in place.
-`is_stale` now takes the same narrow exemption (`claiming_serial`), and
-`renderer.invalidate()` exists so no caller can bump one without the other.
+That gate was found and narrowed to match the lane exemption. **The fix was never measured
+on a link**, which is exactly the state the first regression shipped in, and is why the
+default was returned to 1 rather than raised on the strength of an argument.
 
-**`client_render.scroll_pipeline` now defaults to 1.** The fix has never been
-measured on a link, and a default that has only been reasoned about is precisely
-what produced this regression. Raising it is a deliberate act with a harness
-attached.
+Two settings also became mistuned under client rendering, because both traded against wire
+bytes that no longer existed: `ssh_scroll_settle_ms = 400` added 240 ms of pure delay
+before the picture sharpened, and `ssh_scroll_scale = 0.5` traded sharpness for *render*
+time rather than for bytes.
 
-#### The conclusion that matters, whether or not pipelining is ever retried
+Two details of the design below were changed during implementation, both toward safety:
 
-At depth 1 the arithmetic closes and the round trip really is the floor:
-48 ms out + 20 ms render + 48 ms back = 116 ms against an observed 107 ms. But
-compare the two architectures at their measured floors:
-
-| | renderer on the VM | renderer on the Mac |
-|---|---:|---:|
-| capture | 50–62 ms | 15–21 ms |
-| link, per frame | ~0 (a pipe) | **~90 ms** |
-| floor | **~56 ms** | ~107 ms |
-| delivered | 6.3/s | 3.0–4.7/s |
-
-**Over a link with a ~96 ms round trip, moving the renderer to the client is a
-net loss for smoothness unless its requests are pipelined.** The round trip costs
-more than the faster render saves. What client rendering buys unconditionally is
-bandwidth — 13.3 MB and 16.7 s of wire time in one session, and a settle frame
-that costs nothing — and that is real but is not what a reader feels.
-
-So the honest ranking today, for smoothness alone: **Phase 0 over plain `ssh`
-beats client rendering.** Client rendering wins on bandwidth, and would win on
-both if pipelining is ever shown to work.
-
-Two settings also become mistuned under client rendering, because both trade
-against wire bytes that no longer exist: `ssh_scroll_settle_ms = 400` adds 240 ms
-of pure delay before the picture sharpens, and `ssh_scroll_scale = 0.5` now trades
-sharpness for *render* time rather than for bytes — which only matters while the
-render sits in the critical path, i.e. until pipelining lands.
-
-Two details of the design below were changed during implementation, both toward
-safety, and the text has been corrected in place:
-
-- The token is `ESC _ MDV1;tx;<ref>;<control> ESC \` — the *control string itself* travels
-  in it, rather than an image id the splicer would have to reassemble a control string
-  from. That keeps `chunks()`'s caller the only thing that decides what a transmission
-  looks like, and it is what lets the same seam carry animation frames (`a=f`) unchanged.
-- An unknown reference is **forwarded verbatim**, not dropped. Dropping is right if the
+- The token was `ESC _ MDV1;tx;<ref>;<control> ESC \` — the *control string itself*
+  travelled in it, rather than an image id the splicer would have had to reassemble a
+  control string from. That kept `chunks()`'s caller the only thing deciding what a
+  transmission looked like, and it is what let the same seam carry animation frames
+  (`a=f`) unchanged.
+- An unknown reference was **forwarded verbatim**, not dropped. Dropping is right if the
   token is ours and the frame was evicted; forwarding is right if it was never ours. Both
   end the same way for a real token — the terminal discards an APC string it does not know
-  — so forwarding is strictly better: it cannot destroy somebody's output.
-
-### What is still missing
-
-**Phase 4 does not make scrolling faster.** It is correctness debt, and it was
-mis-scoped early on as part of "parity for v1", which made it look like it sat on
-the path to a fast preview. It does not. The performance work is Phase 3.5 above
-and nothing else.
-
-- **Local images.** `resolveLocalImage` reads the renderer host's filesystem, which under
-  client rendering is the wrong machine. The image renders as its failure placeholder.
-  Phase 4's asset channel is the fix, and it is the one substantially new subsystem left.
-- **Animated images.** `animation.lua` reads frame PNGs from paths on the renderer host,
-  so animations stay on their still frame. The `transmit()` seam already accepts a
-  reference for them; what is missing is `frames[].width/height` in the renderer's
-  `animation` response and a reference in place of each path.
-- **The overlay sheet** still round-trips: the renderer returns it base64 in the response
-  and Lua sends it back as an upload. It is a solid-colour PNG of a few kilobytes,
-  uploaded once per session, so this is a correctness-neutral inefficiency rather than a
-  gap. It goes through the same seam whenever the response grows a reference.
+  — so forwarding was strictly better: it could not destroy somebody's output.
 
 ## The problem
 
@@ -202,35 +152,17 @@ available, which is why the remedy is a code change rather than advice.
 
 ### 1. Send fewer pixels (`render.scroll_scale`)
 
-PNG size against real content follows `bytes ∝ pixels^0.69`, so halving the capture scale
-during a scroll cuts roughly 2.6× off the moving frame while the existing settle frame
-restores sharpness the moment the wheel stops. This needs no new process, no new transport
-and no new trust boundary; it is on by default over SSH and off everywhere else.
+The cheap one, and the one that shipped and stayed. PNG size against real content follows
+`bytes ∝ pixels^0.69`, so halving the capture scale during a scroll cuts roughly 2.6× off
+the moving frame while the existing settle frame restores sharpness the moment the wheel
+stops. Confirmed on the measured link at **3.01×** — 134,851 → 44,766 bytes, 224 ms of
+transit down to 74 ms — with the settle frame byte-identical across both arms, which was
+the invariant that mattered. `render.ssh_scroll_settle_ms` then spends that settle frame
+less often.
 
-Confirmed on the measured link, operator-driven through `scripts/scroll-scale/ab.lua`,
-2026-08-12, Rocky Linux 8.10 VM reached from iTerm2 over AWS SSM:
-
-| | baseline 1.0× | treatment 0.5× |
-|---|---:|---:|
-| `fast_png_bytes` | 134,851 | 44,766 |
-| transit at 0.80 MB/s | 224 ms | 74 ms |
-| `retina_png_bytes` | 304,666 | 304,666 |
-| `capture_encoder` | `cdp_fast_png` | `cdp_fast_png` |
-
-**3.01×**, against 2.58× measured on a macOS development machine at a narrower pane. The
-exponent is not a constant: this content came out at `pixels^0.795` where the original
-investigation and the development machine both sat near `^0.69`. Fonts, Chromium build and
-layout all move it, so treat 2.6× as the conservative figure and anything above it as
-content-dependent luck. The settle frame is byte-identical across the two phases, which is
-the invariant that mattered.
-
-The settle frame is untouched by this, deliberately, and it is still 304,666 bytes —
-**508 ms** of transit. What can be done cheaply is spending it less often:
-`render.ssh_scroll_settle_ms` raises the idle time before that capture from 160 ms to
-400 ms on an SSH session, above the 50–150 ms gaps between wheel notches and below the
-pauses between reading and scrolling again, so it is paid for a reader who has actually
-stopped rather than one mid-flick. The cost is that sharpness arrives about 240 ms later
-when they do stop, which is only worth it when the frame itself takes half a second.
+The options and the `device_scale_factor` warning are documented in the README,
+`:help md-viewer-ssh` and [`troubleshooting.md`](troubleshooting.md); they are not
+repeated here. The two invariants that constrain them are below, and are still live.
 
 ### An unresolved contradiction, recorded rather than smoothed over
 
@@ -251,24 +183,22 @@ of transit. Something else accounts for roughly 350 ms per frame:
 | Observed frame interval over the link | ~520 ms |
 | Of which transit | 74 ms |
 
-**This matters for everything below.** If the missing time is the TUI blocking while it
-writes base64 into a pty the far end drains at 0.80 MB/s, it is still caused by bytes, just
-not by the bytes anyone was counting — and client-side rendering removes essentially all of
-them from that pty, so it would fix this too. If it is anything else — VM scheduling,
-Neovim's redraw cycle, the input path — then client-side rendering buys latency per frame
-and does not buy smoothness, and the case for building it is much weaker than the byte
-table suggests.
+**This mattered for everything below.** If the missing time were the TUI blocking while it
+wrote base64 into a pty the far end drained at 0.80 MB/s, it would still be caused by bytes
+— just not by the bytes anyone was counting — and client-side rendering would have fixed it
+too. If it were anything else, client-side rendering would buy latency per frame and not
+buy smoothness.
 
-`scripts/scroll-scale/ab.lua` now reports the decomposition, and the discriminating row is
-**encode + hand to UI**: `nvim_ui_send` happens inside it, so pty back-pressure lands there
-rather than in UNACCOUNTED. **Do not build the client-render architecture before that number
-has been read.** The byte case for it is sound and the smoothness case is currently
-unproven.
+The instruction written here at the time was: **do not build the client-render architecture
+before that number has been read.** `scripts/scroll-scale/ab.lua` reports the
+decomposition, and the discriminating row is **encode + hand to UI** — `nvim_ui_send`
+happens inside it, so pty back-pressure lands there rather than in UNACCOUNTED. It was
+built anyway, and the answer turned out to be the second one. That is the whole lesson of
+this document, and it is cheaper to read than to repeat.
 
 What neither lever removes is the transit ceiling itself. Transit alone caps preview updates
 at 13.4/s where it capped them at 4.4/s, and the settle frame still costs half a second
-whenever it is taken. Those numbers exist only because pixels cross the link at all — but as
-of this run they are not the numbers a reader is waiting on.
+whenever it is taken.
 
 **Invariant:** only the *moving* frame is scaled. The settle capture stays at full
 `device_scale_factor`, or an idle preview would sit at reduced sharpness indefinitely —
@@ -287,7 +217,7 @@ transfer and becomes a local operation.
 
 Measured on this repository's own README (14,429 bytes, 360×774 CSS viewport, `dsf=2`):
 
-| Crosses the link | Today | Client-render |
+| Crosses the link | Pixels over the link | Client-render |
 |---|---:|---:|
 | Document open | 303,148 B (base64 PNG) | ~26,014 B (request + response) |
 | One scroll frame | 101,215 B (base64 PNG) | ~685 B |
@@ -311,15 +241,16 @@ return id, upload .. sequence
 ```
 
 Only `chunks(...)` is expensive, and `send()` is a single choke point (`nvim_ui_send`). So
-client-side rendering replaces one function's output and nothing else. Placement math,
-double buffering, occlusion cut-outs, z-layer resolution, deletion discipline and the golden
-byte test all stay on the Neovim host, untouched.
+client-side rendering replaced one function's output and nothing else. Placement math,
+double buffering, occlusion cut-outs, z-layer resolution, deletion discipline and the
+golden byte test all stayed on the Neovim host, untouched — and this is the part of the
+design that was right, and that a retry should reuse.
 
-**This is why cell ownership is not a problem here.** A design where a second process draws
+**This is why cell ownership was not a problem.** A design where a second process draws
 into the terminal has to fight Neovim for the grid: flicker, stale placements, wrong
-position after a resize. This design never does. Neovim keeps owning the grid; the client
-substitutes image *data* for a token, in place, at the same position in the same byte
-stream. The terminal receives the bytes it receives today.
+position after a resize. This one never did. Neovim kept owning the grid; the client
+substituted image *data* for a token, in place, at the same position in the same byte
+stream. The terminal received the bytes it already received.
 
 ## Architecture
 
@@ -344,53 +275,50 @@ terminal
 native module, therefore nothing to download on a machine that may have no egress. Only
 stdout is filtered.
 
-**Invariant:** the splicer is a passthrough that recognises exactly one token shape. It
-never interprets, rewrites or buffers anything else, and any error puts it into permanent
+**Invariant:** the splicer was a passthrough that recognised exactly one token shape. It
+never interpreted, rewrote or buffered anything else, and any error put it into permanent
 passthrough for the rest of the session. A filter in the path of an interactive SSH session
 that gets creative is a corrupted terminal.
 
 ### One frame
 
-1. The plugin requests a capture over the socket. **~408 B.**
-2. The companion rasterizes locally, stores the PNG under a `frameRef` in a bounded cache,
-   and replies with metadata, the ref and the PNG's dimensions. **~277 B.**
-3. The plugin emits, through the unchanged `nvim_ui_send` path, a token
-   (`ESC _ MDV1;tx;<frameRef>;<control> ESC \`) followed by today's placement commands.
-   **~56 B.**
-4. The splicer substitutes byte-identical `chunks(base64(png), control)`.
+1. The plugin requested a capture over the socket. **~408 B.**
+2. The companion rasterized locally, stored the PNG under a `frameRef` in a bounded cache,
+   and replied with metadata, the ref and the PNG's dimensions. **~277 B.**
+3. The plugin emitted, through the unchanged `nvim_ui_send` path, a token
+   (`ESC _ MDV1;tx;<frameRef>;<control> ESC \`) followed by the ordinary placement
+   commands. **~56 B.**
+4. The splicer substituted byte-identical `chunks(base64(png), control)`.
 
-The control string travels *in* the token rather than being reconstructed from an image id,
-so `transmit()`'s caller remains the only thing that decides what a transmission looks like
-— which is what lets the same seam carry an `a=f` animation frame with its own gap key
-without the splicer learning anything new.
+The frame was always rendered before the token was emitted, so there was no race. A token
+whose ref the companion no longer held was forwarded verbatim: the terminal discards an APC
+string it does not recognize, so the frame did not appear and the next render replaced it.
+`:MdViewerHealth` warned when that count was non-zero, because nothing else would ever have
+said so.
 
-The frame is always rendered before the token is emitted, so there is no race. A token whose
-ref the companion no longer holds is forwarded verbatim: the terminal discards an APC string
-it does not recognize, so the frame does not appear and the next render replaces it.
-`:MdViewerHealth` warns when that count is non-zero, because nothing else would ever say so.
+**Invariant:** byte equivalence was proven offline. `kittyChunks` in `splice.js` and
+`chunks()` in `kitty_raw.lua` were asserted against the same pinned artifact
+(`tests/fixtures/splice-upload.esc`) from both suites, so neither could drift alone. A
+second Lua assertion stripped the upload from a byte-carried and a reference-carried frame
+and required what remained — every placement, crop, z-index and deletion — to be equal.
+None of those files survive the removal; the technique is what is worth keeping.
 
-**Invariant:** byte equivalence is proven offline. `kittyChunks` in `splice.js` and
-`chunks()` in `kitty_raw.lua` are asserted against the same pinned artifact
-(`tests/fixtures/splice-upload.esc`) from `tests/node/splice.test.js` and
-`tests/lua/cases/client_render.lua`, so neither can drift alone. A second Lua assertion
-strips the upload from both a byte-carried and a reference-carried frame and requires what
-remains — every placement, crop, z-index and deletion — to be equal.
+**Invariant:** unchanged `blocks` were elided from capture responses. Block geometry is
+10,477 B for this README and was returned on *every* capture even when the layout was
+reused. Sending it per frame would have cost 1.4 MB across one wheel spin and quietly
+undone the entire saving. The request named the `blocksRevision` it held — a hash of the
+layout key, so exact rather than conservative, and it survived a renderer restart — and a
+matching revision returned no `blocks` at all. `renderer.lua` reattached what it held
+before any caller saw the result.
 
-**Invariant:** unchanged `blocks` are elided from capture responses. Block geometry is
-10,477 B for this README and is returned on *every* capture even when the layout was reused.
-Sending it per frame would cost 1.4 MB across one wheel spin and quietly undo the entire
-saving. The request names the `blocksRevision` it holds — a hash of the layout key, so it is
-exact rather than conservative and survives a renderer restart — and a matching revision
-returns no `blocks` at all. `renderer.lua` reattaches what it holds before any caller sees
-the result, so nothing downstream knows this happens.
-
-Both halves are needed and the measurement says so: a reference alone left a 6,542-byte
-response, against under 2,048 with the elision too. `tests/node/client-frames.test.js`
-asserts that number rather than the reasoning.
+Both halves were needed and the measurement said so: a reference alone left a 6,542-byte
+response, against under 2,048 with the elision too. **This is the trap most worth
+remembering.** Removing the largest thing on a link promotes whatever was second, and a
+saving measured only on the thing you removed will read as a win it is not.
 
 ### Discovery
 
-The companion exports `LC_MD_VIEWER`. OpenSSH forwards `LC_*` by default — `SendEnv LANG
+The companion exported `LC_MD_VIEWER`. OpenSSH forwards `LC_*` by default — `SendEnv LANG
 LC_*` in the stock client config, `AcceptEnv LANG LC_*` in the stock sshd config — which is
 the same mechanism that already carries `LC_TERMINAL`, and the reason a remote Neovim can
 identify iTerm2 at all. The address to dial comes from `client_render.address` or
@@ -406,36 +334,43 @@ socket on the client, which composes with whatever `-R` habit already exists.
 
 | Situation | Behaviour |
 |---|---|
-| No companion | No `LC_MD_VIEWER`, no token is ever emitted, behaviour is exactly as today |
-| Companion present, socket unreachable | Warned in `:MdViewerHealth`; renders locally as today |
+| No companion | No `LC_MD_VIEWER`, no token ever emitted, behaviour unchanged |
+| Companion present, socket unreachable | Warned in `:MdViewerHealth`; rendered beside Neovim |
 | Companion dies mid-session | Socket closes, one notification, falls back to the local renderer |
 | Token reaches a terminal with no splicer | An unknown APC sequence, which conformant terminals ignore |
 
+Every one of these was one-way, and none of them ever fired in anger. The architecture's
+failure was not that it broke; it is that it worked and did not help.
+
 ## What this does to the security posture
 
-The project's standing claim was that the renderer opens no port and speaks to nothing over
-the network. That claim is narrowed, not dropped, and the narrowing is precise:
+The project's standing claim is that the renderer opens no port and speaks to nothing over
+the network. This design narrowed it — precisely, and in writing, but narrowed it — which
+is the second reason removing the code was worth doing. The narrowing was:
 
-- **On the machine running Neovim, nothing changes.** The plugin only ever *dials out*. The
-  listening socket on that side is created by `sshd` because the user asked for a reverse
-  forward, not by md-viewer. `renderer/src/main.js` is unmodified and still opens nothing,
-  which is why `tests/node/no-listening-port.test.js` continues to pass as written.
-- **On the client machine** an opt-in companion, started by hand, listens on a **unix domain
-  socket** with mode `0600` — never a TCP port.
-- **Remote image fetching moves to the client**, so the SSRF blocklist now protects the
-  client's private network instead of the Neovim host's. The logic is unchanged: https only,
-  resolve then validate then pin the address, every redirect hop re-checked, no allowlist.
-  This is a real change of which network is being defended and is called out in
-  [`../SECURITY.md`](../SECURITY.md).
-- **Local image reads do not move, so they fail.** Reading a file needs the renderer beside
-  it, and until Phase 4's asset channel exists there is nothing on the other side of the
-  document-root check to reach. No containment rule was weakened; a local image simply
-  renders as the placeholder the existing rules already specify. `:MdViewerHealth` notes
-  this whenever client rendering is on, because "why is this image broken only over SSH"
-  is otherwise unanswerable.
-- **`bin/md-viewer-ssh` reads the session's output stream**, since filtering it is what it
-  is for. It has no network access of its own, forwards everything it does not recognize,
-  and writes its log (splicer events and counters, never session output) mode `0600`.
+- **On the machine running Neovim, nothing changed.** The plugin only ever *dialled out*.
+  The listening socket on that side was created by `sshd` because the user asked for a
+  reverse forward, not by md-viewer. `renderer/src/main.js` was unmodified and still opened
+  nothing, which is why `tests/node/no-listening-port.test.js` kept passing as written.
+- **On the client machine** an opt-in companion, started by hand, listened on a **unix
+  domain socket** with mode `0600` — never a TCP port.
+- **Remote image fetching moved to the client**, so the SSRF blocklist protected the
+  client's private network instead of the Neovim host's. The logic was unchanged: https
+  only, resolve then validate then pin the address, every redirect hop re-checked, no
+  allowlist. That is a real change of *which network is being defended*, and it needed a
+  section in `SECURITY.md` to say so.
+- **Local image reads did not move, so they failed.** Reading a file needs the renderer
+  beside it, and there was nothing on the other side of the document-root check to reach.
+  No containment rule was weakened; a local image rendered as the placeholder the existing
+  rules already specify. `:MdViewerHealth` noted it, because "why is this image broken only
+  over SSH" is otherwise unanswerable.
+- **`bin/md-viewer-ssh` read the session's output stream**, since filtering it is what it
+  was for. It had no network access of its own, forwarded everything it did not recognize,
+  and wrote its log (splicer events and counters, never session output) mode `0600`.
+
+Each of those was defensible on its own and none of them was a defect. Together they are
+five paragraphs of qualification on a one-line claim, which is the cost the feature was
+charging even when it worked.
 
 ## Alternatives considered
 
@@ -458,11 +393,13 @@ sends `x,y,w,h` crop keys — and it needs no second machine at all. Scrolling w
 content costs about 200 bytes. It was not chosen because it requires tens of megabytes of
 image data resident in the terminal, and terminal memory under placement churn is exactly
 where this project has been burned before (see `terminal-support.md` on wezterm#7953). It
-remains the best option for an SSH user who will never run a companion.
+remains the best option for an SSH user who wants more than `render.scroll_scale` gives
+them, and it is the one alternative here that the 2026-08-13 measurement did not
+invalidate — it removes bytes *without* adding a round trip.
 
 ## References
 
-- [`architecture.md`](architecture.md) — the data flow this extends
+- [`architecture.md`](architecture.md) — the data flow this extended
 - [`troubleshooting.md`](troubleshooting.md) — the reader-facing symptoms
 - [`terminal-support.md`](terminal-support.md) — the evidence ladder any per-terminal claim uses
 - [`../SECURITY.md`](../SECURITY.md) — what the defaults enforce
