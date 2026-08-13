@@ -45,72 +45,67 @@ Do not run `playwright install`. Confirm the Chrome path `:MdViewerHealth` shows
 exists, and set `browser.executable_path` if automatic discovery misses your
 installation. Renderer stderr and request serials are in `:MdViewerDebug`.
 
-## The image is stretched, soft, or the wrong size
+## The image is stretched or soft, or the text is about twice the size it should be
 
-Check `viewport calibration` in `:MdViewerDebug`. `measured` means the cell size
-came from the terminal itself and the render is already built to match it;
-`estimated` means nothing could be measured — tmux and screen do not propagate
-pixel geometry, and neither does a Neovim without LuaJIT — and the render is
-sized from a guess the terminal then scales.
+Both are the same fault: the terminal's cell was converted to CSS pixels with
+the wrong divisor, or could not be measured at all. `render.font_size_px` is
+honoured exactly at every viewport width, so text at the wrong size is never a
+font setting.
 
-Three lines sit beside the tier. `measured cell` is what the operating system
-reported. `viewport cell (CSS px)` is what the browser viewport is actually
-built from. `cell unit` says how one became the other.
+Check `viewport calibration` in `:MdViewerDebug`, and the three lines beside it.
+`measured cell` is what the operating system reported, `viewport cell (CSS px)`
+is what the browser viewport was built from, and `cell unit` says how one became
+the other.
+
+- **`measured`** — the cell came from the terminal and the render is built to
+  match it.
+- **`env`** — `MD_VIEWER_CELL_WIDTH_PX` and `MD_VIEWER_CELL_HEIGHT_PX` are both
+  set and nothing is inferred.
+- **`estimated`** — nothing could be measured. tmux and screen do not propagate
+  pixel geometry, and neither does a Neovim without LuaJIT; the render is sized
+  from a guess the terminal then scales.
 
 The reported number is *supposed* to be device pixels, in which case the CSS
 cell is that divided by `render.device_scale_factor`. Not every terminal means
 that, and not every display matches the configured scale, so md-viewer tries
 both divisors and keeps whichever yields a cell a font could plausibly have —
 roughly 5–30 CSS px wide and 10–60 tall. `cell unit` names the divisor it
-settled on and whether the choice was the default or a repair. If neither
-divisor works, `:MdViewerHealth` says so as a warning rather than picking one
-silently.
+settled on and whether the choice was the default or a repair. If neither works,
+`:MdViewerHealth` says so as a warning rather than picking one silently.
 
-To override the measurement, set the cell size in **CSS** pixels — the measured
-size divided by `device_scale_factor`, so a 2x display measuring 14×32 wants:
-
-```sh
-export MD_VIEWER_CELL_WIDTH_PX=7
-export MD_VIEWER_CELL_HEIGHT_PX=16
-```
-
-`viewport calibration` should then read `env`. On the `estimated` tier only, if
-the typography is smaller than you expect, the estimated cell width is probably
-too large, causing the terminal to scale the whole screenshot down. Lower
-`render.estimated_cell_width_px` gradually, or prefer the exact values above.
-
-## Preview text is about twice the size it should be
-
-`render.font_size_px` is honoured exactly, at every viewport width, so text at
-the wrong size is a measurement fault rather than a font setting. Check `cell
-unit` in `:MdViewerDebug`.
-
-The chain is short: the CSS viewport is the preview's cell rectangle times the
-CSS cell size, the page is captured at `render.device_scale_factor`, and the
-terminal scales the result into those same cells. A CSS cell that comes out half
-its true size therefore halves the viewport, and the terminal magnifies the PNG
-to fill the cells anyway — so the glyphs double while the layout stays put.
-
-Two things get it there, and md-viewer now detects both:
+**Doubled glyphs specifically.** The CSS viewport is the preview's cell
+rectangle times the CSS cell size, the page is captured at
+`render.device_scale_factor`, and the terminal scales the result back into those
+same cells. A CSS cell that comes out half its true size therefore halves the
+viewport while the terminal magnifies the PNG to fill the cells anyway — so the
+glyphs double and the layout stays put. Two things get it there, and md-viewer
+detects both:
 
 - The terminal fills `ws_xpixel`/`ws_ypixel` with **logical points** rather than
   device pixels, so dividing by the device scale divides a second time. Warp
   does this.
 - The display is **1x** while `render.device_scale_factor` is left at its
   default of `2`. No terminal bug required; setting `render.device_scale_factor
-  = 1` is the direct fix, and also stops the renderer capturing four times the
-  pixels it needs.
+  = 1` is the direct fix, and it also stops the renderer capturing four times
+  the pixels it needs.
 
-If the detection gets it wrong — a genuinely tiny terminal font on a HiDPI
-display is the case to watch, since a real cell can then fall below the
-plausible band — pin the cell by hand in **CSS** pixels:
+**Overriding the measurement.** Give the cell size in **CSS** pixels — the
+measured size divided by `device_scale_factor`, so a 2x display measuring 14×32
+wants:
 
 ```sh
 export MD_VIEWER_CELL_WIDTH_PX=7
 export MD_VIEWER_CELL_HEIGHT_PX=16
 ```
 
-`viewport calibration` then reads `env` and nothing is inferred.
+`viewport calibration` then reads `env`. Worth doing when the detection gets it
+wrong — a genuinely tiny terminal font on a HiDPI display is the case to watch,
+since a real cell can fall below the plausible band.
+
+On the `estimated` tier only, if the typography is smaller than you expect, the
+estimated cell width is probably too large and the terminal is scaling the whole
+screenshot down. Lower `render.estimated_cell_width_px` gradually, or prefer the
+exact values above.
 
 ## The caret or the drag highlight is a huge grey block
 
@@ -188,13 +183,10 @@ it goes after that is the proxy's decision, not something this process can
 verify. Reaching remote images through a proxy while keeping the guarantee that
 makes the check meaningful is **an open design question, not an oversight**.
 
-What did change: this no longer costs you the whole preview. Fetches used to
-resolve in a pre-pass before the document was rendered, so on a proxied network
-one unreachable image paid the full 20-second timeout *before anything
-appeared*. The render no longer waits — the placeholder is drawn immediately,
-the fetch keeps running, and a later render picks it up if it ever lands. On a
-proxied network it will not, so what you get is the placeholder, at once,
-instead of a twenty-second stall and then the placeholder.
+This costs you that one picture and nothing else. The render does not wait for
+a fetch: the placeholder is drawn immediately, and a later render picks the
+image up if it ever lands. On a proxied network it will not, so what you get is
+the placeholder, at once.
 
 Local images and links are unaffected: they never touch the network.
 
@@ -269,8 +261,9 @@ configuration. Read it beside `capture_encoder`: the numeric factor needs the
 matter what is set.
 
 Do **not** lower `render.device_scale_factor` for this. It is a calibration
-divisor, not a size knob — see the note under "The preview falls back to text
-over SSH" for what it actually does to the byte count.
+divisor, not a size knob: lowering it doubles the CSS viewport and makes the
+frame *larger*, and it collapses the moving and settle captures into one so the
+cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
 ## A notification over the preview shows Markdown through its background
 
@@ -307,8 +300,9 @@ placement options.
 
 `:MdViewerDebug` reports `occluded = true` while an overlapping *focusable* float
 is visible; the overlap guard removes the image only for those. If a provider
-creates windows with `noautocmd = true`, confirm `ui_polling = true` — the
-default 50 ms poll discovers them without provider-specific hooks.
+creates windows with `noautocmd = true`, confirm `:MdViewerDebug` reports
+`ui_polling: true` — the poll discovers them without provider-specific hooks,
+on the interval `image.ui_poll_ms` sets (default 50 ms; `0` disables it).
 
 If a stray image persists over another plugin's windows while `tabpage_hidden` is
 `false`, that plugin most likely resized or repositioned the preview split
@@ -471,34 +465,10 @@ Two things that will not help, both common first guesses:
   though naming the profile is better — it also gets the right z-index,
   double-buffer and overlay defaults.
 
-If the preview renders but feels sluggish, that is bandwidth rather than
-detection: every refresh sends a full-page PNG as base64 down the connection,
-and on a throttled link the wire time per frame is larger than everything else
-put together. On an AWS SSM tunnel — a flat 0.80 MB/s ceiling — one 80 KB moving
-frame measured ~134 ms of pure transit, and a single wheel spin queues over a
-hundred of them, so the backlog is the lag.
-
-md-viewer already halves the moving frame on an SSH session
-(`render.ssh_scroll_scale`, default `0.5`, 2.6× to 3× fewer bytes); lower it to
-`0.25` if the link is slower. It also waits `render.ssh_scroll_settle_ms`
-(default `400`, against `160` locally) before taking the expensive sharp
-capture, so a gap between two wheel flicks does not buy a full-size transfer
-that the next notch makes stale. Raising `render.debounce_ms` cuts how many
-refreshes an edit produces.
-
-`render.device_scale_factor = 1` is the tempting one and it makes this **worse**.
-It is a calibration divisor: lowering it stops dividing the terminal cell down,
-so the CSS viewport doubles and the frame grows — measured at 80 KB → 224 KB on
-the same document and pane. It also collapses the moving and settle captures
-into the same picture, so the cheap scroll frame stops existing at all. Both
-were A/B'd on a live SSM link and both felt equal or worse; the defaults are
-already the fastest configuration available.
-
-When even that is not enough, the pixels themselves are the cost and no setting
-removes them. [local-render-design.md](local-render-design.md) records what it
-would take to render on the machine your terminal runs on and send only the
-Markdown source across the link — and why that was built, measured on a real
-link, and removed again.
+A preview that renders but feels *sluggish* is a different problem — bandwidth
+rather than detection — and is covered under
+[Scrolling feels slow](#scrolling-feels-slow), with the settings and the
+measurements behind them in `:help md-viewer-ssh`.
 
 ## The wrong terminal profile was detected
 

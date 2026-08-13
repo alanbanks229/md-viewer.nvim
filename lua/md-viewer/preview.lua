@@ -240,7 +240,6 @@ end
 
 function M.placement(win, backend_name)
   local value = coordinates.for_window(win)
-  value.zindex = config.get().image.zindex
   if backend_name == "kitty_raw" and value.statusline then
     local guard = math.max(0, math.floor(config.get().image.raw_statusline_guard_cells or 1))
     guard = math.min(guard, math.max(0, value.height - 1))

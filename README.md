@@ -2,13 +2,6 @@
 
 **Browser-quality Markdown previews inside terminal Neovim.**
 
-<!--
-  MOTION DEMO GOES HERE, above the still below.
-  One unbroken 20-25s take: live-as-you-type -> cursor follow -> caret with Vim
-  motions -> drag-select -> an animated GIF. Do not speed it up; the point is
-  latency. See the release checklist for the shot list.
--->
-
 <img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
 
 `md-viewer.nvim` opens a read-only split beside your Markdown source. A headless
@@ -106,35 +99,16 @@ caveat naming these fixes.
 
 **Bandwidth.** Every refresh ships a full-page PNG down the connection as
 base64, so on a throttled link the picture arrives late and scrolling lags
-behind the wheel. md-viewer already does two things about this on an SSH session, both without
-configuration:
+behind the wheel. md-viewer already does two things about this on an SSH
+session, neither of which needs configuring: it captures the moving frame of a
+scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
+restores full sharpness the moment scrolling stops, and it waits longer before
+spending that sharp capture (`render.ssh_scroll_settle_ms`).
 
-- **`render.ssh_scroll_scale`** (default `0.5`) captures the moving frame of a
-  scroll at half size — measured 2.6× to 3× fewer bytes per frame, while the
-  sharp image comes back the moment scrolling stops. Lower it to `0.25` on a
-  slower link, or set `render.scroll_scale` to pin one value regardless of
-  session.
-- **`render.ssh_scroll_settle_ms`** (default `400`, against `160` locally) waits
-  longer before spending the expensive sharp capture. A mouse wheel delivers
-  notches 50–150 ms apart, so a shorter delay reads an ordinary gap between two
-  flicks as "stopped" and buys a full-size transfer the next notch immediately
-  makes stale.
-
-`render.debounce_ms` above its 200 ms default cuts how many refreshes an edit
-produces.
-
-> [!IMPORTANT]
-> Do **not** reach for `render.device_scale_factor = 1` here. It is a
-> calibration divisor, not a size knob: lowering it doubles the CSS viewport and
-> makes the frame *larger* — measured at 80 KB → 224 KB — and it collapses the
-> moving and settle frames into one capture, so the cheap scroll frame stops
-> existing. The defaults are already the fastest configuration.
-
-If the link is slow enough that this is still not comfortable, the bytes
-themselves are the problem rather than any setting.
-[docs/local-render-design.md](docs/local-render-design.md) records what it would
-take to stop sending pixels over the connection at all, and why that was built,
-measured, and removed again.
+Do **not** reach for `render.device_scale_factor = 1` here — it is a
+calibration divisor rather than a size knob, and lowering it makes the frame
+*larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
+of the reasoning.
 
 ## Installation
 
@@ -147,7 +121,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.1.1",
+  version = "v0.2.0",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -169,8 +143,9 @@ a browser.
 
 ### Native `vim.pack`
 
-> [!IMPORTANT]
-> I haven't personally used vim.pack but this is the likely setup: If it does not work, please let me know!
+> [!NOTE]
+> This path is untested by the author. If it does not work, please open an
+> issue.
 
 Register the build hook before the first `vim.pack.add()` call, so it also runs
 for a first-time installation:
@@ -198,7 +173,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.1.1" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.2.0" },
 })
 
 require("md-viewer").setup({})
@@ -214,10 +189,11 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 `:MdViewerHealth` says why in one screen.
 
-## Features!!
+## Features
 
 - Live preview of unsaved changes, following your cursor through the document.
-- (Iterm, Ghostty, Kitty only) A real caret in the preview, with Vim motions, counts, and `v`/`V` selection.
+- A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
+  (iTerm2, Kitty and Ghostty only).
 - Drag-to-select; double-click for a word, triple-click for a block; `y` copies
   to the unnamed register and the system clipboard.
 - Markdown-preview search with `/`, `n` and `N`.
@@ -225,16 +201,17 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
   preview follows it, with `H`/`L` history back and forward — so a documentation
   tree can be read by clicking through it.
 - Animated GIF and WebP actually animate, drawn by the terminal over the still
-  frame the screenshot captured.
-    - Off by default (`render.animate`) will turn it on.
-- Previews will stay visible while the source split shows another file.
+  frame the screenshot captured. Off by default; `render.animate = true` turns
+  it on.
+- The preview stays visible while the source split shows another file.
 - A text-only fallback where no graphical backend is available, and diagnostics
   that say which backend you got and why.
 
 ## Configuration
 
-Please see **[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)**, which carries every option and default alongside the reasoning behind each non-obvious one.
-`:help md-viewer-config` describes the option groups and the handful that need more than a default value.
+md-viewer needs none. `:help md-viewer-options` lists every option with its
+default; **[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)** carries the
+reasoning behind each non-obvious one.
 
 Terminal cell dimensions need no configuration either: `md-viewer` measures them
 from the operating system and sizes the render to match. `:help
@@ -245,7 +222,7 @@ by hand when that happens.
 
 | Command | Action |
 |---|---|
-| `:MdViewerToggle` | Open or close the preview |
+| `:MdViewerToggle [position]` | Open or close the preview (`right`, `left`, `below`, `above`) |
 | `:MdViewerCopy` | Copy the current selection |
 | `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
 | `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
@@ -317,28 +294,30 @@ boundary is never something you have to infer from a config file.
 
 ## Known limitations
 
-- The preview is a actually a PNG surface and not an embedded webview, this obviously presents some challenges.
-  - Terminal emulators that have kitty protocol are a minimum to have this working (image rendering).
-  - Animated images are decoded by the same Chromium that renders the preview, at
+- The preview is a PNG surface, not an embedded webview, so a terminal
+  implementing the Kitty graphics protocol is the floor for seeing anything at
+  all.
+- Animated images are decoded by the same Chromium that renders the preview, at
   the size they are actually drawn. Typical GIFs start moving in well under a
   second; a very long retina-scale recording can take a few, and the still frame
   shows throughout. Long recordings are thinned to a fixed pixel budget (duration
   preserved, motion choppier) rather than allowed to grow terminal memory without
   bound.
-  - Graphical confirmation is partial: image rendering and the drag overlay have
+- Graphical confirmation is partial: image rendering and the drag overlay have
   been watched on real hardware, but most placement and occlusion behavior is
   covered by headless tests only.
-  - The drag-highlight overlay is off on WezTerm pending an upstream fix, and
+- The drag-highlight overlay is off on WezTerm pending an upstream fix, and
   animated images are off there for the same reason.
-  - tmux, screen, and Zellij are not supported.
-  - The `vim.ui.img` backend depends on an experimental Neovim API and is
+- tmux, screen, and Zellij are not supported.
+- The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
 
 ## Documentation
 
 **Using it**
 
-- `:help md-viewer` — the complete command, key and configuration reference
+- `:help md-viewer` — the complete command, key and configuration reference,
+  including every option and its default (`:help md-viewer-options`)
 - [Terminal support](docs/terminal-support.md) — per-terminal status, and the
   evidence behind each claim
 - [Troubleshooting](docs/troubleshooting.md) — symptom by symptom
@@ -350,8 +329,8 @@ boundary is never something you have to infer from a config file.
 - [Contributing](CONTRIBUTING.md) — how to open a change
 - [Development](docs/development.md) — tests, manual verification, releasing
 - [Architecture](docs/architecture.md) — how it works, and which invariants matter
-- [Client-side rendering](docs/local-render-design.md) — why a preview lags on a
-  throttled link, and the design for rendering where the terminal is
+- [Rejected: client-side rendering](docs/local-render-design.md) — rendering
+  where the terminal is, measured on a throttled link and turned down
 - [Changelog](CHANGELOG.md)
 
 ## License

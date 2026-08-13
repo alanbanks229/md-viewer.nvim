@@ -43,15 +43,12 @@ Fixes are provided for `main` and the latest tagged release.
   document root" cannot be told apart to probe for files.
 - Animated images are decoded in a second browser context, never the render
   context. That context does enable JavaScript, because WebCodecs requires a
-  page, but its boundary is explicit (`renderer/src/decode-context.js`): the
-  only code that runs is the project's own decode function, the page is one
-  synthetic internal URL served from an inline constant with a deny-all CSP,
-  every other request is aborted, and the context is offline. Image bytes enter
-  as data, staged through a renderer-owned file, so attacker-influenced
-  GIF/WebP is parsed by Chromium's sandboxed, continuously fuzzed decoders
-  rather than by hand-written LZW in the Node process. Anything malformed,
-  oversized, or over the frame caps falls back to the still frame the base
-  screenshot already carries.
+  page, but its boundary is explicit (`renderer/src/decode-context.js`): one
+  synthetic internal URL with a deny-all CSP, offline, every other request
+  aborted, and the project's own decode function the only code that runs.
+  Attacker-influenced GIF/WebP is therefore parsed by Chromium's sandboxed
+  decoders rather than by hand-written LZW in the Node process, and anything
+  malformed or past the caps falls back to the still frame.
 
 ## Deliberate trade-offs
 

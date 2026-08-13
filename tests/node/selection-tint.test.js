@@ -515,7 +515,8 @@ test("composite equivalence: base + tint at reported rects reproduces the browse
     }
   }
 
-  // The report the stage prompt asks for, in the test output itself.
+  // A summary line in the test output, so a geometry regression is readable
+  // from a CI log without attaching a debugger.
   const total = checkedAll;
   console.log(
     `composite equivalence: ${rects.length} rects; flat samples checked ${flatChecked}, mismatched ${flatMismatch}; `

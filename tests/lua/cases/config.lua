@@ -119,4 +119,37 @@ return function(t)
   local bad_raw_html_ok, bad_raw_html_err = pcall(config.setup, { security = { raw_html = "yes" } })
   t.eq(false, bad_raw_html_ok, "a non-boolean security.raw_html is rejected")
   t.ok(tostring(bad_raw_html_err):match("raw_html"), "the raw_html error names the offending option")
+
+  -- Every option is documented, or it exists only for its author. The same
+  -- pin commands.lua applies to the command surface: `:help md-viewer-options`
+  -- is the canonical reference, and a table nothing checks is stale within a
+  -- release. An option added without a row here fails on the next run rather
+  -- than shipping undocumented.
+  --
+  -- Derived from this file rather than the working directory, so the check
+  -- holds wherever the suite is invoked from.
+  local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
+  local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(here))))
+  local help = table.concat(vim.fn.readfile(root .. "/doc/md-viewer.txt"), "\n")
+  -- Bounded at the sentence that closes the table, not at the next section
+  -- rule: the subsections after it discuss individual options in prose, and
+  -- letting those count would pass an option that had been dropped from the
+  -- table itself.
+  local options_section = help:match("%*md%-viewer%-options%*(.-)\nThe options in the rest of this section")
+  t.ok(options_section ~= nil, "the help file has an *md-viewer-options* section")
+
+  -- Every row is four spaces, the option name, then padding, so anchoring on
+  -- the indent and requiring a trailing space keeps `scroll_scale` from being
+  -- satisfied by `ssh_scroll_scale`.
+  local documented, missing = 0, {}
+  for group, options in pairs(config.defaults) do
+    t.ok(options_section:find("\n" .. group .. " ~", 1, true) ~= nil, ("the %s group has a heading"):format(group))
+    for name in pairs(options) do
+      documented = documented + 1
+      if not options_section:find("\n    " .. name .. " ", 1, true) then table.insert(missing, group .. "." .. name) end
+    end
+  end
+  table.sort(missing)
+  t.eq(0, #missing, "every option appears in *md-viewer-options*: " .. table.concat(missing, ", "))
+  t.ok(documented > 60, ("the option table covers the whole surface (%d options)"):format(documented))
 end

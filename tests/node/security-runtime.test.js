@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { BrowserRenderer } from "../../renderer/src/browser.js";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
 
-// Part 7 §7.2: actually attempt the attacks against a real Chromium instance,
+// Actually attempt the attacks against a real Chromium instance,
 // rather than re-asserting the sanitizer/classifyLink unit tests that already
 // cover the input side. These tests exercise what happens if a script somehow
 // reached the page anyway, and whether the hidden page can be driven away from

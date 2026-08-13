@@ -1,5 +1,5 @@
 return function(t)
-  -- Part 7 §7.3: every exit path must release what it owns. `controller.lua`'s
+  -- Every exit path must release what it owns. `controller.lua`'s
   -- other test files already exercise TabLeave/VimSuspend end to end (real
   -- `vim.cmd("tabnew")`/`tabclose"`, see tabpage_placement.lua) and ordinary
   -- `controller.close()` (mouse.lua, controller.lua). This file covers the

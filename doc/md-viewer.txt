@@ -6,11 +6,22 @@ CONTENTS                                                  *md-viewer-contents*
 1.  Introduction ......................... |md-viewer|
 2.  Requirements ......................... |md-viewer-requirements|
 3.  Configuration ........................ |md-viewer-config|
+      All options ........................ |md-viewer-options|
+      Backends ........................... |md-viewer-backends|
+      Cell calibration ................... |md-viewer-calibration|
+      Environment variables .............. |md-viewer-env|
+      Notifications over the preview ..... |md-viewer-overlay-alignment|
+      Document root ...................... |md-viewer-document-root|
+      Remote images ...................... |md-viewer-remote-images|
+      Animated images .................... |md-viewer-animation|
 4.  Commands ............................. |md-viewer-commands|
 5.  Preview navigation ................... |md-viewer-navigation|
+      Mappings ........................... |md-viewer-mappings|
+      Keyboard selection ................. |md-viewer-visual|
 6.  Mouse interaction .................... |md-viewer-interaction|
 7.  Preview history ...................... |md-viewer-history|
 8.  Terminal support ..................... |md-viewer-terminals|
+      Remote sessions over SSH ........... |md-viewer-ssh|
 9.  Security ............................. |md-viewer-security|
 10. Health and diagnostics ............... |md-viewer-health|
 
@@ -67,9 +78,9 @@ to text: >lua
       image = { backend = "kitty_raw" },
     })
 <
-`lua/md-viewer/config.lua` is the complete reference: it holds every option
-and default alongside the rationale for each non-obvious one. Options are
-grouped:
+Every option and its default is listed under |md-viewer-options|.
+`lua/md-viewer/config.lua` carries the reasoning behind each non-obvious one.
+Options are grouped:
 
     split       Preview position and size
     preview     Pinning, winbar, and loading indicator
@@ -81,7 +92,125 @@ grouped:
     terminal    Terminal profile detection and capability overrides
     interaction Mouse/keyboard interaction: selection, search, links, caret
 
-The options below need more than a default value to use.
+                                                           *md-viewer-options*
+ALL OPTIONS ~
+
+Defaults exactly as `setup()` applies them. The third column gives the
+accepted values or range where `setup()` enforces one; anything outside it
+raises at configuration time rather than misbehaving later.
+
+split ~
+    position                     "right"    right, left, below, above
+    width                        0.48       0 < w < 1, of the editor width
+    min_width                    45         columns
+
+preview ~
+    pinned                       true       keep the preview when the source
+                                            window shows another file
+    winbar                       true       label the preview with its source
+    loading                      true       startup spinner
+    loading_interval_ms          80         spinner tick
+
+render ~
+    debounce_ms                  200        after an edit, before a render
+    theme                        "auto"     auto, light, dark
+    local_images                 true       inline images from disk
+    max_local_image_bytes        10 MiB     per image, local and remote
+    device_scale_factor          2          1..3. A calibration divisor, not
+                                            a size knob -- |md-viewer-ssh|
+    font_size_px                 14         > 0
+    cell_aspect_ratio            0.5        > 0; `estimated` tier only
+    estimated_cell_width_px      10         > 0; `estimated` tier only
+    max_width_px                 1920       viewport ceiling, CSS px
+    max_height_px                1440       viewport ceiling, CSS px
+    max_png_bytes                32 MiB     refuse a larger capture
+    scroll_past_end              true       spacer below the last block
+    scroll_past_end_offset_px    22         height of that spacer
+    fast_scroll                  true       capture a cheaper moving frame
+    scroll_settle_ms             160        idle before the sharp capture
+    ssh_scroll_settle_ms         400        what an SSH session waits instead
+    scroll_scale                 nil        0.25..1. nil is full size locally
+                                            and the row below over SSH
+    ssh_scroll_scale             0.5        0.25..1; moving-frame scale over
+                                            SSH (|md-viewer-ssh|)
+    animate                      false      play animated GIF and WebP
+    animate_fps                  5          1..30; `frames` strategy only
+
+browser ~
+    executable_path              nil        nil discovers Chrome, Chromium
+                                            or Edge automatically
+    launch_timeout_ms            10000      before giving up on the browser
+    fast_png_encode              true       false uses Playwright's encoder
+
+image ~
+    backend                      "auto"     |md-viewer-backends|
+    double_buffer                nil        nil takes the terminal profile's
+    raw_zindex                   nil        nil takes the terminal profile's
+    raw_statusline_guard_cells   1          rows kept clear at the bottom
+    raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
+    raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
+    ui_poll_ms                   50         poll for no-autocmd floats
+
+sync ~
+    source_to_preview            true       the preview follows the source
+    preview_to_source            false      preview motion moves the source
+                                            cursor
+    cursor_follow                true       scroll to the cursor's block
+    cursor_debounce_ms           60         after a cursor move
+    navigation_line_px           22         one rendered line, for page and
+                                            wheel motions
+    mouse_scroll                 true       wheel over the preview scrolls it
+    mouse_scroll_lines           3          lines per wheel notch
+    manual_scroll_hold_ms        500        cursor-follow pause after a
+                                            manual scroll
+    alignment_tolerance          0.10       re-align only past this drift
+
+security ~
+    raw_html                     false      read SECURITY.md before enabling
+    document_root_markers        .git, .hg, .svn
+    document_root                nil        nil is the project enclosing the
+                                            document, per
+                                            |md-viewer-document-root|
+
+interaction ~
+    enabled                      true       the whole gesture surface
+    links                        true       CTRL/CMD-click activates one
+    drag_threshold_cells         1          below this a drag is a click
+    double_click                 true       gates the <2-LeftMouse> mapping
+    selection                    true       drag-to-select
+    drag_debounce_ms             0          0 dispatches every frame
+    visual                       true       v, V and o (|md-viewer-visual|)
+    autoscroll                   true       a drag held past the edge keeps
+                                            scrolling
+    autoscroll_interval_ms       60         one step of that scroll
+    autoscroll_max_lines         6          > 0; ceiling on lines per step
+    fast_drag                    false      soften the frame mid-drag
+    selection_overlay            "auto"     auto, on, off
+                                            (|md-viewer-terminals|)
+    settle_ms                    120        idle before the settled frame
+    copy                         true       y and :MdViewerCopy
+    copy_on_select               false      off: nothing reaches the
+                                            clipboard unasked
+    word_select                  true       double-click
+    paragraph_select             true       triple-click
+    find                         true       / and :MdViewerFind
+    history_limit                32         documents kept per preview
+                                            (|md-viewer-history|)
+    external_open_timeout_ms     5000       how long a handler is watched
+
+terminal ~
+    profile                      "auto"     auto, iterm2, kitty, wezterm,
+                                            ghostty, warp, generic_kitty,
+                                            unknown
+    kitty_graphics               "auto"     auto, on, off
+    probe                        "off"      off, safe. The active probe is
+                                            unimplemented, so "safe" behaves
+                                            as "off".
+    animation                    "auto"     auto, native, frames, off
+                                            (|md-viewer-animation|)
+
+The options in the rest of this section need more than a default value to
+use, and are covered in full below.
 
                                                           *md-viewer-backends*
 BACKENDS ~
@@ -125,7 +254,7 @@ use, with the numbers behind it:
   still renders, from `render.estimated_cell_width_px` and
   `render.cell_aspect_ratio`, but is not pixel-exact.
 
-To override the measurement, give the cell size in *CSS* pixels -- the
+To override the measurement, give the cell size in CSS pixels -- the
 measured size divided by `render.device_scale_factor`, so a 2x display
 measuring 14x32 device pixels wants 7 and 16: >sh
 
@@ -184,7 +313,7 @@ docs/terminal-support.md for what has been measured on which terminal.
 DOCUMENT ROOT ~
 
 `security.document_root` bounds which local files a preview may load as images
-or open as links. It defaults to the *project* enclosing the document -- the
+or open as links. It defaults to the project enclosing the document -- the
 nearest ancestor directory holding one of `security.document_root_markers`
 (`.git`, `.hg`, `.svn`) -- falling back to the document's own directory where
 no marker is found, and to Neovim's working directory for a buffer that has
@@ -375,10 +504,11 @@ because those are not places a reader can be. Neovim's own cursor is hidden
 while that block is on screen and follows along underneath, so focus and
 mappings keep working.
 
+                                                          *md-viewer-mappings*
 The graphical preview maps these Normal-mode keys. Counts work on every motion
 (`10j`, `5w`, `3l`) except gg and G, which always mean the ends of the
-document -- going to a *source* line is a separate feature, not this keystroke
-wearing a count, and it is not in this release:
+document -- going to a source line is a separate feature, not this keystroke
+wearing a count:
 
     h, l, Left, Right        One character, within the rendered line
     j, k, Down, Up           One rendered line, holding its column
@@ -424,9 +554,10 @@ motion is one round trip to the renderer, because only the renderer knows
 where the characters are; that is what buys the snapping and the glyph-sized
 caret.
 
-On a terminal that cannot draw the overlay (WezTerm today) the caret falls
-back to the terminal's own cursor: a fixed cell rather than the glyph, but
-still on the right character, and Neovim's cursor stays visible there.
+On a terminal that cannot draw the overlay -- WezTerm, and see
+docs/terminal-support.md for the current list -- the caret falls back to the
+terminal's own cursor: a fixed cell rather than the glyph, but still on the
+right character, and Neovim's cursor stays visible there.
 
 Mouse-wheel events scroll the preview only when the pointer is over its split.
 
@@ -491,7 +622,7 @@ rectangles where that is enabled and as a full captured frame everywhere else
 A local Markdown link opens in Neovim, in the source window, and the preview
 follows it; CTRL-O returns. Files Neovim has no filetype for, and PDFs, still
 go to the system handler via |vim.ui.open()|. A link is never handed to that
-handler when the target is something the OS would                        *run*
+handler when the target is something the OS would run rather than display
 (|md-viewer-security|), and the root it is checked against is described under
 |md-viewer-document-root|.
 
@@ -538,9 +669,9 @@ md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp by
 Kitty-graphics-protocol compatibility. The instant drag highlight -- the
 selection drawn as translucent overlay rectangles rather than re-photographing
 the page each frame -- is enabled only on terminals where an operator drove it
-by hand and watched it: today iTerm2, Ghostty and Kitty. Everywhere else the
-drag falls back to full captured frames, which is always correct and merely
-slower.
+by hand and watched it: iTerm2, Ghostty and Kitty, with
+docs/terminal-support.md holding the current list. Everywhere else the drag
+falls back to full captured frames, which is always correct and merely slower.
 
 It is off on WezTerm for cost rather than correctness, pending an upstream
 fix. Do not force it on there; docs/terminal-support.md has the measurement
@@ -554,9 +685,9 @@ md-viewer works around by keeping Neovim out of its own visual mode over the
 surface. See docs/terminal-support.md.
 
 If preview text renders at roughly twice its configured size, the terminal's
-reported cell is being converted with the wrong divisor -- check `cell unit` in
-|:MdViewerDebug| and see the "Preview text is about twice the size it should
-be" section of docs/troubleshooting.md.
+reported cell is being converted with the wrong divisor. Check `cell unit` in
+|:MdViewerDebug|, and see |md-viewer-calibration| and the "image is stretched
+or soft" section of docs/troubleshooting.md.
 
 tmux, screen, and Zellij are not supported: no escape-sequence passthrough is
 implemented for any of them. :MdViewerHealth detects a multiplexer and
@@ -624,6 +755,14 @@ always full `render.device_scale_factor`. :MdViewerDebug reports
 `scroll_scale` and `scroll_scale_source`; read them beside `capture_encoder`,
 because the numeric scale needs the cdp_fast_png path and a session that fell
 back to playwright_png gets full-size frames whatever is configured.
+
+Two settings switch the scale off entirely rather than tuning it, which is
+worth knowing before concluding it does nothing. `render.fast_scroll = false`
+leaves no separate moving frame for the factor to apply to, so `scroll_scale`
+is ignored -- deliberately, because scaling the only frame there is would
+leave the preview permanently soft. `browser.fast_png_encode = false` drops
+the session to playwright_png, whose own scale is a two-value enum the
+numeric factor cannot reach.
 
 Do NOT lower `render.device_scale_factor` for this. It is a calibration
 divisor, not a size knob: lowering it doubles the CSS viewport and makes the

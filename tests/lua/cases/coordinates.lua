@@ -404,7 +404,7 @@ return function(t)
   t.eq(60, clipped.col + clipped.width, "the bleed is clipped to the placement's right edge")
   vim.api.nvim_win_close(edge_win, true)
 
-  -- cell_to_css: Part 4's mouse-cell -> browser-CSS-pixel conversion.
+  -- cell_to_css: the mouse-cell -> browser-CSS-pixel conversion.
   local placement = { row = 5, col = 10, width = 40, height = 20, exclusions = {} }
   local view = { widthPx = 800, heightPx = 400 }
 

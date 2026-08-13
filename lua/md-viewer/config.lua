@@ -72,7 +72,6 @@ M.defaults = {
     animate_fps = 5,
   },
   browser = {
-    channel = "chrome",
     executable_path = nil,
     launch_timeout_ms = 10000,
     -- Set false to fall back to Playwright's default encoding.
@@ -80,7 +79,6 @@ M.defaults = {
   },
   image = {
     backend = "auto",
-    zindex = 20,
     -- nil defers to the terminal profile's default (see md-viewer.terminal);
     -- set explicitly to override every profile.
     double_buffer = nil,
