@@ -3,120 +3,63 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-13
 
-Scrolling over a throttled SSH link. On a connection whose ceiling is low
-enough — an AWS SSM tunnel is a flat 0.80 MB/s — the wire time for one scroll
-frame is larger than the render and the terminal decode put together, and a
-wheel spin queues frames faster than the link drains them. The preview then
-catches up about half a second late. Nothing was wrong with the pipeline; the
-frames were simply too big for the pipe, and the two settings that looked like
-they would help were measured making it worse.
+Scrolling over a throttled SSH link, and previews that no longer stall on a
+remote image.
 
-Two answers ship here. The smaller one needs no setup and helps every SSH user:
-capture the moving frame of a scroll at half size. The larger one stops sending
-the frame at all — render it on the machine your terminal is on and send a
-reference across the link instead of the picture.
+On a connection whose ceiling is low enough — an AWS SSM tunnel is a flat
+0.80 MB/s — the wire time for one scroll frame is larger than the render and the
+terminal decode put together, and a wheel spin queues frames faster than the link
+drains them. The preview then catches up about half a second late. Nothing was
+wrong with the pipeline; the frames were simply too big for the pipe, and the two
+settings that looked like they would help were measured making it worse.
 
 ### Added
 
 - **`render.scroll_scale` and `render.ssh_scroll_scale`.** The moving frame of a
   scroll is now captured at a fraction of its natural size, halved by default on
   an SSH session and unchanged on a local one. PNG bytes go as `pixels^0.69`, so
-  half scale measures 2.6× fewer bytes per frame locally and 3.0× on the SSM
-  link it was built for — 224 ms of transit per moving frame down to 74 ms. The
-  settle capture that lands when scrolling stops is never reduced, so the
-  picture being read is still full `render.device_scale_factor`.
-  `:MdViewerDebug` reports the factor in force and where it came from.
+  half scale measures 2.6× fewer bytes per frame locally and 3.0× on the SSM link
+  it was built for — 224 ms of transit per moving frame down to 74 ms, and
+  measured end to end, the delivered frame rate 3.8/s to 6.3/s with the link
+  going from 79% saturated to 49%. The settle capture that lands when scrolling
+  stops is never reduced, so the picture being read is still full
+  `render.device_scale_factor`. `:MdViewerDebug` reports the factor in force and
+  where it came from.
 - **`render.ssh_scroll_settle_ms`.** An SSH session now waits 400 ms rather than
   160 ms before taking the sharp settle capture. A mouse wheel delivers notches
   50–150 ms apart, so the shorter delay read an ordinary gap between two flicks
   as "stopped" and bought a full-size transfer — half a second of transit on the
   link this was measured against — that the next notch immediately made stale.
-  Local sessions are unchanged.
-- **A renderer that can run somewhere other than beside Neovim.**
-  `renderer/src/companion.js` serves the existing renderer protocol over a unix
-  domain socket (mode 0600, never TCP), and `client_render.address` points the
-  plugin at one instead of spawning a child. The machine running Neovim still
-  opens no listening port — it dials out, and when the address is a forwarded
-  port the listener belongs to sshd. A companion that cannot be reached is
-  reported in `:MdViewerHealth` and falls back to the local renderer rather than
-  failing the preview.
-- **`bin/md-viewer-ssh`: the preview rendered where your terminal is.** A
-  wrapper around `ssh` that runs the companion locally, filters ssh's stdout,
-  and exports `LC_MD_VIEWER` so the remote plugin knows it is there. The remote
-  preview then asks for its frames *by reference*: the PNG stays on the machine
-  that drew it and a ~56-byte token crosses the link, which the filter swaps
-  back for the identical Kitty upload the terminal receives today. On the SSM
-  link this was built for, a moving scroll frame was 47 KB of wire time.
-  Placement geometry, crops, z-layering and the double-buffered deletion order
-  are all still computed in Lua and are asserted byte-for-byte equal between the
-  two modes; `chunks()` and its JavaScript port are asserted against one pinned
-  artifact so neither can drift alone.
-
-  It adds nothing to install, needs no new inbound connection — `ssh -R` is an
-  ordinary reverse forward, and the listener on the Neovim side is sshd's — and
-  changes nothing when it is absent: no wrapper means no handshake means no
-  token. A companion that dies mid-session falls back with one notification, a
-  leaked token is an APC string conformant terminals discard, and any failure in
-  the filter latches it into plain passthrough for the rest of the session.
-
-  Two things still need the renderer beside the *file* and therefore fall back
-  under it: a local image embedded in the document shows its failure
-  placeholder, and an animated image stays on its still frame. Remote `https`
-  images are fetched by your local machine instead of the remote host, which
-  moves a trust boundary — [SECURITY.md](SECURITY.md) says exactly which.
-  `:MdViewerHealth` notes all of this whenever client rendering is on, reports
-  which of the four preconditions is missing when it is not, and warns if a
-  frame was ever referenced after the renderer had dropped it.
-- **`client_render.enabled`**, `"auto"` by default: reference a frame only when
-  a companion is answering, the raw Kitty backend is in use, and a filter has
-  announced itself. `"on"` waives the handshake alone, for a setup whose
-  environment cannot reach the remote host; `"off"` never references a frame.
-  `$MD_VIEWER_CLIENT_ADDR` joins `client_render.address` as a way to name the
-  companion from the remote side.
-
-- **`client_render.scroll_pipeline`**, default 3: how many scroll captures may
-  be outstanding at once while client rendering. One everywhere else, unchanged
-  and not configurable there — a renderer beside Neovim is paced by its own
-  capture and a second request would only queue behind the first. Across a link
-  it is the wrong answer: one frame costs a round trip plus a render, strictly
-  serially, measured at 92 ms and 15 ms on the connection this was built for, so
-  the renderer sat idle 86% of the time and the preview updated 9 times a second
-  where the browser could manage 66. Depth N makes the floor
-  `max(render, round_trip / N)`. Every frame in flight is a distinct position
-  the reader passed through, and all of them are displayed in order.
-  `scripts/pipeline/ab.lua` measures it.
-
-### Changed
-
-- **`render.ssh_scroll_settle_ms` no longer applies while client rendering.** It
-  exists because a settle capture over SSH was half a second of transit that the
-  next wheel notch made stale; a settle frame rendered on the machine the
-  terminal is on costs ~57 ms and about a kilobyte, so the extra 240 ms only
-  delayed the moment the picture sharpened. `render.scroll_settle_ms` is used
-  there instead, and `:MdViewerDebug` says which and why.
-- **Block geometry is no longer re-sent on every frame of a scroll.** It is
-  identical from one scroll frame to the next and is 10,477 B on this project's
-  own README — 1.4 MB across a single wheel spin, which would have become the
-  largest thing on the link the moment the pixels stopped travelling. A render
-  request may now name the `blocksRevision` it already holds and get nothing
-  back when that is still current. Only client-rendering sessions do; the
-  request a local session sends is unchanged.
-- **A design record for client-side rendering**, in
-  [docs/local-render-design.md](docs/local-render-design.md): the measurements
-  behind the slow-link case and the architecture for rendering on the machine
-  the terminal runs on, sending Markdown across the link instead of pixels.
+  The cost is that sharpness arrives about 240 ms later when you do stop. Local
+  sessions are unchanged.
 
 ### Fixed
 
+- **One unreachable image no longer costs the whole preview twenty seconds.**
+  Remote images resolved in a pre-pass between parsing and rendering, so on a
+  network with no direct route out the full fetch timeout was paid *before the
+  document appeared at all*. The timeout is unchanged, because a slow image on a
+  working network deserves it; what changed is that nothing waits for it. An
+  image that has not arrived renders as its placeholder, the fetch keeps running,
+  and the picture appears on its own once the bytes land. A document whose images
+  are already cached still comes up whole on the first pass.
+
+  **Remote images still do not load behind a mandatory proxy** — they now fail
+  fast instead of hanging. `$HTTP_PROXY` and `$HTTPS_PROXY` are deliberately not
+  consulted: the fetch pins the address it validated, which is what makes the
+  SSRF check meaningful, and a proxy makes pinning impossible. Reconciling the
+  two is an open design question; `:help md-viewer-remote-images`,
+  [SECURITY.md](SECURITY.md) and the troubleshooting guide now say so rather than
+  leaving it to be read as an omission.
 - **Documentation recommended a setting that makes slow links worse.** The
   README, `:help md-viewer-ssh` and the troubleshooting guide all suggested
-  lowering `render.device_scale_factor` on a slow connection. It is a
-  calibration divisor rather than a size knob: lowering it doubles the CSS
-  viewport and grows the frame — 80 KB to 224 KB on the document it was measured
-  against — while collapsing the moving and settle captures into one, so the
-  cheap scroll frame stops existing. All three now say so.
+  lowering `render.device_scale_factor` on a slow connection. It is a calibration
+  divisor rather than a size knob: lowering it doubles the CSS viewport and grows
+  the frame — 80 KB to 224 KB on the document it was measured against — while
+  collapsing the moving and settle captures into one, so the cheap scroll frame
+  stops existing. All three now say so.
 
 ## [0.1.1] - 2026-08-11
 
@@ -197,5 +140,6 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.0
