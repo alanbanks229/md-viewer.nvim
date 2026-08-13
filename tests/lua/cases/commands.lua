@@ -68,6 +68,33 @@ return function(t)
     t.ok(readme:find("| `:" .. gone .. "`", 1, true) == nil, ("the README command table omits %s"):format(gone))
   end
 
+  -- The manual harnesses in scripts/ drive the plugin through its real
+  -- commands, and nothing else checks them: they need a browser and a live
+  -- terminal, so they are not in CI, and a renamed command breaks them
+  -- silently until someone runs one months later. That is not hypothetical --
+  -- `scripts/overlay/live/drive.lua` called `:MdViewerOpen` from the day the
+  -- toggle refactor removed it, and stayed dead through two releases because
+  -- the first thing it did was fail on a command that no longer existed.
+  --
+  -- Only the *name* is checked here. Whether a script's arguments or its
+  -- assertions still make sense is what running it answers.
+  local registered = {}
+  for name in pairs(vim.api.nvim_get_commands({})) do
+    registered[name] = true
+  end
+  local scripts = vim.fn.glob(root .. "/scripts/**/*.lua", true, true)
+  t.ok(#scripts > 0, "the script sweep actually found scripts to check")
+  local checked = 0
+  for _, path in ipairs(scripts) do
+    local body = table.concat(vim.fn.readfile(path), "\n")
+    local relative = path:sub(#root + 2)
+    for name in body:gmatch('vim%.cmd%(%s*"(MdViewer%a*)"') do
+      checked = checked + 1
+      t.ok(registered[name], ("%s invokes :%s, which is a real command"):format(relative, name))
+    end
+  end
+  t.ok(checked > 0, "and that at least one of them invokes a command at all")
+
   -- The functions behind them stay reachable from Lua: removing a command is a
   -- decision about the command surface, not about what the plugin can do.
   local controller = require("md-viewer.controller")

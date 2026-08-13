@@ -225,15 +225,22 @@ function collectRemoteImageSources(tokens, sources = []) {
   return sources;
 }
 
-/// Returns `{ html, sourceMap }`.
+/// Returns `{ html, sourceMap, animations, remoteImagesPending }`.
 ///
 /// `sourceMap` is the full provenance record for this render: the normalized
 /// source lines plus one entry per opaque `data-md-source-id`. It stays in
-/// trusted Node memory (`markdownCache` in `main.js` holds it beside the HTML)
+/// trusted Node memory (`markdownCache` in `service.js` holds it beside the HTML)
 /// and is never sent to the page -- the DOM carries keys only.
 ///
-/// Async only for the remote-image prefetch between parse and render; the
-/// renderer rules themselves stay synchronous, so token mutation and
+/// `remoteImagesPending` counts images still being fetched when this returned.
+/// It is what stops the markup being cached as final: it describes *when* this
+/// render happened rather than what the document says, so a later render at the
+/// same revision must re-run rather than reuse it.
+///
+/// Async only for the remote-image pass between parse and render -- which no
+/// longer waits for the network, only for the microtask queue to drain, so an
+/// image already in the cache lands and one that is not becomes a placeholder.
+/// The renderer rules themselves stay synchronous, so token mutation and
 /// provenance-id minting keep their exact relative order.
 export async function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);

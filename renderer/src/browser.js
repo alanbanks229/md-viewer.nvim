@@ -455,7 +455,7 @@ export class BrowserRenderer {
       scrollY,
       blocks: this.layout.blocks,
       // Document-coordinate rects only. Frames are materialized off this path
-      // (main.js's `animation` method): decoding a large GIF is seconds of CPU
+      // (service.js's `animation` method): decoding a large GIF is seconds of CPU
       // and this is the queue every scroll and keystroke waits behind.
       animations: this.layout.animations ?? [],
       // True while some minted animation still has no measurable box. The Lua
@@ -636,7 +636,7 @@ export class BrowserRenderer {
         token,
         direction: action === "find_next" ? "next" : "previous",
         // Not owned by browser.js -- forwarded through `cached.findState` from
-        // main.js's interactionState, since only find_set recomputes the match
+        // service.js's interactionState, since only find_set recomputes the match
         // set; stepping only moves which one is active.
         activeIndex: cached?.findState?.activeIndex ?? 0,
         matchCount: cached?.findState?.matchCount ?? 0,

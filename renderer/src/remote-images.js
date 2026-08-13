@@ -13,11 +13,13 @@ import { sniffImageType } from "./security.js";
 /// can loosen.
 export const REMOTE_IMAGES = Symbol("md-viewer.remote-images");
 
-// All renders share one serial queue (main.js), so a slow host would freeze
-// every interaction for its duration. The deadline is shared by the whole
-// batch of a render's fetches -- N hanging hosts still stall one render by at
-// most FETCH_TIMEOUT_MS, not N times it. Failures are remembered briefly so a
-// dead host costs one stall per minute, not one per keystroke.
+// This bounds how long a fetch may run, not how long a render waits for one:
+// since `resolveRemoteImages` stopped blocking, no render is held for any of
+// this. What the timeout still decides is when an outstanding fetch gives up
+// and becomes a cached failure, and the deadline is shared by the whole batch
+// of a render's fetches, so N hanging hosts cost one timeout rather than N.
+// Failures are remembered briefly so a dead host is re-attempted about once a
+// minute rather than once per keystroke.
 //
 // 20s, not 5s: measured against a real multi-megabyte GitHub-attachment GIF
 // (the shape this project's own README uses) resolving through two hops --
@@ -170,7 +172,7 @@ export function buildRequestOptions(addresses, signal) {
 
 // url -> { promise } while in flight, then { ok: true, dataUri, bytes } or
 // { ok: false, kind, label, expiresAt }. Insertion order is the LRU order
-// (delete-then-set on hit, evict from the front), the same idiom as main.js's
+// (delete-then-set on hit, evict from the front), the same idiom as service.js's
 // markdownCache. A positive entry needs no re-validation on a cache hit: it
 // holds already-fetched, already-checked bytes, not a live connection, so
 // replaying it exposes nothing further.
@@ -302,13 +304,14 @@ async function resolveOne(source, deadline, settings) {
   return promise;
 }
 
-/// Resolves every source in parallel under one shared deadline and returns
-/// `Map<source, result>` with the same tagged shape `resolveLocalImage` uses.
+/// Starts every source in parallel under one shared deadline and returns
+/// `{ results, pending }`, where `results` is a `Map<source, result>` carrying
+/// the same tagged shape `resolveLocalImage` uses.
+///
 /// `fetchImpl`, `resolveHost`, `timeoutMs`, `negativeTtlMs`, and
 /// `transientNegativeTtlMs` exist so tests can run with no real sockets or DNS
 /// queries (tests/node/no-listening-port forbids a listener) and no real
 /// clocks.
-/// Returns `{ results, pending }`.
 ///
 /// `pending` is the count of sources still being fetched when this returned,
 /// and it exists because waiting for them was making the preview unusable. A

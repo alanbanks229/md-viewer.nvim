@@ -48,10 +48,13 @@ export function createService({ assetsDir, onShutdown } = {}) {
   // follow a relaunch; the store never owns browser lifecycle.
   const animations = new AnimationStore({ dir: browser.tempDir, browserProvider: () => browser.browser });
 
-  // documentId -> { key, html, sourceMap }. The source map is the trusted-memory
-  // half of source provenance: the page holds opaque region keys, this holds what
-  // they mean. It is written and evicted with the markup it describes, so the two
-  // can never disagree about which render they belong to.
+  // documentId -> { key, html, sourceMap, animations, remoteImagesPending }.
+  // The source map is the trusted-memory half of source provenance: the page
+  // holds opaque region keys, this holds what they mean. It is written and
+  // evicted with the markup it describes, so the two can never disagree about
+  // which render they belong to. `remoteImagesPending` rides along because it
+  // describes when this markup was produced rather than what the document says,
+  // and that is what disqualifies it from being reused as final.
   const markdownCache = new Map();
   // documentId -> per-document interaction state, held in trusted Node memory
   // rather than on the page. setContent destroys page state on every document

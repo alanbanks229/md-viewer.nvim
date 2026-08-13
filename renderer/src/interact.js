@@ -168,7 +168,7 @@ function requireFiniteNumber(value, name) {
 
 /// Validate and normalize an `interact` envelope. Pure and synchronous, so the
 /// caller can run it before its first `await` -- see the lane-stamping ordering
-/// requirement in main.js.
+/// requirement in service.js.
 export function validateEnvelope(params) {
   const envelope = params ?? {};
   if (typeof envelope.documentId !== "string" || envelope.documentId === "") {
@@ -2322,7 +2322,7 @@ export function buildFindResult(raw, sourceMap, query) {
     matchCount: raw.matchCount ?? 0,
     activeIndex,
     activeSourcePosition,
-    // Internal only: main.js reads this to populate per-document find state for
+    // Internal only: service.js reads this to populate per-document find state for
     // find_next/find_previous, then strips it before the result reaches Lua --
     // a document with thousands of matches must not serialize thousands of
     // source positions to Lua on every keystroke of a search.
