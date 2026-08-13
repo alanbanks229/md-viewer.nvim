@@ -746,7 +746,7 @@ end
 local function close_session(session)
   if not session or session.closed then return end
   session.closed = true
-  session.request_serial = session.request_serial + 1
+  renderer.invalidate(session)
   for _, name in ipairs({
     "render_timer",
     "resize_timer",
@@ -848,7 +848,7 @@ end
 function M.retarget(session, new_buf, record)
   if not valid(session) or not session.backend or session.backend.name == "cells" then return false end
   if not state.retarget(session, new_buf) then return false end
-  session.request_serial = session.request_serial + 1
+  renderer.invalidate(session)
   session.render_epoch = (session.render_epoch or 0) + 1
   interaction.forget(session)
   interaction.forget_selection(session)

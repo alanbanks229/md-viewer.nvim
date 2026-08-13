@@ -77,6 +77,56 @@ Falsifiable prediction, to be measured on the real link: `fast_interval_min_ms`
 drops from 107 to under 40, and the delivered rate goes from 4.7/s to above 20/s.
 If it does not, the model of this pipeline is wrong and tuning should stop.
 
+#### It was measured, and it failed — on a defect, not on the model
+
+| | depth 1 | depth 3 |
+|---|---:|---:|
+| moving frames | 41 | **11** |
+| scrolled for | 19.8 s | 28.9 s |
+| interval floor | 107 ms | **198 ms** |
+| delivered | 3.0/s | **0.4/s** |
+
+Depth 3 was **slower**, and visibly so. Eleven frames in 28.9 seconds while
+scrolling 46% longer is the signature of frames being produced and then thrown
+away, and that is exactly what happened: `renderer.lua`'s `is_stale` compared
+each response against `session.request_serial`, a session-wide "only the newest
+request may display" gate that predates the lane machinery and does the same job
+one layer up. Three concurrent captures took serials N..N+2, so N and N+1 were
+discarded **on arrival, after the link had already carried them** — three times
+the work for a third of the frames.
+
+The lane exemption was written and the identical Lua-side gate was left in place.
+`is_stale` now takes the same narrow exemption (`claiming_serial`), and
+`renderer.invalidate()` exists so no caller can bump one without the other.
+
+**`client_render.scroll_pipeline` now defaults to 1.** The fix has never been
+measured on a link, and a default that has only been reasoned about is precisely
+what produced this regression. Raising it is a deliberate act with a harness
+attached.
+
+#### The conclusion that matters, whether or not pipelining is ever retried
+
+At depth 1 the arithmetic closes and the round trip really is the floor:
+48 ms out + 20 ms render + 48 ms back = 116 ms against an observed 107 ms. But
+compare the two architectures at their measured floors:
+
+| | renderer on the VM | renderer on the Mac |
+|---|---:|---:|
+| capture | 50–62 ms | 15–21 ms |
+| link, per frame | ~0 (a pipe) | **~90 ms** |
+| floor | **~56 ms** | ~107 ms |
+| delivered | 6.3/s | 3.0–4.7/s |
+
+**Over a link with a ~96 ms round trip, moving the renderer to the client is a
+net loss for smoothness unless its requests are pipelined.** The round trip costs
+more than the faster render saves. What client rendering buys unconditionally is
+bandwidth — 13.3 MB and 16.7 s of wire time in one session, and a settle frame
+that costs nothing — and that is real but is not what a reader feels.
+
+So the honest ranking today, for smoothness alone: **Phase 0 over plain `ssh`
+beats client rendering.** Client rendering wins on bandwidth, and would win on
+both if pipelining is ever shown to work.
+
 Two settings also become mistuned under client rendering, because both trade
 against wire bytes that no longer exist: `ssh_scroll_settle_ms = 400` adds 240 ms
 of pure delay before the picture sharpens, and `ssh_scroll_scale = 0.5` now trades

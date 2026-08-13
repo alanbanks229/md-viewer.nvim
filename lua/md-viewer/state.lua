@@ -12,6 +12,7 @@ function M.create(source_buf, source_win)
     backend = nil,
     request_serial = 0,
     applied_serial = 0,
+    claiming_serial = 0,
     render_epoch = 0,
     renderer_revision = nil,
     latest_blocks = {},

@@ -6,7 +6,37 @@ local client_render = require("md-viewer.client_render")
 
 local M = {}
 
-function M.is_stale(session, serial) return session.closed or serial ~= session.request_serial end
+---Whether a response may still be displayed.
+---
+---`request_serial` is a session-wide "only the newest request may show a frame"
+---gate, and it predates the renderer's own lane machinery by doing the same job
+---one layer up. That is correct as long as exactly one request is ever in
+---flight, and it silently defeats pipelining otherwise: three concurrent
+---captures take serials N, N+1 and N+2, so N and N+1 are discarded on arrival
+---after the link has already carried them. Measured on the real link at depth 3
+---it turned 41 displayed frames into 11 while the renderer did three times the
+---work -- the pipelined arm was slower than the serial one, and visibly so.
+---
+---So a pipelined capture is measured against `claiming_serial` instead: the
+---serial of the last request that *did* claim the session. Same rule as
+---`admit` in renderer/src/lanes.js, for the same reason and with the same
+---narrowness -- a close, a document change, or any ordinary render still
+---invalidates every capture outstanding behind it.
+function M.is_stale(session, serial, pipelined)
+  if session.closed then return true end
+  if pipelined then return serial <= (session.claiming_serial or 0) end
+  return serial ~= session.request_serial
+end
+
+---Invalidate everything in flight for this session.
+---
+---One function so a caller cannot bump the serial and forget the claim, which
+---would leave pipelined captures from before a document change still eligible
+---to draw over the document that replaced it.
+function M.invalidate(session)
+  session.request_serial = session.request_serial + 1
+  session.claiming_serial = session.request_serial
+end
 
 ---Read a PNG produced by the renderer, enforcing the configured size limit.
 ---Exported (not a private `read_bytes` local) so `controller.lua`'s
@@ -69,6 +99,10 @@ function M.request(session, markdown, options, callback)
   local cfg = config.get()
   session.request_serial = session.request_serial + 1
   local serial = session.request_serial
+  -- A pipelined scroll capture is one of several the caller intends to display;
+  -- anything else is the newest thing this session wants and supersedes what
+  -- came before it.
+  if not options.pipelined then session.claiming_serial = serial end
   local viewport = preview.viewport(session.preview_win, session.backend and session.backend.name)
   -- One root, one implementation. This used to compute its own
   -- (`cfg.security.document_root or base_dir(...)`), which skipped the
@@ -127,7 +161,7 @@ function M.request(session, markdown, options, callback)
   if options.pipelined then params.pipelined = true end
   if not capture_only then params.markdown = markdown end
   local request_id = process.request(capture_only and "capture" or "render", params, function(result, err)
-    if M.is_stale(session, serial) then
+    if M.is_stale(session, serial, options.pipelined) then
       if result and result.pngPath then vim.uv.fs_unlink(result.pngPath) end
       callback(nil, nil, true)
       return

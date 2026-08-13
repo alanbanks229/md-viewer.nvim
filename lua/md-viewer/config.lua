@@ -220,11 +220,20 @@ M.defaults = {
     -- near 31ms, which is about what a local preview achieves, and beyond that
     -- the render is the constraint rather than the link.
     --
+    -- **Default 1, which is to say off, and deliberately.** The first attempt at
+    -- this shipped a depth of 3 and was measured on the real link making things
+    -- *worse*: a second staleness gate in renderer.lua discarded every response
+    -- but the newest, so the renderer did three times the work and the preview
+    -- showed a third of the frames. That gate is fixed, but the fix has never
+    -- been measured on a link, and a default that has only ever been reasoned
+    -- about is exactly what produced the regression. Raise it to 3 by hand and
+    -- run scripts/pipeline/ab.lua if you want to find out.
+    --
     -- Every frame in flight is a distinct position the reader passed through and
     -- every one is displayed, in order. Raising this past the point where the
     -- render becomes the constraint buys nothing and lengthens how far the
     -- preview keeps moving after the wheel stops.
-    scroll_pipeline = 3,
+    scroll_pipeline = 1,
   },
   terminal = {
     profile = "auto",

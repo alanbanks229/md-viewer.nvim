@@ -219,13 +219,52 @@ return function(t)
 
   stub({ version = 1 }, connected)
   local depth, depth_source = controller._scroll_pipeline_depth(kitty_session)
-  t.eq(3, depth, "client rendering keeps three captures in flight, so the link is not idle between frames")
+  t.eq(1, depth, "the shipped default is one capture in flight, because depth 3 was measured making things worse")
   t.ok(depth_source:match("client_render.scroll_pipeline"), "and names the option that sets it")
 
   config.setup({ client_render = { scroll_pipeline = 6 } })
   t.eq(6, (controller._scroll_pipeline_depth(kitty_session)), "the depth is configurable")
   config.reset()
   config.setup({ terminal = { profile = "kitty" } })
+
+  -- The defect that made depth 3 slower than depth 1 on the real link, asserted
+  -- directly because nothing else could reach it: `request_serial` is a
+  -- session-wide "only the newest request may display" gate, so three
+  -- concurrent captures took serials N..N+2 and the first two were discarded on
+  -- arrival -- after the link had already carried them. 41 displayed frames
+  -- became 11 while the renderer did three times the work.
+  local pipelined_session = { closed = false, request_serial = 0, claiming_serial = 0 }
+  local serials = {}
+  for _ = 1, 3 do
+    pipelined_session.request_serial = pipelined_session.request_serial + 1
+    serials[#serials + 1] = pipelined_session.request_serial
+  end
+  for index, serial in ipairs(serials) do
+    t.eq(
+      false,
+      renderer.is_stale(pipelined_session, serial, true),
+      ("pipelined capture %d of 3 is still displayable when all three are outstanding"):format(index)
+    )
+    t.eq(
+      index ~= 3,
+      renderer.is_stale(pipelined_session, serial, false),
+      ("but the same serial as an ordinary request %s"):format(index ~= 3 and "is superseded" or "is the newest")
+    )
+  end
+
+  -- What must still invalidate them. A capture drawn over the document that
+  -- replaced it is the failure this gate exists to prevent, and pipelining may
+  -- not reopen it.
+  renderer.invalidate(pipelined_session)
+  for index, serial in ipairs(serials) do
+    t.eq(
+      true,
+      renderer.is_stale(pipelined_session, serial, true),
+      ("a document change invalidates outstanding capture %d"):format(index)
+    )
+  end
+  pipelined_session.closed = true
+  t.eq(true, renderer.is_stale(pipelined_session, 99, true), "and a closed session invalidates everything")
 
   stub(nil, { running = true, transport = "stdio", connected = true })
   depth, depth_source = controller._scroll_pipeline_depth(kitty_session)

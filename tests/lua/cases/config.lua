@@ -89,7 +89,11 @@ return function(t)
   t.eq(nil, cfg.client_render.address, "no companion renderer until one is configured")
   t.eq(2000, cfg.client_render.connect_timeout_ms, "a companion gets two seconds to answer")
   t.eq("auto", cfg.client_render.enabled, "and referencing a frame requires everything that makes it work")
-  t.eq(3, cfg.client_render.scroll_pipeline, "three captures in flight while client rendering, one everywhere else")
+  t.eq(
+    1,
+    cfg.client_render.scroll_pipeline,
+    "one capture in flight by default: depth 3 was measured making things worse"
+  )
   for _, bad in ipairs({ 0, 9, 2.5, "3" }) do
     local ok_depth, err_depth = pcall(config.setup, { client_render = { scroll_pipeline = bad } })
     t.eq(false, ok_depth, ("a scroll_pipeline of %s is rejected"):format(vim.inspect(bad)))
