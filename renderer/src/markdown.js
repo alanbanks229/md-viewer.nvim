@@ -117,6 +117,9 @@ function createMarkdown(options) {
       registerAnimation(token, result.dataUri, options, env);
     } else {
       token.attrSet("src", placeholderDataUri(result.kind, result.label, source));
+      // "pending" reads as failed for styling: the alternative is a third
+      // placeholder style for a state that lasts one render, and a box that
+      // changes appearance twice is worse than one that changes once.
       token.attrJoin("class", result.kind === "blocked" ? "md-viewer-image-blocked" : "md-viewer-image-failed");
       token.attrSet("title", `${result.label} — ${source}`.slice(0, 256));
     }
@@ -237,7 +240,8 @@ export async function renderMarkdown(markdown, options) {
   const builder = createSourceMapBuilder(markdown);
   const env = { [SOURCE_MAP_BUILDER]: builder, [ANIMATIONS]: new Map() };
   const tokens = attachSourceMaps(md.parse(markdown, env), env, builder.lines);
-  env[REMOTE_IMAGES] = await resolveRemoteImages(collectRemoteImageSources(tokens), options);
+  const remote = await resolveRemoteImages(collectRemoteImageSources(tokens), options);
+  env[REMOTE_IMAGES] = remote.results;
   let html = md.renderer.render(tokens, md.options, env);
   html = sanitizeHtml(html, {
     allowedTags,
@@ -271,5 +275,11 @@ export async function renderMarkdown(markdown, options) {
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });
-  return { html, sourceMap: builder.build(), animations: env[ANIMATIONS] };
+  // `remoteImagesPending` is what stops this markup from being cached as final:
+  // it describes when this render happened rather than what the document says,
+  // so a later render at the same revision must re-run rather than reuse it.
+  return {
+    html, sourceMap: builder.build(), animations: env[ANIMATIONS],
+    remoteImagesPending: remote.pending,
+  };
 }

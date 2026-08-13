@@ -95,6 +95,7 @@ function M.snapshot()
       -- `incomplete` means the renderer is still trying to measure them.
       animation_geometry_count = session.animation_geometry and #session.animation_geometry or 0,
       animation_geometry_incomplete = session.animation_geometry_incomplete or false,
+      remote_images_pending = session.remote_images_pending or false,
       animation_count = session.animation_assets and vim.tbl_count(session.animation_assets) or 0,
       animation_strategy = session.animation_strategy,
       animation_assets = (function()

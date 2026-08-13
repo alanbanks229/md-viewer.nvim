@@ -239,7 +239,12 @@ export function createService({ assetsDir, onShutdown, frames } = {}) {
           // the document.
           params.animate === true,
         ]);
-        markdownReused = previous?.key === markdownKey;
+        // Markup rendered while an image was still being fetched is not final,
+        // whatever the content revision says. Reusing it would cache the
+        // "loading" placeholder for the life of the document and the retry that
+        // is meant to replace it would be answered with the thing it is
+        // replacing -- so the one case that must re-render never would.
+        markdownReused = previous?.key === markdownKey && !previous.remoteImagesPending;
         if (markdownReused) {
           html = previous.html;
           // Same refresh as the capture path: a reused parse is still a use.
@@ -257,6 +262,7 @@ export function createService({ assetsDir, onShutdown, frames } = {}) {
           rememberMarkdown(params.documentId, {
             key: markdownKey, html: rendered.html, sourceMap: rendered.sourceMap,
             animations: rendered.animations,
+            remoteImagesPending: rendered.remoteImagesPending,
           });
           // New content: whatever the user had selected or searched for belongs to
           // the old document body and must not be carried forward.
@@ -274,6 +280,12 @@ export function createService({ assetsDir, onShutdown, frames } = {}) {
         request.id
       );
       result.markdownReused = markdownReused;
+      // True while some image in this document is still being fetched. The Lua
+      // side answers it with one more render, because nothing else would: an
+      // idle preview issues no renders at all, so without a nudge the markup
+      // would keep its "loading" placeholders until the next keystroke. Same
+      // shape and same reasoning as `animationsIncomplete`.
+      result.remoteImagesPending = (cachedEntry?.remoteImagesPending ?? 0) > 0;
       // Animation geometry travels with the render it was measured against --
       // same response, same staleness lane as the base image, so the two can
       // never disagree. The sha is joined here so the Lua side can ask the

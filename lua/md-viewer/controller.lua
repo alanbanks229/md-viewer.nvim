@@ -579,6 +579,18 @@ function M.refresh(session, render_options)
     -- unmeasurable image costs a handful of renders rather than a loop.
     session.animation_geometry_incomplete = meta.animationsIncomplete == true
     if session.animation_geometry_incomplete then M.schedule(session, 120, "animation_geometry_timer") end
+    -- An image the renderer is still fetching. The document has already been
+    -- shown with a placeholder in its place rather than waiting for it -- one
+    -- unreachable image used to cost the whole preview a 20 second stall before
+    -- anything appeared -- so this is the nudge that puts the picture in once it
+    -- lands. Nothing else would: an idle preview issues no renders at all.
+    --
+    -- 400ms rather than the animation retry's 120: a fetch crossing a network is
+    -- not going to finish in a tenth of a second, and each attempt costs a full
+    -- re-render of the document. The renderer's own timeout bounds how long this
+    -- can go on, and a failure caches as a failure, so this stops on its own.
+    session.remote_images_pending = meta.remoteImagesPending == true
+    if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
     session.last_image_bytes = result.image
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
@@ -753,6 +765,7 @@ local function close_session(session)
     "scroll_settle_timer",
     "cursor_scroll_timer",
     "animation_geometry_timer",
+    "remote_image_timer",
     "ui_poll_timer",
     "selection_debounce_timer",
     "selection_settle_timer",
