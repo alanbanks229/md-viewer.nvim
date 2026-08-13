@@ -176,65 +176,6 @@ M.defaults = {
     -- handler *is* the success case.
     external_open_timeout_ms = 5000,
   },
-  client_render = {
-    -- Where a companion renderer is already listening, or nil to spawn the
-    -- ordinary child renderer beside Neovim -- which is what every session
-    -- does unless this is set, and is unchanged by this option existing.
-    --
-    -- A path ("/run/user/501/md-viewer-501.sock") is a unix socket; a
-    -- "host:port" is a loopback TCP address, which is what an `ssh -R
-    -- <port>:<companion socket>` forward looks like from the Neovim side.
-    -- $MD_VIEWER_CLIENT_ADDR sets the same thing and outranks nothing: config
-    -- wins, for the same reason terminal.profile outranks its variable.
-    --
-    -- The point of connecting outward rather than listening: on the machine
-    -- running Neovim md-viewer still opens no port at all. Whatever is
-    -- listening on the near end of that forward belongs to sshd because
-    -- someone asked for it. See docs/local-render-design.md.
-    address = nil,
-    connect_timeout_ms = 2000,
-    -- Whether a frame rendered by that companion may stay there, with only a
-    -- reference to it crossing the link for a splicer in front of the terminal
-    -- to substitute back. This is the setting that turns kilobytes per scroll
-    -- frame into hundreds of bytes.
-    --
-    -- "auto" requires everything that has to be true for it to work: a
-    -- companion answering, the raw Kitty backend, and a splicer that announced
-    -- itself through $LC_MD_VIEWER (which `bin/md-viewer-ssh` exports).
-    -- "off" never references a frame, whatever else is in place. "on" waives
-    -- the handshake alone -- for a splicer whose environment cannot reach this
-    -- host -- and nothing else: a session with no companion still renders
-    -- beside Neovim, because there would be nothing to reference.
-    --
-    -- A frame referenced with no splicer to substitute it does not display, so
-    -- "auto" is the setting to leave alone unless you have looked.
-    enabled = "auto",
-    -- How many scroll captures may be in flight at once while client rendering.
-    -- One everywhere else, and not configurable there: a renderer beside Neovim
-    -- is paced by its own capture, and a second request would only queue.
-    --
-    -- Across a link one frame costs a round trip plus a render, serially -- 92ms
-    -- and 15ms on the connection this was built for, so the renderer sits idle
-    -- 86% of the time and the preview updates 9 times a second where the browser
-    -- could manage 66. Depth N makes the floor `max(render, RTT/N)`: 3 lands
-    -- near 31ms, which is about what a local preview achieves, and beyond that
-    -- the render is the constraint rather than the link.
-    --
-    -- **Default 1, which is to say off, and deliberately.** The first attempt at
-    -- this shipped a depth of 3 and was measured on the real link making things
-    -- *worse*: a second staleness gate in renderer.lua discarded every response
-    -- but the newest, so the renderer did three times the work and the preview
-    -- showed a third of the frames. That gate is fixed, but the fix has never
-    -- been measured on a link, and a default that has only ever been reasoned
-    -- about is exactly what produced the regression. Raise it to 3 by hand and
-    -- run scripts/pipeline/ab.lua if you want to find out.
-    --
-    -- Every frame in flight is a distinct position the reader passed through and
-    -- every one is displayed, in order. Raising this past the point where the
-    -- render becomes the constraint buys nothing and lengthens how far the
-    -- preview keeps moving after the wheel stops.
-    scroll_pipeline = 1,
-  },
   terminal = {
     profile = "auto",
     kitty_graphics = "auto",
@@ -389,26 +330,6 @@ local function validate(cfg)
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
   local animation_modes = { auto = true, native = true, frames = true, off = true }
   assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
-  assert(
-    cfg.client_render.address == nil
-      or (type(cfg.client_render.address) == "string" and cfg.client_render.address ~= ""),
-    "md-viewer: client_render.address must be a socket path or host:port string, or nil to spawn the child renderer"
-  )
-  assert(
-    type(cfg.client_render.connect_timeout_ms) == "number" and cfg.client_render.connect_timeout_ms > 0,
-    "md-viewer: client_render.connect_timeout_ms must be positive"
-  )
-  assert(
-    cfg.client_render.enabled == "auto" or cfg.client_render.enabled == "on" or cfg.client_render.enabled == "off",
-    "md-viewer: client_render.enabled must be 'auto', 'on', or 'off'"
-  )
-  assert(
-    type(cfg.client_render.scroll_pipeline) == "number"
-      and cfg.client_render.scroll_pipeline >= 1
-      and cfg.client_render.scroll_pipeline <= 8
-      and cfg.client_render.scroll_pipeline % 1 == 0,
-    "md-viewer: client_render.scroll_pipeline must be a whole number between 1 and 8"
-  )
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(
     vim.islist(cfg.security.document_root_markers),
@@ -479,24 +400,12 @@ local function invalidate_terminal()
   if terminal and terminal.invalidate then terminal.invalidate() end
 end
 
--- A companion that failed to answer is not retried for the rest of the session,
--- because a connect attempt costs a timeout and one that was not there when the
--- preview opened will not appear. Changing the configuration is the one event
--- that makes another attempt meaningful. Guarded on package.loaded for the same
--- reason as the terminal cache: configuring md-viewer must not drag the process
--- module in as a side effect.
-local function reset_companion()
-  local process = package.loaded["md-viewer.process"]
-  if process and process.reset_companion then process.reset_companion() end
-end
-
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_terminal()
-  reset_companion()
   return current
 end
 
@@ -505,7 +414,6 @@ function M.get() return current end
 function M.reset()
   current = vim.deepcopy(M.defaults)
   invalidate_terminal()
-  reset_companion()
 end
 
 return M

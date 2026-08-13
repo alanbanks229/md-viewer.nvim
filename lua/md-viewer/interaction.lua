@@ -30,12 +30,6 @@ function M.captured_session() return captured end
 ---third `meta` argument.
 local function interact_request(session, params, callback)
   session.interaction_request_count = (session.interaction_request_count or 0) + 1
-  -- Set here rather than at each of the dozen call sites, for the same reason
-  -- the counter is: whether an interaction's frame comes back as bytes or as a
-  -- reference is a property of the session, not of the gesture. Absent unless
-  -- the session is client rendering, so the envelope is unchanged otherwise.
-  local transport = require("md-viewer.client_render").frame_transport(session.backend and session.backend.name)
-  if transport == "ref" then params.frameTransport = "ref" end
   process.request("interact", params, function(result, err, meta)
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1

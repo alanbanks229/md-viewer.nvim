@@ -70,25 +70,6 @@ function round(value) {
   return Math.round(value * 100) / 100;
 }
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-
-/// A PNG's own idea of its size, from the IHDR chunk every file opens with.
-///
-/// The mirror of `png_dimensions` in lua/md-viewer/backends/kitty_raw.lua, and
-/// held to the same rule: a zero dimension is a valid-looking header and a real
-/// hazard downstream, so it is reported as no answer rather than as a size.
-/// Only the client-render path needs this -- everywhere else the Lua side still
-/// reads the bytes and measures them itself.
-function pngDimensions(buffer) {
-  if (!Buffer.isBuffer(buffer) || buffer.length < 24) return {};
-  if (!buffer.subarray(0, 8).equals(PNG_SIGNATURE)) return {};
-  if (buffer.toString("latin1", 12, 16) !== "IHDR") return {};
-  const pngWidth = buffer.readUInt32BE(16);
-  const pngHeight = buffer.readUInt32BE(20);
-  if (pngWidth < 1 || pngHeight < 1) return {};
-  return { pngWidth, pngHeight };
-}
-
 /// Bound a CDP round trip.
 ///
 /// `CDPSession.send` has no timeout of its own, so a compositor that never
@@ -217,12 +198,7 @@ export class BrowserRenderer {
     // is the least likely moment in the document's life for every data-URI
     // image to have an intrinsic size yet.
     const { rects: animations, complete } = await collectAnimationGeometry(this.page, animationIds ?? []);
-    // The blocks are a pure function of the layout key -- that is what the key
-    // is -- so naming them by it is exact rather than conservative, and it
-    // survives a renderer restart where a counter would not. Short because it
-    // rides on every render request and every render response.
-    const blocksRevision = createHash("sha1").update(layoutKey).digest("hex").slice(0, 16);
-    this.layout = { key: layoutKey, blocksRevision, documentHeight, blocks, animations, animationsComplete: complete };
+    this.layout = { key: layoutKey, documentHeight, blocks, animations, animationsComplete: complete };
     this.active = { documentId, contentRevision, layoutKey, token, width, height, scrollY: 0 };
     return { token, documentHeight, blocks, animations };
   }
@@ -264,10 +240,6 @@ export class BrowserRenderer {
   /// return byte-identical files. If anything fails, the Playwright call is
   /// still the fallback, so a browser without the option renders normally.
   async captureViewportPng(pngPath, scale, scaleFactor) {
-    // `pngPath` is null when the caller wants the bytes rather than a file --
-    // the client-render path, where the frame never leaves this machine and a
-    // temp file would be written only to be read back and deleted. Both paths
-    // return the same buffer, so nothing downstream can tell them apart.
     // The moving frame of a scroll may be captured below its natural size. PNG
     // bytes against real content go as pixels^0.69, so half scale is about 2.6x
     // fewer bytes -- which is the whole of the lag on a link that is throughput
@@ -324,9 +296,8 @@ export class BrowserRenderer {
           this.cdpCaptureTimeoutMs,
           "Page.captureScreenshot",
         );
-        const buffer = Buffer.from(data, "base64");
-        if (pngPath) fs.writeFileSync(pngPath, buffer);
-        return { encoder: "cdp_fast_png", data: buffer };
+        fs.writeFileSync(pngPath, Buffer.from(data, "base64"));
+        return "cdp_fast_png";
       } catch (error) {
         this.cdpCaptureUnavailable = String(error?.message ?? error);
       }
@@ -336,32 +307,21 @@ export class BrowserRenderer {
     // size instead: correct, and merely as large as it was before
     // `render.scroll_scale` existed. `captureEncoder` in :MdViewerDebug is what
     // says which path a session is on.
-    const data = await this.page.screenshot({
-      path: pngPath ?? undefined, type: "png", fullPage: false, animations: "disabled", scale,
-    });
-    return { encoder: "playwright_png", data };
+    await this.page.screenshot({ path: pngPath, type: "png", fullPage: false, animations: "disabled", scale });
+    return "playwright_png";
   }
 
   /// Screenshot the current viewport. Shared by render() and by any interaction
   /// that mutates visible state, so the mutation and its frame are produced by
   /// the same queued operation and Lua never has to follow up with a capture.
-  /// `frameTransport` is `"path"` (the default, and everything before client
-  /// rendering existed) or `"ref"`. On `"ref"` the frame is not written to disk
-  /// at all: the bytes come back in `pngData` for the caller to store under a
-  /// reference, because the machine that will read them is this one and the
-  /// only thing crossing the link is the reference. See renderer/src/frames.js.
-  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor, frameTransport }) {
-    const byReference = frameTransport === "ref";
+  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor }) {
     const safeDocument = String(documentId ?? "document").replace(/[^a-zA-Z0-9_-]/g, "_");
-    const pngPath = byReference ? null : path.join(this.tempDir, `${safeDocument}-${requestId}.png`);
+    const pngPath = path.join(this.tempDir, `${safeDocument}-${requestId}.png`);
     const scale = captureScale === "css" ? "css" : "device";
     const started = performance.now();
-    const { encoder: captureEncoder, data } = await this.captureViewportPng(pngPath, scale, captureScaleFactor);
+    const captureEncoder = await this.captureViewportPng(pngPath, scale, captureScaleFactor);
     const captureMs = performance.now() - started;
-    // Read from the buffer rather than stat'ing the file: it is the same number
-    // by construction (the file is this buffer), one fewer syscall, and it is
-    // the only one available when nothing was written.
-    const pngBytes = data.length;
+    const pngBytes = fs.statSync(pngPath).size;
     // `captureScale` stays the two-value tier the Lua side keys its fast/settle
     // bookkeeping off; the factor rides alongside it rather than replacing it,
     // so `apply_image`'s "css" and "device" comparisons keep meaning what they
@@ -369,14 +329,6 @@ export class BrowserRenderer {
     // came back at 1 is the Playwright fallback path, and nothing else says so.
     return {
       pngPath,
-      // Only on the reference path, and consumed by service.js rather than
-      // returned to the client: a response carrying a megabyte of pixels is the
-      // exact thing this avoids.
-      pngData: byReference ? data : undefined,
-      // The dimensions the Lua backend would otherwise read out of the PNG
-      // header itself. Without the bytes it cannot, and it needs them to build
-      // the crop rectangles every placement is expressed in.
-      ...pngDimensions(data),
       captureScale: scale,
       captureScaleFactor: scale === "css" ? captureScaleFactor : undefined,
       pngBytes,
@@ -475,7 +427,7 @@ export class BrowserRenderer {
     const scrollY = await this.applyScroll(documentHeight, height, params.scrollY);
     const capture = await this.captureViewport({
       documentId: params.documentId, requestId, captureScale: params.captureScale,
-      captureScaleFactor: params.captureScaleFactor, frameTransport: params.frameTransport,
+      captureScaleFactor: params.captureScaleFactor,
     });
 
     // The rehydration record. Written on every successful render so an
@@ -496,27 +448,12 @@ export class BrowserRenderer {
       animationIds: params.animationIds,
     });
 
-    // Block geometry is 10KB on this project's own README and it is *identical*
-    // on every frame of a scroll -- the layout did not change, only the scroll
-    // offset did. Sent every time it would silently be the largest thing in a
-    // client-rendered frame, several times over the pixels it replaced. The
-    // client says what it already holds and gets nothing back when that is
-    // still current; a client that says nothing gets the blocks, exactly as
-    // before.
-    const blocksUnchanged = params.knownBlocksRevision !== undefined
-      && params.knownBlocksRevision !== null
-      && params.knownBlocksRevision === this.layout.blocksRevision;
-
     return {
       pngPath: capture.pngPath,
-      pngData: capture.pngData,
-      pngWidth: capture.pngWidth,
-      pngHeight: capture.pngHeight,
       documentHeightPx: documentHeight,
       viewportHeightPx: height,
       scrollY,
-      blocks: blocksUnchanged ? undefined : this.layout.blocks,
-      blocksRevision: this.layout.blocksRevision,
+      blocks: this.layout.blocks,
       // Document-coordinate rects only. Frames are materialized off this path
       // (main.js's `animation` method): decoding a large GIF is seconds of CPU
       // and this is the queue every scroll and keystroke waits behind.
@@ -812,7 +749,6 @@ export class BrowserRenderer {
     if (envelope.capture) {
       const capture = await this.captureViewport({
         documentId: envelope.documentId, requestId, captureScale: envelope.captureScale,
-        frameTransport: envelope.frameTransport,
       });
       Object.assign(result, capture);
     }

@@ -415,11 +415,6 @@ export function validateEnvelope(params) {
     // "css" (the cheap, slightly-soft scroll fast-frame scale) is opt-in
     // only; anything that doesn't explicitly ask for it renders sharp.
     captureScale: envelope.captureScale === "css" ? "css" : "device",
-    // Whether this interaction's frame comes back as a temp file or as a
-    // reference to bytes held here. Validated to the two-value enum for the
-    // same reason `captureScale` is: an unrecognized value must read as the
-    // pre-existing behaviour rather than as an error or an empty response.
-    frameTransport: envelope.frameTransport === "ref" ? "ref" : "path",
   };
 }
 

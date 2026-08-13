@@ -1,10 +1,9 @@
 // The renderer as Neovim spawns it: one child process, requests on stdin,
 // responses on stdout, nothing else.
 //
-// This file is deliberately the whole of what "how requests arrive" means for
-// the default configuration, and it is deliberately tiny. What a request *does*
-// is in service.js, which is shared with companion.js -- so the two transports
-// cannot drift into answering the same request differently.
+// This file is deliberately the whole of what "how requests arrive" means, and
+// it is deliberately tiny. What a request *does* is in service.js, so the two
+// questions stay separable.
 //
 // **Invariant:** this process opens no listening port of any kind, and neither
 // does the Chromium it launches. `tests/node/no-listening-port.test.js` asserts

@@ -124,7 +124,6 @@ function M.collect(renderer_result, renderer_error)
   local version = vim.version()
   local capability = terminal.capability(cfg.terminal)
   local discovered_executable = renderer_result and renderer_result.executable
-  local client_render_enabled, client_render_reason = require("md-viewer.client_render").resolve("kitty_raw")
   return {
     neovim = ("%d.%d.%d"):format(version.major, version.minor, version.patch),
     vim_ui_img = type(vim.ui and vim.ui.img) == "table",
@@ -194,19 +193,6 @@ function M.collect(renderer_result, renderer_error)
       or (renderer_error and ("failed: " .. renderer_error) or "not tested"),
     temporary_directory_writable = temp_writable(),
     renderer_process = process.status(),
-    -- Whether the pixels stay on the machine the terminal is on, and if not,
-    -- which of the four preconditions is missing. Answered for the raw Kitty
-    -- backend specifically because it is the only one a reference can reach --
-    -- asking about the backend actually in force would report "the cells
-    -- backend cannot" on a session whose real problem is that no companion is
-    -- configured.
-    client_render_enabled = client_render_enabled,
-    client_render_reason = client_render_reason,
-    -- What the companion is holding, when it is the companion answering.
-    -- `misses` is the number that matters: a non-zero count is a frame whose
-    -- token reached the terminal after the bytes behind it had been evicted,
-    -- which is one frame that never appeared.
-    client_frame_store = renderer_result and renderer_result.frameStore or nil,
     raw_html = sec.raw_html,
     local_image_root = sec.document_root,
     document_root_source = sec.document_root_source,
@@ -410,44 +396,6 @@ local function verbose_raw_graphics(report)
   }
 end
 
----Which renderer answered this session, and how it got chosen.
----
----Both halves are needed and neither implies the other: an address that was
----configured says what was asked for, and the transport in force says what
----actually happened. A companion that was configured and then unreachable is
----the case worth reading at a glance, because everything still works and the
----whole reason for configuring one has quietly gone away.
-local function transport_text(process)
-  process = process or {}
-  if process.transport == "socket" then
-    return ("companion socket %s (%s)"):format(process.address or "?", process.address_source or "configured")
-  end
-  if process.companion_refused then return ("child process beside Neovim -- %s"):format(process.companion_refused) end
-  return "child process beside Neovim"
-end
-
----Whether frames stay on the machine the terminal is on, and what the far side
----is holding when they do.
----
----The reason is printed on the "no" branch and not on the "yes" branch, for the
----same reason `transport_text` prints the refusal and not the success: four
----separate preconditions all present identically when they fail -- a preview
----that works, and is slow -- so the one that is missing is the whole diagnostic.
-local function client_render_text(report)
-  if not report.client_render_enabled then return ("no -- %s"):format(report.client_render_reason or "unavailable") end
-  local store = report.client_frame_store
-  if not store then return ("yes (%s)"):format(report.client_render_reason or "enabled") end
-  local text = ("yes (%s); %d frames held, %d minted"):format(
-    report.client_render_reason or "enabled",
-    store.frames or 0,
-    store.minted or 0
-  )
-  if (store.misses or 0) > 0 then
-    text = text .. (", %d frame(s) referenced after eviction and did not display"):format(store.misses)
-  end
-  return text
-end
-
 local function verbose_renderer(report)
   local process = report.renderer_process or {}
   local process_text = process.running and ("running (pid %s)"):format(process.pid or "unknown")
@@ -462,8 +410,6 @@ local function verbose_renderer(report)
     { "chromium launch", report.chromium_launch },
     { "temp dir writable", yes_no(report.temporary_directory_writable) },
     { "process", process_text },
-    { "transport", transport_text(process) },
-    { "client rendering", client_render_text(report) },
   }
 end
 
@@ -596,11 +542,7 @@ end
 
 local function process_summary(process)
   process = process or {}
-  -- Named, not implied. A session rendering on a companion and a session that
-  -- silently fell back to the child look identical in every other row, and the
-  -- difference is the entire point of having configured one.
-  local where = process.transport == "socket" and (" on the companion at %s"):format(process.address or "?") or ""
-  if process.running then return "running" .. where end
+  if process.running then return "running" end
   if process.last_error then return "stopped: " .. split_lines(process.last_error)[1] end
   return "not started yet"
 end
@@ -644,39 +586,6 @@ end
 ---repeat the same diagnosis across a caveat, a reason, and a warning.
 local function build_warnings(report, status, status_reason)
   local warnings = {}
-  -- Actionable, and invisible without saying so: everything still renders, on
-  -- the machine Neovim is on, exactly as it did before a companion was
-  -- configured. The only symptom is that the reason for configuring one --
-  -- keeping pixels off a slow link -- silently is not happening.
-  local renderer = report.renderer_process or {}
-  if renderer.companion_refused then
-    warnings[#warnings + 1] = {
-      text = "a companion renderer was configured but could not be reached",
-      severity = "warn",
-      detail = {
-        renderer.companion_refused,
-        "Rendering fell back to the process beside Neovim, which is correct and merely local.",
-        "Check the companion is running and that its socket is reachable from this host;",
-        "over SSH that means the reverse forward is up. Changing client_render.address",
-        "makes md-viewer try again.",
-      },
-    }
-  end
-  -- A frame referenced after its bytes were evicted is a frame that never
-  -- appeared. It self-heals on the next render and is invisible otherwise, so
-  -- the count is the only evidence there will ever be that it happened.
-  local store = report.client_frame_store
-  if store and (store.misses or 0) > 0 then
-    warnings[#warnings + 1] = {
-      text = ("%d rendered frame(s) were referenced after the renderer had dropped them"):format(store.misses),
-      severity = "warn",
-      detail = {
-        "Each one is a preview frame that did not display until the next render replaced it.",
-        "This means frames are being produced far faster than they are being shown;",
-        "raise render.scroll_settle_ms or report it with :MdViewerDebug attached.",
-      },
-    }
-  end
   if status ~= "healthy" then
     -- status_reason can be a multi-paragraph Playwright launch-failure
     -- message; keep the full text, just split so no single buffer line
@@ -757,21 +666,6 @@ end
 ---a health report arguing with the reader about their own configuration.
 local function build_notes(report)
   local notes = {}
-  -- A note rather than a warning: nothing is wrong, and the whole session is
-  -- faster for it. But it moves where files are read from, and "why is this
-  -- image broken only over SSH" is otherwise an unanswerable question.
-  if report.client_render_enabled then
-    notes[#notes + 1] = {
-      text = "frames are rendered on the machine your terminal is on, not on the machine Neovim is on",
-      detail = {
-        "Scroll frames cross the link as a reference rather than as pixels, which is the point.",
-        "Two things still need the renderer beside the file and therefore fall back:",
-        "local images embedded in the document show their failure placeholder, and animated",
-        "images stay on their still frame. Remote (https) images are fetched by the machine",
-        "your terminal is on, so they are subject to that machine's network, not this one's.",
-      },
-    }
-  end
   if report.document_root_unbounded then
     notes[#notes + 1] = {
       text = 'security.document_root is "/": local links and images resolve to any path on this filesystem',

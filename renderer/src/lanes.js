@@ -92,29 +92,7 @@ export function createLaneRegistry(options = {}) {
   // synchronously, before the caller's first `await`: the readline handler in
   // protocol.js does not await one line before reading the next, so synchronous
   // stamping is what makes arrival order equal supersession order.
-  /// `pipelined` admits a request without claiming its lane.
-  ///
-  /// Supersession exists so the renderer does not draw a scroll position the
-  /// reader has already passed, and when the renderer is a pipe away that is
-  /// free and right: a superseded request costs one map lookup. Across a link
-  /// with a 92ms round trip it is neither. Every frame in flight is one the
-  /// caller has already decided to display -- the coalescing happened on the Lua
-  /// side, before the request was sent -- so cancelling all but the newest holds
-  /// the pipeline to exactly one frame per round trip, which is the whole of the
-  /// remaining lag.
-  ///
-  /// **The `contentEpoch` check still applies**, and that is the check that
-  /// carries the correctness. An edit, a resize, a theme change or any other
-  /// render still invalidates every pipelined capture in flight, because those
-  /// frames describe a layout that no longer exists. What is given up is only
-  /// "a newer capture of the *same* layout cancels an older one" -- and at
-  /// depth N the oldest is at most N frames behind, which is what smooth
-  /// scrolling looks like rather than a defect.
-  ///
-  /// Admission-time revision verification is untouched, and `maxPendingPerLane`
-  /// still bounds the queue, so a caller that forgets to limit its own depth is
-  /// refused rather than allowed to grow the queue without end.
-  function admit({ documentId, lane, requestId, contentRevision, pipelined }) {
+  function admit({ documentId, lane, requestId, contentRevision }) {
     if (typeof documentId !== "string" || documentId === "") {
       throw createLaneError("INVALID_REQUEST", "documentId must be a non-empty string");
     }
@@ -152,19 +130,13 @@ export function createLaneRegistry(options = {}) {
     }
 
     serial += 1;
-    // A pipelined request deliberately does not become "the newest in this
-    // lane": several are meant to be in flight at once and each is a frame that
-    // will be displayed. The content lane is never pipelined -- a render must
-    // always cancel what it invalidates.
-    const claims = pipelined !== true || lane === "content";
-    if (claims) record.lanes[lane] = serial;
+    record.lanes[lane] = serial;
     record.pending[lane] += 1;
     return {
       documentId,
       lane,
       serial,
       requestId,
-      claims,
       contentEpoch: record.contentEpoch,
       contentRevision: revision,
     };
@@ -178,19 +150,7 @@ export function createLaneRegistry(options = {}) {
     if (!record) {
       return { lane: ticket.lane, documentId: ticket.documentId, reason: "forgotten" };
     }
-    if (ticket.claims === false) {
-      // A pipelined ticket is not cancelled by another pipelined one -- that is
-      // the whole exemption -- but it is still cancelled by a request that
-      // *claimed* the lane after it. Serials are globally monotonic, so a lane
-      // holder numbered above this ticket is unambiguously later. The narrow
-      // form matters: "never superseded at all" would strand these frames live
-      // when a session drops back to a renderer beside Neovim mid-flight.
-      if (record.lanes[ticket.lane] > ticket.serial) {
-        return { lane: ticket.lane, documentId: ticket.documentId, reason: "superseded" };
-      }
-    } else if (record.lanes[ticket.lane] !== ticket.serial) {
-      // `claims === undefined` is every ticket minted before pipelining existed
-      // and every non-pipelined one since, so the default path is unchanged.
+    if (record.lanes[ticket.lane] !== ticket.serial) {
       return { lane: ticket.lane, documentId: ticket.documentId, reason: "superseded" };
     }
     if (record.contentEpoch !== ticket.contentEpoch) {

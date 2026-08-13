@@ -180,21 +180,6 @@ return function(t)
     local clean = health._diagnose(base_report(), auto_cfg)
     t.eq(0, #clean.warnings, "a healthy, conventionally configured session warns about nothing")
     t.eq(0, #clean.notes, "and has nothing to note either")
-
-    -- A referenced frame whose bytes were dropped before the token reached the
-    -- terminal is a frame that never displayed. It self-heals on the next
-    -- render, which is exactly why the count is the only evidence of it.
-    local evicted = base_report()
-    evicted.client_render_enabled = true
-    evicted.client_render_reason = "LC_MD_VIEWER v1"
-    evicted.client_frame_store = { frames = 12, minted = 400, evicted = 388, misses = 3 }
-    local dropped = health._diagnose(evicted, auto_cfg)
-    t.ok(warning_texts(dropped):match("referenced after"), "frames referenced after eviction are reported")
-    local held = base_report()
-    held.client_render_enabled = true
-    held.client_render_reason = "LC_MD_VIEWER v1"
-    held.client_frame_store = { frames = 12, minted = 400, evicted = 388, misses = 0 }
-    t.eq(0, #health._diagnose(held, auto_cfg).warnings, "and an eviction that nothing asked for again is not a problem")
   end
 
   -- End-to-end: the concise default and the verbose opt-in both render from
@@ -220,23 +205,6 @@ return function(t)
     -- the divisor is picked by plausibility instead, and a judgement call
     -- should say that it was one.
     t.ok(lines:match("cell unit:%s+device %(divisor 2, default%)"), "the environment dump names the cell's unit")
-
-    -- Four separate things have to be true before a frame can stay on the
-    -- machine that drew it, and all four present identically when they fail: a
-    -- preview that works, and is slow. So the row says which one is missing.
-    local remote = base_report()
-    remote.client_render_enabled = false
-    remote.client_render_reason = "no companion renderer (client_render.address / $MD_VIEWER_CLIENT_ADDR is unset)"
-    local remote_lines = table.concat(health.environment_lines(remote), "\n")
-    t.ok(remote_lines:match("client rendering:%s+no %-%- no companion"), "a session not client rendering says why")
-
-    local local_render = base_report()
-    local_render.client_render_enabled = true
-    local_render.client_render_reason = "LC_MD_VIEWER v1"
-    local_render.client_frame_store = { frames = 9, minted = 118, evicted = 109, misses = 0 }
-    local client_lines = table.concat(health.environment_lines(local_render), "\n")
-    t.ok(client_lines:match("client rendering:%s+yes %(LC_MD_VIEWER v1%)"), "and one that is names its evidence")
-    t.ok(client_lines:match("9 frames held, 118 minted"), "beside what the far side is actually holding")
 
     local estimated = base_report()
     local estimated_lines = table.concat(health.environment_lines(estimated), "\n")

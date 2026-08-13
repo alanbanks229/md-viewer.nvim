@@ -221,7 +221,7 @@ local function report()
   elseif b.encoder ~= "cdp_fast_png" then
     verdict = ('INERT: capture_encoder is %q, not "cdp_fast_png". Playwright\'s own scale is a '):format(
       tostring(b.encoder)
-    ) .. "two-value enum, so the numeric factor cannot apply on that path and this change does " .. "nothing on this host. Report this -- it also affects the client-render design."
+    ) .. "two-value enum, so the numeric factor cannot apply on that path and this change does " .. "nothing on this host. Report it."
   else
     local ratio = a.fast_png_bytes / b.fast_png_bytes
     local before, after = wire_ms(a.fast_png_bytes), wire_ms(b.fast_png_bytes)

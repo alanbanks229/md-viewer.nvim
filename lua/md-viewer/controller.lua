@@ -14,7 +14,6 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
-local client_render = require("md-viewer.client_render")
 
 local M = {}
 local group
@@ -100,15 +99,6 @@ end
 ---through, so there is exactly one place that knows how to show/update a
 ---backend image.
 local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
-  -- A table here is a reference to a frame the renderer is holding on the
-  -- machine the terminal is on: those pixels never crossed the link, and this
-  -- is the only place that knows how many of them there were. Counted rather
-  -- than inferred, because a session that *thinks* it is client rendering and
-  -- is not looks identical from every other field.
-  if type(image_bytes) == "table" and image_bytes.ref then
-    session.client_frame_count = (session.client_frame_count or 0) + 1
-    session.client_bytes_deferred = (session.client_bytes_deferred or 0) + (png_bytes or 0)
-  end
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -404,14 +394,10 @@ end
 ---`renderer.lua`; the display half is `apply_image`, shared verbatim.
 function M.display_interact_result(session, result)
   if not valid(session) or session.backend.name == "cells" then return end
-  if type(result) ~= "table" then return end
-  -- Same two shapes a render frame arrives in -- a temp file, or a reference to
-  -- one the renderer is holding on the machine the terminal is on. Neither is a
-  -- frame at all when both are absent, which is every interaction that mutates
-  -- nothing visible.
-  if type(result.pngPath) ~= "string" and type(result.frameRef) ~= "string" then return end
+  if type(result) ~= "table" or type(result.pngPath) ~= "string" then return end
   local cfg = config.get().render
-  local image, read_err = renderer._frame_source(result, cfg.max_png_bytes)
+  local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
+  vim.uv.fs_unlink(result.pngPath)
   if not image then
     notify_error(read_err)
     return
@@ -517,16 +503,7 @@ function M.refresh(session, render_options)
     if session.selection_content_revision and session.selection_content_revision ~= session.renderer_revision then
       interaction.forget_selection(session)
     end
-    -- "Is there a position newer than this frame's that has not been shown
-    -- yet?" With several captures outstanding, the ones still in flight count as
-    -- much as the one waiting to be sent: this frame's own request has not been
-    -- released yet (`on_complete` runs after this), so `> 1` means a genuinely
-    -- newer capture is behind it. Reading only `scroll_render_pending` here let
-    -- an older frame's scrollY overwrite the desired position and snap the next
-    -- capture backwards.
-    local newer_scroll_pending = render_options
-      and render_options.scroll_frame
-      and (session.scroll_render_pending or (session.scroll_in_flight or 0) > 1)
+    local newer_scroll_pending = render_options and render_options.scroll_frame and session.scroll_render_pending
     session.latest_blocks = meta.blocks
     session.document_height_px = meta.documentHeightPx
     session.viewport_height_px = meta.viewportHeightPx
@@ -538,11 +515,7 @@ function M.refresh(session, render_options)
     session.last_layout_reused = meta.layoutReused == true
     session.last_markdown_reused = meta.markdownReused == true
     session.last_capture_scale = meta.captureScale
-    -- `pngBytes` is what the renderer measured; the fallback measures the bytes
-    -- in hand, which only exist when the frame travelled as bytes. A referenced
-    -- frame always carries the renderer's count, so the fallback is unreachable
-    -- there rather than wrong there.
-    session.last_png_bytes = meta.pngBytes or (type(result.image) == "string" and #result.image or nil)
+    session.last_png_bytes = meta.pngBytes or #result.image
     session.last_layout_ms = meta.layoutMs
     session.last_capture_ms = meta.captureMs
     session.viewport_width_px = result.viewport.widthPx
@@ -660,46 +633,11 @@ end
 ---because they are gated on different things: the scale trades sharpness for
 ---bytes, this trades latency for *not spending the bytes at all* on a reader
 ---who has not finished scrolling.
----Not applied when the frame never crosses the link. The whole reason to wait
----longer is that a settle capture over SSH was half a second of transit that the
----next wheel notch immediately made stale; a settle frame rendered on the
----machine the terminal is on costs ~57ms and about a kilobyte, so the extra
----240ms buys nothing and delays the moment the picture sharpens by exactly that.
 local function scroll_settle_delay(render)
   if render.ssh_scroll_settle_ms ~= nil and terminal.detect().ssh then
-    if client_render.resolve("kitty_raw") then
-      return render.scroll_settle_ms, "client rendering (the settle frame costs no wire time)"
-    end
     return render.ssh_scroll_settle_ms, "SSH session (render.ssh_scroll_settle_ms)"
   end
   return render.scroll_settle_ms, "render.scroll_settle_ms"
-end
-
----How many scroll captures may be in flight at once, and why that number.
----
----One, everywhere the renderer is a pipe away: a capture and its terminal
----transmission are then the natural pacing, and a second request in flight would
----only queue behind the first. That is every local session and every SSH session
----rendering on the remote host, so the default path is unchanged.
----
----Across a link it is the wrong answer, and measurably so. With the renderer on
----the machine the terminal is on, one frame costs a 92ms round trip plus a 15ms
----render, strictly serially -- so the renderer is idle 86% of the time and the
----preview updates 9 times a second while the browser could manage 66. With N in
----flight the floor becomes `max(render, RTT/N)`: at 3 that is ~31ms, which is
----about what a local preview achieves, because at that point the render is the
----constraint again rather than the link.
----
----The frames are not wasted work. Every one is a distinct scroll position the
----reader passed through and every one is displayed, in order -- which is what
----smooth scrolling is. See `admit` in renderer/src/lanes.js for what stays
----guaranteed while several are outstanding.
-local function scroll_pipeline_depth(session)
-  local configured = config.get().client_render.scroll_pipeline
-  if not client_render.resolve(session.backend and session.backend.name) then
-    return 1, "one capture in flight (the renderer is beside Neovim)"
-  end
-  return configured, "client rendering (client_render.scroll_pipeline)"
 end
 
 function M.schedule_scroll(session)
@@ -711,26 +649,24 @@ function M.schedule_scroll(session)
   -- this session's frames were actually captured at.
   session.scroll_scale = scale_factor
   session.scroll_scale_source = scale_source
-  local depth, depth_source = scroll_pipeline_depth(session)
-  session.scroll_pipeline_depth = depth
-  session.scroll_pipeline_source = depth_source
-  if (session.scroll_in_flight or 0) >= depth then
+  if session.scroll_render_in_flight then
     session.scroll_render_pending = true
     session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
   else
-    session.scroll_in_flight = (session.scroll_in_flight or 0) + 1
+    session.scroll_render_in_flight = true
     M.refresh(session, {
       capture_scale = fast_scale,
       capture_scale_factor = scale_factor,
       capture_only = true,
       scroll_frame = true,
-      pipelined = depth > 1,
       on_complete = function()
-        session.scroll_in_flight = math.max(0, (session.scroll_in_flight or 1) - 1)
+        session.scroll_render_in_flight = false
         if not valid(session) then return end
         if session.scroll_render_pending then
           session.scroll_render_pending = false
-          -- Continue with the newest position on the next event-loop turn.
+          -- One capture at a time is sufficient backpressure. Continue with
+          -- the newest position on the next event-loop turn; capture and
+          -- terminal transmission provide the natural pacing.
           vim.schedule(function()
             if valid(session) then M.schedule_scroll(session) end
           end)
@@ -758,7 +694,7 @@ end
 local function close_session(session)
   if not session or session.closed then return end
   session.closed = true
-  renderer.invalidate(session)
+  session.request_serial = session.request_serial + 1
   for _, name in ipairs({
     "render_timer",
     "resize_timer",
@@ -861,7 +797,7 @@ end
 function M.retarget(session, new_buf, record)
   if not valid(session) or not session.backend or session.backend.name == "cells" then return false end
   if not state.retarget(session, new_buf) then return false end
-  renderer.invalidate(session)
+  session.request_serial = session.request_serial + 1
   session.render_epoch = (session.render_epoch or 0) + 1
   interaction.forget(session)
   interaction.forget_selection(session)
@@ -1309,19 +1245,7 @@ function M.setup_autocmds()
   -- in-memory interactionState does not survive a restart, and without this
   -- the cached Lua-side flags describing it would go stale silently.
   process.on_exit(function()
-    each_session(function(session)
-      interaction.forget_selection(session)
-      -- A cached *reference* died with the renderer's frame store, for exactly
-      -- the reason a cached frame path died with its temp directory. Both
-      -- caches exist so a redisplay costs no round trip -- `show_cached` after
-      -- an occlusion, `restore_clean_base` at the start of a drag -- and a
-      -- reference nothing can resolve any more would emit a token the splicer
-      -- forwards untouched, which is a preview that goes blank until the next
-      -- render. Cached *bytes* are in this process's own memory and stay valid
-      -- across a renderer restart, so only references are dropped.
-      if type(session.last_image_bytes) == "table" then session.last_image_bytes = nil end
-      if type(session.clean_image_bytes) == "table" then session.clean_image_bytes = nil end
-    end)
+    each_session(function(session) interaction.forget_selection(session) end)
     -- Frame paths died with the renderer's temp directory; the animation
     -- module drops them and re-materializes, while terminal-resident uploads
     -- survive by stable content key.
@@ -1647,6 +1571,5 @@ end
 -- an intention.
 M._scroll_capture_scale = scroll_capture_scale
 M._scroll_settle_delay = scroll_settle_delay
-M._scroll_pipeline_depth = scroll_pipeline_depth
 
 return M
