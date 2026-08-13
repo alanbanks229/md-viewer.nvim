@@ -405,11 +405,15 @@ test("a capture that never answers degrades to the Playwright path instead of ha
     let playwrightScreenshots = 0;
     renderer.page = {
       evaluate: evaluateStalls ? forever : async () => ({ x: 0, y: 0 }),
-      screenshot: async ({ path: target }) => { playwrightScreenshots += 1; fs.writeFileSync(target, "png"); },
+      screenshot: async ({ path: target }) => {
+        playwrightScreenshots += 1;
+        fs.writeFileSync(target, "png");
+        return Buffer.from("png");
+      },
     };
 
     const pngPath = path.join(renderer.tempDir, "stall.png");
-    const encoder = await renderer.captureViewportPng(pngPath, "device");
+    const { encoder } = await renderer.captureViewportPng(pngPath, "device");
     assert.equal(encoder, "playwright_png", `${name}: expected the fallback capture path`);
     assert.equal(playwrightScreenshots, 1, `${name}: the fallback must actually take the picture`);
     assert.match(
@@ -419,7 +423,7 @@ test("a capture that never answers degrades to the Playwright path instead of ha
 
     // Latched, so one stall costs one failed round trip rather than one per frame.
     const again = await renderer.captureViewportPng(pngPath, "device");
-    assert.equal(again, "playwright_png", `${name}: the fast path must stay disabled`);
+    assert.equal(again.encoder, "playwright_png", `${name}: the fast path must stay disabled`);
     assert.equal(playwrightScreenshots, 2, `${name}: the second frame still gets captured`);
   }
 });

@@ -64,6 +64,14 @@ function M.snapshot()
           and session.fast_interval_count > 0
           and (session.fast_interval_sum_ms / session.fast_interval_count)
         or nil,
+      -- Frames that were rasterized on the machine the terminal is on and named
+      -- by a ~60-byte token instead of being carried across the link, and the
+      -- pixels that therefore stayed put. Zero on every session that is not
+      -- client rendering, which is the answer to "is this on?" -- the
+      -- configuration says what was asked for, this says what happened.
+      client_frame_count = session.client_frame_count or 0,
+      client_bytes_deferred = session.client_bytes_deferred or 0,
+      client_render = session.client_render_reason,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
       retina_image_update_ms = session.retina_image_update_ms,

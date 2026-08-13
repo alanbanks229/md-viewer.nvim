@@ -71,6 +71,12 @@ local function companion_address()
   if type(configured) == "string" and configured ~= "" then return configured, "client_render.address" end
   local from_env = vim.env.MD_VIEWER_CLIENT_ADDR
   if type(from_env) == "string" and from_env ~= "" then return from_env, "$MD_VIEWER_CLIENT_ADDR" end
+  -- Last, because the two above are decisions made on this host about this
+  -- host, while this is whatever the wrapper on the other end of the link was
+  -- told to announce. It exists so that starting a session through
+  -- `md-viewer-ssh` needs no configuration on the remote at all.
+  local announced = require("md-viewer.client_render").announced_address()
+  if type(announced) == "string" and announced ~= "" then return announced, "$LC_MD_VIEWER" end
   return nil, nil
 end
 

@@ -2,6 +2,7 @@ local config = require("md-viewer.config")
 local process = require("md-viewer.process")
 local preview = require("md-viewer.preview")
 local security = require("md-viewer.security")
+local client_render = require("md-viewer.client_render")
 
 local M = {}
 
@@ -23,6 +24,39 @@ function M.read_png(path, limit)
   vim.uv.fs_close(fd)
   return data, err
 end
+
+---What the backend should be handed for one rendered frame.
+---
+---Two shapes, and every caller downstream treats them identically because
+---`kitty_raw`'s `transmit` is the only thing that can tell them apart:
+---
+---  * PNG bytes, read from the temp file the renderer wrote and then deleted --
+---    what this has always done, and what a renderer running beside Neovim
+---    still does.
+---  * `{ ref, width_px, height_px }`, naming a frame the renderer is holding on
+---    the machine the terminal is on. Nothing is read, because there is nothing
+---    here to read: the pixels never crossed the link.
+---
+---The configured size limit is enforced on both. On the reference path the
+---bytes are not in hand, so it is checked against the size the renderer
+---reported -- which is the same number, from the same buffer.
+local function frame_source(result, limit)
+  if type(result.frameRef) == "string" then
+    if type(result.pngWidth) ~= "number" or type(result.pngHeight) ~= "number" then
+      return nil, "renderer returned a frame reference without its dimensions"
+    end
+    if type(result.pngBytes) == "number" and result.pngBytes > limit then
+      return nil, "PNG exceeds configured size limit"
+    end
+    return { ref = result.frameRef, width_px = result.pngWidth, height_px = result.pngHeight }
+  end
+  if type(result.pngPath) ~= "string" then return nil, "invalid render result" end
+  local image, read_err = M.read_png(result.pngPath, limit)
+  vim.uv.fs_unlink(result.pngPath)
+  return image, read_err
+end
+
+M._frame_source = frame_source
 
 local function base_dir(buf)
   local name = vim.api.nvim_buf_get_name(buf)
@@ -74,6 +108,18 @@ function M.request(session, markdown, options, callback)
     animate = cfg.render.animate == true,
     browser = cfg.browser,
   }
+  -- Absent on every session that is not client rendering, so the request is
+  -- byte-identical to what it was before this existed.
+  local transport, transport_reason = client_render.frame_transport(session.backend and session.backend.name)
+  session.client_render_reason = transport_reason
+  if transport == "ref" then
+    params.frameTransport = "ref"
+    -- Block geometry is identical on every frame of a scroll and is ~10KB of
+    -- it, so on a link where the pixels have stopped travelling it would
+    -- otherwise become the largest thing that still does. Naming what we hold
+    -- is what lets the renderer send nothing back.
+    params.knownBlocksRevision = session.blocks_revision
+  end
   if not capture_only then params.markdown = markdown end
   local request_id = process.request(capture_only and "capture" or "render", params, function(result, err)
     if M.is_stale(session, serial) then
@@ -90,18 +136,30 @@ function M.request(session, markdown, options, callback)
       callback(nil, err, false)
       return
     end
-    if type(result) ~= "table" or type(result.pngPath) ~= "string" or type(result.blocks) ~= "table" then
+    if type(result) ~= "table" then
       callback(nil, "invalid render result", false)
       return
     end
-    local image, read_err = M.read_png(result.pngPath, cfg.render.max_png_bytes)
-    vim.uv.fs_unlink(result.pngPath)
+    -- The renderer omits block geometry it knows we already hold, so reattach
+    -- what we hold here -- in the one place that knows the revision -- and
+    -- every caller downstream still receives a complete result. A response
+    -- naming a revision we do not have is a bug in this bookkeeping rather than
+    -- something to paper over, so it falls through to the check below.
+    if result.blocks == nil and result.blocksRevision ~= nil and result.blocksRevision == session.blocks_revision then
+      result.blocks = session.blocks
+    end
+    if type(result.blocks) ~= "table" then
+      callback(nil, "invalid render result", false)
+      return
+    end
+    local image, read_err = frame_source(result, cfg.render.max_png_bytes)
     if not image then
       callback(nil, read_err, false)
       return
     end
     session.applied_serial = serial
     session.renderer_revision = content_revision
+    session.blocks_revision, session.blocks = result.blocksRevision, result.blocks
     callback({ image = image, metadata = result, viewport = viewport }, nil, false)
   end)
   return request_id

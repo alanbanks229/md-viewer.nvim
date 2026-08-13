@@ -1,0 +1,246 @@
+#!/usr/bin/env node
+// ssh, with a renderer behind it and a filter in front of the terminal.
+//
+//     md-viewer-ssh [ssh options] <destination> [command]
+//
+// Everything on the command line is handed to ssh untouched. What this adds:
+//
+//   * a **companion renderer** on a unix socket (mode 0600) on this machine, so
+//     the remote Neovim can rasterize its preview *here* -- where the terminal
+//     is -- instead of shipping pixels back across the link;
+//   * a **splicer** over ssh's stdout, which turns the transmission tokens that
+//     preview then emits back into the Kitty graphics uploads the terminal
+//     expects, byte for byte;
+//   * `LC_MD_VIEWER`, which is how the far end finds out any of this is here.
+//     OpenSSH forwards `LC_*` by default, the same mechanism the plugin already
+//     uses to identify iTerm2 and WezTerm across a hop.
+//
+// docs/local-render-design.md is the whole argument for why. The short version:
+// an AWS SSM tunnel is a hard 0.80 MB/s, one scroll frame is 130-540 ms of pure
+// wire time, and the preview ends up half a second behind the wheel. Markdown
+// is 14 KB where the pixels it becomes are 300 KB.
+//
+// **stdin is inherited, never piped.** ssh reads the window size with
+// `ioctl(TIOCGWINSZ)` on stdin, so handing it a pipe breaks SIGWINCH and resize
+// permanently. Inheriting it keeps raw mode, ^C, ^Z, resize and exit codes as
+// ssh's own business and needs no pty -- so no native module, and nothing to
+// install. Only stdout is filtered, and stderr is inherited so ssh's own
+// diagnostics reach the terminal unmediated.
+//
+// **A bug here costs the whole session, so the failure mode is passthrough.**
+// Any error in the splicer latches it into forwarding bytes untouched for the
+// rest of the session; any error starting the companion leaves ssh running with
+// no filter at all, which is exactly a plain `ssh`. There is no path through
+// this program in which output stops.
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { createSplicer } from "../renderer/src/splice.js";
+import { createFrameStore } from "../renderer/src/frames.js";
+import { start as startCompanion, defaultSocketPath } from "../renderer/src/companion.js";
+
+const directory = path.dirname(fileURLToPath(import.meta.url));
+
+const USAGE = `md-viewer-ssh -- ssh with a local renderer for md-viewer.nvim
+
+  md-viewer-ssh [--md-viewer-socket <path>] [--md-viewer-addr <host:port>]
+                [--md-viewer-log <path>] [--md-viewer-no-render]
+                [ssh options] <destination> [command]
+
+Every other argument is passed to ssh unchanged. The remote plugin needs a way
+to reach the companion; the usual one is a reverse forward you set up yourself:
+
+  md-viewer-ssh -R 4445:$(md-viewer-ssh --md-viewer-print-socket) host
+
+or, if the forward already exists in your ssh config or a wrapper script, name
+the remote-side address so the plugin is told where to dial:
+
+  md-viewer-ssh --md-viewer-addr 127.0.0.1:4445 host
+`;
+
+/// Split our own options out of the ssh command line.
+///
+/// Prefixed `--md-viewer-` rather than short-formed on purpose: ssh's option
+/// space is large, contested and not ours, and a collision here would silently
+/// change what the user's ssh does. Everything unrecognized is ssh's.
+export function parseArgs(argv) {
+  const options = { socket: null, address: null, log: null, render: true, help: false, printSocket: false };
+  const ssh = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    const take = (name) => {
+      const value = argv[index + 1];
+      if (typeof value !== "string" || value === "") throw new Error(`${name} needs a value`);
+      index += 1;
+      return value;
+    };
+    if (arg === "--md-viewer-socket") options.socket = take(arg);
+    else if (arg === "--md-viewer-addr") options.address = take(arg);
+    else if (arg === "--md-viewer-log") options.log = take(arg);
+    else if (arg === "--md-viewer-no-render") options.render = false;
+    else if (arg === "--md-viewer-print-socket") options.printSocket = true;
+    else if (arg === "--md-viewer-help") options.help = true;
+    else ssh.push(arg);
+  }
+  return { options, ssh };
+}
+
+/// The value the far end reads out of `LC_MD_VIEWER`.
+///
+/// `v` is the protocol version and is what lets an older plugin ignore a newer
+/// wrapper rather than misread it. `addr` is optional: a forward is often
+/// described on the remote side already (`client_render.address`, or
+/// `$MD_VIEWER_CLIENT_ADDR`), and this wrapper cannot know the remote-side port
+/// of a forward somebody else set up.
+export function handshakeValue(address) {
+  return address ? `v=1,addr=${address}` : "v=1";
+}
+
+/// Where diagnostics go.
+///
+/// Not stderr: stderr is the terminal, mid-session, and writing to it would
+/// paint over whatever the user is looking at -- or worse, land inside an
+/// escape sequence. A file is also what is left to read after the session that
+/// went wrong has ended.
+function openLog(explicit) {
+  const target = explicit ?? path.join(os.tmpdir(), `md-viewer-ssh-${process.pid}.log`);
+  try {
+    const stream = fs.createWriteStream(target, { flags: "a", mode: 0o600 });
+    stream.on("error", () => {});
+    return {
+      path: target,
+      write(line) {
+        try {
+          stream.write(`${line}\n`);
+        } catch {}
+      },
+      close() {
+        try {
+          stream.end();
+        } catch {}
+      },
+    };
+  } catch {
+    return { path: null, write() {}, close() {} };
+  }
+}
+
+async function main() {
+  const { options, ssh } = parseArgs(process.argv.slice(2));
+
+  if (options.help) {
+    process.stdout.write(USAGE);
+    return 0;
+  }
+  // A helper for writing the `-R` argument, since the socket path is uid- and
+  // platform-dependent and nobody should have to reconstruct it by hand.
+  if (options.printSocket) {
+    process.stdout.write(`${options.socket ?? defaultSocketPath()}\n`);
+    return 0;
+  }
+  if (ssh.length === 0) {
+    process.stderr.write(USAGE);
+    return 2;
+  }
+
+  const log = openLog(options.log);
+  log.write(`--- md-viewer-ssh ${new Date().toISOString()} pid=${process.pid}`);
+
+  let companion = null;
+  let frames = null;
+  if (options.render) {
+    frames = createFrameStore();
+    try {
+      companion = await startCompanion({
+        socketPath: options.socket ?? undefined,
+        assetsDir: path.resolve(directory, "../renderer/assets"),
+        frames,
+      });
+      log.write(`companion listening on ${companion.socketPath}`);
+    } catch (error) {
+      // A companion that will not start is a preview that renders remotely --
+      // which is what happens today and is merely slower. Refusing to run ssh
+      // over it would be a much larger failure than the one being reported.
+      log.write(`companion did not start: ${error?.message ?? error}`);
+      process.stderr.write(`md-viewer-ssh: local rendering unavailable (${error?.message ?? error})\n`);
+      frames = null;
+    }
+  }
+
+  const env = { ...process.env };
+  if (companion) {
+    env.LC_MD_VIEWER = handshakeValue(options.address);
+  } else {
+    // Never inherited: a stale value from an outer session would tell the
+    // remote plugin to emit tokens nothing here will splice, and the preview
+    // would come up blank instead of merely slow.
+    delete env.LC_MD_VIEWER;
+  }
+
+  // stdin inherited (see the header), stdout piped so it can be filtered,
+  // stderr inherited so ssh's own messages are never delayed behind our filter.
+  const child = spawn("ssh", ssh, { stdio: ["inherit", "pipe", "inherit"], env });
+
+  const splicer = companion
+    ? createSplicer({ frames, onEvent: (event) => log.write(`splice: ${JSON.stringify(event)}`) })
+    : null;
+
+  // Backpressure is real on this path and only on this path: the splicer turns
+  // a ~60-byte token into as much as 324KB of upload, so a slow consumer can be
+  // outrun by a wide margin here where it never could be by ssh alone. Pausing
+  // the source is what keeps that from becoming unbounded memory.
+  child.stdout.on("data", (chunk) => {
+    const out = splicer ? splicer.push(chunk) : chunk;
+    if (out.length === 0) return;
+    if (!process.stdout.write(out)) {
+      child.stdout.pause();
+      process.stdout.once("drain", () => child.stdout.resume());
+    }
+  });
+  child.stdout.on("end", () => {
+    if (splicer) {
+      const held = splicer.flush();
+      if (held.length > 0) process.stdout.write(held);
+    }
+  });
+
+  child.on("error", (error) => {
+    process.stderr.write(`md-viewer-ssh: could not run ssh: ${error.message}\n`);
+  });
+
+  // Forwarded rather than handled: ^C reaches ssh directly through the shared
+  // terminal, but a signal sent to this process by anything else (a window
+  // manager, a supervisor) has to reach the child too, and must not kill the
+  // wrapper first and orphan it.
+  for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) {
+    process.on(signal, () => {
+      try {
+        child.kill(signal);
+      } catch {}
+    });
+  }
+
+  // `close` rather than `exit`: it fires once the child's stdio streams have
+  // closed as well, which is what guarantees the last chunk has been through
+  // the splicer and written. Resolving on `exit` alone can tear the companion
+  // down and return while output is still in flight.
+  const [code, signal] = await new Promise((resolve) => child.once("close", (c, s) => resolve([c, s])));
+  if (splicer) log.write(`splice stats: ${JSON.stringify(splicer.stats())}`);
+  if (companion) {
+    log.write(`frame store: ${JSON.stringify(companion.frames.stats())}`);
+    await companion.stop().catch(() => {});
+  }
+  log.close();
+  // ssh's exit status is the remote command's, and scripts depend on it. A
+  // signalled child is reported the way a shell reports one.
+  return signal ? 128 + (os.constants.signals[signal] ?? 0) : (code ?? 0);
+}
+
+// Only when run as a program, so a test may import parseArgs without starting
+// an ssh session.
+if (process.argv[1] && fs.realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = await main();
+}

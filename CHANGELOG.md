@@ -13,6 +13,11 @@ catches up about half a second late. Nothing was wrong with the pipeline; the
 frames were simply too big for the pipe, and the two settings that looked like
 they would help were measured making it worse.
 
+Two answers ship here. The smaller one needs no setup and helps every SSH user:
+capture the moving frame of a scroll at half size. The larger one stops sending
+the frame at all — render it on the machine your terminal is on and send a
+reference across the link instead of the picture.
+
 ### Added
 
 - **`render.scroll_scale` and `render.ssh_scroll_scale`.** The moving frame of a
@@ -36,8 +41,50 @@ they would help were measured making it worse.
   opens no listening port — it dials out, and when the address is a forwarded
   port the listener belongs to sshd. A companion that cannot be reached is
   reported in `:MdViewerHealth` and falls back to the local renderer rather than
-  failing the preview. Groundwork: rendering across two machines needs the
-  transmission tokens that come next, so this is not yet useful remotely.
+  failing the preview.
+- **`bin/md-viewer-ssh`: the preview rendered where your terminal is.** A
+  wrapper around `ssh` that runs the companion locally, filters ssh's stdout,
+  and exports `LC_MD_VIEWER` so the remote plugin knows it is there. The remote
+  preview then asks for its frames *by reference*: the PNG stays on the machine
+  that drew it and a ~56-byte token crosses the link, which the filter swaps
+  back for the identical Kitty upload the terminal receives today. On the SSM
+  link this was built for, a moving scroll frame was 47 KB of wire time.
+  Placement geometry, crops, z-layering and the double-buffered deletion order
+  are all still computed in Lua and are asserted byte-for-byte equal between the
+  two modes; `chunks()` and its JavaScript port are asserted against one pinned
+  artifact so neither can drift alone.
+
+  It adds nothing to install, needs no new inbound connection — `ssh -R` is an
+  ordinary reverse forward, and the listener on the Neovim side is sshd's — and
+  changes nothing when it is absent: no wrapper means no handshake means no
+  token. A companion that dies mid-session falls back with one notification, a
+  leaked token is an APC string conformant terminals discard, and any failure in
+  the filter latches it into plain passthrough for the rest of the session.
+
+  Two things still need the renderer beside the *file* and therefore fall back
+  under it: a local image embedded in the document shows its failure
+  placeholder, and an animated image stays on its still frame. Remote `https`
+  images are fetched by your local machine instead of the remote host, which
+  moves a trust boundary — [SECURITY.md](SECURITY.md) says exactly which.
+  `:MdViewerHealth` notes all of this whenever client rendering is on, reports
+  which of the four preconditions is missing when it is not, and warns if a
+  frame was ever referenced after the renderer had dropped it.
+- **`client_render.enabled`**, `"auto"` by default: reference a frame only when
+  a companion is answering, the raw Kitty backend is in use, and a filter has
+  announced itself. `"on"` waives the handshake alone, for a setup whose
+  environment cannot reach the remote host; `"off"` never references a frame.
+  `$MD_VIEWER_CLIENT_ADDR` joins `client_render.address` as a way to name the
+  companion from the remote side.
+
+### Changed
+
+- **Block geometry is no longer re-sent on every frame of a scroll.** It is
+  identical from one scroll frame to the next and is 10,477 B on this project's
+  own README — 1.4 MB across a single wheel spin, which would have become the
+  largest thing on the link the moment the pixels stopped travelling. A render
+  request may now name the `blocksRevision` it already holds and get nothing
+  back when that is still current. Only client-rendering sessions do; the
+  request a local session sends is unchanged.
 - **A design record for client-side rendering**, in
   [docs/local-render-design.md](docs/local-render-design.md): the measurements
   behind the slow-link case and the architecture for rendering on the machine

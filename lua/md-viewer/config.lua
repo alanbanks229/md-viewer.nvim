@@ -193,6 +193,22 @@ M.defaults = {
     -- someone asked for it. See docs/local-render-design.md.
     address = nil,
     connect_timeout_ms = 2000,
+    -- Whether a frame rendered by that companion may stay there, with only a
+    -- reference to it crossing the link for a splicer in front of the terminal
+    -- to substitute back. This is the setting that turns kilobytes per scroll
+    -- frame into hundreds of bytes.
+    --
+    -- "auto" requires everything that has to be true for it to work: a
+    -- companion answering, the raw Kitty backend, and a splicer that announced
+    -- itself through $LC_MD_VIEWER (which `bin/md-viewer-ssh` exports).
+    -- "off" never references a frame, whatever else is in place. "on" waives
+    -- the handshake alone -- for a splicer whose environment cannot reach this
+    -- host -- and nothing else: a session with no companion still renders
+    -- beside Neovim, because there would be nothing to reference.
+    --
+    -- A frame referenced with no splicer to substitute it does not display, so
+    -- "auto" is the setting to leave alone unless you have looked.
+    enabled = "auto",
   },
   terminal = {
     profile = "auto",
@@ -356,6 +372,10 @@ local function validate(cfg)
   assert(
     type(cfg.client_render.connect_timeout_ms) == "number" and cfg.client_render.connect_timeout_ms > 0,
     "md-viewer: client_render.connect_timeout_ms must be positive"
+  )
+  assert(
+    cfg.client_render.enabled == "auto" or cfg.client_render.enabled == "on" or cfg.client_render.enabled == "off",
+    "md-viewer: client_render.enabled must be 'auto', 'on', or 'off'"
   )
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(

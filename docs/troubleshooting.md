@@ -466,9 +466,46 @@ were A/B'd on a live SSM link and both felt equal or worse; the defaults are
 already the fastest configuration available.
 
 When even that is not enough, the pixels themselves are the cost and no setting
-removes them. [local-render-design.md](local-render-design.md) records what it
-would take to render on the machine your terminal runs on and send only the
-Markdown source across the link.
+removes them. Start the session through `bin/md-viewer-ssh` instead of bare
+`ssh`: the frame is then rendered on the machine your terminal is on, and a
+~60-byte reference crosses the link in place of the picture. See
+[the README section](../README.md#rendering-on-the-machine-your-terminal-is-on)
+and [local-render-design.md](local-render-design.md).
+
+## The session runs through `md-viewer-ssh` but nothing got faster
+
+Everything still works, and that is the whole difficulty: all four of the
+things that have to be true fail identically, as a preview that renders and is
+slow. `:MdViewerHealth` names which one, on the `client rendering` row of
+`:MdViewerHealth verbose`:
+
+| Row says | What to do |
+|---|---|
+| `no companion renderer (client_render.address / $MD_VIEWER_CLIENT_ADDR is unset)` | The remote plugin has no address to dial. Pass `--md-viewer-addr <host:port>` to the wrapper, or set `MD_VIEWER_CLIENT_ADDR` / `client_render.address` on the remote host. |
+| `companion unreachable: ...` | The address exists but nothing answered. Check the reverse forward is actually up — `ssh -R` is silent when the remote-side bind fails unless `ExitOnForwardFailure` is set. |
+| `no splicer in front of the terminal ($LC_MD_VIEWER is unset...)` | The variable did not survive the hop. The remote `sshd` needs `AcceptEnv LANG LC_*` — the same requirement `LC_TERMINAL` has. Confirm with `echo $LC_MD_VIEWER` on the remote host. If it cannot be forwarded, set `client_render.enabled = "on"`, which waives the handshake and nothing else. |
+| `the cells backend is handed pixels, not transmission commands` | This is the terminal-detection problem above, not a client-rendering one. Fix the profile first. |
+
+`:MdViewerDebug` answers the same question from the other end:
+`client_frame_count` counts frames that were named rather than carried, and
+`client_bytes_deferred` is the pixels that stayed put. Both zero means no token
+was ever emitted.
+
+The wrapper writes a log to `$TMPDIR/md-viewer-ssh-<pid>.log` (or wherever
+`--md-viewer-log` points), which records the companion's socket path, every
+splicer event, and the frame-store statistics at exit. Nothing is written to the
+terminal mid-session, because that would land inside somebody's escape sequence.
+
+## An image is broken, or an animation is frozen, only under `md-viewer-ssh`
+
+Expected, and named in `:MdViewerHealth`'s notes. A local image embedded in the
+document and an animated image's frames are both read from disk by the renderer,
+and under client rendering the renderer is on the machine your *terminal* is on
+while the file is on the remote host. The local image shows its failure
+placeholder and the animation stays on its still frame. Remote `https` images
+are unaffected — better, if anything, since they are fetched by a machine with
+ordinary internet access. Set `client_render.enabled = "off"` for a document
+where this matters.
 
 ## The wrong terminal profile was detected
 

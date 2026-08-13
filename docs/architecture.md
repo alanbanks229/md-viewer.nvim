@@ -48,7 +48,50 @@ renderer speaks to nothing over the network" stays a property of the renderer
 rather than of one entrypoint. A companion serves one connection at a time,
 because a service owns one browser, one page and one serial queue; and it
 forgets a disconnected session's documents, because document ids are buffer
-numbers and the next session would otherwise inherit them. Scroll-only work reuses cached HTML, the live DOM, document geometry
+numbers and the next session would otherwise inherit them.
+
+### Transmission tokens: the frame that does not cross the link
+
+A companion is only worth reaching if its frames stay with it, and that is what
+`frameTransport: "ref"` is for. On that path the renderer writes no temp file:
+the PNG goes into `renderer/src/frames.js` (a bounded LRU, recency refreshed on
+*read* so a frame that keeps being re-transmitted keeps being held) and the
+response carries `frameRef`, `pngWidth` and `pngHeight` in its place — a few
+hundred bytes where the frame is a few hundred kilobytes.
+
+The Lua side then builds the same Kitty graphics stream it always has, with one
+substitution. `kitty_raw.lua`'s `transmit(source, control)` is the *only* place
+that knows the difference: given bytes it emits `chunks(base64(bytes), control)`
+exactly as before; given a reference it emits
+`ESC _ MDV1;tx;<ref>;<control> ESC \`. Everything else — placement geometry,
+crop rectangles, occlusion cut-outs, z-layering, deletion order — is computed
+from the image's *dimensions*, which both forms carry, so none of it can tell
+the two apart. `tests/lua/cases/client_render.lua` asserts that byte for byte.
+
+`renderer/src/splice.js`, running inside `bin/md-viewer-ssh` between ssh's
+stdout and the terminal, substitutes the token back. **Invariant:** its
+`kittyChunks` is a byte-for-byte port of Lua's `chunks()`, and both are asserted
+against the same pinned artifact (`tests/fixtures/splice-upload.esc`) from
+`tests/node/splice.test.js` and `tests/lua/cases/client_render.lua`, so neither
+implementation can drift alone. The terminal receives the stream it receives
+today.
+
+The filter's other invariant is that it never eats a byte it did not mint.
+Anything unrecognized — an unknown reference, an unterminated token, a sequence
+that merely looks like one — is forwarded verbatim, and any internal failure
+latches it into pure passthrough. A leaked token is an APC string with an
+application identifier the terminal does not know, which conformant terminals
+discard: the failure is one frame that does not appear, never a corrupted
+stream.
+
+Block geometry is elided on the same path. It is ~10 KB, it is byte-identical on
+every frame of a scroll, and once the pixels stop travelling it would be the
+largest thing that still does. The request names the `blocksRevision` it holds
+(a hash of the layout key, so it is exact rather than conservative and survives
+a renderer restart); a matching revision returns no `blocks` at all, and
+`renderer.lua` reattaches what it already has before any caller sees the result.
+
+Scroll-only work reuses cached HTML, the live DOM, document geometry
 and the token source map, then performs a page scroll and viewport screenshot
 alone.
 

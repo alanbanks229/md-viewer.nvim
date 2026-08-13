@@ -67,6 +67,43 @@ because browser networking is always blocked and image URLs are static text
 in a JavaScript-free page, it is an "is this file an image" oracle rather than
 a way to send one anywhere.
 
+## What the companion renderer moves, and what it does not
+
+Rendering on the machine your terminal is on
+([`md-viewer-client-render`](docs/architecture.md)) does not relax a single rule
+above — it is the same renderer code, with the same deny-all CSP, the same
+disabled JavaScript, the same SSRF-safe pinned-IP fetch, the same document-root
+containment. What changes is **which machine each rule is enforced on**, and
+that is worth stating explicitly:
+
+- **Remote (`https`) image fetches move to your local machine.** The blocklist
+  is unchanged, so it now protects your machine's private network rather than
+  the remote host's. If the remote host sits inside a network you trust more
+  than your own, that is a change worth weighing; if it sits inside one you
+  trust less, this is an improvement.
+- **Local file reads do not move.** Reading a file requires the renderer to be
+  on the machine that has it, so under client rendering local images simply
+  fail — visibly, as the placeholder the rules above already specify. No
+  document-root check has been weakened; there is nothing on the other side of
+  it to reach.
+- **The Markdown source crosses the link.** It always did: the source is what a
+  render request carries. Client rendering sends it to a companion you started,
+  on your own machine, over your own SSH connection.
+- **The companion accepts a connection; the machine running Neovim never
+  does.** The companion binds a unix domain socket created with mode `0600` by
+  umask rather than chmod'ed to it afterwards, so there is no window in which it
+  exists and is group- or world-reachable. It is never a TCP port. When it is
+  reached across an SSH reverse forward, the listener on the Neovim side belongs
+  to `sshd` because a user asked for a forward — md-viewer only ever dials out.
+  `tests/node/companion.test.js` and `tests/node/no-listening-port.test.js`
+  assert both halves.
+- **`bin/md-viewer-ssh` reads your terminal's output stream.** It filters ssh's
+  stdout to substitute frame references, so it necessarily sees everything the
+  remote session prints. It is a byte filter with no network access of its own,
+  it forwards anything it does not recognize untouched, and any internal failure
+  latches it into pure passthrough. Its log file records splicer events and
+  frame-store counters — never session output — and is created mode `0600`.
+
 ## Installing
 
 Dependencies are pinned to exact versions with integrity hashes in

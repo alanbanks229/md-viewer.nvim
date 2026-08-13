@@ -99,6 +99,15 @@ end
 ---through, so there is exactly one place that knows how to show/update a
 ---backend image.
 local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
+  -- A table here is a reference to a frame the renderer is holding on the
+  -- machine the terminal is on: those pixels never crossed the link, and this
+  -- is the only place that knows how many of them there were. Counted rather
+  -- than inferred, because a session that *thinks* it is client rendering and
+  -- is not looks identical from every other field.
+  if type(image_bytes) == "table" and image_bytes.ref then
+    session.client_frame_count = (session.client_frame_count or 0) + 1
+    session.client_bytes_deferred = (session.client_bytes_deferred or 0) + (png_bytes or 0)
+  end
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -394,10 +403,14 @@ end
 ---`renderer.lua`; the display half is `apply_image`, shared verbatim.
 function M.display_interact_result(session, result)
   if not valid(session) or session.backend.name == "cells" then return end
-  if type(result) ~= "table" or type(result.pngPath) ~= "string" then return end
+  if type(result) ~= "table" then return end
+  -- Same two shapes a render frame arrives in -- a temp file, or a reference to
+  -- one the renderer is holding on the machine the terminal is on. Neither is a
+  -- frame at all when both are absent, which is every interaction that mutates
+  -- nothing visible.
+  if type(result.pngPath) ~= "string" and type(result.frameRef) ~= "string" then return end
   local cfg = config.get().render
-  local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
-  vim.uv.fs_unlink(result.pngPath)
+  local image, read_err = renderer._frame_source(result, cfg.max_png_bytes)
   if not image then
     notify_error(read_err)
     return
@@ -515,7 +528,11 @@ function M.refresh(session, render_options)
     session.last_layout_reused = meta.layoutReused == true
     session.last_markdown_reused = meta.markdownReused == true
     session.last_capture_scale = meta.captureScale
-    session.last_png_bytes = meta.pngBytes or #result.image
+    -- `pngBytes` is what the renderer measured; the fallback measures the bytes
+    -- in hand, which only exist when the frame travelled as bytes. A referenced
+    -- frame always carries the renderer's count, so the fallback is unreachable
+    -- there rather than wrong there.
+    session.last_png_bytes = meta.pngBytes or (type(result.image) == "string" and #result.image or nil)
     session.last_layout_ms = meta.layoutMs
     session.last_capture_ms = meta.captureMs
     session.viewport_width_px = result.viewport.widthPx
@@ -1232,7 +1249,19 @@ function M.setup_autocmds()
   -- in-memory interactionState does not survive a restart, and without this
   -- the cached Lua-side flags describing it would go stale silently.
   process.on_exit(function()
-    each_session(function(session) interaction.forget_selection(session) end)
+    each_session(function(session)
+      interaction.forget_selection(session)
+      -- A cached *reference* died with the renderer's frame store, for exactly
+      -- the reason a cached frame path died with its temp directory. Both
+      -- caches exist so a redisplay costs no round trip -- `show_cached` after
+      -- an occlusion, `restore_clean_base` at the start of a drag -- and a
+      -- reference nothing can resolve any more would emit a token the splicer
+      -- forwards untouched, which is a preview that goes blank until the next
+      -- render. Cached *bytes* are in this process's own memory and stay valid
+      -- across a renderer restart, so only references are dropped.
+      if type(session.last_image_bytes) == "table" then session.last_image_bytes = nil end
+      if type(session.clean_image_bytes) == "table" then session.clean_image_bytes = nil end
+    end)
     -- Frame paths died with the renderer's temp directory; the animation
     -- module drops them and re-materializes, while terminal-resident uploads
     -- survive by stable content key.

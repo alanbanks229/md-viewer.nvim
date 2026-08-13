@@ -6,8 +6,44 @@ Neovim runs on, why that is worth doing, and what it may not break. Statements m
 reintroduces a real defect.
 
 This is a design record. It describes the architecture and the evidence behind it; the
-shipped behaviour is documented in [`../README.md`](../README.md), `:help md-viewer-ssh`
-and [`troubleshooting.md`](troubleshooting.md).
+shipped behaviour is documented in [`../README.md`](../README.md),
+`:help md-viewer-client-render` and [`troubleshooting.md`](troubleshooting.md).
+
+## Status
+
+| Phase | State |
+|---|---|
+| 0 — `render.scroll_scale`, SSH-gated | **Shipped and validated on the real link.** Moving frame 134,851 → 47,469 B; delivered rate 3.8/s → 6.3/s; wire saturation 79% → 49% |
+| 1 — transport seam (`service.js`, `companion.js`, socket transport) | **Shipped.** One machine only: responses still returned a path |
+| 2 — transmission tokens, splicer, `blocks` elision | **Shipped.** `frames.js`, `splice.js`, the `transmit()` seam, `frameTransport: "ref"`, `blocksRevision` |
+| 3 — `bin/md-viewer-ssh`, `LC_MD_VIEWER`, diagnostics | **Shipped.** End-to-end on one machine; not yet run across a real link |
+| 4 — parity: overlay sheet, animation frames, local images by reference | **Not built.** See "What is still missing" below |
+
+Two details of the design below were changed during implementation, both toward
+safety, and the text has been corrected in place:
+
+- The token is `ESC _ MDV1;tx;<ref>;<control> ESC \` — the *control string itself* travels
+  in it, rather than an image id the splicer would have to reassemble a control string
+  from. That keeps `chunks()`'s caller the only thing that decides what a transmission
+  looks like, and it is what lets the same seam carry animation frames (`a=f`) unchanged.
+- An unknown reference is **forwarded verbatim**, not dropped. Dropping is right if the
+  token is ours and the frame was evicted; forwarding is right if it was never ours. Both
+  end the same way for a real token — the terminal discards an APC string it does not know
+  — so forwarding is strictly better: it cannot destroy somebody's output.
+
+### What is still missing
+
+- **Local images.** `resolveLocalImage` reads the renderer host's filesystem, which under
+  client rendering is the wrong machine. The image renders as its failure placeholder.
+  Phase 4's asset channel is the fix, and it is the one substantially new subsystem left.
+- **Animated images.** `animation.lua` reads frame PNGs from paths on the renderer host,
+  so animations stay on their still frame. The `transmit()` seam already accepts a
+  reference for them; what is missing is `frames[].width/height` in the renderer's
+  `animation` response and a reference in place of each path.
+- **The overlay sheet** still round-trips: the renderer returns it base64 in the response
+  and Lua sends it back as an upload. It is a solid-colour PNG of a few kilobytes,
+  uploaded once per session, so this is a correctness-neutral inefficiency rather than a
+  gap. It goes through the same seam whenever the response grows a reference.
 
 ## The problem
 
@@ -200,17 +236,38 @@ that gets creative is a corrupted terminal.
 2. The companion rasterizes locally, stores the PNG under a `frameRef` in a bounded cache,
    and replies with metadata, the ref and the PNG's dimensions. **~277 B.**
 3. The plugin emits, through the unchanged `nvim_ui_send` path, a token
-   (`ESC _ MDV1;op=tx,i=<imageId>,ref=<frameRef> ESC \`) followed by today's placement
-   commands. **~60 B.**
-4. The splicer substitutes byte-identical `chunks(base64(png), "a=t,f=100,t=d,q=2,i=<id>")`.
+   (`ESC _ MDV1;tx;<frameRef>;<control> ESC \`) followed by today's placement commands.
+   **~56 B.**
+4. The splicer substitutes byte-identical `chunks(base64(png), control)`.
+
+The control string travels *in* the token rather than being reconstructed from an image id,
+so `transmit()`'s caller remains the only thing that decides what a transmission looks like
+— which is what lets the same seam carry an `a=f` animation frame with its own gap key
+without the splicer learning anything new.
 
 The frame is always rendered before the token is emitted, so there is no race. A token whose
-ref the companion no longer holds emits nothing and asks the plugin to re-render.
+ref the companion no longer holds is forwarded verbatim: the terminal discards an APC string
+it does not recognize, so the frame does not appear and the next render replaces it.
+`:MdViewerHealth` warns when that count is non-zero, because nothing else would ever say so.
+
+**Invariant:** byte equivalence is proven offline. `kittyChunks` in `splice.js` and
+`chunks()` in `kitty_raw.lua` are asserted against the same pinned artifact
+(`tests/fixtures/splice-upload.esc`) from `tests/node/splice.test.js` and
+`tests/lua/cases/client_render.lua`, so neither can drift alone. A second Lua assertion
+strips the upload from both a byte-carried and a reference-carried frame and requires what
+remains — every placement, crop, z-index and deletion — to be equal.
 
 **Invariant:** unchanged `blocks` are elided from capture responses. Block geometry is
 10,477 B for this README and is returned on *every* capture even when the layout was reused.
 Sending it per frame would cost 1.4 MB across one wheel spin and quietly undo the entire
-saving. Responses carry a `blocksRevision`; the plugin reuses the geometry it already has.
+saving. The request names the `blocksRevision` it holds — a hash of the layout key, so it is
+exact rather than conservative and survives a renderer restart — and a matching revision
+returns no `blocks` at all. `renderer.lua` reattaches what it holds before any caller sees
+the result, so nothing downstream knows this happens.
+
+Both halves are needed and the measurement says so: a reference alone left a 6,542-byte
+response, against under 2,048 with the elision too. `tests/node/client-frames.test.js`
+asserts that number rather than the reasoning.
 
 ### Discovery
 
@@ -251,8 +308,15 @@ the network. That claim is narrowed, not dropped, and the narrowing is precise:
   resolve then validate then pin the address, every redirect hop re-checked, no allowlist.
   This is a real change of which network is being defended and is called out in
   [`../SECURITY.md`](../SECURITY.md).
-- **Local image containment moves to the machine that owns the files**, which is stronger
-  than today: the document root is resolved and enforced where the document actually lives.
+- **Local image reads do not move, so they fail.** Reading a file needs the renderer beside
+  it, and until Phase 4's asset channel exists there is nothing on the other side of the
+  document-root check to reach. No containment rule was weakened; a local image simply
+  renders as the placeholder the existing rules already specify. `:MdViewerHealth` notes
+  this whenever client rendering is on, because "why is this image broken only over SSH"
+  is otherwise unanswerable.
+- **`bin/md-viewer-ssh` reads the session's output stream**, since filtering it is what it
+  is for. It has no network access of its own, forwards everything it does not recognize,
+  and writes its log (splicer events and counters, never session output) mode `0600`.
 
 ## Alternatives considered
 

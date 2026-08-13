@@ -139,6 +139,62 @@ local function png_dimensions(bytes)
   return width, height
 end
 
+-- ---------------------------------------------------------------------------
+-- Transmission: the one thing about an image that can happen somewhere else.
+--
+-- Every command this backend emits is tiny except one -- the `a=t` upload
+-- carrying a base64 PNG, 80-324KB of it, against ~60 bytes for a placement. On
+-- a link with a hard throughput ceiling that single command *is* the lag, and
+-- when the frame was rasterized on the machine the terminal is on there is no
+-- reason for it to cross the link at all.
+--
+-- So an image reaches this backend either as bytes, exactly as it always has,
+-- or as a reference to bytes held by the renderer on the far side of the
+-- terminal. `transmit` is the only place that difference exists. Placement
+-- geometry, crop rectangles, occlusion cut-outs, z-layering, the
+-- double-buffered deletion order, the golden stream test -- all of it is
+-- computed here in Lua from the image's *dimensions*, which both forms carry,
+-- and none of it can tell the two apart. `tests/lua/cases/client_render.lua`
+-- asserts exactly that: same placements, byte for byte, either way.
+--
+-- The token is an APC string with this application's own identifier, spliced
+-- back into the real upload by `renderer/src/splice.js` in front of the
+-- terminal. A terminal that receives one -- which happens only if the splicer
+-- died mid-session -- sees an APC string it does not know and discards it, so
+-- the failure is a frame that does not appear rather than a corrupted stream.
+-- ---------------------------------------------------------------------------
+
+---What the terminal must be given for one image, and how large it is.
+---
+---A string is PNG bytes and is measured from its own header, which is what
+---this backend has always done. A table is `{ ref, width_px, height_px }` --
+---a frame the renderer holds and the splicer will substitute. Returns nil for
+---anything that cannot be placed, so a caller's `error()` still names the same
+---failure it named before this existed.
+local function image_source(value)
+  if type(value) == "string" then
+    local width, height = png_dimensions(value)
+    if not width then return nil end
+    return { bytes = value, width_px = width, height_px = height }
+  end
+  if type(value) ~= "table" or type(value.ref) ~= "string" then return nil end
+  -- Both are embedded verbatim in an escape sequence, so a reference may not
+  -- contain the `;` that separates the token's fields or the ESC that ends it.
+  -- Checked on the way in rather than at the point of formatting: a rejected
+  -- frame is a frame that does not display, and a smuggled one is a stream that
+  -- does not parse.
+  if not value.ref:match("^[%w_%-]+$") or #value.ref > 64 then return nil end
+  local width, height = tonumber(value.width_px), tonumber(value.height_px)
+  if not (width and height) or width < 1 or height < 1 then return nil end
+  return { ref = value.ref, width_px = math.floor(width), height_px = math.floor(height) }
+end
+
+---The bytes, or the token that stands for them.
+local function transmit(source, control)
+  if source.bytes then return chunks(vim.base64.encode(source.bytes), control) end
+  return ("\27_MDV1;tx;%s;%s\27\\"):format(source.ref, control)
+end
+
 local function intersect(a, b)
   local left, top = math.max(a.x, b.x), math.max(a.y, b.y)
   local right = math.min(a.x + a.width, b.x + b.width)
@@ -330,17 +386,16 @@ local function deletion_command(image_id) return command(("a=d,d=I,q=2,i=%d"):fo
 ---
 ---`M.show` is this plus a `send`. It is split so `M.update` can concatenate the
 ---replacement with the deletion of what it replaces -- see there.
-local function build_show(image_bytes, placement)
+local function build_show(image, placement)
   next_id = next_id + 1
   local id = next_id
-  local width_px, height_px = png_dimensions(image_bytes)
-  if not width_px then error("md-viewer: raw Kitty backend received an invalid PNG") end
-  local encoded = vim.base64.encode(image_bytes)
-  local item = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
+  local source = image_source(image)
+  if not source then error("md-viewer: raw Kitty backend received an invalid PNG") end
+  local item = { id = id, width_px = source.width_px, height_px = source.height_px, placement_ids = {} }
   owned[id] = item
   -- Upload once, then use cropped placements so passive floating UI can punch
   -- out only its own cells instead of blanking the complete preview.
-  local upload = chunks(encoded, ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+  local upload = transmit(source, ("a=t,f=100,t=d,q=2,i=%d"):format(id))
   local sequence, ids = placement_sequences(item, placement)
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
@@ -608,9 +663,10 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   local key = tint_key(tint, margin)
   local sheet = sheet_for(tint, margin, need_w, need_h)
   if not sheet then
-    if type(sheet_png) ~= "string" then return nil, "need_sheet" end
-    local width_px, height_px = png_dimensions(sheet_png)
-    if not width_px then return nil, "overlay sheet is not a valid PNG" end
+    if sheet_png == nil then return nil, "need_sheet" end
+    local sheet_source = image_source(sheet_png)
+    if not sheet_source then return nil, "overlay sheet is not a valid PNG" end
+    local width_px, height_px = sheet_source.width_px, sheet_source.height_px
     if width_px < need_w or height_px < need_h then
       return nil,
         ("overlay sheet %dx%d is smaller than the %dx%d it must cover"):format(width_px, height_px, need_w, need_h)
@@ -619,7 +675,7 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
     next_sheet_id = next_sheet_id + 1
     sheet = { id = next_sheet_id, width_px = width_px, height_px = height_px }
     sheets[key] = sheet
-    send(chunks(vim.base64.encode(sheet_png), ("a=t,f=100,t=d,q=2,i=%d"):format(sheet.id)))
+    send(transmit(sheet_source, ("a=t,f=100,t=d,q=2,i=%d"):format(sheet.id)))
     -- A smaller predecessor for the same color is fully replaced: any set
     -- still holding placements of it keeps them until its own next apply.
     if previous and previous.id ~= sheet.id then
@@ -881,11 +937,12 @@ end
 function M.animation_upload(key, bytes)
   local existing = animation_images[key]
   if existing then return existing.id end
-  local width, height = png_dimensions(bytes)
-  if not width then return nil, "frame is not a usable PNG" end
+  local source = image_source(bytes)
+  if not source then return nil, "frame is not a usable PNG" end
+  local width, height = source.width_px, source.height_px
   next_animation_id = next_animation_id + 1
   local id = next_animation_id
-  send(chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
+  send(transmit(source, ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
   animation_images[key] = { id = id, complete = true, width_px = width, height_px = height }
   return id, { width_px = width, height_px = height }
 end
@@ -914,11 +971,12 @@ function M.animation_native_begin(key, bytes, gap_ms)
   local entry = animation_images[key]
   if entry and entry.complete and entry.native then return entry.id, true end
   if entry then M.animation_free({ key }) end
-  local width, height = png_dimensions(bytes)
-  if not width then return nil, "root frame is not a usable PNG" end
+  local source = image_source(bytes)
+  if not source then return nil, "root frame is not a usable PNG" end
+  local width, height = source.width_px, source.height_px
   next_animation_id = next_animation_id + 1
   local id = next_animation_id
-  local parts = { chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)) }
+  local parts = { transmit(source, ("a=t,f=100,t=d,q=2,i=%d"):format(id)) }
   -- The root frame is created by the plain transmission above, which carries
   -- no gap of its own; the protocol sets the root's gap through the control
   -- action (a=a, frame r=1) instead.
@@ -941,11 +999,23 @@ function M.animation_native_frame(key, bytes, gap_ms)
   local entry = animation_images[key]
   if not entry or not entry.native then return nil, "no native upload in progress under this key" end
   if entry.complete then return nil, "this animation's upload already finished" end
-  if type(bytes) ~= "string" or bytes == "" then return nil, "frame bytes are empty" end
+  if bytes == "" then return nil, "frame bytes are empty" end
+  -- Not `image_source`: a continuation frame is not required to be a PNG this
+  -- can measure -- `a=f` frames are placed against the root frame's geometry --
+  -- so the check stays what it was, and the reference form is validated for
+  -- shape alone.
+  local source = type(bytes) == "string" and { bytes = bytes }
+    or (
+      type(bytes) == "table"
+      and type(bytes.ref) == "string"
+      and bytes.ref:match("^[%w_%-]+$")
+      and { ref = bytes.ref }
+    )
+  if not source then return nil, "frame bytes are empty" end
   local gap = math.floor(tonumber(gap_ms) or 0)
   local control = gap > 0 and ("a=f,f=100,t=d,q=2,i=%d,z=%d"):format(entry.id, gap)
     or ("a=f,f=100,t=d,q=2,i=%d"):format(entry.id)
-  send(chunks(vim.base64.encode(bytes), control))
+  send(transmit(source, control))
   return true
 end
 
@@ -1225,8 +1295,8 @@ function M.detect()
     )
 end
 
-function M.show(image_bytes, placement)
-  local id, sequence = build_show(image_bytes, placement)
+function M.show(image, placement)
+  local id, sequence = build_show(image, placement)
   send(sequence)
   return id
 end
@@ -1245,14 +1315,14 @@ end
 ---Which side the deletion goes on is still the double-buffer policy's call:
 ---create-then-delete never has a moment with nothing on screen, and is the
 ---default everywhere a profile does not say otherwise.
-function M.update(image_id, image_bytes, placement)
+function M.update(image_id, image, placement)
   local double_buffer = resolve_double_buffer()
   local removal = ""
   if image_id and owned[image_id] then
     removal = deletion_command(image_id)
     owned[image_id] = nil
   end
-  local new_id, addition = build_show(image_bytes, placement)
+  local new_id, addition = build_show(image, placement)
   send(double_buffer and (addition .. removal) or (removal .. addition))
   return new_id
 end

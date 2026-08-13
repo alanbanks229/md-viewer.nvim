@@ -45,7 +45,13 @@ const ALLOWED_LANES = {
 /// service does not decide that: the stdio child is owned by Neovim and must
 /// exit when told, while a companion outlives any single Neovim session and
 /// must not.
-export function createService({ assetsDir, onShutdown } = {}) {
+///
+/// `frames` is the store that makes `frameTransport: "ref"` answerable, and is
+/// injected rather than created here because the *splicer* is its other reader
+/// and the two must be the same object. A service with no store simply refuses
+/// the reference path, which is what the stdio child does -- it renders on the
+/// machine Neovim is on, so there is nothing for a reference to save.
+export function createService({ assetsDir, onShutdown, frames } = {}) {
   const browser = new BrowserRenderer({ assetsDir });
   // Frames are written inside the browser's own temp directory, which is the
   // trust boundary: the terminal is handed a path to read, so that path must
@@ -127,6 +133,32 @@ export function createService({ assetsDir, onShutdown } = {}) {
     try { fs.unlinkSync(pngPath); } catch {}
   }
 
+  /// Refuse the reference path here rather than deep inside a capture.
+  ///
+  /// Asked of a service with no store, `frameTransport: "ref"` would otherwise
+  /// produce a response with neither a path nor a reference in it, which reads
+  /// downstream as a malformed render rather than as a misconfiguration. Said
+  /// once, in the words of the thing that is wrong.
+  function resolveFrameTransport(requested) {
+    if (requested !== "ref") return "path";
+    if (!frames) {
+      const error = new Error("frameTransport 'ref' needs a renderer with a frame store; this one has none");
+      error.code = "NO_FRAME_STORE";
+      throw error;
+    }
+    return "ref";
+  }
+
+  /// Move a captured frame out of the response and into the store, leaving the
+  /// reference that names it. Called after the staleness check, so a frame that
+  /// nobody will display never occupies a slot.
+  function publishFrame(result) {
+    if (!result || result.pngData === undefined || result.pngData === null) return result;
+    result.frameRef = frames.put(result.pngData);
+    delete result.pngData;
+    return result;
+  }
+
   // One serial chain over one shared page: all DOM work must be mutually
   // exclusive, and a second parallel queue would let an interaction evaluate while
   // a render is mid-setContent. Head-of-line blocking is handled by the lanes
@@ -154,6 +186,9 @@ export function createService({ assetsDir, onShutdown } = {}) {
       throw new Error("render requires documentId and markdown strings; capture requires documentId");
     }
     const lane = resolveLane(request.method, params.lane);
+    // Synchronous and before the ticket, so a request for a transport this
+    // service cannot serve fails outright instead of superseding a good frame.
+    const frameTransport = resolveFrameTransport(params.frameTransport);
     // Stamped synchronously, before this function's caller reaches any `await`.
     // protocol.js does not await one line before reading the next, so synchronous
     // stamping is what makes arrival order equal supersession order.
@@ -227,7 +262,10 @@ export function createService({ assetsDir, onShutdown } = {}) {
 
       const cachedEntry = markdownCache.get(params.documentId);
       const result = await browser.render(
-        { ...params, contentFingerprint: markdownKey, animationIds: [...(cachedEntry?.animations?.keys() ?? [])] },
+        {
+          ...params, frameTransport, contentFingerprint: markdownKey,
+          animationIds: [...(cachedEntry?.animations?.keys() ?? [])],
+        },
         html,
         request.id
       );
@@ -247,7 +285,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
         unlinkQuietly(result.pngPath);
         throw lanes.staleError(ticket, after);
       }
-      return result;
+      return publishFrame(result);
     };
 
     return enqueue(task, ticket);
@@ -257,6 +295,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
     // Pure and synchronous, so an invalid envelope never reaches the queue.
     const envelope = validateEnvelope(request.params);
     const lane = resolveLane("interact", request.params?.lane);
+    resolveFrameTransport(envelope.frameTransport);
     const ticket = lanes.admit({
       documentId: envelope.documentId,
       lane,
@@ -314,7 +353,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
         // ever needs the active match's position, not the whole capped array.
         delete result.matches;
       }
-      return result;
+      return publishFrame(result);
     };
 
     return enqueue(task, ticket);
@@ -371,6 +410,9 @@ export function createService({ assetsDir, onShutdown } = {}) {
     }
     markdownCache.clear();
     interactionState.clear();
+    // Same reason, one layer down: references are minted per connection and the
+    // next session's tokens name its own frames, never the last session's.
+    frames?.clear();
   }
 
   /// Release the browser, the decode context and the temp directory. Idempotent,
@@ -397,6 +439,10 @@ export function createService({ assetsDir, onShutdown } = {}) {
         laneDocuments: lanes.size,
         interactionDocuments: interactionState.size,
         animationStore: animations.snapshot(),
+        // Absent on a renderer that holds no frames, which is how
+        // :MdViewerHealth tells a companion from the child beside Neovim
+        // without asking the transport.
+        frameStore: frames?.stats(),
       };
     }
     if (request.method === "animation") return dispatchAnimation(request);

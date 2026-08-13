@@ -6,13 +6,13 @@
 // inbound, so the plugin dials out to a socket its own `ssh -R` forwarded here.
 // docs/local-render-design.md has the measurements and the whole architecture.
 //
-// **What this is not, yet.** Render responses hand back `pngPath`, a path in
-// *this* machine's temp directory, and the Lua side opens it directly. Across
-// two machines that path does not resolve, so a companion is only useful today
-// when it runs beside the Neovim it serves -- which is exactly what makes this
-// phase testable on one machine. Replacing the path with an in-stream
-// transmission token is the next phase's job, and until it lands this
-// entrypoint is infrastructure rather than a feature.
+// **How a frame gets back.** A request may ask for `frameTransport: "ref"`,
+// which keeps the PNG here (see frames.js) and answers with the reference that
+// names it. The Lua side puts that reference into the byte stream it was
+// already sending to the terminal, and splice.js -- in front of the terminal,
+// inside bin/md-viewer-ssh -- swaps it back for the real Kitty upload. Nothing
+// but the reference crosses the link. The older `pngPath` answer is still the
+// default and is what the child renderer beside Neovim always uses.
 //
 // **Invariant: unix domain socket, never TCP.** The claim this narrows is "the
 // renderer opens no listening port". On the machine running Neovim that stays
@@ -24,6 +24,10 @@
 // Usage:
 //     node renderer/src/companion.js [--socket <path>]
 //
+// Ordinarily started for you by `bin/md-viewer-ssh`, which also runs the
+// splicer and needs the *same* frame store this does -- hence the injectable
+// `frames` parameter below.
+//
 // The path also comes from $MD_VIEWER_COMPANION_SOCKET, and defaults to
 // $XDG_RUNTIME_DIR (or the temp directory) plus a uid-qualified name.
 
@@ -34,6 +38,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LineProtocol } from "./protocol.js";
 import { createService } from "./service.js";
+import { createFrameStore } from "./frames.js";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 
@@ -98,11 +103,18 @@ export function clearStaleSocket(socketPath) {
 
 /// Start serving. Exported so a test can drive a real socket without a
 /// subprocess, and so the path is returned rather than only printed.
-export async function start({ socketPath, assetsDir, onListening } = {}) {
+export async function start({ socketPath, assetsDir, frames, onListening } = {}) {
   const resolved = socketPath ?? defaultSocketPath();
   await clearStaleSocket(resolved);
 
-  const service = createService({ assetsDir: assetsDir ?? path.resolve(directory, "../assets") });
+  // Its own by default, so `node companion.js` is a complete program; injected
+  // by `bin/md-viewer-ssh`, which needs the *same* store the splicer reads
+  // from. A reference is only meaningful to whoever holds the frame.
+  const frameStore = frames ?? createFrameStore();
+  const service = createService({
+    assetsDir: assetsDir ?? path.resolve(directory, "../assets"),
+    frames: frameStore,
+  });
   let active = null;
 
   const server = net.createServer((socket) => {
@@ -170,7 +182,7 @@ export async function start({ socketPath, assetsDir, onListening } = {}) {
     await service.close();
   }
 
-  return { socketPath: resolved, server, service, stop };
+  return { socketPath: resolved, server, service, frames: frameStore, stop };
 }
 
 // Only when run as a program, so importing this for a test starts nothing.

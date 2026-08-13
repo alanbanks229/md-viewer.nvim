@@ -460,6 +460,36 @@ local function lc_terminal_profile(env)
   return profile_id, evidence
 end
 
+--- What is between this Neovim and the terminal, according to the terminal side.
+---
+--- `bin/md-viewer-ssh` exports `LC_MD_VIEWER` before handing the session to
+--- ssh, and OpenSSH forwards `LC_*` -- the same mechanism `lc_terminal_profile`
+--- above already relies on, on the same hosts, so this needs no sshd change
+--- that LC_TERMINAL did not already need. The value names the protocol version
+--- and where to dial back, `v=1,addr=127.0.0.1:4445`; `addr` is optional
+--- because a forward may equally be described by `client_render.address` or
+--- `$MD_VIEWER_CLIENT_ADDR` on this host.
+---
+--- Returns `{ version, address }` and an evidence string, or nil. The address
+--- is *not* validated here beyond being non-empty: what makes an address usable
+--- is whether connecting to it works, which process.lua finds out and reports.
+--- An unrecognized version is nil rather than an error, so a newer wrapper in
+--- front of an older plugin degrades to today's behaviour instead of failing.
+local function lc_md_viewer(env)
+  local raw = env.LC_MD_VIEWER
+  if type(raw) ~= "string" or raw == "" then return nil end
+  local fields = {}
+  for key, value in raw:gmatch("([%w_]+)=([^,]*)") do
+    fields[key] = value
+  end
+  if fields.v ~= "1" then
+    return nil, ("LC_MD_VIEWER=%q is not a protocol version this plugin speaks; ignored"):format(raw)
+  end
+  local address = fields.addr ~= "" and fields.addr or nil
+  local evidence = address and ("LC_MD_VIEWER v1 (addr=%s)"):format(address) or "LC_MD_VIEWER v1"
+  return { version = 1, address = address }, evidence
+end
+
 --- Infer a terminal profile id purely from environment evidence. Returns the
 --- profile id and the list of evidence strings that produced it.
 function M.match_profile(env)
@@ -586,6 +616,7 @@ function M.capability(cfg, env)
 
   local mux, mux_evidence = M.multiplexer(env)
   local ssh, ssh_evidence = M.ssh(env)
+  local client_render, client_render_evidence = lc_md_viewer(env)
   local caveats = vim.deepcopy(profile.caveats or {})
   if mux ~= "none" then
     caveats[#caveats + 1] = {
@@ -633,6 +664,11 @@ function M.capability(cfg, env)
     multiplexer_evidence = mux_evidence,
     ssh = ssh,
     ssh_evidence = ssh_evidence,
+    -- Nil unless something in front of the terminal announced itself, which is
+    -- the whole gate on emitting a transmission token: a token nobody is there
+    -- to splice is a frame that never appears.
+    client_render = client_render,
+    client_render_evidence = client_render_evidence,
     validation = profile.validation,
     caveats = caveats,
   }
