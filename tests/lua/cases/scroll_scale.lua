@@ -68,6 +68,36 @@ return function(t)
   t.eq(nil, no_fast_scale, "with fast_scroll off there is no moving frame to reduce")
   t.ok(no_fast_source:match("fast_scroll"), "the refusal names the option that caused it")
 
+  -- A *remote document* in a *local* Neovim is not an SSH session. The rule
+  -- consults the session's transport -- the environment Neovim itself runs
+  -- in -- and never the buffer's origin, so a remote-ssh.nvim document gets
+  -- the full-quality local path even while its bytes live on another
+  -- machine, and an actual remote Neovim keeps its reduced moving frame
+  -- whatever its buffers are called. This is the boundary between the two
+  -- remote features and must not blur.
+  config.reset()
+  do
+    local state = require("md-viewer.state")
+    local buf = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_name(buf, "rsync://alan@dev-vm//home/alan/project/mode-b.md")
+    local session = state.create(buf, vim.api.nvim_get_current_win())
+    session.remote = { ready = true, parsed = { authority = "alan@dev-vm" } }
+    stub_ssh(false)
+    local remote_doc_scale, remote_doc_source = resolve(config.get().render)
+    t.eq(nil, remote_doc_scale, "a remote document on a local Neovim keeps the full-size moving frame")
+    t.ok(remote_doc_source:match("local"), "and is answered as a local session")
+    t.eq(160, (controller._scroll_settle_delay(config.get().render)), "with the local settle delay")
+    stub_ssh(true)
+    t.eq(
+      0.5,
+      (resolve(config.get().render)),
+      "an actual SSH session still reduces the moving frame, whatever its buffers are named"
+    )
+    t.eq(400, (controller._scroll_settle_delay(config.get().render)), "and still waits the SSH settle delay")
+    state.remove(buf)
+    vim.api.nvim_buf_delete(buf, { force = true })
+  end
+
   -- ---------------------------------------------------------------------
   -- The settle delay
   -- ---------------------------------------------------------------------

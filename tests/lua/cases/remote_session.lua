@@ -199,6 +199,28 @@ return function(t)
   })
   vim.wait(1000, function() return session.remote.ready end)
 
+  -- Health and debug describe the remote session: the boundary reported is
+  -- the remote root, never a local guess, and a configured local
+  -- document_root is called out as inert.
+  config.setup({ render = { debounce_ms = 0 }, security = { document_root = "/tmp" } })
+  local health_report = require("md-viewer.health").collect(nil, nil)
+  t.ok(health_report.remote_document ~= nil, "health reports the remote session")
+  t.eq("connected", health_report.remote_document.state, "as connected once the walk answered")
+  t.eq("/home/alan/project", health_report.remote_document.root, "with the remote root")
+  t.eq(true, health_report.remote_document.configured_root_ignored, "and flags the inert local document_root")
+  t.eq("/home/alan/project", health_report.local_image_root, "the security summary shows the remote boundary")
+  t.ok(
+    health_report.document_root_source:find("remote project root", 1, true) ~= nil,
+    "and says where the boundary came from"
+  )
+  config.setup({ render = { debounce_ms = 0 } })
+
+  local snapshot = require("md-viewer.debug").snapshot()
+  local snap_session = snapshot.sessions[tostring(session.source_buf)]
+  t.ok(snap_session.remote_document ~= nil, "the debug snapshot carries the remote-document block")
+  t.eq("alan@dev-vm", snap_session.remote_document.authority, "with its authority")
+  t.eq(true, snap_session.remote_document.ready, "and its readiness")
+
   -- A remote name with no special buftype still opens as remote: the *name*
   -- is what local path handling cannot be trusted with.
   controller.close(session.source_buf)

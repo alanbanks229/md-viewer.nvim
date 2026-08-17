@@ -4,6 +4,7 @@ local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
+local source = require("md-viewer.source")
 local state = require("md-viewer.state")
 local terminal = require("md-viewer.terminal")
 
@@ -66,11 +67,15 @@ local function temp_writable()
 end
 
 local function file_backed(buf)
-  return buf
-    and buf > 0
-    and vim.api.nvim_buf_is_valid(buf)
-    and vim.bo[buf].buftype == ""
-    and vim.api.nvim_buf_get_name(buf) ~= ""
+  if not (buf and buf > 0 and vim.api.nvim_buf_is_valid(buf)) then return false end
+  local name = vim.api.nvim_buf_get_name(buf)
+  if name == "" then return false end
+  local buftype = vim.bo[buf].buftype
+  if buftype == "" then return true end
+  -- A remote document is acwrite-backed, and when a preview is showing one it
+  -- is exactly the buffer this report should describe -- rejecting it made
+  -- the security summary describe some other buffer entirely.
+  return buftype == "acwrite" and source.parse(name) ~= nil
 end
 
 ---The buffer this report should describe.
@@ -120,7 +125,38 @@ end
 function M.collect(renderer_result, renderer_error)
   local cfg = config.get()
   local backend = backends.health()
-  local sec = security.summary(cfg, document_buf())
+  local doc_buf = document_buf()
+  local sec = security.summary(cfg, doc_buf)
+  -- security.summary describes local containment, which has nothing true to
+  -- say about a remote document: its boundary is the remote project root the
+  -- session resolved over ssh, so report that instead of whatever the local
+  -- root detection made of a URL-shaped name.
+  local doc_session = state.get(doc_buf)
+  if doc_session and not doc_session.closed and doc_session.remote then
+    sec.document_root = doc_session.remote.root or "(resolving)"
+    sec.document_root_source = "remote project root, resolved over ssh"
+    sec.document_root_excludes_current = false
+    sec.document_root_unbounded = doc_session.remote.root == "/"
+  end
+  local remote_document
+  for _, session in pairs(state.all()) do
+    if not session.closed and session.remote then
+      local remote = session.remote
+      remote_document = {
+        authority = ("%s (%s)"):format(remote.parsed.authority, remote.parsed.scheme),
+        state = remote.failed and ("degraded -- " .. remote.failed) or (remote.ready and "connected" or "resolving"),
+        root = remote.root or "(resolving)",
+        mirror = remote.mirror_root or "(not created yet)",
+        assets = remote.assets and ("%d fetched, %d refused, %d failed"):format(
+          remote.assets.fetched,
+          remote.assets.refused,
+          remote.assets.failed
+        ) or "none requested",
+        configured_root_ignored = (cfg.security.document_root and cfg.security.document_root ~= "") and true or false,
+      }
+      break
+    end
+  end
   local version = vim.version()
   local capability = terminal.capability(cfg.terminal)
   local discovered_executable = renderer_result and renderer_result.executable
@@ -202,6 +238,7 @@ function M.collect(renderer_result, renderer_error)
     document_root_excludes_current = sec.document_root_excludes_current or false,
     document_root_unbounded = sec.document_root_unbounded or false,
     security_overrides = sec.overrides,
+    remote_document = remote_document,
     viewport_calibration_tier = coordinates.calibration_tier(cfg.render),
     -- The two numbers behind that tier. The measurement is in device pixels
     -- (what a placement rectangle is drawn in); the CSS pair is what the
@@ -445,6 +482,25 @@ local function verbose_chromium(report)
   }
 end
 
+---One live remote-document session, when any exists. Reported beside
+---Security because that is what it modifies: the boundary is on another
+---machine, and a configured local document_root is deliberately inert.
+local function verbose_remote(report)
+  local remote = report.remote_document
+  local rows = {
+    { "document", remote.authority },
+    { "state", remote.state },
+    { "remote root", remote.root },
+    { "local mirror", remote.mirror },
+    { "assets", remote.assets },
+  }
+  if remote.configured_root_ignored then
+    rows[#rows + 1] =
+      { "security.document_root", "IGNORED for remote documents -- the boundary is the remote project root" }
+  end
+  return rows
+end
+
 ---The full environment dump, rendered for `:MdViewerDebug`. It lives here
 ---rather than in debug.lua because this module already owns the vocabulary
 ---for describing a machine's capabilities; debug.lua owns what the running
@@ -470,6 +526,14 @@ function M.environment_lines(report)
     },
     { title = "Chromium Session State", rows = verbose_chromium(report) },
   }
+  if report.remote_document then
+    for index, section in ipairs(sections) do
+      if section.title == "Security" then
+        table.insert(sections, index + 1, { title = "Remote Document", rows = verbose_remote(report) })
+        break
+      end
+    end
+  end
   for _, section in ipairs(sections) do
     output[#output + 1] = ""
     output[#output + 1] = "-- " .. section.title .. " --"

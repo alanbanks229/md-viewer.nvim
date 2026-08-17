@@ -141,6 +141,22 @@ function M.snapshot()
       -- shows for the one that matters.
       history_length = session.history and #session.history or 0,
       history_index = session.history_index or 0,
+      -- The remote-document session, when this is one: where the document
+      -- lives, whether the root walk has answered, and what the fetch
+      -- pipeline has done so far. `failed` carries the root walk's error, the
+      -- one fact that explains a session whose images are all placeholders.
+      remote_document = session.remote and {
+        authority = session.remote.parsed and session.remote.parsed.authority,
+        scheme = session.remote.parsed and session.remote.parsed.scheme,
+        ready = session.remote.ready or false,
+        failed = session.remote.failed,
+        root = session.remote.root,
+        base_dir = session.remote.base_dir,
+        mirror_root = session.remote.mirror_root,
+        assets_fetched = session.remote.assets and session.remote.assets.fetched or 0,
+        assets_refused = session.remote.assets and session.remote.assets.refused or 0,
+        assets_failed = session.remote.assets and session.remote.assets.failed or 0,
+      } or nil,
       selection_active = session.selection_active,
       -- Length only -- see interaction.lua's copy_selection comment. Never
       -- surface the selected text itself in diagnostics.
