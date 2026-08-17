@@ -55,9 +55,40 @@ geometry, which the preview is sized against.
 [docs/terminal-support.md](docs/terminal-support.md) holds the evidence behind
 each row — read it before reporting a graphical bug or claiming a terminal works.
 
+### Remote projects, local Neovim
+
+If your Neovim runs on your own machine and only the *project* is remote —
+buffers named `rsync://user@host//path` or `scp://…`, as
+[remote-ssh.nvim](https://github.com/inhesrom/remote-ssh.nvim) and netrw
+create them — md-viewer previews them at **full local quality**. The
+document's text is already in the local buffer, so the renderer, Chromium and
+every rendered frame stay on your machine; nothing about scrolling or editing
+touches the network.
+
+Files the document references (`![…](./images/arch.png)`) are copied from the
+host **once each**, over your own `ssh`, into a bounded local cache — confined
+to the remote project root, size-capped before transfer, and revalidated with
+a single stat per session. Needs key-based auth and nothing installed on the
+host beyond `sshd` and a POSIX shell; no Node or Chromium there, ever.
+
+```sh
+nvim                                              # locally, as always
+```
+```vim
+:RemoteOpen rsync://dev-vm//home/alan/project/README.md
+:MdViewerToggle
+```
+
+**[docs/remote-projects.md](docs/remote-projects.md)** is the full onboarding
+guide — SSH keys, the remote-ssh.nvim setup, where LSP and git run, and the
+honest limitations. `:help md-viewer-remote-projects` covers the options and
+the security boundary.
+
 ### Remote sessions over SSH
 
-md-viewer works over SSH, with one thing to install and one thing to know.
+The opposite topology: Neovim itself runs on the remote host and your terminal
+is local. md-viewer works there too, with one thing to install and one thing
+to know.
 
 **Node.js and Chrome/Chromium go on the remote host, not on your laptop.** The
 renderer runs wherever Neovim runs. It produces a PNG, and Neovim then writes
@@ -200,6 +231,10 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 - Ctrl/Cmd-click follows a link. A local Markdown link opens in Neovim and the
   preview follows it, with `H`/`L` history back and forward — so a documentation
   tree can be read by clicking through it.
+- Remote-project buffers (`rsync://`, `scp://` — remote-ssh.nvim, netrw) render
+  at full local quality, with the document's images fetched from the host once
+  each and cached. See
+  [Remote projects, local Neovim](#remote-projects-local-neovim).
 - Animated GIF and WebP actually animate, drawn by the terminal over the still
   frame the screenshot captured. Off by default; `render.animate = true` turns
   it on.
@@ -318,6 +353,8 @@ boundary is never something you have to infer from a config file.
 
 - `:help md-viewer` — the complete command, key and configuration reference,
   including every option and its default (`:help md-viewer-options`)
+- [Remote projects, local Neovim](docs/remote-projects.md) — edit a project on
+  a VM from your own Neovim, with the preview rendered locally
 - [Terminal support](docs/terminal-support.md) — per-terminal status, and the
   evidence behind each claim
 - [Troubleshooting](docs/troubleshooting.md) — symptom by symptom

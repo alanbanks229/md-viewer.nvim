@@ -3,6 +3,64 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+Remote projects, local Neovim: previews of `rsync://`/`scp://` buffers at
+full local quality.
+
+0.2.0 made the preview survivable when Neovim runs on the far side of a slow
+link by shrinking what crosses it. This release removes that traffic from the
+render loop altogether for the opposite topology — Neovim, the renderer and
+Chromium on your machine, only the project on the other one, as
+remote-ssh.nvim and netrw arrange it. The document's text is already in the
+local buffer, so no rendered pixel and no render request ever touches SSH;
+only the files a document references cross, once each, off the interactive
+path. The existing SSH-session behavior is untouched, and the two are kept
+deliberately distinct: SSH detection answers for Neovim's own transport,
+never for a buffer's origin.
+
+### Added
+
+- **Remote documents render at full local quality.** A buffer named
+  `rsync://user@host//path/doc.md` or `scp://…` (remote-ssh.nvim, netrw)
+  opens a preview whose renderer, Chromium and frames all stay local.
+  Scrolling an already-resolved document performs zero remote I/O — asserted
+  in the suite by counting calls through the one transport seam.
+- **Referenced files are fetched once, into a bounded mirror.** A relative
+  image renders its placeholder while md-viewer copies it from the host into
+  a per-host, per-project cache, then one more render puts the picture in —
+  the same loop https images already used. One batched stat refuses
+  symlinks, non-files and anything over `render.max_local_image_bytes`
+  before a content byte moves; failures are negative-cached for a minute; a
+  new session revalidates inherited files with one stat and refetches only
+  what changed; the mirror is evicted oldest-first past
+  `remote.cache_max_bytes`.
+- **The security boundary travels with the document.** A remote document is
+  confined to its *remote* project root (same markers as local detection,
+  resolved on the host with symlinked parents flattened), and the renderer's
+  `documentRoot` is the mirror — a directory that can only ever hold content
+  fetched from that project — so a remote document can never name a local
+  file. A configured local `security.document_root` is deliberately inert
+  for it. Previously a URL-shaped buffer name would have been mangled by
+  local path handling and rooted in whatever project enclosed Neovim's cwd;
+  such names now either open as remote sessions or are refused, never
+  treated as local paths.
+- **Links and history work across the host.** Ctrl/Cmd-clicking a Markdown
+  or text link in a remote document opens the target as another remote
+  buffer and the preview follows; non-text targets are refused rather than
+  fetched for the OS. History stores remote names verbatim and revives a
+  wiped entry through the provider rather than declaring it dead on a local
+  stat.
+- **`remote` configuration section** — `enabled` (off refuses these buffers
+  outright), `fetch_timeout_ms`, `cache_max_bytes`, `ssh_command` (argv
+  prefix, never a shell string; `BatchMode=yes` so missing keys fail
+  visibly; ControlMaster left to your ssh config). `:MdViewerDebug` and
+  `:MdViewerHealth` gained a Remote Document section; the render response
+  gained `localImageAssets`, reporting each file-shaped image source and its
+  outcome.
+- **`docs/remote-projects.md`** — the onboarding guide for the whole
+  arrangement, from SSH keys to where LSP and git run.
+
 ## [0.2.1] - 2026-08-13
 
 Renderers that outlived the Neovim which started them, and burned a full CPU

@@ -41,6 +41,28 @@ Fixes are provided for `main` and the latest tagged release.
   `realpath`, so neither `../` nor a symlink escapes. The lexical check runs
   before the filesystem is consulted, so "does not exist" and "outside the
   document root" cannot be told apart to probe for files.
+- A remote document (an `rsync://`/`scp://` buffer from remote-ssh.nvim or
+  netrw) is confined to its **remote** project root, resolved on the host with
+  symlinked parents flattened. References are judged lexically before anything
+  is fetched; what survives is stat'ed remotely in one batch that refuses
+  symlinks (fetching one would materialize its target), non-files, and
+  anything over `max_local_image_bytes` — before a content byte moves. Fetched
+  bytes land in a private per-host, per-project mirror under Neovim's cache
+  directory, and that mirror is the `document_root` the renderer is given, so
+  a remote document can never name a local file: its boundary contains only
+  content already fetched from its own project. A configured local
+  `security.document_root` is deliberately ignored for remote documents.
+  Fetched images then pass the same validation as any local image —
+  extension, magic bytes, size cap.
+- Those fetches are the only remote commands md-viewer runs, always as an
+  argv-exec'd `ssh` (`remote.ssh_command`) with `BatchMode=yes` — no local
+  shell ever parses a document-derived string. On the remote side the
+  composition is one fixed POSIX script taking paths as positional
+  parameters, single-quoted by one escaping helper whose output the test
+  suite runs through a real shell byte-for-byte. File names never appear in
+  remote command *output* (results come back by index), so a hostile name
+  cannot corrupt the parse. The remote login shell must be POSIX-compatible;
+  fish is not supported for this feature.
 - Animated images are decoded in a second browser context, never the render
   context. That context does enable JavaScript, because WebCodecs requires a
   page, but its boundary is explicit (`renderer/src/decode-context.js`): one

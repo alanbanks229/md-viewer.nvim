@@ -79,6 +79,30 @@ document references. An image that is refused or fails renders as a visible
 placeholder with the reason baked into an inline SVG, so showing it needs no
 network and no script.
 
+**Document sources.** A buffer named `rsync://…`/`scp://…` (remote-ssh.nvim,
+netrw) is a *remote document*: the text still travels over the protocol as
+usual, but `baseDir`/`documentRoot` point into a local **mirror** of the
+remote project (`stdpath("cache")/md-viewer/remote/<authority>/<root>/…`), so
+every mechanism above — containment, realpath, magic bytes, size caps, data:
+inlining — runs unchanged against a directory that can only ever hold content
+fetched from that project. `source.lua` parses the names (never `vim.fs`,
+which mangles URLs); `remote_assets.lua` owns every remote byte behind one
+injectable spawn seam. The render response reports each file-shaped image
+source with its outcome (`localImageAssets`, the same shape as
+`remoteImagesPending`); misses are lexically confined to the remote project
+root **in Lua, before any transfer** — an escaping reference that names
+nothing locally reports as an ordinary miss, so this check is the gate, not
+belt-and-braces — then one batched remote stat refuses symlinks and oversize
+files, one `ssh cat` per survivor lands bytes atomically beside their remote
+mtime, and a `render_epoch` bump re-renders. **Invariant:** repeat reports of
+a resolved document cost zero transport calls — scrolling never touches the
+network — asserted by counting calls through the seam. **Invariant:** SSH
+detection (`terminal.ssh`) answers for Neovim's own transport and never
+consults a buffer's origin, so a remote document on a local Neovim keeps the
+full-quality path while a remote Neovim keeps its bandwidth reductions,
+whatever its buffers are named. `tests/lua/cases/scroll_scale.lua` pins both
+directions.
+
 **The media lane.** Animated images (GIF, animated WebP) get a second request
 lane that never touches the render queue or its serials. Registration is a
 shallow header sniff at parse time (`renderer/src/media.js`, the single home of

@@ -165,6 +165,41 @@ An image that is merely slow shows the same placeholder while it is still being
 fetched. The document is not held back for it: the render goes ahead with the
 placeholder in place, and the picture appears on its own once the bytes land.
 
+## A remote document's images stay placeholders
+
+For a document opened from another machine (an `rsync://`/`scp://` buffer —
+see [remote-projects.md](remote-projects.md)), images are copied from that
+machine on first sight, so a placeholder that never resolves means the copy
+is not happening. `:MdViewerDebug`'s `Remote Document` section answers most
+of it in one place: `state: degraded` carries the exact ssh error from the
+session's first round trip, and the fetch counters say whether anything was
+refused.
+
+The usual causes, in order of likelihood:
+
+- **Key auth is not actually passwordless.** md-viewer runs `ssh` with
+  `BatchMode=yes`, so where an interactive session would prompt, this fails.
+  `ssh <host> true` from a shell must succeed silently.
+- **The file sits outside the remote project root** — the nearest ancestor
+  of the document with a `.git`/`.hg`/`.svn` marker. That refusal is the
+  boundary working, not a defect; the placeholder says "outside the document
+  root".
+- **The image is a symlink on the remote host.** Refused outright — copying
+  one would materialize whatever it points at. Reference the real file.
+- **It exceeds `render.max_local_image_bytes`** (10 MiB default) — refused
+  before the transfer, so a huge file costs a stat rather than a stall.
+- **The remote login shell is fish** (or another non-POSIX shell). The one
+  remote script both this plugin and remote-ssh.nvim run requires POSIX
+  quoting; `:MdViewerDebug` reports the reply as unparseable when this is
+  the cause.
+- **A missing file was recently asked for.** Failures are remembered for
+  about a minute rather than retried per keystroke; create the file and it
+  is picked up on the next render after that window, or reopen the preview.
+
+`ssh session: no` in the same debug output is correct and expected here —
+that line describes Neovim's own transport, not the document's origin. A
+remote document on a local Neovim renders at full local quality.
+
 ## Remote images never load, and the network needs a proxy
 
 `$HTTP_PROXY` and `$HTTPS_PROXY` are not consulted, deliberately, so on a

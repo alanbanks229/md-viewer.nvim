@@ -22,8 +22,9 @@ CONTENTS                                                  *md-viewer-contents*
 7.  Preview history ...................... |md-viewer-history|
 8.  Terminal support ..................... |md-viewer-terminals|
       Remote sessions over SSH ........... |md-viewer-ssh|
-9.  Security ............................. |md-viewer-security|
-10. Health and diagnostics ............... |md-viewer-health|
+9.  Remote projects, local Neovim ........ |md-viewer-remote-projects|
+10. Security ............................. |md-viewer-security|
+11. Health and diagnostics ............... |md-viewer-health|
 
 =============================================================================
 INTRODUCTION                                                       *md-viewer*
@@ -212,6 +213,7 @@ terminal ~
 remote ~
     enabled                      true       preview scp:// and rsync://
                                             buffers from a local Neovim
+                                            (|md-viewer-remote-projects|)
     fetch_timeout_ms             15000      per remote operation
     cache_max_bytes              256 MiB    ceiling on the local mirror of
                                             fetched remote assets
@@ -710,6 +712,11 @@ option's notes in lua/md-viewer/config.lua.
                                                                *md-viewer-ssh*
 REMOTE SESSIONS OVER SSH ~
 
+This section is about running Neovim itself on the remote host. When Neovim
+runs on your own machine and only the *files* are remote (remote-ssh.nvim,
+`:e scp://...`), none of it applies -- see |md-viewer-remote-projects|, which
+is the faster arrangement wherever it is available.
+
 md-viewer works over SSH. Node.js and Chrome/Chromium must be installed on the
 remote host, because by default the renderer runs wherever Neovim runs; it
 produces a PNG which Neovim then writes to your terminal as Kitty graphics
@@ -778,6 +785,54 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame larger (measured 80 KB -> 224 KB), and it collapses the moving and
 settle captures into one, so the cheap scroll frame stops existing. Raising
 `render.debounce_ms` does help, by cutting how many refreshes an edit makes.
+
+=============================================================================
+REMOTE PROJECTS, LOCAL NEOVIM                    *md-viewer-remote-projects*
+
+A buffer named `rsync://user@host//path/doc.md` or `scp://...` -- what
+remote-ssh.nvim and netrw create when they open a file over SSH from a
+*local* Neovim -- previews at full local quality. The document's text is
+already in the buffer, so the renderer, Chromium and every PNG stay on this
+machine; nothing about the render loop touches the network, and the SSH
+bandwidth reductions of |md-viewer-ssh| deliberately do not engage
+(`:MdViewerDebug` shows `ssh session: no`, which is correct: that line
+describes Neovim's own transport, never a buffer's origin).
+
+What does cross SSH is the files the document references. On the first
+render, a relative image shows the ordinary "file not found" placeholder
+while md-viewer copies it from the host into a private local mirror --
+one `ssh` stat batch to validate, then one copy per file, then one more
+render. After that, edits and scrolling reuse the mirror with no remote
+traffic at all; a cached file is revalidated (one stat, no transfer) once
+per preview session.
+
+The boundary is the *remote* project root: the nearest ancestor of the
+document holding one of `security.document_root_markers`, resolved on the
+host at session start, or the document's own directory when no marker is
+found. References outside it are refused before anything is fetched, remote
+symlinked images are refused outright (copying one would materialize its
+target), and each file is size-capped by `render.max_local_image_bytes`
+before transfer. A configured local `security.document_root` is ignored for
+remote documents -- no local directory is a boundary a remote document may
+have.
+
+Options live under `remote` in |md-viewer-options|: `enabled` (set false to
+refuse these buffers instead), `fetch_timeout_ms`, `cache_max_bytes` (the
+mirror's global budget, oldest files evicted first), and `ssh_command` (argv
+prefix for every remote command -- point it at a wrapper if your ssh needs
+one). Key-based auth is required: commands run with `BatchMode=yes`, so a
+password prompt becomes a clean failure. Multiplexing and host trust follow
+your own `~/.ssh/config` (`ControlMaster` is recommended and never
+overridden). The remote login shell must be POSIX-compatible; fish breaks
+the quoting this relies on.
+
+Ctrl/Cmd-clicking a link to another Markdown or text file on the host opens
+it as another remote buffer, and the preview and |md-viewer-history| follow
+as they do locally. Links to anything else are refused in a remote document
+rather than fetched for the system handler.
+
+docs/remote-projects.md is the full guide, from SSH keys to where LSP and
+git run under this arrangement.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*
