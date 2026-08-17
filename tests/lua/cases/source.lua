@@ -178,6 +178,32 @@ return function(t)
     t.eq(case[3], source.inside_remote(case[1], case[2]), ("inside_remote %s ⊇ %s"):format(case[1], case[2]))
   end
 
+  -- decode_href is the one shared reading of what a document-written
+  -- reference names: the same strip-and-decode the local link path and the
+  -- renderer's image path apply.
+  local decoded = {
+    { "images/arch.png", "images/arch.png" },
+    { "my%20pic.png", "my pic.png" },
+    { "file:///abs/pic.png", "/abs/pic.png" },
+    { "file:notes.md", "notes.md" },
+    { "docs/x.md?raw=1", "docs/x.md" },
+    { "docs/x.md#section", "docs/x.md" },
+    { "a%2Fb.png", "a/b.png" },
+    { "", nil },
+    { "#fragment-only", nil },
+  }
+  for _, case in ipairs(decoded) do
+    t.eq(case[2], source.decode_href(case[1]), "decode_href " .. vim.inspect(case[1]))
+  end
+  t.eq(
+    "/a/b.md",
+    source.parent_remote("/a/b.md/c") and source.parent_remote("/a/b.md/c") or nil,
+    "parent_remote walks up"
+  )
+  t.eq("/a", source.parent_remote("/a/b.md"), "parent of a file is its directory")
+  t.eq("/", source.parent_remote("/x.md"), "a top-level file's parent is the root")
+  t.eq("/", source.parent_remote("/"), "the root is its own parent")
+
   -- local_base_dir consolidates what renderer.lua and interaction.lua used to
   -- compute separately; pin both behaviours it inherited.
   local unnamed = vim.api.nvim_create_buf(false, true)

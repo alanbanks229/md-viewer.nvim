@@ -962,10 +962,15 @@ end
 ---available any more, which is a dead entry rather than an error.
 local function history_buf(entry)
   if entry.buf and vim.api.nvim_buf_is_valid(entry.buf) then return entry.buf end
-  if not entry.path or not vim.uv.fs_stat(entry.path) then return nil end
+  if not entry.path then return nil end
+  -- A remote entry cannot be stat'ed here; reopening it hands the URL to
+  -- bufadd and the provider's BufReadCmd, which is exactly how it was opened
+  -- the first time. Local entries keep the existence check: a dead entry is
+  -- stepped over, not reported.
+  if not source.parse(entry.path) and not vim.uv.fs_stat(entry.path) then return nil end
   local buf = vim.fn.bufadd(entry.path)
   if buf == 0 then return nil end
-  vim.fn.bufload(buf)
+  pcall(vim.fn.bufload, buf)
   entry.buf = buf
   return buf
 end

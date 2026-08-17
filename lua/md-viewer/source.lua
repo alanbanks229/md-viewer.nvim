@@ -91,6 +91,29 @@ function M.join_remote(base_dir, relative)
   return M.normalize_remote(base_dir .. "/" .. relative)
 end
 
+---Decode a document-written reference into the path it names: strip a
+---`file:`/`file://` prefix, drop query and fragment, percent-decode. The
+---same steps, in the same order, as security.lua's link path and the
+---renderer's image path (security.js:38) -- one more copy of the rules would
+---eventually disagree about what file a reference names. Returns nil for a
+---reference that decodes to nothing.
+function M.decode_href(href)
+  if type(href) ~= "string" then return nil end
+  local raw = href
+  if raw:match("^file://") then
+    raw = raw:sub(8)
+  elseif raw:match("^file:") then
+    raw = raw:sub(6)
+  end
+  raw = raw:gsub("[?#].*$", "")
+  if raw == "" then return nil end
+  local ok, decoded = pcall(function()
+    return (raw:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end))
+  end)
+  if ok and decoded ~= "" then return decoded end
+  return raw
+end
+
 ---The parent directory of an absolute remote path; "/" is its own parent.
 function M.parent_remote(path)
   local parent = path:match("^(.*)/[^/]+$")

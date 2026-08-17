@@ -1204,7 +1204,49 @@ local function should_edit_in_neovim(path)
   return not os_owned_filetypes[filetype], filetype
 end
 
+---A link in a remote document names a file on the remote host, so the local
+---resolver has nothing true to say about it. The rules are the local ones
+---transposed: decode the same way, resolve against the remote base
+---directory, refuse anything outside the remote project root. What may open
+---is narrower than the local case on purpose -- a target Neovim would edit
+---opens as another remote buffer (the provider's BufReadCmd loads it and the
+---preview follows exactly as it does locally), and everything else is
+---refused, because "hand it to the OS" would first mean fetching an
+---arbitrary remote file onto this machine: a transfer the reader did not ask
+---for, handed to a handler the executable policy cannot fully vet without
+---the bytes.
+local function open_remote_file(session, href)
+  local remote = session.remote
+  if not remote.ready then
+    vim.notify("md-viewer: the remote session is still connecting; try again shortly", vim.log.levels.WARN)
+    return
+  end
+  local decoded = source.decode_href(href)
+  if not decoded then
+    vim.notify("md-viewer: could not resolve link: " .. href, vim.log.levels.WARN)
+    return
+  end
+  local remote_abs = source.join_remote(remote.base_dir, decoded)
+  if not source.inside_remote(remote.root, remote_abs) then
+    vim.notify(
+      ("md-viewer: refused to open link outside the remote project root (%s): %s"):format(remote.root, href),
+      vim.log.levels.WARN
+    )
+    return
+  end
+  local edit, filetype = should_edit_in_neovim(remote_abs)
+  if not edit then
+    vim.notify("md-viewer: only text links can be followed in a remote document: " .. href, vim.log.levels.WARN)
+    return
+  end
+  M.edit_in_source_window(session, source.build_url(remote.parsed, remote_abs), filetype)
+end
+
 function M.open_local_file(session, href)
+  if session.remote then
+    open_remote_file(session, href)
+    return
+  end
   local cfg = config.get()
   local base_dir = source.local_base_dir(session.source_buf)
   local root =

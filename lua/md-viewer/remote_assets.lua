@@ -185,20 +185,11 @@ local negative = {}
 
 local function negative_key(parsed, remote_abs) return parsed.authority .. "\0" .. remote_abs end
 
-local function percent_decode(text)
-  return (text:gsub("%%(%x%x)", function(hex) return string.char(tonumber(hex, 16)) end))
-end
-
----The renderer's own decoding, reproduced: strip query and fragment, then
----percent-decode (security.js:38). The two sides must agree on what file a
----source names, or the fetch would populate a path the renderer never reads.
-local function decode_source(text)
-  local raw = text:gsub("[?#].*$", "")
-  if raw == "" then return nil end
-  local ok, decoded = pcall(percent_decode, raw)
-  if ok and decoded ~= "" then return decoded end
-  return raw
-end
+-- The renderer's own decoding, shared through source.decode_href: the two
+-- sides must agree on what file a source names, or the fetch would populate
+-- a path the renderer never reads. (Image sources never carry file: -- the
+-- report excludes them -- so the prefix strip in there is inert here.)
+local decode_source = source.decode_href
 
 -- Emits one line per path, by *index* -- file names never appear in remote
 -- output, so a hostile name cannot corrupt the line-oriented parse. Refusals

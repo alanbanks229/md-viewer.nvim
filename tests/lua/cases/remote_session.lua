@@ -149,6 +149,56 @@ return function(t)
   t.ok(refreshes > 0, "BufReadPost on the source schedules a render")
   controller.refresh = saved_refresh
 
+  -- Links in a remote document resolve in remote space: escapes and
+  -- non-text targets are refused, and a Markdown target opens as another
+  -- remote buffer whose name the provider (or netrw) would load -- the
+  -- preview follows it through the ordinary retarget path.
+  local interaction = require("md-viewer.interaction")
+  local notified_before = #notified
+  interaction.open_local_file(session, "../../../etc/passwd.md")
+  t.ok(
+    notified[#notified]:find("remote project root", 1, true) ~= nil,
+    "a traversal link is refused against the remote root"
+  )
+  interaction.open_local_file(session, "images/arch.png")
+  t.ok(
+    notified[#notified]:find("only text links", 1, true) ~= nil,
+    "a non-text target is refused rather than fetched for the OS"
+  )
+  t.eq(notified_before + 2, #notified, "each refusal is reported exactly once")
+
+  interaction.open_local_file(session, "docs/setup%20guide.md")
+  t.eq(
+    "rsync://alan@dev-vm//home/alan/project/docs/setup guide.md",
+    vim.api.nvim_buf_get_name(session.source_buf),
+    "a followed link opens the decoded path as an unambiguous remote name"
+  )
+  t.ok(session.remote ~= nil and not session.remote.ready, "the followed document starts its own root walk")
+  t.eq(
+    "rsync://alan@dev-vm//home/alan/project/docs/setup guide.md",
+    session.history[#session.history].path,
+    "and the history records it verbatim"
+  )
+  release({
+    code = 0,
+    stdout = "outcome=ok\ndoc=/home/alan/project/docs/setup guide.md\nbase=/home/alan/project/docs\nroot=/home/alan/project\n",
+  })
+  vim.wait(1000, function() return session.remote.ready end)
+
+  -- A wiped remote history entry is revived from its URL: bufadd + the
+  -- provider's BufReadCmd, never fs_stat, which would call every remote
+  -- entry dead.
+  local wiped_name = vim.api.nvim_buf_get_name(remote_two)
+  vim.api.nvim_buf_delete(remote_two, { force = true })
+  controller.history_back(session)
+  t.eq(wiped_name, vim.api.nvim_buf_get_name(session.source_buf), "back revives the wiped remote document by URL")
+  t.ok(session.source_buf ~= remote_two, "in a fresh buffer")
+  release({
+    code = 0,
+    stdout = "outcome=ok\ndoc=/home/alan/project/README.md\nbase=/home/alan/project\nroot=/home/alan/project\n",
+  })
+  vim.wait(1000, function() return session.remote.ready end)
+
   -- A remote name with no special buftype still opens as remote: the *name*
   -- is what local path handling cannot be trusted with.
   controller.close(session.source_buf)
