@@ -2,6 +2,7 @@ local config = require("md-viewer.config")
 local process = require("md-viewer.process")
 local preview = require("md-viewer.preview")
 local security = require("md-viewer.security")
+local source = require("md-viewer.source")
 
 local M = {}
 
@@ -24,12 +25,6 @@ function M.read_png(path, limit)
   return data, err
 end
 
-local function base_dir(buf)
-  local name = vim.api.nvim_buf_get_name(buf)
-  if name == "" then return vim.uv.cwd() end
-  return vim.fs.dirname(vim.fs.normalize(name))
-end
-
 function M.request(session, markdown, options, callback)
   options = options or {}
   local cfg = config.get()
@@ -40,8 +35,22 @@ function M.request(session, markdown, options, callback)
   -- (`cfg.security.document_root or base_dir(...)`), which skipped the
   -- normalization and the project-root detection that the link path gets --
   -- so a local image and a local link disagreed about the same boundary.
-  local root =
-    security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
+  --
+  -- A remote session's boundary is its local mirror of the remote project:
+  -- the only directory whose entire contents were fetched from that project,
+  -- so handing it to the renderer is what makes "a remote document can only
+  -- ever show remote content" structural rather than checked. The configured
+  -- security.document_root is deliberately not consulted for it -- that
+  -- option names a local directory, and no local directory is a boundary a
+  -- remote document may have. The controller guarantees these fields exist
+  -- before any request (M.refresh defers until remote.ready).
+  local root, base
+  if session.remote then
+    root, base = session.remote.mirror_root, session.remote.mirror_base_dir
+  else
+    root = security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
+    base = source.local_base_dir(session.source_buf)
+  end
   local content_revision = ("%d:%d"):format(
     vim.api.nvim_buf_get_changedtick(session.source_buf),
     session.render_epoch or 0
@@ -50,7 +59,7 @@ function M.request(session, markdown, options, callback)
   local params = {
     documentId = session.document_id,
     contentRevision = content_revision,
-    baseDir = base_dir(session.source_buf),
+    baseDir = base,
     documentRoot = root,
     viewport = viewport,
     scrollY = session.scroll_y or 0,

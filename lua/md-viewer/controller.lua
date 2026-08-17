@@ -14,6 +14,8 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
+local source = require("md-viewer.source")
+local remote_assets = require("md-viewer.remote_assets")
 
 local M = {}
 local group
@@ -466,6 +468,17 @@ function M.refresh(session, render_options)
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
+  if session.remote and not session.remote.ready then
+    -- The mirror paths are not known yet: rendering now would send local-path
+    -- garbage as baseDir/documentRoot. Remember that a render was wanted and
+    -- let remote_attach's completion fire it -- the loading spinner is
+    -- already covering the wait, and this one guard covers every producer
+    -- (edits, scrolls, resizes, colorscheme changes) because they all funnel
+    -- through here.
+    session.remote.pending_refresh = true
+    if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
+    return
+  end
   session.render_failed = false
   if update_occlusion(session) then
     clear_image(session)
@@ -751,13 +764,65 @@ function M.close_all(opts)
   process.stop(opts)
 end
 
+---Attach remote-document state to a session and start the one round trip that
+---resolves the document's physical path, base directory and project root.
+---Every render defers (M.refresh's guard) until this lands: the mirror paths
+---derived here are what the render request carries as baseDir/documentRoot,
+---and they are final for the session -- the renderer's markdown cache keys on
+---them, so a mid-session swap would strand every cached parse.
+---
+---When the walk fails the session still opens: the text is already in the
+---buffer and renders without touching the network. It is rooted at the
+---document's own directory so the failure stays contained -- images show
+---placeholders naming what happened, reported once here rather than once per
+---image.
+local function remote_attach(session, parsed)
+  local remote = { parsed = parsed, ready = false, pending_refresh = false, failed = nil }
+  session.remote = remote
+  remote_assets.resolve_root(parsed, function(info, err)
+    if not valid(session) or session.remote ~= remote then return end
+    if info then
+      remote.path, remote.base_dir, remote.root = info.path, info.base_dir, info.root
+    else
+      remote.failed = err
+      remote.path = source.normalize_remote(parsed.path)
+      remote.base_dir = source.parent_remote(remote.path)
+      remote.root = remote.base_dir
+      notify_error(err)
+    end
+    remote.mirror_root = remote_assets.mirror_root(parsed, remote.root)
+    remote.mirror_base_dir = remote_assets.mirror_path(remote.mirror_root, remote.root, remote.base_dir)
+    remote.ready = true
+    if remote.pending_refresh then
+      remote.pending_refresh = false
+      M.schedule(session, 0)
+    end
+  end)
+end
+
 function M.open(position)
   local source_buf, source_win = vim.api.nvim_get_current_buf(), vim.api.nvim_get_current_win()
   local existing = state.get(source_buf)
   if existing and valid(existing) then return existing end
   local pinned = state.from_source_win(source_win)
   if pinned and valid(pinned) then return pinned end
-  if vim.bo[source_buf].buftype ~= "" then
+  local remote_parsed = source.parse(vim.api.nvim_buf_get_name(source_buf))
+  local buftype = vim.bo[source_buf].buftype
+  if remote_parsed then
+    -- A parseable remote name must never fall through to local path handling,
+    -- whatever its buftype: vim.fs would mangle the URL and root the document
+    -- in whichever project encloses Neovim's cwd -- a local security boundary
+    -- for remote content. Either it opens as a remote session or it is
+    -- refused outright.
+    if not config.get().remote.enabled then
+      notify_error("remote documents are disabled (remote.enabled = false)")
+      return
+    end
+    if buftype ~= "" and buftype ~= "acwrite" then
+      notify_error("open a normal Markdown buffer first")
+      return
+    end
+  elseif buftype ~= "" then
     notify_error("open a normal Markdown buffer first")
     return
   end
@@ -767,6 +832,7 @@ function M.open(position)
     return
   end
   local session = state.create(source_buf, source_win)
+  if remote_parsed then remote_attach(session, remote_parsed) end
   M.history_init(session)
   session.backend, session.backend_reason = backend, reason
   session.preview_buf, session.preview_win = preview.open(position, session)
@@ -801,7 +867,14 @@ end
 ---the last two documents.
 function M.retarget(session, new_buf, record)
   if not valid(session) or not session.backend or session.backend.name == "cells" then return false end
+  local remote_parsed = source.parse(vim.api.nvim_buf_get_name(new_buf))
+  -- Same rule as M.open, for the same reason: a remote name either becomes a
+  -- remote session or is refused -- it must never be rendered with local
+  -- path handling.
+  if remote_parsed and not config.get().remote.enabled then return false end
   if not state.retarget(session, new_buf) then return false end
+  session.remote = nil
+  if remote_parsed then remote_attach(session, remote_parsed) end
   session.request_serial = session.request_serial + 1
   session.render_epoch = (session.render_epoch or 0) + 1
   interaction.forget(session)
@@ -838,7 +911,11 @@ end
 
 local function history_entry(buf)
   local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil }
+  if name == "" then return { buf = buf, path = nil } end
+  -- A remote name is stored verbatim: vim.fs.normalize would corrupt the URL
+  -- (scp://h//a becomes scp:/h/a), and reopening one goes through
+  -- bufadd(url) + the provider's BufReadCmd rather than the filesystem.
+  return { buf = buf, path = source.parse(name) and name or vim.fs.normalize(name) }
 end
 
 function M.history_init(session)
@@ -1258,6 +1335,17 @@ function M.setup_autocmds()
   end)
   group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
+    group = group,
+    callback = function(args)
+      local session = state.get(args.buf)
+      if session then M.schedule(session) end
+    end,
+  })
+  -- A remote provider fills its buffer through BufReadCmd plus an
+  -- asynchronous network read, and `:e!` replays that; neither fires
+  -- TextChanged. Without this, a preview opened before the content landed
+  -- would sit blank until the first edit.
+  vim.api.nvim_create_autocmd("BufReadPost", {
     group = group,
     callback = function(args)
       local session = state.get(args.buf)

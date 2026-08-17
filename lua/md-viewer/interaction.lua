@@ -6,6 +6,7 @@ local debounce = require("md-viewer.debounce")
 local preview = require("md-viewer.preview")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
+local source = require("md-viewer.source")
 
 local M = {}
 
@@ -1205,8 +1206,7 @@ end
 
 function M.open_local_file(session, href)
   local cfg = config.get()
-  local name = vim.api.nvim_buf_get_name(session.source_buf)
-  local base_dir = name ~= "" and vim.fs.dirname(vim.fs.normalize(name)) or vim.uv.cwd()
+  local base_dir = source.local_base_dir(session.source_buf)
   local root =
     security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
   local resolved, reason = security.resolve_local_link(href, base_dir, root)

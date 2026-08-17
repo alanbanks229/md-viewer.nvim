@@ -91,6 +91,13 @@ function M.join_remote(base_dir, relative)
   return M.normalize_remote(base_dir .. "/" .. relative)
 end
 
+---The parent directory of an absolute remote path; "/" is its own parent.
+function M.parent_remote(path)
+  local parent = path:match("^(.*)/[^/]+$")
+  if parent == nil or parent == "" then return "/" end
+  return parent
+end
+
 ---Purely lexical containment for remote paths, both already normalized.
 ---Mirrors security.lua's `lexically_inside`: the root itself, or a
 ---descendant past a `/` boundary -- `/p` does not contain `/pq`.
