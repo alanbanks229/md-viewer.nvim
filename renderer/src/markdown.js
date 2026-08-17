@@ -105,13 +105,18 @@ function createMarkdown(options) {
     const id = registerPointRegion(env, token);
     if (id) token.attrSet("data-md-source-id", id);
     const source = token.attrGet("src") ?? "";
+    const httpsSource = /^https?:/i.test(source);
     // Remote sources were resolved (fetched, validated, inlined -- or refused)
     // before rendering began; the rule itself never awaits. A miss can only
     // mean the source was not collected, which fails closed -- this is a bug
     // guard, not a policy outcome, so it is "failed" rather than "blocked".
-    const result = /^https?:/i.test(source)
+    const result = httpsSource
       ? (env[REMOTE_IMAGES]?.get(source) ?? { ok: false, kind: "failed", label: "remote image was not resolved" })
       : resolveLocalImage(source, options);
+    // Scheme'd sources the resolver refuses outright (data:, file:,
+    // protocol-relative) are never mirror candidates; the report means "what
+    // might exist as a file beside the document", so they stay out of it.
+    if (!httpsSource && !/^(?:data:|file:|\/\/)/i.test(source)) recordLocalImageAsset(env, source, result.ok === true);
     if (result.ok) {
       token.attrSet("src", result.dataUri);
       registerAnimation(token, result.dataUri, options, env);
@@ -148,6 +153,26 @@ function createMarkdown(options) {
 // type is still by construction.
 const ANIMATABLE_DATA_URIS = ["data:image/gif;base64,", "data:image/webp;base64,"];
 const ANIMATIONS = Symbol("md-viewer.animations");
+const LOCAL_IMAGE_ASSETS = Symbol("md-viewer.local-image-assets");
+// Enough for any real document while keeping the report a footnote on the
+// response. Past the cap a source still renders (or placeholders) exactly as
+// before -- only the report of it is dropped.
+const LOCAL_IMAGE_ASSET_LIMIT = 128;
+
+/// Record what the local resolver was asked for and whether it produced an
+/// image, so the render response can carry the list out. For a local document
+/// it is diagnostic. For a remote document it is load-bearing: the renderer
+/// resolves against a local mirror of the remote project, so `ok: false`
+/// names exactly the files the mirror lacks -- the fetch list -- and
+/// `ok: true` names what a new session must revalidate. Sources are reported
+/// as written in the document (percent-encoding, query and fragment intact)
+/// because the Lua side re-derives the decode itself rather than trusting a
+/// transformation it cannot inspect.
+function recordLocalImageAsset(env, source, ok) {
+  const assets = env[LOCAL_IMAGE_ASSETS];
+  if (!assets || assets.has(source) || assets.size >= LOCAL_IMAGE_ASSET_LIMIT) return;
+  assets.set(source, ok);
+}
 
 /// Mark an image whose bytes are an animated GIF or WebP, so the terminal can
 /// draw the animation over the still frame Chromium paints.
@@ -225,7 +250,7 @@ function collectRemoteImageSources(tokens, sources = []) {
   return sources;
 }
 
-/// Returns `{ html, sourceMap, animations, remoteImagesPending }`.
+/// Returns `{ html, sourceMap, animations, remoteImagesPending, localImageAssets }`.
 ///
 /// `sourceMap` is the full provenance record for this render: the normalized
 /// source lines plus one entry per opaque `data-md-source-id`. It stays in
@@ -245,7 +270,7 @@ function collectRemoteImageSources(tokens, sources = []) {
 export async function renderMarkdown(markdown, options) {
   const md = createMarkdown(options);
   const builder = createSourceMapBuilder(markdown);
-  const env = { [SOURCE_MAP_BUILDER]: builder, [ANIMATIONS]: new Map() };
+  const env = { [SOURCE_MAP_BUILDER]: builder, [ANIMATIONS]: new Map(), [LOCAL_IMAGE_ASSETS]: new Map() };
   const tokens = attachSourceMaps(md.parse(markdown, env), env, builder.lines);
   const remote = await resolveRemoteImages(collectRemoteImageSources(tokens), options);
   env[REMOTE_IMAGES] = remote.results;
@@ -288,5 +313,6 @@ export async function renderMarkdown(markdown, options) {
   return {
     html, sourceMap: builder.build(), animations: env[ANIMATIONS],
     remoteImagesPending: remote.pending,
+    localImageAssets: [...env[LOCAL_IMAGE_ASSETS]].map(([source, ok]) => ({ source, ok })),
   };
 }

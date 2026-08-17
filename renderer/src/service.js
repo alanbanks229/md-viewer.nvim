@@ -48,7 +48,8 @@ export function createService({ assetsDir, onShutdown } = {}) {
   // follow a relaunch; the store never owns browser lifecycle.
   const animations = new AnimationStore({ dir: browser.tempDir, browserProvider: () => browser.browser });
 
-  // documentId -> { key, html, sourceMap, animations, remoteImagesPending }.
+  // documentId -> { key, html, sourceMap, animations, remoteImagesPending,
+  // localImageAssets }.
   // The source map is the trusted-memory half of source provenance: the page
   // holds opaque region keys, this holds what they mean. It is written and
   // evicted with the markup it describes, so the two can never disagree about
@@ -221,6 +222,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
             key: markdownKey, html: rendered.html, sourceMap: rendered.sourceMap,
             animations: rendered.animations,
             remoteImagesPending: rendered.remoteImagesPending,
+            localImageAssets: rendered.localImageAssets,
           });
           // New content: whatever the user had selected or searched for belongs to
           // the old document body and must not be carried forward.
@@ -241,6 +243,12 @@ export function createService({ assetsDir, onShutdown } = {}) {
       // would keep its "loading" placeholders until the next keystroke. Same
       // shape and same reasoning as `animationsIncomplete`.
       result.remoteImagesPending = (cachedEntry?.remoteImagesPending ?? 0) > 0;
+      // What the local-image resolver was asked for and what it could produce,
+      // straight from the cached parse -- so it describes the markup actually
+      // on screen, captures and reused parses included. For a remote document
+      // the Lua side fetches what its mirror lacks and answers with one more
+      // render, the same loop remote images use.
+      result.localImageAssets = cachedEntry?.localImageAssets ?? [];
       // Animation geometry travels with the render it was measured against --
       // same response, same staleness lane as the base image, so the two can
       // never disagree. The sha is joined here so the Lua side can ask the
