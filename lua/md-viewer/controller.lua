@@ -577,6 +577,18 @@ function M.refresh(session, render_options)
     -- can go on, and a failure caches as a failure, so this stops on its own.
     session.remote_images_pending = meta.remoteImagesPending == true
     if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
+    -- The same loop for a remote document's files: the render already showed
+    -- placeholders for whatever the mirror lacks, the pipeline fetches those
+    -- files, and this callback -- fired at most once per batch, only when the
+    -- mirror actually changed -- is the one more render that puts the
+    -- pictures in. The epoch bump is what invalidates the renderer's cached
+    -- parse; contentRevision carries it, so no new protocol field exists.
+    if session.remote and meta.localImageAssets then
+      remote_assets.on_assets(session, meta.localImageAssets, function()
+        session.render_epoch = (session.render_epoch or 0) + 1
+        M.schedule(session, 0)
+      end)
+    end
     session.last_image_bytes = result.image
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
