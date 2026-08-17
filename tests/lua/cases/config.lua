@@ -119,6 +119,34 @@ return function(t)
   local bad_raw_html_ok, bad_raw_html_err = pcall(config.setup, { security = { raw_html = "yes" } })
   t.eq(false, bad_raw_html_ok, "a non-boolean security.raw_html is rejected")
   t.ok(tostring(bad_raw_html_err):match("raw_html"), "the raw_html error names the offending option")
+  config.reset()
+  -- Remote documents: the renderer never leaves this machine, so the only
+  -- knobs are whether to accept such buffers at all, how long one remote
+  -- operation may take, how large the asset mirror may grow, and what argv
+  -- carries the commands.
+  t.eq(true, cfg.remote.enabled, "remote documents preview by default")
+  t.eq(15000, cfg.remote.fetch_timeout_ms, "one remote operation is bounded")
+  t.eq(256 * 1024 * 1024, cfg.remote.cache_max_bytes, "the asset mirror is bounded")
+  t.eq({ "ssh" }, cfg.remote.ssh_command, "remote commands run through plain ssh by default")
+  local bad_remote_ok, bad_remote_err = pcall(config.setup, { remote = { enabled = "yes" } })
+  t.eq(false, bad_remote_ok, "a non-boolean remote.enabled is rejected")
+  t.ok(tostring(bad_remote_err):match("remote%.enabled"), "the remote.enabled error names the offending option")
+  config.reset()
+  local zero_timeout_ok = pcall(config.setup, { remote = { fetch_timeout_ms = 0 } })
+  t.eq(false, zero_timeout_ok, "a zero remote timeout would let one operation hang forever")
+  config.reset()
+  local zero_cache_ok = pcall(config.setup, { remote = { cache_max_bytes = 0 } })
+  t.eq(false, zero_cache_ok, "a zero mirror budget is rejected")
+  config.reset()
+  local empty_ssh_ok, empty_ssh_err = pcall(config.setup, { remote = { ssh_command = {} } })
+  t.eq(false, empty_ssh_ok, "an empty ssh_command has nothing to exec")
+  t.ok(tostring(empty_ssh_err):match("ssh_command"), "the ssh_command error names the offending option")
+  config.reset()
+  local nonstring_ssh_ok = pcall(config.setup, { remote = { ssh_command = { "ssh", 42 } } })
+  t.eq(false, nonstring_ssh_ok, "ssh_command entries must be strings")
+  config.reset()
+  local wrapped = config.setup({ remote = { ssh_command = { "ssh", "-F", "/tmp/corp" } } })
+  t.eq({ "ssh", "-F", "/tmp/corp" }, wrapped.remote.ssh_command, "remote.ssh_command is overridable")
 
   -- Every option is documented, or it exists only for its author. The same
   -- pin commands.lua applies to the command surface: `:help md-viewer-options`

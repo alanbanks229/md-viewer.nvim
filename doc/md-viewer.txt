@@ -209,6 +209,15 @@ terminal ~
     animation                    "auto"     auto, native, frames, off
                                             (|md-viewer-animation|)
 
+remote ~
+    enabled                      true       preview scp:// and rsync://
+                                            buffers from a local Neovim
+    fetch_timeout_ms             15000      per remote operation
+    cache_max_bytes              256 MiB    ceiling on the local mirror of
+                                            fetched remote assets
+    ssh_command                  ssh        argv prefix for every remote
+                                            command; never a shell string
+
 The options in the rest of this section need more than a default value to
 use, and are covered in full below.
 

@@ -174,6 +174,27 @@ M.defaults = {
     -- handler *is* the success case.
     external_open_timeout_ms = 5000,
   },
+  remote = {
+    -- Preview documents whose buffer names remote-ssh.nvim or netrw own
+    -- (scp://, rsync://). Neovim, the renderer and the browser all stay on
+    -- this machine; files the document references are copied over once each,
+    -- into a private mirror, off the render loop. Off, those buffers are
+    -- refused exactly like any other special buffer.
+    enabled = true,
+    -- Ceiling on one remote operation -- the per-render stat batch, or one
+    -- file copy. Generous because a cold connection through a relayed tunnel
+    -- (AWS SSM and the like) can take seconds before the first byte moves.
+    fetch_timeout_ms = 15000,
+    -- Ceiling on the local mirror of fetched assets, across all hosts and
+    -- projects together. Enforced after each fetch batch by deleting the
+    -- oldest files first.
+    cache_max_bytes = 256 * 1024 * 1024,
+    -- argv prefix for every command this plugin runs against a remote host;
+    -- replace it to route through a wrapper. It is always exec'd as an argv
+    -- vector, never handed to a local shell, so nothing a document says can
+    -- reach one.
+    ssh_command = { "ssh" },
+  },
   terminal = {
     profile = "auto",
     kitty_graphics = "auto",
@@ -328,6 +349,22 @@ local function validate(cfg)
   assert(probe_modes[cfg.terminal.probe], "md-viewer: terminal.probe must be off or safe")
   local animation_modes = { auto = true, native = true, frames = true, off = true }
   assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
+  assert(type(cfg.remote.enabled) == "boolean", "md-viewer: remote.enabled must be a boolean")
+  assert(
+    type(cfg.remote.fetch_timeout_ms) == "number" and cfg.remote.fetch_timeout_ms > 0,
+    "md-viewer: remote.fetch_timeout_ms must be positive"
+  )
+  assert(
+    type(cfg.remote.cache_max_bytes) == "number" and cfg.remote.cache_max_bytes > 0,
+    "md-viewer: remote.cache_max_bytes must be positive"
+  )
+  assert(
+    vim.islist(cfg.remote.ssh_command) and #cfg.remote.ssh_command > 0,
+    "md-viewer: remote.ssh_command must be a non-empty list of argv strings"
+  )
+  for _, part in ipairs(cfg.remote.ssh_command) do
+    assert(type(part) == "string" and part ~= "", "md-viewer: remote.ssh_command entries must be non-empty strings")
+  end
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
   assert(
     vim.islist(cfg.security.document_root_markers),
