@@ -8,9 +8,10 @@ covered without one — run those first.
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
 fully prove: the **drag-highlight overlay** (`overlay/`) and **animated
-images** (`animation/`). Two others need neither a display nor a browser:
-`scroll-scale/` needs a *slow link*, and `remote-images/` needs a *network with
-no direct route out* -- the two pieces of hardware no test machine has.
+images** (`animation/`). Three others need neither a display nor a browser:
+`scroll-scale/` needs a *slow link*, `remote-images/` needs a *network with
+no direct route out*, and `remote-projects/` needs a *reachable ssh host* --
+the pieces of hardware no test machine has.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -128,6 +129,35 @@ The verdict worth watching for is **INERT**: `capture_encoder` is
 `playwright_png` rather than `cdp_fast_png`. Playwright's own `scale` is a
 two-value enum, so the numeric factor cannot reach the capture on that path and
 `render.scroll_scale` does nothing on that host, whatever it is set to.
+
+## `remote-projects/ab.lua` — does scrolling a remote document really cost zero remote I/O?
+
+The headless suite already proves it with a stubbed transport
+(`tests/lua/cases/remote_assets.lua` counts calls through the one spawn
+seam); this is the same claim against a real host, with the prediction fixed
+in the file header before any run: **zero transport calls during the scroll,
+cadence within 30% of a local baseline**. Run it inside a *local* Neovim that
+can open a remote document (remote-ssh.nvim or netrw):
+
+```vim
+:edit README.md                             " a local file first
+:MdViewerToggle
+:runtime scripts/remote-projects/ab.lua     " arms the baseline
+"  ...wheel-scroll the whole document...
+:RemoteProjectAB                            " ends the baseline
+:RemoteOpen rsync://host//path/README.md    " then the remote document
+:MdViewerToggle
+"  ...wait for its images to appear...
+:RemoteProjectAB                            " arms the remote phase
+"  ...wheel-scroll the same way...
+:RemoteProjectAB                            " prints the comparison
+```
+
+`:RemoteProjectABCancel` abandons a run partway. No configuration is changed
+and nothing is written to disk. An INCONCLUSIVE verdict names what was wrong
+with the run itself — the second phase was not a remote buffer, or this
+Neovim is itself over SSH, which is the other feature (`:help
+md-viewer-ssh`).
 
 ## `remote-images/probe.lua` — does a blocked image still cost the whole preview?
 
