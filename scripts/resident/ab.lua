@@ -108,21 +108,18 @@ end
 ---The gate is evaluated once, when the preview opens, so changing the option
 ---alone would leave both arms running whatever the session started as -- the
 ---shape of A/B that reports a difference of zero and looks like a null result.
----`_resident_gate` is the controller's own answer, so what this arms is the same
----decision a fresh session would make rather than a second copy of the rules.
+---
+---`controller.reevaluate_resident` is the controller's own answer, applied by
+---the same code path a fresh session uses. An earlier version of this reproduced
+---that logic here and got it wrong in one line, which armed the treatment arm
+---with the gate's *success* message recorded as a fallback reason -- so the arm
+---under test silently ran on the ordinary path and the run compared the baseline
+---with itself. A harness must not reimplement the decision it is measuring.
 local function apply_pan(current, value)
   local next_config = vim.deepcopy(config.get())
   next_config.image.resident_pan = value
   config.setup(next_config)
-  local live = current.resident
-  controller.free_resident(current)
-  local ok, reason = controller._resident_gate(current)
-  live.enabled = ok
-  live.gate_reason = reason
-  live.fallback_reason = ok and nil or reason
-  live.budget_px = config.get().image.resident_budget_px
-  live.height_scale, live.region_shrinks = 1, 0
-  return ok, reason
+  return controller.reevaluate_resident(current)
 end
 
 local function restore()

@@ -114,10 +114,35 @@ return function(t)
       "an actual SSH session may keep them, whatever its buffers are named"
     )
 
+    -- The gate answers with a reason on *success* as well as on failure -- it
+    -- says which rule allowed it, not only which one refused. That makes
+    -- `fallback_reason = ok and nil or reason` a trap, because `nil` is falsy
+    -- and the `or` takes its right branch whatever `ok` was: the success message
+    -- becomes a fallback reason and every fill and pan refuses for the rest of
+    -- the session. It shipped that way in the A/B harness once and made the
+    -- treatment arm silently run on the ordinary path.
+    local allowed_ok, allowed_reason = controller._resident_gate(session)
+    t.eq(true, allowed_ok, "sanity: the gate allows this session")
+    t.ok(allowed_reason ~= nil, "and still answers with a reason, which is what makes the idiom unsafe")
+
+    -- So applying the gate is the controller's job, not a caller's, and the
+    -- property that matters is the one that broke: allowed means no fallback.
+    local applied_ok = controller.reevaluate_resident(session)
+    t.eq(true, applied_ok, "applying the gate to an open session enables it")
+    t.eq(true, session.resident.enabled, "recording that on the session")
+    t.eq(nil, session.resident.fallback_reason, "and leaving no fallback reason behind when it was allowed")
+    t.ok(session.resident.gate_reason ~= nil, "while still reporting why it was allowed")
+
     config.setup({ image = { resident_pan = "off" } })
     local off_ok, off_reason = controller._resident_gate(session)
     t.eq(false, off_ok, "and image.resident_pan = off refuses regardless of transport")
     t.ok(off_reason:match("off"), "naming the option that refused")
+
+    -- The other direction: a refusal must leave a reason, or a session that
+    -- declined would be indistinguishable from one that was never asked.
+    controller.reevaluate_resident(session)
+    t.eq(false, session.resident.enabled, "re-applying a refusal disables it")
+    t.ok(session.resident.fallback_reason ~= nil, "and says why, on the session")
 
     config.setup({ image = { resident_pan = "on", resident_budget_px = 0 } })
     local broke_ok, broke_reason = controller._resident_gate(session)

@@ -646,6 +646,34 @@ local function resident_gate(session)
   return true, reason
 end
 
+---Apply the gate's answer to a session, giving back any pixels it was holding.
+---
+---`M.open` needs this once. The A/B harness needs it again, because it toggles
+---`image.resident_pan` between arms and a gate evaluated only at open would
+---leave both arms running whatever the session started as -- the shape of A/B
+---that reports a difference of zero and looks like a null result.
+---
+---Exported rather than left for the harness to reproduce, which is how this went
+---wrong the first time: `fallback_reason = ok and nil or reason` reads as "the
+---reason, but only on failure" and is not that. `nil` is falsy, so the `or`
+---takes its right branch whatever `ok` was, and the gate's *success* message
+---became a fallback reason that refused every fill and every pan for the rest of
+---the session. Written out longhand below for that reason. The one thing a
+---harness must not do is reimplement the decision it exists to measure.
+function M.reevaluate_resident(session)
+  local live = session.resident
+  if not live then return false, "session has no resident state" end
+  free_resident(session)
+  local ok, reason = resident_gate(session)
+  live.enabled = ok
+  live.gate_reason = reason
+  live.fallback_reason = nil
+  if not ok then live.fallback_reason = reason end
+  live.budget_px = config.get().image.resident_budget_px
+  live.height_scale, live.region_shrinks = 1, 0
+  return ok, reason
+end
+
 ---Everything that must match for a region to still describe this document.
 local function resident_key(session)
   local render = config.get().render
@@ -1102,7 +1130,8 @@ function M.refresh(session, render_options)
       -- simply will not be there for the next scroll, which is the ordinary
       -- capture path rather than a defect. The next `apply_image` frees its
       -- image, since nothing in the cache holds it.
-      live.last_insert_refusal = stored and nil or insert_reason
+      live.last_insert_refusal = nil
+      if not stored then live.last_insert_refusal = insert_reason end
       live.key = region.key
       for _, other in ipairs(live.regions) do
         other.placed = other == region
@@ -1532,11 +1561,7 @@ function M.open(position)
   -- depends on a capability snapshot and a terminal profile, neither of which
   -- changes under a session, and a reader asking `:MdViewerDebug` later wants to
   -- know what this session actually did.
-  local resident_ok, resident_reason = resident_gate(session)
-  session.resident.enabled = resident_ok
-  session.resident.budget_px = config.get().image.resident_budget_px
-  session.resident.gate_reason = resident_reason
-  if not resident_ok then session.resident.fallback_reason = resident_reason end
+  M.reevaluate_resident(session)
   session.preview_buf, session.preview_win = preview.open(position, session)
   -- Size the caret surface now that the split has been created and resized;
   -- `preview.open` cannot do it itself, since the placement it measures needs
