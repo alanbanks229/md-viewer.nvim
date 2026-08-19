@@ -835,6 +835,15 @@ function try_pan(session)
   clear_selection_overlay(session)
   M.clear_caret_overlay(session)
   M.place_caret(session)
+  -- And the terminal cursor that shadows the caret, which is a separate thing
+  -- drawn by Neovim rather than by the backend. It is derived from
+  -- `applied_scroll_y` -- the same drift subtraction the overlay uses -- but it
+  -- is normally only recomputed when the renderer answers with a new caret
+  -- position. A pan moves the frame of reference with no round trip, so nothing
+  -- would recompute it, and the block would sit at the row the caret occupied
+  -- before the scroll while the overlay drew it at the row it occupies now.
+  -- Anything derived from `applied_scroll_y` has to follow when it changes.
+  caret.shadow_cursor(session)
   animation.repaint(session)
   return true
 end

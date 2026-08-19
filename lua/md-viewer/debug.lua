@@ -106,6 +106,24 @@ function M.snapshot()
       scroll_y = session.scroll_y,
       document_height_px = session.document_height_px,
       applied_scroll_y = session.applied_scroll_y,
+      -- The caret, and the two numbers its position is derived from. A caret
+      -- rect is viewport-relative at the scroll it was measured against, and
+      -- every later position is that rect less the drift since. So a caret in
+      -- the wrong place is one of three things, and only these fields tell them
+      -- apart: a stale rect, a `caret_scroll_y` that no longer matches the
+      -- measurement, or an `applied_scroll_y` that disagrees with the pixels on
+      -- screen. Panning changes the third with no round trip, which is why it
+      -- became worth reporting.
+      caret_scroll_y = session.caret_scroll_y,
+      caret_rect = session.caret_rect and ("%.1f,%.1f %.1fx%.1f"):format(
+        session.caret_rect.x,
+        session.caret_rect.y,
+        session.caret_rect.width,
+        session.caret_rect.height
+      ),
+      caret_drift_px = session.caret_rect and ((session.applied_scroll_y or 0) - (session.caret_scroll_y or 0)) or nil,
+      caret_index = session.caret_index,
+      pan_serial = session.pan_serial,
       layout_reused = session.last_layout_reused,
       markdown_reused = session.last_markdown_reused,
       capture_scale = session.last_capture_scale,
