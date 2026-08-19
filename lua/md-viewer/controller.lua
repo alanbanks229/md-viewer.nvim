@@ -237,6 +237,16 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   if type(image_stats) == "table" then
     session.image_width_px = image_stats.width_px
     session.image_height_px = image_stats.height_px
+    -- And, separately, the width a *device-tier* capture comes back at. Not the
+    -- same question as "how big is the image on screen", and conflating them is
+    -- a bug that only appears over SSH: the settle timer fires once scrolling
+    -- has stopped, so the frame on screen at that moment is always a moving one
+    -- captured at `ssh_scroll_scale`. A region planned from that width assumes
+    -- half the scale it will actually be captured at -- and since a region's
+    -- height is derived as budget / (width x scale^2), halving the scale asks
+    -- for four times the region the budget can hold. It is then refused, either
+    -- by the renderer or by the cache, and nothing is ever resident.
+    if capture_scale == "device" then session.device_image_width_px = image_stats.width_px end
   end
   if png_bytes then session.last_png_bytes = png_bytes end
   if capture_ms then session.last_capture_ms = capture_ms end
@@ -744,7 +754,13 @@ function try_pan(session)
   -- A drag resolves its rectangles against the scroll the frame on screen shows
   -- and refuses a disagreement over half a pixel, so moving the page underneath
   -- one would fail every overlay frame of the gesture.
-  if session.pointer then return false end
+  -- The *press*, not the pointer table. Releasing a drag leaves the table alive
+  -- -- only `interaction.forget` nils it -- and a visual-mode synthetic pointer
+  -- exists with `pressed = false`, so gating on the table's existence disables
+  -- panning for the rest of the session after one click anywhere in the preview.
+  -- animation.lua carries this same comment because it was caught there first;
+  -- this is the second time the same table has been mistaken for a gesture.
+  if session.pointer and session.pointer.pressed then return false end
   if update_occlusion(session) then return false end
 
   local key = resident_key(session)
@@ -1287,7 +1303,13 @@ function settle_options(session)
   local live = session.resident
   local plain = { capture_scale = "device", capture_only = true }
   if not (live and live.enabled) or live.fallback_reason then return plain end
-  if session.selection_active or session.find_active or session.pointer then return plain end
+  -- `pointer.pressed`, not `pointer`: a released drag leaves the table behind,
+  -- and refusing on its existence means one click stops every later settle from
+  -- ever asking for a region -- silently, since nothing was refused and nothing
+  -- failed. See `try_pan`.
+  if session.selection_active or session.find_active or (session.pointer and session.pointer.pressed) then
+    return plain
+  end
   if live.fill.in_flight then return plain end
   if not (session.viewport_width_px and session.viewport_height_px and session.document_height_px) then return plain end
 
@@ -1297,11 +1319,19 @@ function settle_options(session)
     viewport_h = session.viewport_height_px,
     viewport_w = session.viewport_width_px,
     document_height_px = session.document_height_px,
-    -- The scale the capture will come back at. Measured from the last image when
-    -- there is one, because that is the only number that is right on both
-    -- encoder paths, and the configured factor only as a first guess.
-    scale = (session.image_width_px and session.viewport_width_px)
-        and (session.image_width_px / session.viewport_width_px)
+    -- The scale the capture will come back at, measured from the last
+    -- *device-tier* image rather than from whatever is on screen. Those are the
+    -- same thing locally and never the same thing over SSH: a settle fires once
+    -- scrolling has stopped, so the frame on screen at that moment is a moving
+    -- one captured at `ssh_scroll_scale`, whose PNG at the default 0.5 and
+    -- device scale 2 is exactly viewport-width. Reading the scale off that gives
+    -- 1.0 for a capture that will arrive at 2.0 -- and since the height below is
+    -- derived as budget / (width * scale^2), halving the scale asks for four
+    -- times the region the budget can hold. Measured rather than configured
+    -- because the Playwright fallback cannot express a sub-1x factor and returns
+    -- a full-size frame, so the requested number is wrong on one encoder path.
+    scale = (session.device_image_width_px and session.viewport_width_px)
+        and (session.device_image_width_px / session.viewport_width_px)
       or render.device_scale_factor,
     -- Not the whole budget when this session has already been shown that its
     -- regions encode larger than the budget assumed. The height is derived from
@@ -2419,5 +2449,10 @@ M._scroll_settle_delay = scroll_settle_delay
 M._resident_gate = resident_gate
 M._settle_options = settle_options
 M._resident_key = resident_key
+-- Exported so the interaction gates can be asserted directly rather than
+-- inferred from whether a scroll happened to produce a placement. The pointer
+-- gate in particular refuses *silently* and correctly-looking -- nothing fails,
+-- nothing is counted -- which is exactly the shape that reached a real session.
+M._try_pan = try_pan
 
 return M

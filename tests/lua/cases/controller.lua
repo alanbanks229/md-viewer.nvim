@@ -783,6 +783,43 @@ return function(t)
     t.eq(nil, controller._settle_options(session).capture_region, "but a fill already in flight refuses a second")
     live.fill.in_flight = false
 
+    -- The *press*, not the pointer table. A released drag leaves the table
+    -- behind -- only interaction.forget nils it -- and a visual-mode synthetic
+    -- pointer exists with pressed=false. Refusing on the table's existence means
+    -- one click anywhere in the preview stops every later settle from asking for
+    -- a region, and stops every pan, for the rest of the session: silently, with
+    -- nothing refused and nothing failed. animation.lua was caught by this same
+    -- table once already.
+    session.pointer = { pressed = true }
+    t.eq(nil, controller._settle_options(session).capture_region, "a drag in progress plans no region")
+    session.scroll_y = 1500
+    t.eq(false, controller._try_pan(session), "and pans nothing")
+    session.pointer = { pressed = false }
+    t.ok(
+      controller._settle_options(session).capture_region ~= nil,
+      "a released drag leaves the table but not the gesture"
+    )
+    t.eq(true, controller._try_pan(session), "so scrolling after a click still pans")
+    session.pointer = nil
+
+    -- The capture scale is read off the last *device-tier* image, not off
+    -- whatever is on screen. Over SSH those differ every time it matters: the
+    -- settle fires once scrolling stopped, so the frame on screen is a moving
+    -- one captured at ssh_scroll_scale, whose PNG at 0.5 and device scale 2 is
+    -- exactly viewport-width. Reading 1.0 for a capture that arrives at 2.0 asks
+    -- for four times the region the budget holds, because height is derived as
+    -- budget / (width * scale^2).
+    session.image_width_px = 990 -- the moving frame: 990 CSS * 2 * 0.5
+    session.device_image_width_px = 1980 -- what a settle actually comes back at
+    session.scroll_y = 1500
+    local planned = controller._settle_options(session)
+    t.eq(2020, planned.capture_region.heightPx, "the region is sized for the scale the capture will arrive at")
+    t.ok(
+      planned.capture_region.heightPx * 2 * 1980 <= live.budget_px,
+      "so its device pixels fit the budget rather than overrunning it fourfold"
+    )
+    session.image_width_px = 1980
+
     -- A fill, end to end. The viewport is pinned for the duration because this
     -- callback adopts whatever the renderer reports, and a viewport that moved
     -- would change the region key -- which is a real hazard, tested below on

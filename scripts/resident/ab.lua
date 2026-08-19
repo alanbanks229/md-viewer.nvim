@@ -258,8 +258,14 @@ local function report()
     verdict = ("FELL BACK: %s. The treatment arm ran on the ordinary path, so this run compares "):format(b.fallback)
       .. "the baseline with itself. Report the reason."
   elseif b.fills == 0 then
-    verdict = "NO REGION WAS EVER FILLED. Either the gate refused (check :MdViewerDebug "
-      .. "`resident.gate_reason`) or scrolling never settled long enough. Nothing is being measured."
+    -- Deliberately not "check gate_reason". The gate passing is the *common*
+    -- case here and it reports its success in the same field it reports refusal,
+    -- so pointing at it sends a reader to a line that looks fine. Every field
+    -- below is a place a settle can decline to ask for a region while nothing
+    -- has failed and nothing has been counted.
+    verdict = ("NO REGION WAS EVER FILLED, though %d settle frames were taken -- so the settles ran "):format(
+      b.retina_frames
+    ) .. "and none of them asked for a region. In :MdViewerDebug's `resident` block, in order: " .. "`plan_refusal` (no region fits the budget at this viewport), " .. "`fallback_reason` (it gave up earlier in the session), " .. "then check whether a drag is still registered -- a click leaves state behind that a " .. "settle will not fill through. If `fills` is above 0 but `regions` is 0 instead, the " .. "capture happened and `last_insert_refusal` says why the cache would not keep it."
   elseif not mark_base then
     verdict = "NO MARK TAKEN: run :ResidentABMark in phase 2 once `regions 1` appears, then scroll "
       .. "inside the region. Without it the report cannot separate the one fill from the scrolling."
