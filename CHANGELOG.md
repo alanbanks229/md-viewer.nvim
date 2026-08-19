@@ -5,6 +5,11 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.0-remote.1] - 2026-08-18
+
+Prerelease. Stable `0.3.0` is reserved until this work has had real-world
+validation and `main` represents it.
+
 Remote projects, local Neovim: previews of `rsync://`/`scp://` buffers at
 full local quality.
 
@@ -241,6 +246,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-remote.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-remote.1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
