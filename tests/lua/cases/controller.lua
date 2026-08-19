@@ -953,8 +953,26 @@ return function(t)
     controller.refresh(session, controller._settle_options(session))
     local planned_height = pending.params.captureRegion.heightPx
     session.scroll_y = 1500
-    complete_fill({ pngBytes = 1016667 })
-    t.near(0.9, live.height_scale, 1e-6, "a region larger than three sharp frames shrinks the fills after it")
+
+    -- The cap must not bind before K_MAX does. A region's PNG scales about
+    -- linearly with its pixels, so a region of k viewports costs about k settle
+    -- frames -- which makes this cap and K_MAX two limits on the same quantity
+    -- in different units. Set below K_MAX it wins every time and silently
+    -- overrides the height the budget derived: shipped at 3 against a K_MAX of
+    -- 4, it ratcheted real regions to 43% of their allowed height, leaving about
+    -- a third of a screen of travel and turning nearly every scroll into a
+    -- refill.
+    local at_k_max = 305000 * resident.K_MAX
+    complete_fill({ pngBytes = at_k_max })
+    t.eq(1, live.height_scale, "a region as large as K_MAX allows is not cut down by the byte cap")
+    t.eq(0, live.height_reduced, "so the two limits never fight over the same region")
+
+    live.upload_hold_until = 0
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    session.scroll_y = 1500
+    complete_fill({ pngBytes = 2033334 })
+    t.near(0.9, live.height_scale, 1e-6, "a region well outside that relationship still shrinks the fills after it")
     t.eq(1, live.height_reduced, "and records that it did")
     live.upload_hold_until = 0
     local shorter = controller._settle_options(session)

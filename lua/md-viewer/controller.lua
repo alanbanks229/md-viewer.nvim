@@ -1236,12 +1236,23 @@ end
 ---A multiple rather than a byte count, because what a viewport costs to encode
 ---is a property of the document: a page of prose and a page of syntax-
 ---highlighted code are not within a factor of each other, and a constant here
----would be wrong for every document but the one it was measured on. Three is the
----worst-case stall this accepts -- a reader who crosses a region boundary waits
----roughly as long as three sharp frames, which is the same order as the settle
----behaviour they already have, rather than the 5.7 seconds an unbounded eight
----viewports would cost on the 0.80 MB/s link (scripts/resident/probe.mjs).
-local REGION_PNG_CAP_FRAMES = 3
+---would be wrong for every document but the one it was measured on.
+---
+---**It must stay above `resident.K_MAX`, and the reason is not obvious.** A
+---region's PNG scales close to linearly with its pixel count
+---(scripts/resident/probe.mjs), so a region of *k* viewports costs about *k*
+---settle frames. That makes this cap and `K_MAX` two limits on the same
+---quantity, expressed in different units -- and set below `K_MAX` this one
+---always binds first, silently overriding the height the budget derived.
+---
+---It shipped at 3 against a `K_MAX` of 4 and did exactly that on the first real
+---run: regions were ratcheted to 43% of the budget's height, which at that
+---viewport left about a third of a screen of travel, so nearly every scroll
+---missed and refilled. 6 fills and 5 evictions in 149 seconds, and 25% *more*
+---traffic than the baseline. The budget is what bounds size; this exists only to
+---catch a region so far outside the linear relationship that the budget's
+---estimate of its cost was wrong. Hence the headroom.
+local REGION_PNG_CAP_FRAMES = 6
 
 ---Keep the wire to this session's region upload for as long as it is likely to
 ---still be crossing it.
