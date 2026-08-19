@@ -859,8 +859,11 @@ return function(t)
         captureEncoder = "cdp",
         pngBytes = 810000,
         captureMs = 146,
-        regionYPx = pending.params.captureRegion.yPx,
-        regionHeightPx = pending.params.captureRegion.heightPx,
+        -- Absent on an ordinary settle, which is a picture of one viewport
+        -- rather than of a range. The helper answers both so the same completion
+        -- path can be used to land either kind.
+        regionYPx = pending.params.captureRegion and pending.params.captureRegion.yPx,
+        regionHeightPx = pending.params.captureRegion and pending.params.captureRegion.heightPx,
       }, overrides or {})
       local callback = pending.callback
       pending = nil
@@ -928,6 +931,30 @@ return function(t)
     t.eq(abandoned_before + 1, live.abandoned_fills, "a region the reader has left is discarded")
     t.eq(uploads_before, uploads, "without spending a byte on pixels nobody is looking at")
     t.eq(false, live.fill.in_flight, "and releases the slot")
+
+    -- A capture in flight for the position the reader has just panned away from
+    -- must not land on top of them. `request_serial` cannot catch this: a pan
+    -- issues no request, so nothing moves it, and before resident panning every
+    -- scroll issued a capture so it always moved. Observed in a real session as
+    -- scrolling to the top, seeing the top, and then being thrown back down to
+    -- where the settle had been requested -- a sharp, internally consistent
+    -- frame of the wrong part of the document, arriving late enough to win.
+    do
+      local superseded_before = live.superseded_by_pan or 0
+      local uploads_at_start = uploads
+      session.scroll_y = 1500
+      controller.refresh(session, { capture_scale = "device", capture_only = true })
+      t.ok(pending ~= nil, "sanity: an ordinary settle capture is in flight")
+      -- The reader pans away. No request is issued, by design -- that is the
+      -- whole feature -- so the capture above is not stale by any existing test.
+      session.scroll_y = 1400
+      t.eq(true, controller._try_pan(session), "sanity: the scroll away was a pan")
+      complete_fill({ scrollY = 1500 })
+      t.eq(uploads_at_start, uploads, "the frame for the position they left never reaches the terminal")
+      t.eq(1400, session.scroll_y, "and cannot rewind the reader to where it was requested")
+      t.eq(1400, session.applied_scroll_y, "nor claim the screen is showing that position")
+      t.eq(superseded_before + 1, live.superseded_by_pan, "counted, since nothing else can see a pan happen")
+    end
 
     -- A failed capture must release the slot too. This is the shape of the bug
     -- that would silently disable region fills for the rest of a session.

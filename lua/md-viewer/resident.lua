@@ -425,6 +425,9 @@ function M.new_state(opts)
     blocked_by_find = 0,
     blocked_by_selection = 0,
     frames_suppressed_by_hold = 0,
+    -- Captures thrown away because the reader panned while they were in flight.
+    -- A pan issues no request, so nothing else can notice it happened.
+    superseded_by_pan = 0,
     height_reduced = 0,
     upload_bytes = 0,
     placement_bytes = 0,

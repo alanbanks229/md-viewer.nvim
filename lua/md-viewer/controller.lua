@@ -803,6 +803,17 @@ function try_pan(session)
   record_ui_bytes(session, stats)
   live.placement_bytes = live.placement_bytes + (type(stats) == "table" and stats.bytes or 0)
   live.hits = live.hits + 1
+  -- A pan is a scroll that issued no request, and `request_serial` -- the thing
+  -- that makes a newer request invalidate an older one -- only moves when a
+  -- request is made. So a capture already in flight for the position the reader
+  -- has just panned away from is not stale by that measure, and lands, and
+  -- repaints the view they left. Before resident panning every scroll issued a
+  -- capture, so the serial always moved; this counter is what replaces that.
+  --
+  -- Deliberately not `request_serial` itself. That would also cancel renders a
+  -- pan has no quarrel with -- an edit's re-render, a float closing -- and
+  -- `try_pan` runs on those restore paths too.
+  session.pan_serial = (session.pan_serial or 0) + 1
   if restoring then
     live.unplaced_places = live.unplaced_places + 1
   else
@@ -888,6 +899,9 @@ function M.refresh(session, render_options)
   -- deny it to the fill that actually went out: the settle timer re-plans on
   -- every scroll event, so the first event of a burst took the slot and the last
   -- one, the only one that fires, found it taken.
+  -- Where the reader was, in pans, when this request went out. A pan moves the
+  -- view without issuing anything, so it cannot be caught by the request serial.
+  local pan_at = session.pan_serial or 0
   local filling = render_options and render_options.resident_fill and session.resident or nil
   local fill_token
   if filling then
@@ -964,6 +978,21 @@ function M.refresh(session, render_options)
       session.render_failed = true
       preview.stop_loading(session)
       notify_error(err)
+      finish()
+      return
+    end
+    -- The reader panned while this was in flight, so it is a picture of
+    -- somewhere they are no longer looking. Discarded rather than displayed --
+    -- displaying it is the defect: the frame is internally consistent and
+    -- perfectly sharp, it is simply of the wrong part of the document, and it
+    -- arrives *after* the correct view so it wins.
+    --
+    -- A fill is exempt and must be: it is not a picture of one position but of a
+    -- range, and it is cropped to wherever the reader is now. Panning while one
+    -- is in flight is the case it was designed for, not a reason to throw it
+    -- away.
+    if not filling and (session.pan_serial or 0) ~= pan_at then
+      if session.resident then session.resident.superseded_by_pan = (session.resident.superseded_by_pan or 0) + 1 end
       finish()
       return
     end

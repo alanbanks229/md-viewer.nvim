@@ -78,6 +78,7 @@ local function resident_report(session)
     wire_samples = live.wire_samples,
     upload_hold_ms = live.upload_hold_ms,
     frames_suppressed_by_hold = live.frames_suppressed_by_hold,
+    superseded_by_pan = live.superseded_by_pan,
     -- Below 1 means this document's regions encode larger than the budget
     -- assumed and fills have been shrunk to bound the stall.
     height_scale = live.height_scale,
