@@ -88,14 +88,27 @@ response, because unchanged block geometry was being returned on every capture; 
 that too brought it under 2,048. A saving measured only on the thing you removed will
 read as a win it is not.
 
-**The better remaining option.** Keep the whole document resident in the terminal and pan
-with crop placements. The protocol support exists and `placement_sequences` already sends
-`x,y,w,h` crop keys, so scrolling within resident content costs about 200 bytes, and it
-needs no second machine at all. It was not chosen because it requires tens of megabytes
-of image data resident in the terminal, and terminal memory under placement churn is
-exactly where this project has been burned before ([`terminal-support.md`](terminal-support.md)
-on wezterm#7953). It is the one alternative here that removes bytes *without* adding a
-round trip, so the measurement above does not invalidate it.
+**The better remaining option — since built, with bounds.** Keep rendered content resident
+in the terminal and pan with crop placements. The protocol support exists and
+`placement_sequences` already sends `x,y,w,h` crop keys, so scrolling within resident
+content costs a few hundred bytes, and it needs no second machine at all. It is the one
+alternative here that removes bytes *without* adding a round trip, so the measurement
+above never invalidated it.
+
+What was holding it back was the "whole document" part: tens of megabytes resident in the
+terminal, and terminal memory under placement churn is exactly where this project has been
+burned before ([`terminal-support.md`](terminal-support.md) on wezterm#7953). What shipped
+is **bounded** instead — one region of about two viewports, derived from an explicit pixel
+budget rather than from the document's length, so a 5-page README and a 500-page one cost
+the same. See [`architecture.md`](architecture.md#resident-regions) and
+`:help md-viewer-resident-pan`.
+
+Two things measured during that work are worth carrying forward. A region's PNG scales
+close to **linearly** with pixel count rather than as `pixels^0.69` — two viewports came
+back at 810 KB, about 1.7× the estimate, which is ~1.35 s of wire here. And Chromium's
+`captureBeyondViewport: false` does not fail loudly on a clip taller than the viewport: it
+returns a correctly *sized* image whose beyond-the-fold band is only 95.5% right. The flag
+is asserted by test rather than assumed from the absence of an exception.
 
 **Two alternatives that cannot work.** Writing to the ssh pty slave from a second
 process: two processes writing one terminal is not atomic, and a write landing inside an

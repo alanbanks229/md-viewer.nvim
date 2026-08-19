@@ -5,6 +5,65 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.0-remote.2] - 2026-08-19
+
+Prerelease, on the same validation channel as `0.3.0-remote.1`. This is the
+resident-region work built and verified locally, tagged so it can be exercised
+on a real throttled link. **Nothing here has been measured on that link yet:**
+the entry below describes a mechanism the suite proves, not a throughput result,
+and `image.resident_budget_px` is still the deliberately small provisional value
+rather than a measured one. Stable `0.3.0` stays reserved until both the A/B and
+the sustained-memory run exist.
+
+### Added
+
+- **Resident regions: scrolling over SSH stops re-sending pixels it has already
+  sent.** Where the earlier SSH work made each frame smaller, this removes the
+  frame. One capture a couple of viewports tall is uploaded once, and every
+  scroll position inside it is shown as a different *crop* of the same image — so
+  scrolling back through a paragraph you have just read costs a few hundred bytes
+  of placement command instead of a photograph, and shows sharp device-scale
+  pixels while moving rather than the half-size ones `render.ssh_scroll_scale`
+  trades for bytes. A hit issues no renderer request, takes no screenshot and
+  uploads no image at all; that is asserted directly in the suite rather than
+  inferred from a byte count.
+
+  Narrowly gated, because what it trades is terminal memory for wire time and
+  only one of those is free: raw Kitty backend, over SSH, outside a multiplexer,
+  on a terminal profile qualified for it — today iTerm2 alone. Everywhere else,
+  including every local session, the scroll path is one boolean test longer than
+  it was and byte-for-byte identical otherwise.
+
+  Two bounds are load-bearing and both are stated as invariants rather than
+  intentions. `image.resident_budget_px` (default 8,000,000 px, ~32 MB estimated)
+  is the *invariant* and the region's height is derived from it, checked against
+  the PNG's real dimensions at upload — a region nominated as "two viewports" and
+  checked afterwards is how a budget gets exceeded by an amount nobody sees until
+  the terminal is holding it. And because a region and the moving frames it
+  replaces share one `nvim_ui_send` queue and one pty, **at most one image payload
+  is outstanding per session**: a scroll that misses while a region is still
+  crossing the link emits nothing at all and resumes once, at the newest position,
+  when the wire is free. Without that the feature would rebuild the very backlog
+  it exists to remove.
+
+  Panning is refused, and today's capture path used instead, while a search or a
+  selection is live — a resident region was captured without them, so panning to
+  it would erase highlights the reader can see. Clearing the search costs one
+  placement command and no upload: the region was never discarded.
+
+- `image.resident_pan` (`"auto"` / `"on"` / `"off"`) and
+  `image.resident_budget_px`. `:MdViewerHealth` reports the terminal's half of the
+  gate, `:MdViewerDebug`'s `resident` block the session's half, including why it
+  refused. `scripts/resident/ab.lua` is the two-phase harness that measures the
+  claim on a real link, in total `nvim_ui_send` bytes rather than PNG bytes —
+  "the payload fell to zero" and "the traffic fell to zero" are different claims.
+
+### Fixed
+
+- The caret overlay recorded the literal string `"nil"` as its refusal reason,
+  reading the reason from the wrong return position — so the one case that field
+  exists to explain was the one case it could not.
+
 ## [0.3.0-remote.1] - 2026-08-18
 
 Prerelease. Stable `0.3.0` is reserved until this work has had real-world
@@ -246,6 +305,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-remote.2]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-remote.2
 [0.3.0-remote.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-remote.1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0

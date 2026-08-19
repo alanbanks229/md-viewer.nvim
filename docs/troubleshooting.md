@@ -300,6 +300,38 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame *larger*, and it collapses the moving and settle captures into one so the
 cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
+## Scrolling over SSH is not using resident regions
+
+On an SSH session the preview can show scrolling by re-cropping pixels the
+terminal already holds, which costs a few hundred bytes instead of a frame. It is
+narrowly gated, and `:MdViewerDebug`'s `resident` block says which gate refused:
+
+- **`enabled false` with a `gate_reason`.** The session did not qualify. The
+  reason names the cause verbatim — a backend that cannot crop, a *local* session
+  (there is no wire time to save, so this is working as designed), a multiplexer,
+  a terminal profile that is not qualified ([terminal-support.md](terminal-support.md#resident-panning)),
+  or a zero `image.resident_budget_px`.
+- **`fallback_reason` set.** It qualified and then gave up, once, for the rest of
+  the session. One-way on purpose: every reason to fall back is a reason to
+  distrust the machinery rather than the moment, and a gate that re-armed itself
+  would rediscover the same defect on every scroll. Reopen the preview to retry.
+- **`plan_refusal` set and `fills 0`.** No region worth having fits the budget.
+  The message says which bound is binding; raise `image.resident_budget_px` only
+  after reading what it costs in `:help md-viewer-resident-pan`.
+- **`hits 0` but `fills` climbing.** Regions are being captured and then not used.
+  A region holds only about *one viewport* of travel in total — the viewport
+  itself occupies the rest of it — so scrolling further than that in one gesture
+  misses every time. `blocked_by_find` and `blocked_by_selection` climbing instead
+  means an active search or selection, where panning is refused deliberately: the
+  highlights are painted into the frame and a clean region would erase them.
+
+`upload_bytes` staying flat while `hits` and `placement_bytes` climb is the whole
+feature working. `frames_suppressed_by_hold` climbing is the anti-backlog rule:
+a scroll that missed while a region was still crossing the wire sent nothing at
+all rather than queueing behind it.
+
+To turn it off: `image.resident_pan = "off"`.
+
 ## A notification over the preview shows Markdown through its background
 
 A negative `raw_zindex` draws the image below text glyphs but *above* cell

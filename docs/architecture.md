@@ -58,6 +58,36 @@ it; `tests/lua/cases/scroll_scale.lua` asserts the two streams' cell geometry is
 identical. Why the obvious alternative is wrong, and what it would take to stop
 sending pixels altogether, is in [local-render-design.md](local-render-design.md).
 
+<a id="resident-regions"></a>
+**Resident regions.** Over SSH the two-stage capture above still re-sends pixels the
+terminal already has: every scroll position is a new photograph of the same document. A
+*resident region* is one capture several viewport-heights tall, uploaded once, from which
+each scroll position is shown as a different **crop** of the same image — so scrolling
+inside it costs a placement command rather than a frame. Gated to sessions where the
+trade is real: raw Kitty backend, over SSH, no multiplexer, on a terminal profile
+qualified for it (`image.resident_pan`, default `auto` → iTerm2 only). Everywhere else
+`session.resident.enabled` is false and the scroll path is one boolean test longer than it
+was.
+
+The coordinate model lives in `md-viewer/resident.lua` as pure functions with no `vim.api`
+in them, for the same reason `renderer/src/lanes.js` is pure: a wrong crop is a wrong
+picture, and this is the one place it can be caught before pixels are involved. It owns
+three conversions and deliberately not a fourth — it answers *which rectangle of the image
+the viewport is*, the backend answers *which cells that rectangle goes in*, and neither can
+express the other's mistake. **Invariant:** `c`/`r` stay cells throughout, so the
+capture-scale independence stated above holds unchanged; a source window covering the whole
+image reduces the crop arithmetic to exactly what it was, which is why the golden Kitty
+stream in `tests/lua/cases/backend_kitty.lua` did not move.
+
+Two bounds make it safe. Memory: `image.resident_budget_px` is the invariant and the
+region's *height* is derived from it, checked against the PNG's real dimensions at upload —
+nominating "two viewports" and checking afterwards is how a budget gets exceeded by an
+amount nobody sees until the terminal is holding it. And the wire: a region and the moving
+frames it replaces share one `nvim_ui_send` queue and one pty, and bytes handed to that
+queue cannot be recalled, so **at most one image payload is outstanding per session** — a
+scroll that misses while a region is draining emits nothing at all and resumes once, at the
+newest position, when the wire is free.
+
 **Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
 allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
 route aborts every browser request that is not `data:`/`about:`

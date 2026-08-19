@@ -136,6 +136,15 @@ scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
 restores full sharpness the moment scrolling stops, and it waits longer before
 spending that sharp capture (`render.ssh_scroll_settle_ms`).
 
+On iTerm2 it also does a third thing, which is the only one that removes the
+bytes rather than shrinking them: it keeps a couple of viewports of rendered
+document **resident in the terminal** and shows each scroll position as a crop of
+pixels already sent. Scrolling back through content you have just read then costs
+a placement command instead of a photograph — and, unlike the half-size moving
+frame, it shows you sharp pixels while you scroll rather than soft ones. Bounded
+by `image.resident_budget_px` and off outside iTerm2 until other terminals are
+measured; `:help md-viewer-resident-pan`.
+
 Do **not** reach for `render.device_scale_factor = 1` here — it is a
 calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
@@ -152,7 +161,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-remote.1",
+  version = "v0.3.0-remote.2",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -204,7 +213,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-remote.1" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-remote.2" },
 })
 
 require("md-viewer").setup({})
