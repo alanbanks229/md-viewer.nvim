@@ -16,6 +16,7 @@ local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
 local source = require("md-viewer.source")
 local remote_assets = require("md-viewer.remote_assets")
+local resident = require("md-viewer.resident")
 
 local M = {}
 local group
@@ -35,6 +36,26 @@ end
 local function markdown(session) return table.concat(vim.api.nvim_buf_get_lines(session.source_buf, 0, -1, false), "\n") end
 
 local function notify_error(message) vim.notify("md-viewer: " .. tostring(message), vim.log.levels.ERROR) end
+
+---Attribute what a backend operation actually wrote to the terminal to this
+---session.
+---
+---`last_png_bytes` is the largest part of a frame but never the whole of it: the
+---placements that position it, the deletions that supersede them, and the
+---overlay rectangles composited on top are bytes on the same pty. Over SSH that
+---pty is the constraint, so counting only the PNG is how "the payload fell to
+---zero" can be true while the traffic did not -- the second-largest-item trap
+---docs/local-render-design.md records being caught by once already.
+---
+---A no-op for a backend that reports nothing, which is every backend but
+---kitty_raw. `kitty_raw.ui_bytes_total()` is the process-wide total these
+---per-session shares are a subset of.
+local function record_ui_bytes(session, stats)
+  local bytes = type(stats) == "table" and tonumber(stats.bytes) or nil
+  if not bytes then return end
+  session.ui_bytes_total = (session.ui_bytes_total or 0) + bytes
+  session.last_ui_bytes = bytes
+end
 
 local function current_session(buf)
   buf = buf or vim.api.nvim_get_current_buf()
@@ -59,10 +80,75 @@ end
 
 function M.clear_selection_overlay(session) clear_selection_overlay(session) end
 
+---Give up every resident region's pixels.
+---
+---The counterpart to `backend.hide`, and the distinction matters: hiding takes
+---an image off the screen and keeps it, this frees it. Only the paths that end a
+---session's claim on the terminal's memory belong here -- closing, retargeting
+---to another document, and falling back -- because everything else will want
+---those pixels again within seconds.
+---
+---Deliberately **not** called on a renderer restart. The regions are pixels the
+---terminal already holds, keyed by content revision, and a restarted renderer
+---rebuilds the same document from the same buffer -- so they stay correct and
+---survive for free. `animation.lua` keeps its terminal-resident uploads across a
+---restart on exactly this reasoning ("uploads survive by stable content key").
+local function free_resident(session)
+  local state_ = session.resident
+  if not (state_ and session.backend) then return end
+  for _, region in ipairs(resident.drain(state_)) do
+    if region.image_id and session.backend.clear then pcall(session.backend.clear, region.image_id) end
+  end
+end
+
+function M.free_resident(session) free_resident(session) end
+
+---Is this image one the resident cache is still counting on?
+local function resident_holds(live, image_id)
+  if not (live and image_id) then return false end
+  for _, region in ipairs(live.regions) do
+    if region.image_id == image_id then return true end
+  end
+  return false
+end
+
+---Nothing this session owns is on the screen any more. Placement state only --
+---the pixels are a separate question, and `clear_image` answers it.
+local function mark_regions_unplaced(session)
+  local live = session.resident
+  if not live then return end
+  for _, region in ipairs(live.regions) do
+    region.placed = false
+  end
+end
+
+-- The hit path, defined with the rest of the resident policy further down.
+-- Declared here because restoring a preview is one of the things it answers,
+-- and `show_cached` -- which sits between the two -- is what asks.
+local try_pan
+
 local function clear_image(session)
   clear_selection_overlay(session)
   M.clear_caret_overlay(session)
-  if session.image_id and session.backend then session.backend.clear(session.image_id) end
+  if session.image_id and session.backend then
+    -- A resident region comes off the *screen*, not out of the terminal. Every
+    -- reason a preview stops being drawn is temporary -- a focusable float, a
+    -- tab switch, a completion popup, a suspend -- and freeing several viewports
+    -- of pixels the terminal has not forgotten means paying to send them all
+    -- again seconds later, over the one link this whole feature exists to spare.
+    -- `free_resident` stays the only thing that gives a region's pixels back.
+    local hide = resident_holds(session.resident, session.image_id) and session.backend.hide
+    local hidden, stats
+    if hide then
+      hidden, stats = select(2, pcall(hide, session.image_id))
+    end
+    if hidden then
+      record_ui_bytes(session, stats)
+      mark_regions_unplaced(session)
+    else
+      session.backend.clear(session.image_id)
+    end
+  end
   session.image_id = nil
   session.last_placement = nil
   animation.clear(session)
@@ -100,23 +186,58 @@ end
 ---render/capture path and `display_interact_result`'s interact path funnel
 ---through, so there is exactly one place that knows how to show/update a
 ---backend image.
-local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
+local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder, opts)
+  opts = opts or {}
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
   session.preview_width_cells = placement.width
   session.preview_height_cells = placement.height
   local image_started = vim.uv.hrtime()
-  local ok, image_id, image_err = pcall(function()
-    if session.image_id then return session.backend.update(session.image_id, image_bytes, placement) end
-    return session.backend.show(image_bytes, placement)
+  local ok, image_id, image_stats = pcall(function()
+    -- `opts.source` shows only part of the image, for one taller than the
+    -- viewport.
+    --
+    -- Whether to keep the image being replaced is deliberately *not* a caller's
+    -- choice. It is either one the resident cache still holds -- in which case
+    -- freeing it leaves the cache pointing at pixels the terminal has been told
+    -- to forget, and the next pan fails on an image nobody owns -- or it is
+    -- nothing to anybody, in which case the ordinary free is right. There is no
+    -- third case, so deriving it here is what makes "a resident region is never
+    -- freed as a side effect" structural rather than remembered at five call
+    -- sites, two of which had already forgotten.
+    if session.image_id then
+      return session.backend.update(session.image_id, image_bytes, placement, {
+        source = opts.source,
+        retain_superseded = resident_holds(session.resident, session.image_id),
+      })
+    end
+    return session.backend.show(image_bytes, placement, opts.source)
   end)
   if not ok or not image_id then
     session.render_failed = true
-    notify_error(ok and (image_err or "failed to display rendered image") or image_id)
+    -- On the failure branch the second value is a reason string, not stats.
+    notify_error(ok and (image_stats or "failed to display rendered image") or image_id)
     return false
   end
   session.last_image_update_ms = (vim.uv.hrtime() - image_started) / 1000000
+  record_ui_bytes(session, image_stats)
+  -- Every frame is a measurement of the same wire, and the ordinary ones are the
+  -- better sample: there are many of them and they all precede the first region
+  -- fill, which is the payload the estimate has to be ready for. A fill folds in
+  -- its own sample afterwards, once it has been charged the hold this one
+  -- produced -- charging it against its own measurement would be circular.
+  if session.resident and not opts.resident_fill then
+    resident.note_wire_sample(session.resident, session.last_ui_bytes, session.last_image_update_ms)
+  end
+  -- What the terminal actually holds, from the PNG header the backend already
+  -- parsed rather than from the scale this frame asked for. The two disagree on
+  -- the Playwright fallback path, which cannot express a sub-1x factor, so the
+  -- measured value is the only one geometry may be derived from.
+  if type(image_stats) == "table" then
+    session.image_width_px = image_stats.width_px
+    session.image_height_px = image_stats.height_px
+  end
   if png_bytes then session.last_png_bytes = png_bytes end
   if capture_ms then session.last_capture_ms = capture_ms end
   if capture_scale then session.last_capture_scale = capture_scale end
@@ -152,7 +273,13 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
       session.fast_interval_count = (session.fast_interval_count or 0) + 1
     end
     session.fast_last_ns = now
-  elseif capture_scale == "device" then
+  elseif capture_scale == "device" and not opts.resident_fill then
+    -- A region fill is captured at the device tier too, and is emphatically not
+    -- a settle frame: it is several viewports tall, so averaging it in here
+    -- would report the sharp-frame cost as several times what a reader actually
+    -- waits for. It would also make the adaptive cap self-referential, since the
+    -- cap is a multiple of this number -- a region measured against three of
+    -- itself is never too large. The fill's own size is `resident.fill_png_bytes`.
     session.retina_png_bytes = session.last_png_bytes
     session.retina_capture_ms = session.last_capture_ms
     session.retina_image_update_ms = session.last_image_update_ms
@@ -294,6 +421,11 @@ function M.display_selection_overlay(session, result)
   session.overlay_last_bytes = type(stats) == "table" and stats.bytes or nil
   session.overlay_last_ms = (vim.uv.hrtime() - started) / 1000000
   session.overlay_last_error = nil
+  -- The overlay exists to replace a captured frame with a few hundred bytes of
+  -- placements, so it has to be inside the same total the frame it replaced was
+  -- counted in -- otherwise the saving it makes is invisible to the one number
+  -- that could confirm it.
+  record_ui_bytes(session, stats)
   return true
 end
 
@@ -329,7 +461,7 @@ function M.display_caret_overlay(session, tint, sheet_png)
   end
   session.caret_tint = tint or session.caret_tint
   if not session.caret_tint then return false end
-  local ok, set_id = pcall(
+  local ok, set_id, stats = pcall(
     backend.overlay_apply,
     session.caret_overlay_set,
     session.image_id,
@@ -343,10 +475,16 @@ function M.display_caret_overlay(session, tint, sheet_png)
     -- "need_sheet" is expected once per colour. The sheet is the renderer's to
     -- build, so the next motion asks for one by carrying the tint again; until
     -- then the caret is simply not drawn, which is honest rather than wrong.
-    session.caret_overlay_error = ok and set_id or tostring(set_id)
+    --
+    -- The reason is `overlay_apply`'s *second* return, not its first. Reading it
+    -- from `set_id` recorded the literal string "nil" for every refusal the
+    -- backend declined politely -- so the one case this field exists to explain
+    -- was the one case it could not.
+    session.caret_overlay_error = ok and (stats or "overlay refused") or tostring(set_id)
     return false
   end
   session.caret_overlay_set = set_id
+  record_ui_bytes(session, stats)
   session.caret_overlay_error = nil
   -- The block is on screen now, so Neovim's own cursor would be a second,
   -- differently-sized caret sitting somewhere else. Hidden here, at the one
@@ -426,7 +564,14 @@ function M.display_interact_result(session, result)
 end
 
 local function show_cached(session)
-  if not valid(session) or session.backend.name == "cells" or not session.last_image_bytes then return false end
+  if not valid(session) or session.backend.name == "cells" then return false end
+  -- A resident region goes back with a placement command and no pixels at all:
+  -- it never left the terminal, only the screen. Tried before the cached PNG and
+  -- not after, because the cached PNG is an *older* frame -- a region that has
+  -- been panned within has moved on from whenever that capture was taken, so
+  -- restoring the cache would silently put the reader back there.
+  if try_pan(session) then return true end
+  if not session.last_image_bytes then return false end
   if update_occlusion(session) then
     clear_image(session)
     return false
@@ -434,12 +579,13 @@ local function show_cached(session)
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
-  local ok, image_id, image_err = pcall(session.backend.show, session.last_image_bytes, placement)
+  local ok, image_id, image_stats = pcall(session.backend.show, session.last_image_bytes, placement)
   if not ok or not image_id then
     session.render_failed = true
-    notify_error(ok and (image_err or "failed to display cached image") or image_id)
+    notify_error(ok and (image_stats or "failed to display cached image") or image_id)
     return false
   end
+  record_ui_bytes(session, image_stats)
   session.image_id = image_id
   session.last_placement = placement
   -- This path does not go through `apply_image`, so nothing else would put the
@@ -456,6 +602,209 @@ local function show_cached(session)
     M.schedule(session, 0)
   end
   return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Resident regions: policy.
+--
+-- The split this file keeps to: `md-viewer.resident` answers "does this region
+-- cover that scroll, and which pixels of it are the viewport" with no Neovim in
+-- it; `backends/kitty_raw` answers "upload, place with this crop, delete" with
+-- no idea what a scroll is; and everything between -- is this a hit, may we fill,
+-- what has to be freed, when do we give up -- is here.
+-- ---------------------------------------------------------------------------
+
+-- Defined further down, beside `scroll_settle_delay`, which they need and which
+-- belongs with the capture-scale rule it is the twin of. Declared here because
+-- `M.refresh` -- which sits between the two -- is what calls them.
+local hold_wire, cap_region_png, settle_options
+
+---Whether this session may keep resident regions at all, and why not when it
+---may not. Evaluated once, when the preview opens.
+local function resident_gate(session)
+  local cfg = config.get()
+  if not session.backend or session.backend.name ~= "kitty_raw" then
+    return false, ("backend %s cannot crop placements"):format(session.backend and session.backend.name or "none")
+  end
+  local supported, reason = session.backend.resident_pan_supported()
+  if not supported then return false, reason end
+  -- The same rule, and the same reason, as the moving frame's scale
+  -- (`scroll_capture_scale`): what this trades terminal memory for is wire time,
+  -- and wire time only exists over SSH. A local terminal receives a frame for
+  -- free, so holding megabytes to avoid sending one would be a pure loss.
+  --
+  -- `terminal.detect().ssh` answers for the transport Neovim itself runs over
+  -- and never for a buffer's origin, so a remote document opened in a local
+  -- Neovim keeps the full-quality path -- the boundary
+  -- tests/lua/cases/scroll_scale.lua pins between the two remote features.
+  local capability = terminal.detect()
+  if not capability.ssh then return false, "local session (no wire time to save)" end
+  if capability.multiplexer ~= "none" then
+    return false, ("multiplexer %s is not validated for resident panning"):format(capability.multiplexer)
+  end
+  if (cfg.image.resident_budget_px or 0) <= 0 then return false, "image.resident_budget_px is zero" end
+  return true, reason
+end
+
+---Everything that must match for a region to still describe this document.
+local function resident_key(session)
+  local render = config.get().render
+  return resident.key({
+    document_id = session.document_id,
+    renderer_revision = session.renderer_revision,
+    viewport_width_px = session.viewport_width_px,
+    viewport_height_px = session.viewport_height_px,
+    theme = render.theme,
+    background = vim.o.background,
+    font_size_px = render.font_size_px,
+    scroll_past_end = render.scroll_past_end,
+    scroll_past_end_offset_px = render.scroll_past_end_offset_px,
+    device_scale_factor = render.device_scale_factor,
+  })
+end
+
+---Stop trying, for the life of this session, and give the pixels back.
+---
+---One-way on purpose. Every reason to fall back is a reason to distrust the
+---machinery rather than the moment -- a refused crop, a capture Chromium will
+---not take, metadata that does not add up -- and a gate that re-armed itself
+---would rediscover the same defect on every scroll. The reason is reported in
+---`:MdViewerDebug`, which is the only way anyone finds out.
+local function resident_fallback(session, reason)
+  local live = session.resident
+  if not live or live.fallback_reason then return end
+  live.fallback_reason = reason or "unspecified"
+  live.enabled = false
+  free_resident(session)
+end
+
+---Drop every region and remember the key they were replaced by.
+local function resident_invalidate(session, key)
+  local live = session.resident
+  free_resident(session)
+  live.key = key
+end
+
+---Show an already-resident region at the newest scroll position, if one covers
+---it. This is the whole optimization: no renderer request, no capture, no image
+---bytes -- a few hundred bytes of placement commands and the terminal pans
+---pixels it is already holding.
+---
+---Returns false for every reason not to, and every one of them lands on exactly
+---the behaviour that existed before this feature.
+function try_pan(session)
+  local live = session.resident
+  if not (live and live.enabled) or live.fallback_reason then return false end
+  if not valid(session) or session.backend.name ~= "kitty_raw" then return false end
+  if not (session.viewport_width_px and session.viewport_height_px and session.renderer_revision) then return false end
+
+  -- Browser-painted state a clean region does not carry. Find marks and a
+  -- committed selection live in the DOM and are baked into the frame that shows
+  -- them; a resident region was captured without either. Panning to it would
+  -- silently erase a highlight the reader can see, so scrolling keeps its old
+  -- behaviour until they clear it. Refusing to *fill* while these are up is not
+  -- sufficient on its own -- a region captured before the search is still valid
+  -- by key, and would be eligible to pan straight over the marks.
+  if session.find_active then
+    live.blocked_by_find = live.blocked_by_find + 1
+    return false
+  end
+  if session.selection_active then
+    live.blocked_by_selection = live.blocked_by_selection + 1
+    return false
+  end
+  -- A drag resolves its rectangles against the scroll the frame on screen shows
+  -- and refuses a disagreement over half a pixel, so moving the page underneath
+  -- one would fail every overlay frame of the gesture.
+  if session.pointer then return false end
+  if update_occlusion(session) then return false end
+
+  local key = resident_key(session)
+  if live.key ~= key then
+    resident_invalidate(session, key)
+    return false
+  end
+
+  local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
+  local desired = session.scroll_y or 0
+  local region = resident.find(live, desired, viewport.heightPx, key)
+  if not region then
+    live.misses = live.misses + 1
+    return false
+  end
+  local source, applied = resident.source_window(region, desired, viewport)
+  if not source then
+    live.misses = live.misses + 1
+    return false
+  end
+
+  local placement = preview.placement(session.preview_win, session.backend.name)
+  local previous = session.image_id
+  local restoring = previous ~= region.image_id
+  local ok, moved, stats = pcall(session.backend.move, region.image_id, placement, source)
+  if not ok or not moved then
+    resident_fallback(session, ok and (stats or "placement refused") or tostring(moved))
+    return false
+  end
+
+  -- Whatever was on screen before, if it was not itself a region, is now
+  -- unreferenced. Freed *after* the replacement is up, never before: deleting
+  -- first leaves the terminal a moment with nothing to composite, which is the
+  -- blink `M.move` documents at length.
+  if previous and restoring and not resident_holds(live, previous) then pcall(session.backend.clear, previous) end
+  for _, other in ipairs(live.regions) do
+    other.placed = other == region
+  end
+
+  record_ui_bytes(session, stats)
+  live.placement_bytes = live.placement_bytes + (type(stats) == "table" and stats.bytes or 0)
+  live.hits = live.hits + 1
+  if restoring then
+    live.unplaced_places = live.unplaced_places + 1
+  else
+    live.pans = live.pans + 1
+  end
+
+  session.image_id = region.image_id
+  session.last_placement = placement
+  session.image_width_px, session.image_height_px = region.image_w, region.image_h
+  -- The scroll the pixels genuinely show, snapped to a whole image pixel. Three
+  -- things read this as exactly that -- the caret's drift, the animation layer's
+  -- placement, and the scroll every interact request carries -- so recording the
+  -- requested position instead would put all three fractionally out.
+  session.applied_scroll_y = applied
+  preview.stop_loading(session)
+  -- Same order `apply_image` establishes after a new frame lands: the overlays
+  -- were measured against geometry that has just moved, and the caret is redrawn
+  -- immediately so it survives the pan without a round trip or a flicker.
+  clear_selection_overlay(session)
+  M.clear_caret_overlay(session)
+  M.place_caret(session)
+  animation.repaint(session)
+  return true
+end
+
+---Turn a completed region capture into a region record, or say why not.
+---
+---The dimensions come from the PNG's own header rather than from the scale that
+---was requested, and the document rectangle from what the renderer says it
+---actually captured rather than from what was asked for -- the renderer clamps a
+---region to the document's end, and a region that believed the request would
+---misplace every crop in a document's last screen.
+local function region_from_fill(session, image_bytes, meta)
+  if type(meta.regionYPx) ~= "number" or type(meta.regionHeightPx) ~= "number" then
+    return nil, "renderer reported no captured region"
+  end
+  local width_px, height_px = session.backend.png_dimensions(image_bytes)
+  if not width_px then return nil, "region PNG has no readable dimensions" end
+  return resident.region({
+    doc_y = meta.regionYPx,
+    doc_h = meta.regionHeightPx,
+    css_w = session.viewport_width_px,
+    image_w = width_px,
+    image_h = height_px,
+    key = resident_key(session),
+  })
 end
 
 function M.refresh(session, render_options)
@@ -489,8 +838,35 @@ function M.refresh(session, render_options)
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
-  renderer.request(session, markdown(session), render_options, function(result, err, stale)
+  -- A fill occupies the one fill slot from here -- the point the request is
+  -- genuinely issued, past every early return above -- rather than from where
+  -- its options were built. Claiming the slot at planning time was enough to
+  -- deny it to the fill that actually went out: the settle timer re-plans on
+  -- every scroll event, so the first event of a burst took the slot and the last
+  -- one, the only one that fires, found it taken.
+  local filling = render_options and render_options.resident_fill and session.resident or nil
+  local fill_token
+  if filling then
+    filling.fill.token = (filling.fill.token or 0) + 1
+    fill_token = filling.fill.token
+    filling.fill.in_flight = true
+    -- The document this region will be pixels *of*, recorded now. Compared again
+    -- when the capture lands, because between the two the viewport can change
+    -- underneath it -- this same callback adopts the renderer's viewport before
+    -- the region is built, so a key computed only at the end would stamp a
+    -- resized document's identity onto pixels of the old one.
+    filling.fill.key = resident_key(session)
+    filling.fill.doc_y = render_options.capture_region and render_options.capture_region.yPx
+    filling.fill.doc_h = render_options.capture_region and render_options.capture_region.heightPx
+    filling.desired_scroll_y = session.scroll_y or 0
+  end
+  renderer.request(session, markdown(session), render_options, function(result, err, stale, info)
     local function finish()
+      -- Released by every route out of this callback -- superseded, failed,
+      -- discarded, displayed -- and only by the fill that is actually holding
+      -- it. Releasing only on success is how one failed capture would disable
+      -- region fills for the rest of a session with nothing on screen to say so.
+      if filling and filling.fill.token == fill_token then filling.fill.in_flight = false end
       if render_options and render_options.on_complete then render_options.on_complete(stale, err) end
     end
     if not valid(session) then
@@ -498,7 +874,46 @@ function M.refresh(session, render_options)
       return
     end
     if stale then
+      -- A newer request of any kind supersedes this one, and for a fill that is
+      -- a whole region's capture thrown away. It costs no wire -- nothing was
+      -- uploaded -- but it is worth seeing, because a session where every fill
+      -- is superseded is a session that never gets a region at all.
+      if filling then filling.stale_fills = filling.stale_fills + 1 end
       finish()
+      return
+    end
+    -- A region the renderer will not capture at the size that was asked for.
+    -- Handled ahead of the generic error branch because it is not a render
+    -- failure: the preview on screen is untouched and the reader has nothing to
+    -- be told. Ask once for half as much, and only give up if that is refused
+    -- too -- at which point the geometry is beyond what this Chromium will take
+    -- at all, and no smaller region is going to change that.
+    if filling and info and info.code == "REGION_TOO_LARGE" then
+      -- First, because planning the replacement asks whether a fill is already
+      -- in flight -- and this one is, until it is finished with.
+      finish()
+      if filling.region_shrinks >= 1 then
+        resident_fallback(session, "renderer refused the region twice: " .. tostring(err))
+        return
+      end
+      filling.region_shrinks = filling.region_shrinks + 1
+      filling.height_scale = math.max(resident.MIN_HEIGHT_SCALE, filling.height_scale * 0.5)
+      filling.height_reduced = filling.height_reduced + 1
+      local retry = settle_options(session)
+      if not retry.capture_region then
+        -- Halving left nothing worth having, which at a small budget is the
+        -- ordinary outcome: half a region is under a viewport, and a region that
+        -- cannot hold the viewport can never be a hit. Said out loud rather than
+        -- left to plan nothing on every settle for the rest of the session.
+        resident_fallback(
+          session,
+          ("renderer refused the region and no smaller one fits (%s)"):format(filling.plan_refusal or tostring(err))
+        )
+        return
+      end
+      -- Immediately, rather than waiting for the reader to scroll again: they
+      -- have already stopped, which is the whole condition a settle waits for.
+      M.schedule(session, 0, "scroll_settle_timer", retry)
       return
     end
     if err then
@@ -523,8 +938,17 @@ function M.refresh(session, render_options)
     -- Preserve a newer requested position while showing this completed frame.
     -- The next capture then uses the desired position instead of snapping back
     -- to the older frame's scrollY.
-    if not newer_scroll_pending then session.scroll_y = meta.scrollY end
-    session.applied_scroll_y = meta.scrollY
+    --
+    -- A fill writes neither. It is a cache load, not a navigation: it was
+    -- requested from wherever the reader happened to be, and they are free to
+    -- have moved on while it captured -- a resident hit issues no request, so a
+    -- fill is not superseded by scrolling that lands inside a region. Writing
+    -- `scroll_y` here would drag them back to where the fill started. Writing
+    -- `applied_scroll_y` would be worse: its pixels are not on screen yet and
+    -- may never be, and the caret and the animation layer are both placed from
+    -- it. It is set once, below, if the region is actually displayed.
+    if not (newer_scroll_pending or filling) then session.scroll_y = meta.scrollY end
+    if not filling then session.applied_scroll_y = meta.scrollY end
     session.last_layout_reused = meta.layoutReused == true
     session.last_markdown_reused = meta.markdownReused == true
     session.last_capture_scale = meta.captureScale
@@ -589,7 +1013,11 @@ function M.refresh(session, render_options)
         M.schedule(session, 0)
       end)
     end
-    session.last_image_bytes = result.image
+    -- A region fill is not a frame; it is an image several viewports tall that
+    -- the terminal will hold and be re-cropped within. Caching it as
+    -- `last_image_bytes` would have `show_cached` later restore it as though it
+    -- were one viewport -- the whole range squashed into the split.
+    if not filling then session.last_image_bytes = result.image end
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
     -- replacement whenever a selection-free frame does reach the screen.
@@ -599,6 +1027,90 @@ function M.refresh(session, render_options)
       finish()
       return
     end
+
+    if filling then
+      local live = session.resident
+      live.fills = live.fills + 1
+      live.fill_png_bytes = session.last_png_bytes
+      live.fill_capture_ms = session.last_capture_ms
+      -- The document these pixels are of, against the document there is now.
+      -- The request serial catches most disagreements, but not the one this
+      -- callback creates itself: it adopts the renderer's viewport a few dozen
+      -- lines above, so a preview resized while the region captured changes the
+      -- key here, between the capture and the region built from it. A region
+      -- stamped with the new key and filled with the old document's pixels is
+      -- the one failure this whole cache must not be able to produce.
+      if live.fill.key and live.fill.key ~= resident_key(session) then
+        live.stale_fills = live.stale_fills + 1
+        finish()
+        return
+      end
+      local region, region_reason = region_from_fill(session, result.image, meta)
+      if not region then
+        -- Not a transient failure: the renderer or the image is not answering in
+        -- a shape the coordinate model can use, and retrying would rediscover
+        -- that on every settle.
+        resident_fallback(session, region_reason)
+        finish()
+        return
+      end
+      local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
+      local source, applied = resident.source_window(region, session.scroll_y or 0, viewport)
+      if not source then
+        -- The reader left the range while this captured. Discarded rather than
+        -- uploaded-and-kept: a region the viewport is not inside is several
+        -- hundred kilobytes of wire spent on pixels nobody is looking at, and on
+        -- the link this exists for that is the most expensive thing it could
+        -- possibly do. Dropping it here costs nothing at all -- the capture
+        -- never left the VM. Counted apart from `stale_fills` because it means
+        -- something different: this fill was never wrong, only overtaken.
+        live.abandoned_fills = live.abandoned_fills + 1
+        finish()
+        return
+      end
+      if
+        not apply_image(
+          session,
+          result.image,
+          meta.captureScale,
+          session.last_png_bytes,
+          session.last_capture_ms,
+          meta.captureEncoder,
+          { source = source, resident_fill = true }
+        )
+      then
+        finish()
+        return
+      end
+      region.image_id = session.image_id
+      region.placed = true
+      session.applied_scroll_y = applied
+      local emitted = session.last_ui_bytes or 0
+      live.upload_bytes = live.upload_bytes + emitted
+      hold_wire(session, emitted, session.last_image_update_ms)
+      -- Fold this payload in only now, after it has been charged the hold the
+      -- *previous* frames predicted. Estimating from a payload and then holding
+      -- that same payload against its own estimate is circular, and the answer
+      -- it converges on is "however long the write happened to block".
+      resident.note_wire_sample(live, emitted, session.last_image_update_ms)
+      cap_region_png(session)
+      local stored, evicted, insert_reason = resident.insert(live, region)
+      for _, gone in ipairs(evicted) do
+        if gone.image_id and gone.image_id ~= region.image_id then pcall(session.backend.clear, gone.image_id) end
+      end
+      -- A region that cannot be kept is still on screen and still correct; it
+      -- simply will not be there for the next scroll, which is the ordinary
+      -- capture path rather than a defect. The next `apply_image` frees its
+      -- image, since nothing in the cache holds it.
+      live.last_insert_refusal = stored and nil or insert_reason
+      live.key = region.key
+      for _, other in ipairs(live.regions) do
+        other.placed = other == region
+      end
+      finish()
+      return
+    end
+
     if
       not apply_image(
         session,
@@ -616,10 +1128,19 @@ function M.refresh(session, render_options)
   end)
 end
 
+---`render_options` may be a function, and is then resolved when the timer fires
+---rather than when it is armed. The settle timer needs that and nothing else
+---does: it is re-armed by every scroll event in a burst, so options built at arm
+---time describe where the reader was when the burst *started*. For the sharp
+---viewport frame that made no difference -- the request carries no position of
+---its own, and `session.scroll_y` is read at send time. For a region fill it is
+---the whole thing: the region is anchored around the scroll it was planned at,
+---so planning at arm time would centre it a full burst behind the reader.
 function M.schedule(session, delay, timer_name, render_options)
   if not valid(session) then return end
   debounce.call(session, timer_name or "render_timer", delay or config.get().render.debounce_ms, function()
-    if valid(session) then M.refresh(session, render_options) end
+    if not valid(session) then return end
+    M.refresh(session, type(render_options) == "function" and render_options(session) or render_options)
   end)
 end
 
@@ -665,7 +1186,161 @@ local function scroll_settle_delay(render)
   return render.scroll_settle_ms, "render.scroll_settle_ms"
 end
 
+---How many settle frames a region may cost before it is judged too large.
+---
+---A multiple rather than a byte count, because what a viewport costs to encode
+---is a property of the document: a page of prose and a page of syntax-
+---highlighted code are not within a factor of each other, and a constant here
+---would be wrong for every document but the one it was measured on. Three is the
+---worst-case stall this accepts -- a reader who crosses a region boundary waits
+---roughly as long as three sharp frames, which is the same order as the settle
+---behaviour they already have, rather than the 5.7 seconds an unbounded eight
+---viewports would cost on the 0.80 MB/s link (scripts/resident/probe.mjs).
+local REGION_PNG_CAP_FRAMES = 3
+
+---Keep the wire to this session's region upload for as long as it is likely to
+---still be crossing it.
+---
+---The invariant this exists to hold: **at most one image payload outstanding per
+---session**. Nothing else enforces it. `scroll_render_in_flight` clears when the
+---*capture* completes, which on this link is an order of magnitude sooner than
+---the bytes arrive, and `nvim_ui_send` cannot be taken back once it has them --
+---so without a hold, a region draining for a second collects every moving frame
+---produced during that second, behind it, at positions the reader has left. That
+---is precisely the backlog this whole feature exists to remove, rebuilt by the
+---feature itself.
+function hold_wire(session, bytes, elapsed_ms)
+  local live = session.resident
+  if not live then return end
+  local settle = scroll_settle_delay(config.get().render)
+  live.upload_hold_ms = resident.wire_hold_ms(bytes, live.wire_bytes_per_ms, elapsed_ms, settle, settle * 2)
+  live.upload_hold_until = vim.uv.now() + live.upload_hold_ms
+end
+
+---Shrink future regions if this one encoded larger than the cap.
+---
+---A hold is damage control -- it stops a big payload collecting a queue. This is
+---prevention: it stops the payload being big. Both are needed, because a hold
+---long enough to cover a genuinely oversized region is a hold long enough for
+---the reader to notice.
+function cap_region_png(session)
+  local live = session.resident
+  local baseline = session.retina_png_bytes
+  -- No sharp frame measured yet means no basis to judge against. A region is not
+  -- compared to itself: `apply_image` keeps fills out of `retina_png_bytes`
+  -- exactly so this number stays the cost of one *viewport*.
+  if not (live and baseline and baseline > 0) then return end
+  local reduced = resident.png_cap_scale(live.height_scale, live.fill_png_bytes, baseline * REGION_PNG_CAP_FRAMES)
+  if reduced < live.height_scale then
+    live.height_scale = reduced
+    live.height_reduced = live.height_reduced + 1
+  end
+end
+
+---What the settle timer should ask for once scrolling stops.
+---
+---Ordinarily the sharp viewport frame it has always taken. On a session keeping
+---resident regions the *same* request becomes a region fill instead: one
+---capture, a couple of viewports tall, after which scrolling inside it needs no
+---capture at all. One request either way -- the settle is repurposed, not
+---doubled up, so a miss costs what it always cost plus the region's extra
+---height and nothing more.
+---
+---Falls back to the plain settle whenever a region would be wrong to take: while
+---a selection or a search is painted into the document (a region outlives the
+---frame it was captured with by minutes, so either would become a highlight that
+---never clears), while a fill is already in flight, and when no region worth
+---having fits the budget.
+---
+---Called when the settle timer *fires*, not when it is armed (see `M.schedule`),
+---so the region is planned around where the reader actually stopped.
+function settle_options(session)
+  local live = session.resident
+  local plain = { capture_scale = "device", capture_only = true }
+  if not (live and live.enabled) or live.fallback_reason then return plain end
+  if session.selection_active or session.find_active or session.pointer then return plain end
+  if live.fill.in_flight then return plain end
+  if not (session.viewport_width_px and session.viewport_height_px and session.document_height_px) then return plain end
+
+  local render = config.get().render
+  local plan, refusal = resident.plan_region({
+    scroll_y = session.scroll_y or 0,
+    viewport_h = session.viewport_height_px,
+    viewport_w = session.viewport_width_px,
+    document_height_px = session.document_height_px,
+    -- The scale the capture will come back at. Measured from the last image when
+    -- there is one, because that is the only number that is right on both
+    -- encoder paths, and the configured factor only as a first guess.
+    scale = (session.image_width_px and session.viewport_width_px)
+        and (session.image_width_px / session.viewport_width_px)
+      or render.device_scale_factor,
+    -- Not the whole budget when this session has already been shown that its
+    -- regions encode larger than the budget assumed. The height is derived from
+    -- the budget, so shrinking what the planner may spend is what shrinks the
+    -- region -- and every other clamp, including the memory bound itself, still
+    -- applies to the result unchanged.
+    budget_px = live.budget_px * (live.height_scale or 1),
+    max_regions = live.max_regions,
+  })
+  if not plan then
+    live.plan_refusal = refusal
+    return plain
+  end
+  live.plan_refusal = nil
+
+  return {
+    capture_scale = "device",
+    capture_only = true,
+    capture_region = { yPx = plan.doc_y, heightPx = plan.doc_h },
+    -- The renderer has had a `settle` lane since the interaction work and has
+    -- never been sent one: `capture` has been carrying both the moving frames
+    -- and the settle frame, which invalidate each other. A fill is expensive
+    -- enough that losing it to the next wheel notch would be the whole cost of
+    -- the feature paid for nothing.
+    lane = "settle",
+    resident_fill = true,
+  }
+end
+
+---Is the wire still carrying this session's last region upload?
+---
+---Asked only after `try_pan` has declined, because a pan during a drain is not
+---merely allowed but preferred: it is a couple of hundred bytes that queue
+---trivially behind the region they crop into, and it shows the reader the
+---position they are actually at.
+---
+---A *miss* during a drain is the opposite. Adding an 80 KB frame behind a
+---draining 810 KB one does not make anything appear sooner; it makes it appear
+---later, and at a position the reader has already left by the time it lands. So
+---nothing is emitted -- not a request, not a byte -- and one resume is armed for
+---when the wire is free. Debounced by name, so a burst of twenty events during
+---one drain arms one resume rather than twenty, and it resumes at whatever the
+---newest position turns out to be rather than replaying the burst.
+local function hold_scroll(session)
+  local live = session.resident
+  if not (live and live.enabled) or live.fallback_reason then return false end
+  local remaining = (live.upload_hold_until or 0) - vim.uv.now()
+  if remaining <= 0 then return false end
+  live.desired_scroll_y = session.scroll_y or 0
+  live.frames_suppressed_by_hold = live.frames_suppressed_by_hold + 1
+  -- The same counter the ordinary in-flight coalescing uses: from the reader's
+  -- side both are "a scroll event that produced no frame of its own", and
+  -- splitting them in the headline number would understate how much of the
+  -- traffic this removes.
+  session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
+  debounce.call(session, "resident_hold_timer", remaining, function()
+    if valid(session) then M.schedule_scroll(session) end
+  end)
+  return true
+end
+
 function M.schedule_scroll(session)
+  -- The hit path, and the point of all of this: the pixels for this position are
+  -- already in the terminal, so the newest scroll costs a placement command
+  -- rather than a capture, a transfer and a frame.
+  if try_pan(session) then return end
+  if hold_scroll(session) then return end
+
   local render = config.get().render
   local fast_scale = render.fast_scroll and "css" or "device"
   local scale_factor, scale_source = scroll_capture_scale(render)
@@ -703,10 +1378,10 @@ function M.schedule_scroll(session)
     local settle_ms, settle_source = scroll_settle_delay(render)
     session.scroll_settle_ms = settle_ms
     session.scroll_settle_source = settle_source
-    M.schedule(session, settle_ms, "scroll_settle_timer", {
-      capture_scale = "device",
-      capture_only = true,
-    })
+    -- Passed as a function, not a value: this is re-armed by every event in a
+    -- scroll burst, and a region planned at arm time would be anchored where the
+    -- burst started rather than where the reader stopped.
+    M.schedule(session, settle_ms, "scroll_settle_timer", settle_options)
   end
 end
 
@@ -727,6 +1402,7 @@ local function close_session(session, stop_opts)
     "render_timer",
     "resize_timer",
     "scroll_settle_timer",
+    "resident_hold_timer",
     "cursor_scroll_timer",
     "animation_geometry_timer",
     "remote_image_timer",
@@ -742,6 +1418,11 @@ local function close_session(session, stop_opts)
   preview.restore_cursor()
   caret.forget(session)
   clear_image(session)
+  -- After clear_image, not before: the image on screen may itself be a resident
+  -- region, and freeing the pixels out from under a live placement is the one
+  -- ordering that can leave the terminal drawing from an image it was told to
+  -- forget.
+  free_resident(session)
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
   state.remove(session.source_buf)
@@ -847,6 +1528,15 @@ function M.open(position)
   if remote_parsed then remote_attach(session, remote_parsed) end
   M.history_init(session)
   session.backend, session.backend_reason = backend, reason
+  -- Decided once, here, rather than re-derived on the scroll path: the answer
+  -- depends on a capability snapshot and a terminal profile, neither of which
+  -- changes under a session, and a reader asking `:MdViewerDebug` later wants to
+  -- know what this session actually did.
+  local resident_ok, resident_reason = resident_gate(session)
+  session.resident.enabled = resident_ok
+  session.resident.budget_px = config.get().image.resident_budget_px
+  session.resident.gate_reason = resident_reason
+  if not resident_ok then session.resident.fallback_reason = resident_reason end
   session.preview_buf, session.preview_win = preview.open(position, session)
   -- Size the caret surface now that the split has been created and resized;
   -- `preview.open` cannot do it itself, since the placement it measures needs
@@ -887,6 +1577,10 @@ function M.retarget(session, new_buf, record)
   if not state.retarget(session, new_buf) then return false end
   session.remote = nil
   if remote_parsed then remote_attach(session, remote_parsed) end
+  -- Every resident region belongs to the document being left. The key would
+  -- refuse them anyway -- `document_id` moves with the retarget -- but refusing
+  -- them is not the same as giving their pixels back, and nothing else would.
+  free_resident(session)
   session.request_serial = session.request_serial + 1
   session.render_epoch = (session.render_epoch or 0) + 1
   interaction.forget(session)
@@ -1174,15 +1868,18 @@ local function reconcile_placement(session, force)
   if not coordinates.window_is_displayed(session.preview_win) then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
   if force or not coordinates.same(session.last_placement, placement) then
-    local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
+    -- Third value is a stats table when `moved` is truthy and a reason string
+    -- when it is not; each branch below reads only the one it asked for.
+    local ok, moved, stats_or_err = pcall(session.backend.move, session.image_id, placement)
     if not ok then
       notify_error(moved)
       return
     end
     if not moved then
-      notify_error(err or "failed to update image placement")
+      notify_error(stats_or_err or "failed to update image placement")
       return
     end
+    record_ui_bytes(session, stats_or_err)
     -- The base just moved or re-cropped (a float opened or closed over it);
     -- overlay rectangles computed against the old placement are wrong now.
     -- Cleared after the move rather than re-derived: the next drag frame
@@ -1686,5 +2383,16 @@ end
 -- an intention.
 M._scroll_capture_scale = scroll_capture_scale
 M._scroll_settle_delay = scroll_settle_delay
+
+-- Exported for the same reason, and it is the same kind of rule: whether a
+-- session may keep resident regions depends on a live capability snapshot, a
+-- terminal profile and the transport Neovim is running over. Driving it through
+-- `M.open` would need a preview window, a backend and a renderer to reach a
+-- handful of conditions, and the one that matters most -- that a *remote
+-- document* in a *local* Neovim is not an SSH session -- is asserted directly in
+-- `tests/lua/cases/scroll_scale.lua` beside the identical rule for scroll scale.
+M._resident_gate = resident_gate
+M._settle_options = settle_options
+M._resident_key = resident_key
 
 return M

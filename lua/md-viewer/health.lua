@@ -217,6 +217,13 @@ function M.collect(renderer_result, renderer_error)
     raw_graphics_double_buffer_source = backend.kitty_raw.double_buffer_source,
     raw_graphics_cell_offset_px = backend.kitty_raw.cell_offset_px,
     raw_graphics_overlay_bleed_cells = backend.kitty_raw.overlay_bleed_cells,
+    -- Whether scrolling can be shown by re-cropping pixels the terminal already
+    -- holds instead of sending new ones. This is only the *terminal's* half of
+    -- the answer -- a session also has to be over SSH, outside a multiplexer and
+    -- have a budget -- so it says what this terminal is qualified for, not what
+    -- any particular preview is doing. `:MdViewerDebug` reports the other half.
+    raw_graphics_resident_pan = backend.kitty_raw.resident_pan,
+    raw_graphics_resident_pan_reason = backend.kitty_raw.resident_pan_reason,
     raw_graphics_owned_images = backend.kitty_raw.owned_images,
     raw_graphics_owned_placements = backend.kitty_raw.owned_placements,
     node_version = command({ "node", "--version" }) or "unavailable",
@@ -402,9 +409,13 @@ local function verbose_raw_graphics(report)
         report.raw_graphics_zindex
       )
     or ("off -- %s"):format(report.raw_graphics_animation_reason or "reason not reported")
+  local resident = report.raw_graphics_resident_pan
+      and "qualified (per-session: needs SSH, no multiplexer, and a budget)"
+    or ("off -- %s"):format(report.raw_graphics_resident_pan_reason or "reason not reported")
   return {
     { "overlay", overlay },
     { "animation", animation },
+    { "resident panning", resident },
     { "cell pixels", cell_pixels },
     { "base layer", ("%s (%s)"):format(report.raw_graphics_zindex, report.raw_graphics_zindex_source) },
     -- Printed as one ascending run rather than three separate numbers, because

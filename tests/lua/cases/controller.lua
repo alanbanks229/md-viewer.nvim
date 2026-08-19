@@ -112,10 +112,15 @@ return function(t)
   -- must also stay tracked on last_placement, since interaction.locate's
   -- click-resolution depends on it.
   local move_calls, moved_exclusions = 0, nil
+  -- The stub answers with a stats table, exactly as the raw Kitty backend does,
+  -- so the controller's byte attribution is exercised by the same float events
+  -- that exercise the re-crop itself rather than needing a case of its own.
+  local MOVE_BYTES = 137
+  local ui_bytes_before = session.ui_bytes_total or 0
   session.backend.move = function(image_id, moved_placement)
     move_calls = move_calls + 1
     moved_exclusions = #(moved_placement.exclusions or {})
-    return image_id
+    return image_id, { bytes = MOVE_BYTES }
   end
   t.eq(0, #(session.last_placement.exclusions or {}), "sanity: no exclusion before the notification opens")
   local notify_buf = vim.api.nvim_create_buf(false, true)
@@ -138,6 +143,16 @@ return function(t)
   t.eq(0, #(session.last_placement.exclusions or {}), "the exclusion is removed once the float closes")
   t.ok(move_calls > 0, "closing the passive float restores the uncropped image")
   t.eq(0, moved_exclusions, "the restoring re-crop carries no cutout")
+
+  -- Every byte a re-crop wrote is attributed to the session, which is what makes
+  -- "re-placing a resident image costs placements rather than pixels" a measured
+  -- claim instead of an intention. Opening and closing the float is at least two
+  -- moves; the ui_poll may add more, so this is a floor rather than an equality.
+  t.ok(
+    (session.ui_bytes_total or 0) >= ui_bytes_before + MOVE_BYTES * 2,
+    "the controller attributes each re-crop's byte count to the session"
+  )
+  t.eq(MOVE_BYTES, session.last_ui_bytes, "and records what the most recent write cost")
 
   -- A steady state with no float open must not churn: the 50ms ui_poll and
   -- every window event recompute the placement constantly, and an unchanged
@@ -192,7 +207,13 @@ return function(t)
   t.eq("css", scheduled.scroll_timer.options.capture_scale, "moving preview uses CSS-resolution frame")
   t.eq(true, scheduled.scroll_timer.options.capture_only, "scroll capture omits unchanged Markdown payload")
   t.eq(true, scheduled.scroll_timer.options.scroll_frame, "moving capture is identified for scroll ordering")
-  t.eq("device", scheduled.scroll_settle_timer.options.capture_scale, "settled preview restores Retina frame")
+  -- The settle timer is armed with a *function*, resolved when it fires. Every
+  -- event in a burst re-arms it, so options built at arm time would describe
+  -- where the reader was when the burst began -- which for a region fill is the
+  -- difference between caching what they are reading and what they scrolled past.
+  t.eq("function", type(scheduled.scroll_settle_timer.options), "the settle request is decided when the timer fires")
+  local settled = scheduled.scroll_settle_timer.options(session)
+  t.eq("device", settled.capture_scale, "settled preview restores Retina frame")
   t.ok(scheduled.scroll_timer.delay < scheduled.scroll_settle_timer.delay, "fast frame precedes settled frame")
 
   local fast_requests, latest_fast_options = 0, nil
@@ -541,6 +562,555 @@ return function(t)
     t.eq("device", session.clean_image_scale, "the capture scale rides along so the restore matches")
     t.eq(false, session.base_selection_painted, "the frame on screen is now known to be clean")
     t.eq(true, controller.restore_clean_base(session), "so the next drag has a base to composite over")
+
+    -- ------------------------------------------------------------------
+    -- Resident regions: a hit costs a placement, not a frame.
+    --
+    -- This is the acceptance test for the whole feature. Everything else
+    -- measures how much smaller a frame got; this measures that no frame was
+    -- produced at all -- no renderer request, no capture, no image bytes.
+    -- ------------------------------------------------------------------
+    local resident = require("md-viewer.resident")
+    local process = require("md-viewer.process")
+
+    -- Counted, and deliberately never forwarded: this measures whether a scroll
+    -- *asks* for a frame, and a real renderer round trip would add a Chromium
+    -- launch to a question that is answered before the request leaves Lua.
+    local requests, request_positions = 0, {}
+    local real_request = process.request
+    process.request = function(_, params)
+      requests = requests + 1
+      request_positions[#request_positions + 1] = params and params.scrollY
+      return 1
+    end
+
+    local moves, move_sources, uploads = 0, {}, 0
+
+    -- A miss leaves a capture in flight, and the next scroll is meant to
+    -- coalesce behind it rather than issue a second. That is the existing
+    -- backpressure, tested above; here it would mask what is being measured, so
+    -- each case starts from an idle pipeline.
+    local function scroll_to(position)
+      session.scroll_render_in_flight = false
+      session.scroll_render_pending = false
+      requests, moves, uploads, request_positions = 0, 0, 0, {}
+      session.scroll_y = position
+      controller.schedule_scroll(session)
+    end
+
+    session.backend.move = function(image_id, _, source)
+      moves = moves + 1
+      move_sources[#move_sources + 1] = source
+      return image_id, { bytes = 210 }
+    end
+    session.backend.show = function()
+      uploads = uploads + 1
+      return 4242, { bytes = 810000, width_px = 1980, height_px = 4040 }
+    end
+    session.backend.clear = function() return true end
+
+    session.viewport_width_px, session.viewport_height_px = 990, 1020
+    session.viewport_height_render_px = 1020
+    session.document_height_px = 10891
+    session.renderer_revision = "1:0"
+    session.selection_active, session.find_active, session.pointer = false, false, nil
+    session.base_selection_painted = false
+
+    local live = session.resident
+    live.enabled = true
+    live.fallback_reason = nil
+    live.budget_px = 8000000
+    live.key = controller._resident_key(session)
+    local region = assert(resident.region({
+      doc_y = 1000,
+      doc_h = 2020,
+      css_w = 990,
+      image_w = 1980,
+      image_h = 4040,
+      key = live.key,
+      image_id = 4242,
+    }))
+    assert(resident.insert(live, region))
+    session.image_id = 4242
+
+    -- A scroll to a position the region covers.
+    scroll_to(1500)
+    t.eq(0, requests, "a resident hit sends the renderer nothing at all")
+    t.eq(0, uploads, "and uploads no image")
+    t.eq(1, moves, "it is one placement command")
+    t.eq(1000, move_sources[1].y, "cropping 500 CSS px into the region, which is 1000 image px at scale 2")
+    t.eq(1500, session.applied_scroll_y, "and the position recorded is the one the pixels show")
+    t.eq(1, live.hits, "counted as a hit")
+    t.eq(210, live.placement_bytes, "with the bytes it actually cost")
+
+    -- Scrolling back is free too -- the case a smaller frame can never help
+    -- with, because the pixels have already been paid for.
+    scroll_to(1100)
+    t.eq(0, requests, "scrolling back through resident content is also free")
+    t.eq(200, move_sources[#move_sources].y, "and crops backwards within the same image")
+
+    -- Leaving the region is an ordinary miss, on exactly the path that existed
+    -- before any of this.
+    scroll_to(4000)
+    t.ok(requests > 0, "leaving the resident range falls through to a capture")
+    t.eq(0, moves, "and does not pretend to pan")
+    t.ok(live.misses > 0, "counted as a miss")
+
+    -- Browser-painted state that a clean region does not carry. Refusing to
+    -- *fill* while a search is up is not enough on its own: a region captured
+    -- before the search is still valid by key, so it would be eligible to pan
+    -- straight over the marks and erase them.
+    session.find_active = true
+    scroll_to(1500)
+    t.eq(0, moves, "an active search refuses to pan even over a region that covers the viewport")
+    t.ok(live.blocked_by_find > 0, "and says why")
+    t.ok(requests > 0, "falling through to the capture path that shows the marks")
+
+    session.find_active = false
+    session.selection_active = true
+    scroll_to(1400)
+    t.eq(0, moves, "a live selection refuses for the same reason")
+    t.ok(live.blocked_by_selection > 0, "and is counted separately")
+
+    -- Clearing it restores panning at no cost: the region was never discarded,
+    -- so the next scroll is a placement rather than a capture.
+    session.selection_active = false
+    scroll_to(1300)
+    t.eq(0, requests, "clearing the search or selection makes scrolling free again")
+    t.eq(1, moves, "at the cost of one placement")
+    t.eq(0, uploads, "and no re-upload -- the region was kept throughout")
+
+    -- New content supersedes every region, and the pixels go back.
+    local freed = {}
+    session.backend.clear = function(image_id)
+      freed[#freed + 1] = image_id
+      return true
+    end
+    session.renderer_revision = "2:0"
+    scroll_to(1200)
+    t.eq(0, moves, "a new content revision invalidates every region")
+    t.eq(0, #live.regions, "dropping them from the cache")
+    t.ok(vim.tbl_contains(freed, 4242), "and freeing their pixels rather than leaking them")
+    t.eq(0, live.used_px, "so the budget is given back")
+
+    -- ------------------------------------------------------------------
+    -- The wire: at most one image payload outstanding per session.
+    --
+    -- The renderer's `settle` lane stops a region fill and a moving capture
+    -- cancelling each other inside Node. It does not give them separate wires.
+    -- A region and the frames it replaces go through the same `nvim_ui_send`
+    -- queue into the same pty, and bytes handed to that queue cannot be
+    -- recalled -- so unless something declines to produce them, a region
+    -- draining for a second collects behind it every frame produced during that
+    -- second, each showing a position the reader has already left. That is the
+    -- backlog this whole feature exists to remove, rebuilt by the feature.
+    -- ------------------------------------------------------------------
+
+    -- The renderer owns this field and rewrites it on every completed request,
+    -- so a fill can only be tested against the revision it will actually be
+    -- given. Setting it to anything else makes every fill below correctly
+    -- discarded as stale, which is a real behaviour but not the one under test.
+    session.renderer_revision = ("%d:%d"):format(
+      vim.api.nvim_buf_get_changedtick(session.source_buf),
+      session.render_epoch or 0
+    )
+    live.key = controller._resident_key(session)
+    assert(resident.insert(
+      live,
+      assert(resident.region({
+        doc_y = 1000,
+        doc_h = 2020,
+        css_w = 990,
+        image_w = 1980,
+        image_h = 4040,
+        key = live.key,
+        image_id = 4242,
+      }))
+    ))
+    session.image_id = 4242
+
+    -- A pan during a drain is not merely allowed but preferred: two hundred
+    -- bytes queue trivially behind the region they crop into, and they show the
+    -- reader where they actually are.
+    live.upload_hold_until = vim.uv.now() + 120
+    scroll_to(1500)
+    t.eq(1, moves, "a pan during a region's drain is emitted rather than held")
+    t.eq(0, requests, "and still asks the renderer for nothing")
+    t.eq(0, live.frames_suppressed_by_hold, "so there was nothing to suppress")
+
+    -- A miss during a drain is the opposite. Twenty of them, which is what one
+    -- flick of a wheel produces.
+    requests, moves, uploads, request_positions = 0, 0, 0, {}
+    session.scroll_render_in_flight = false
+    session.scroll_render_pending = false
+    local coalesced_before = session.coalesced_scroll_events or 0
+    for i = 1, 20 do
+      session.scroll_y = 5000 + i
+      controller.schedule_scroll(session)
+    end
+    t.eq(0, requests, "twenty scroll events during one drain ask the renderer for nothing at all")
+    t.eq(0, uploads, "and put no second image on a wire that is already carrying one")
+    t.eq(0, moves, "and place nothing -- these are misses, outside the region")
+    t.eq(20, live.frames_suppressed_by_hold, "each counted as a frame that was not queued")
+    t.eq(20, (session.coalesced_scroll_events or 0) - coalesced_before, "and as a scroll that produced no frame")
+    t.eq(5020, live.desired_scroll_y, "with the newest position kept rather than the burst replayed")
+
+    -- And the anti-backlog assertion: the twenty become one.
+    t.ok(vim.wait(2000, function() return requests > 0 end, 5), "the hold expires and scrolling resumes on its own")
+    t.eq(1, requests, "as exactly one capture, not the twenty that were suppressed")
+    t.eq(5020, request_positions[1], "at the newest position rather than the oldest")
+    require("md-viewer.debounce").close(session, "scroll_settle_timer")
+
+    -- ------------------------------------------------------------------
+    -- The fill: one slot, claimed where the request is issued.
+    -- ------------------------------------------------------------------
+
+    live.upload_hold_until = 0
+    session.scroll_y = 1500
+    local first_plan = controller._settle_options(session)
+    t.ok(first_plan.capture_region ~= nil, "a settled scroll asks for a region rather than a viewport")
+    -- Planning must not claim the slot. The settle timer re-plans on every event
+    -- of a burst and fires once, so a slot taken at planning time is taken by an
+    -- event that issued nothing -- and denied to the one that did.
+    t.eq(false, live.fill.in_flight, "planning a region does not claim the fill slot")
+    session.scroll_y = 4000
+    local later_plan = controller._settle_options(session)
+    t.ok(
+      later_plan.capture_region.yPx > first_plan.capture_region.yPx,
+      "so a later event in the same burst still plans, around wherever the reader has got to"
+    )
+    live.fill.in_flight = true
+    t.eq(nil, controller._settle_options(session).capture_region, "but a fill already in flight refuses a second")
+    live.fill.in_flight = false
+
+    -- A fill, end to end. The viewport is pinned for the duration because this
+    -- callback adopts whatever the renderer reports, and a viewport that moved
+    -- would change the region key -- which is a real hazard, tested below on
+    -- purpose rather than by accident here.
+    local real_viewport = preview.viewport
+    local viewport_answer = { widthPx = 990, heightPx = 1020, tier = "measured" }
+    preview.viewport = function() return viewport_answer end
+
+    local pending
+    process.request = function(_, params, callback)
+      requests = requests + 1
+      request_positions[#request_positions + 1] = params and params.scrollY
+      pending = { params = params, callback = callback }
+      return 1
+    end
+
+    local update_opts = {}
+    session.backend.png_dimensions = function() return 1980, 4040 end
+    session.backend.update = function(image_id, _, _, opts)
+      uploads = uploads + 1
+      update_opts[#update_opts + 1] = opts
+      return image_id == 4242 and 4343 or image_id, { bytes = 810000, width_px = 1980, height_px = 4040 }
+    end
+
+    local function complete_fill(overrides)
+      local path = vim.fn.tempname() .. ".png"
+      local fd = assert(vim.uv.fs_open(path, "w", 420))
+      vim.uv.fs_write(fd, "png", 0)
+      vim.uv.fs_close(fd)
+      local answer = vim.tbl_extend("force", {
+        pngPath = path,
+        blocks = {},
+        documentHeightPx = 10891,
+        viewportHeightPx = 1020,
+        scrollY = pending.params.scrollY,
+        captureScale = "device",
+        captureEncoder = "cdp",
+        pngBytes = 810000,
+        captureMs = 146,
+        regionYPx = pending.params.captureRegion.yPx,
+        regionHeightPx = pending.params.captureRegion.heightPx,
+      }, overrides or {})
+      local callback = pending.callback
+      pending = nil
+      callback(answer, nil)
+    end
+
+    -- One sharp viewport frame, for the adaptive cap to judge regions against.
+    session.retina_png_bytes = 305000
+    freed = {}
+    uploads, requests = 0, 0
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    t.eq(true, live.fill.in_flight, "issuing a fill claims the one fill slot")
+    t.eq(1250, pending.params.captureRegion.yPx, "and asks for a region anchored a quarter of its slack behind")
+
+    -- The reader keeps reading while it captures. Nothing supersedes the fill:
+    -- a resident hit issues no request, so scrolling inside a region does not
+    -- invalidate the fill that is capturing the next one.
+    session.scroll_y = 1700
+    complete_fill()
+    t.eq(false, live.fill.in_flight, "which is released when it lands")
+    t.eq(1700, session.scroll_y, "a fill never drags the reader back to where it was planned")
+    t.eq(1700, session.applied_scroll_y, "and the position recorded is the one the crop actually shows")
+    t.eq(900, update_opts[#update_opts].source.y, "cropped 450 CSS px into the region, at scale 2")
+    t.eq(true, update_opts[#update_opts].retain_superseded, "the image it replaced keeps its pixels through the swap")
+    t.ok(vim.tbl_contains(freed, 4242), "and is freed deliberately, once evicted, rather than as a side effect")
+    t.eq(1, #live.regions, "leaving one region cached")
+    t.eq(305000, session.retina_png_bytes, "a region is never counted as the cost of a sharp viewport frame")
+
+    -- The hold, from the one number this link has already been tuned around.
+    t.eq(160, live.upload_hold_ms, "with no throughput estimate yet the hold is the session's settle delay")
+    t.ok(live.upload_hold_until > vim.uv.now(), "and the wire is held while the region drains")
+    t.ok(live.wire_bytes_per_ms > 0, "the region's own transfer becomes the first throughput sample")
+    live.upload_hold_until = 0
+
+    -- The one failure this cache must not be able to produce: pixels of one
+    -- document stamped with another document's identity. The request serial does
+    -- not catch this, because the disagreement is created by this very callback
+    -- adopting the renderer's viewport before the region is built.
+    local stale_before, uploads_before = live.stale_fills, uploads
+    session.scroll_y = 1500
+    -- The preview was resized after the last response landed, so the session's
+    -- idea of its own viewport is one response out of date. That is precisely
+    -- when this happens: the key is computed from the stale width when the fill
+    -- is issued, and from the width the renderer measured when it comes back.
+    viewport_answer = { widthPx = 880, heightPx = 1020, tier = "measured" }
+    controller.refresh(session, controller._settle_options(session))
+    complete_fill()
+    t.eq(stale_before + 1, live.stale_fills, "a fill whose document changed under it is discarded, never displayed")
+    t.eq(uploads_before, uploads, "without reaching the terminal")
+    t.eq(false, live.fill.in_flight, "and the slot is released -- a discarded fill must not disable every later one")
+    viewport_answer = { widthPx = 990, heightPx = 1020, tier = "measured" }
+    session.viewport_width_px = 990
+    live.key = controller._resident_key(session)
+
+    -- Overtaken rather than wrong, and counted apart for exactly that reason: a
+    -- region the reader has left is several hundred kilobytes of wire that would
+    -- buy nothing, so it is dropped before it costs any.
+    local abandoned_before = live.abandoned_fills
+    uploads_before = uploads
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    session.scroll_y = 9000
+    complete_fill()
+    t.eq(abandoned_before + 1, live.abandoned_fills, "a region the reader has left is discarded")
+    t.eq(uploads_before, uploads, "without spending a byte on pixels nobody is looking at")
+    t.eq(false, live.fill.in_flight, "and releases the slot")
+
+    -- A failed capture must release the slot too. This is the shape of the bug
+    -- that would silently disable region fills for the rest of a session.
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    t.eq(true, live.fill.in_flight, "a fill is in flight")
+    local notified = pending.callback
+    pending = nil
+    -- This one is *meant* to fail, and the notification it produces is
+    -- indistinguishable at a glance from a test that broke. Swallowed so the
+    -- suite's output still means what it says.
+    local real_notify = vim.notify
+    vim.notify = function() end
+    notified(nil, "renderer exploded")
+    vim.notify = real_notify
+    t.eq(false, live.fill.in_flight, "and a failed capture gives the slot back rather than keeping it forever")
+    session.render_failed = false
+
+    -- The adaptive cap: bound the payload, not just the queue behind it. Three
+    -- sharp frames is 915,000 bytes here, so a region encoding at 1,016,667
+    -- shrinks the next one to nine tenths of the height the budget would allow.
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    local planned_height = pending.params.captureRegion.heightPx
+    session.scroll_y = 1500
+    complete_fill({ pngBytes = 1016667 })
+    t.near(0.9, live.height_scale, 1e-6, "a region larger than three sharp frames shrinks the fills after it")
+    t.eq(1, live.height_reduced, "and records that it did")
+    live.upload_hold_until = 0
+    local shorter = controller._settle_options(session)
+    t.ok(shorter.capture_region.heightPx < planned_height, "so the next region asks for less of the document")
+    t.ok(shorter.capture_region.heightPx > 1020, "but still more than a viewport, or it would buy nothing")
+
+    -- A drag's clean base and an interact frame both replace whatever is on
+    -- screen, and what is on screen may be a resident region. Freeing it there
+    -- would leave the cache holding an id the terminal has been told to forget,
+    -- and the next pan would fail on an image nobody owns. The retention is
+    -- derived inside `apply_image` rather than asked of each caller, because the
+    -- image being replaced is either one the cache holds or nothing to anyone --
+    -- there is no third case, and two of the five callers had already forgotten.
+    session.base_selection_painted = true
+    session.clean_image_bytes = "clean"
+    session.clean_image_scale = "device"
+    session.clean_image_scroll_y = session.applied_scroll_y
+    session.clean_image_revision = session.renderer_revision
+    local updates_before = #update_opts
+    t.eq(true, controller.restore_clean_base(session), "a drag's clean base can be laid over a resident region")
+    t.ok(#update_opts > updates_before, "sanity: the restore reached the backend")
+    t.eq(true, update_opts[#update_opts].retain_superseded, "without freeing the region's pixels to do it")
+
+    -- A pan is not just a placement: the overlays around it were measured
+    -- against geometry that has just moved. The caret is re-derived from
+    -- `applied_scroll_y` and the animation layer is placed from it, so both have
+    -- to be told -- in the order a new frame already establishes.
+    local animation = require("md-viewer.animation")
+    local real_repaint = animation.repaint
+    local repaints = 0
+    animation.repaint = function() repaints = repaints + 1 end
+    session.base_selection_painted = false
+    live.upload_hold_until = 0
+    scroll_to(1400)
+    t.eq(1, moves, "sanity: that scroll was a pan")
+    t.eq(1, repaints, "a pan repaints the animation layer, which is placed from the position it just changed")
+    animation.repaint = real_repaint
+
+    preview.viewport = real_viewport
+    require("md-viewer.debounce").close(session, "scroll_settle_timer")
+    require("md-viewer.debounce").close(session, "resident_hold_timer")
+
+    -- ------------------------------------------------------------------
+    -- Off the screen is not out of the terminal.
+    --
+    -- Every reason a preview stops being drawn is temporary: a focusable float,
+    -- a tab switch, a completion popup, a suspend. Before this the image was
+    -- freed and re-uploaded on the way back, which for an ordinary frame is one
+    -- viewport and for a resident region is several -- paid over the one link
+    -- the region exists to spare.
+    -- ------------------------------------------------------------------
+    process.request = function()
+      requests = requests + 1
+      return 1
+    end
+    local hidden, freed_now = {}, {}
+    session.backend.hide = function(image_id)
+      hidden[#hidden + 1] = image_id
+      return true, { bytes = 24 }
+    end
+    session.backend.clear = function(image_id)
+      freed_now[#freed_now + 1] = image_id
+      return true
+    end
+
+    live.upload_hold_until = 0
+    resident.drain(live)
+    live.key = controller._resident_key(session)
+    local held = assert(resident.region({
+      doc_y = 1000,
+      doc_h = 2020,
+      css_w = 990,
+      image_w = 1980,
+      image_h = 4040,
+      key = live.key,
+      image_id = 5151,
+    }))
+    assert(resident.insert(live, held))
+    held.placed = true
+    session.image_id = 5151
+    session.scroll_y = 1500
+    uploads, moves, requests = 0, 0, 0
+
+    local rect = preview.placement(session.preview_win, "kitty_raw")
+    local cover_buf = vim.api.nvim_create_buf(false, true)
+    local cover_win = vim.api.nvim_open_win(cover_buf, false, {
+      relative = "editor",
+      row = rect.row,
+      col = rect.col,
+      width = math.min(10, rect.width),
+      height = math.min(3, rect.height),
+      style = "minimal",
+    })
+    t.eq(true, (preview.occlusion(session.preview_win)), "sanity: the float genuinely occludes the preview")
+    controller.refresh(session)
+    t.eq({ 5151 }, hidden, "a float over the preview hides the region's placements")
+    t.eq({}, freed_now, "and leaves its pixels in the terminal")
+    t.eq(1, #live.regions, "the cache still holds it")
+    t.eq(false, held.placed, "recorded as resident but not on screen")
+
+    -- And back. This is the fourth cache state the design calls
+    -- resident-but-unplaced: not a hit to pan within, not a miss to capture, but
+    -- a region that simply needs putting back.
+    local unplaced_before = live.unplaced_places
+    vim.api.nvim_win_close(cover_win, true)
+    t.ok(vim.wait(500, function() return session.image_id ~= nil end, 10), "closing it puts the preview back")
+    t.eq(5151, session.image_id, "as the same image the terminal never stopped holding")
+    t.eq(0, uploads, "costing no upload at all")
+    t.eq(0, requests, "and no capture")
+    t.eq(1, moves, "one placement command, which is the whole bill")
+    t.eq(unplaced_before + 1, live.unplaced_places, "counted as a re-place rather than a pan")
+    t.eq(true, held.placed, "and on screen again")
+
+    -- The distinction the whole thing turns on: hiding is not freeing, and the
+    -- paths that end a session's claim on the pixels must still free them.
+    hidden, freed_now = {}, {}
+    controller.free_resident(session)
+    t.eq({ 5151 }, freed_now, "giving up a session's regions frees them for real")
+    t.eq({}, hidden, "hiding is never a substitute for that")
+    t.eq(0, #live.regions, "and the cache is empty")
+
+    -- ------------------------------------------------------------------
+    -- Refusals, and where they land.
+    --
+    -- The whole feature is an optimization over a path that already works, so
+    -- every way it can decline has exactly one correct destination: the
+    -- behaviour that existed before it. The only question each refusal answers
+    -- is whether to try again.
+    -- ------------------------------------------------------------------
+    process.request = function(_, params, callback)
+      requests = requests + 1
+      pending = { params = params, callback = callback }
+      return 1
+    end
+    local function refuse_region(reason)
+      local callback = pending.callback
+      pending = nil
+      callback(nil, reason, { code = "REGION_TOO_LARGE" })
+    end
+
+    -- A budget with room for a smaller region, so the retry has somewhere to go.
+    live.height_scale, live.region_shrinks, live.height_reduced = 1, 0, 0
+    live.budget_px, live.upload_hold_until = 16000000, 0
+    session.render_failed = false
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    local asked_for = pending.params.captureRegion.heightPx
+    local requests_before = requests
+    refuse_region("capture region of 1980x40000 device px exceeds the safe ceiling")
+    t.eq(0.5, live.height_scale, "a region Chromium will not capture is asked for again at half the height")
+    t.eq(1, live.region_shrinks, "once, and recorded as once")
+    t.eq(false, session.render_failed, "and not reported as a render failure -- the frame on screen is untouched")
+    t.eq(nil, live.fallback_reason, "with the feature still on")
+    t.ok(
+      vim.wait(500, function() return requests > requests_before end, 5),
+      "retried straight away rather than waiting for the reader to scroll again"
+    )
+    t.ok(pending.params.captureRegion.heightPx < asked_for, "asking for less of the document than last time")
+
+    -- A second refusal is not a size problem. No third size is tried: the
+    -- geometry is outside what this Chromium will capture at all, and a smaller
+    -- number would only rediscover that on every settle for the rest of the day.
+    refuse_region("still too large")
+    t.ok(live.fallback_reason ~= nil, "a second refusal gives up for the rest of the session")
+    t.ok(live.fallback_reason:find("twice", 1, true) ~= nil, "saying it had already tried")
+    t.eq(false, live.enabled, "so nothing tries again")
+    t.eq(0, #live.regions, "and the terminal gets its pixels back")
+
+    -- At the shipped budget there is no smaller region to retry with: half of it
+    -- is under one viewport, and a region that cannot hold the viewport can
+    -- never be a hit. The refusal has to say so rather than quietly planning
+    -- nothing on every settle from then on.
+    live.enabled, live.fallback_reason = true, nil
+    live.height_scale, live.region_shrinks = 1, 0
+    live.budget_px, live.upload_hold_until = 8000000, 0
+    session.scroll_y = 1500
+    controller.refresh(session, controller._settle_options(session))
+    refuse_region("capture region of 1980x40000 device px exceeds the safe ceiling")
+    t.eq(false, live.enabled, "one refusal is final when the budget cannot afford a smaller region")
+    t.ok(
+      live.fallback_reason:find("no smaller one fits", 1, true) ~= nil,
+      "and the reason names that, not just the refusal that started it"
+    )
+    t.ok(live.fallback_reason:find("viewport", 1, true) ~= nil, "carrying the planner's own words for why nothing fits")
+
+    -- The destination.
+    require("md-viewer.debounce").close(session, "scroll_settle_timer")
+    scroll_to(1500)
+    t.eq(0, moves, "scrolling after a fallback never pans")
+    t.ok(requests > 0, "it captures, exactly as it did before any of this existed")
+    require("md-viewer.debounce").close(session, "scroll_settle_timer")
+
+    process.request = real_request
 
     controller.close(source)
     pcall(vim.api.nvim_set_current_win, entry_win)

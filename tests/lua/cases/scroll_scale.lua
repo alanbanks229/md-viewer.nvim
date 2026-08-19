@@ -94,6 +94,37 @@ return function(t)
       "an actual SSH session still reduces the moving frame, whatever its buffers are named"
     )
     t.eq(400, (controller._scroll_settle_delay(config.get().render)), "and still waits the SSH settle delay")
+
+    -- Resident panning is gated on the identical rule, and must not blur the
+    -- same boundary. It trades terminal memory for wire time, and wire time only
+    -- exists where the pixels have to travel -- so a remote document on a local
+    -- Neovim gets nothing from it and must not pay for it.
+    session.backend = raw_backend
+    session.viewport_width_px, session.viewport_height_px = 990, 1020
+    stub_ssh(false)
+    local local_ok, local_reason = controller._resident_gate(session)
+    t.eq(false, local_ok, "a remote document on a local Neovim keeps no resident regions")
+    t.ok(local_reason:match("local session"), "and is answered as a local session, not as a remote document")
+
+    stub_ssh(true)
+    config.setup({ image = { resident_pan = "on" } })
+    t.eq(
+      true,
+      (controller._resident_gate(session)),
+      "an actual SSH session may keep them, whatever its buffers are named"
+    )
+
+    config.setup({ image = { resident_pan = "off" } })
+    local off_ok, off_reason = controller._resident_gate(session)
+    t.eq(false, off_ok, "and image.resident_pan = off refuses regardless of transport")
+    t.ok(off_reason:match("off"), "naming the option that refused")
+
+    config.setup({ image = { resident_pan = "on", resident_budget_px = 0 } })
+    local broke_ok, broke_reason = controller._resident_gate(session)
+    t.eq(false, broke_ok, "a zero budget cannot hold a region")
+    t.ok(broke_reason:match("budget"), "and says so")
+    config.reset()
+
     state.remove(buf)
     vim.api.nvim_buf_delete(buf, { force = true })
   end

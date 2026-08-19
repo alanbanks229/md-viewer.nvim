@@ -1,12 +1,94 @@
 local state = require("md-viewer.state")
 local process = require("md-viewer.process")
 local config = require("md-viewer.config")
+local resident = require("md-viewer.resident")
 
 local M = { events = {} }
 
 function M.log(event, data)
   M.events[#M.events + 1] = { time = os.date("!%Y-%m-%dT%H:%M:%SZ"), event = event, data = data }
   if #M.events > 200 then table.remove(M.events, 1) end
+end
+
+---The backend's own process-wide byte total, when it keeps one.
+---
+---Only the raw Kitty backend does. The others answer nil rather than zero,
+---because "this backend does not measure its output" and "this backend wrote
+---nothing" are different facts and a report that conflated them would invite
+---exactly the wrong conclusion from a quiet session.
+local function backend_ui_bytes(session)
+  local backend = session.backend
+  if not (backend and backend.ui_bytes_total) then return nil end
+  return backend.ui_bytes_total()
+end
+
+---What the terminal is holding on this session's behalf, and whether it is
+---earning its keep.
+---
+---`hits` against `misses` is the whole question: a hit is a scroll that cost
+---placement bytes instead of a frame. `used_px` beside `budget_px` says how
+---close the bound is to binding, and `decoded_mb` is the estimate that bound
+---exists to control -- labelled an estimate because 4 bytes a pixel is an
+---assumption about a representation no terminal documents.
+local function resident_report(session)
+  local live = session.resident
+  if not live then return nil end
+  local decoded = 0
+  for _, region in ipairs(live.regions) do
+    decoded = decoded + resident.decoded_bytes(region)
+  end
+  return {
+    enabled = live.enabled,
+    -- Non-nil means this session gave up and is on the ordinary capture path
+    -- for good; the string says why.
+    fallback_reason = live.fallback_reason,
+    regions = #live.regions,
+    max_regions = live.max_regions,
+    used_px = live.used_px,
+    budget_px = live.budget_px,
+    decoded_mb_estimate = decoded > 0 and (decoded / 1048576) or 0,
+    hits = live.hits,
+    misses = live.misses,
+    pans = live.pans,
+    unplaced_places = live.unplaced_places,
+    fills = live.fills,
+    -- A fill thrown away because it could no longer be trusted, against one
+    -- thrown away because the reader had moved past it. The first climbing means
+    -- something is invalidating regions faster than they can be captured; the
+    -- second just means a fast reader, and costs nothing but a capture.
+    stale_fills = live.stale_fills,
+    abandoned_fills = live.abandoned_fills,
+    evictions = live.evictions,
+    prefetches = live.prefetches,
+    -- Pans declined so a browser-painted highlight would not be erased. Not a
+    -- failure: it is the feature correctly getting out of the way.
+    blocked_by_find = live.blocked_by_find,
+    blocked_by_selection = live.blocked_by_selection,
+    upload_bytes = live.upload_bytes,
+    placement_bytes = live.placement_bytes,
+    fill_in_flight = live.fill.in_flight,
+    -- The wire, which is the resource the cache is really trading against. A
+    -- region and the moving frames it replaces share one `nvim_ui_send` queue
+    -- and one pty, so a hit ratio alone can look excellent while the link is
+    -- still saturated. `frames_suppressed_by_hold` is the count of moving frames
+    -- this session declined to queue behind a draining region -- the anti-
+    -- backlog measure -- and `wire_bytes_per_ms` is what the link was observed
+    -- to actually do, from the blocked writes rather than from configuration.
+    wire_bytes_per_ms = live.wire_bytes_per_ms,
+    wire_samples = live.wire_samples,
+    upload_hold_ms = live.upload_hold_ms,
+    frames_suppressed_by_hold = live.frames_suppressed_by_hold,
+    -- Below 1 means this document's regions encode larger than the budget
+    -- assumed and fills have been shrunk to bound the stall.
+    height_scale = live.height_scale,
+    height_reduced = live.height_reduced,
+    fill_png_bytes = live.fill_png_bytes,
+    fill_capture_ms = live.fill_capture_ms,
+    desired_scroll_y = live.desired_scroll_y,
+    plan_refusal = live.plan_refusal,
+    last_insert_refusal = live.last_insert_refusal,
+    gate_reason = live.gate_reason,
+  }
 end
 
 function M.snapshot()
@@ -70,7 +152,27 @@ function M.snapshot()
       retina_frame_count = session.retina_frame_count or 0,
       retina_bytes_total = session.retina_bytes_total or 0,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
+      -- Everything this session has actually written to the terminal, and what
+      -- the last write cost. The `*_bytes_total` fields above count PNGs only;
+      -- these count the placements, deletions and overlay rectangles that ride
+      -- the same pty. Over SSH they are one wire, so a change that claims to
+      -- have removed traffic has to be judged here -- removing the largest
+      -- payload promotes whatever was second, and PNG counters cannot see that.
+      --
+      -- `raw_ui_bytes_total` is the whole backend's, across every session plus
+      -- the shared tint-sheet and animation-frame caches, so it is always the
+      -- larger number; a big gap between them is work no session owns.
+      ui_bytes_total = session.ui_bytes_total or 0,
+      last_ui_bytes = session.last_ui_bytes,
+      raw_ui_bytes_total = backend_ui_bytes(session),
       viewport_width_px = session.viewport_width_px,
+      -- What the terminal is holding, measured from the PNG header rather than
+      -- derived from the requested scale: the Playwright fallback cannot express
+      -- a sub-1x factor, so a frame that asked for 0.5 and came back at 1.0
+      -- shows the disagreement here and nowhere else.
+      image_width_px = session.image_width_px,
+      image_height_px = session.image_height_px,
+      resident = resident_report(session),
       -- How many animated images the last render *measured*, beside how many
       -- became assets. Without the first number a document whose geometry pass
       -- timed out reads exactly like a document with no animated images in it

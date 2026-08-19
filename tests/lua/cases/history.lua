@@ -175,6 +175,43 @@ return function(t)
     t.eq(buf_a, session.source_buf, "H moves it back again")
   end
 
+  -- Resident regions belong to the document they were captured from, and every
+  -- component of their identity changes when the preview retargets. Following a
+  -- link is therefore one of the few things that must genuinely hand the pixels
+  -- back rather than merely take them off the screen -- the distinction the rest
+  -- of the lifecycle turns on, since occlusion and tab switches do the opposite.
+  do
+    local resident = require("md-viewer.resident")
+    local freed = {}
+    session.backend.clear = function(image_id)
+      freed[#freed + 1] = image_id
+      return true
+    end
+    local live = session.resident
+    live.budget_px = 8000000
+    live.key = "whatever-this-document-was"
+    assert(resident.insert(
+      live,
+      assert(resident.region({
+        doc_y = 0,
+        doc_h = 2020,
+        css_w = 990,
+        image_w = 1980,
+        image_h = 4040,
+        key = live.key,
+        image_id = 6161,
+      }))
+    ))
+    t.eq(1, #live.regions, "sanity: the session is holding a region")
+
+    interaction.activate_link(session, { link = { type = "local_file", href = "b.md" } })
+    t.eq({ 6161 }, freed, "following a link gives the previous document's region back to the terminal")
+    t.eq(0, #live.regions, "and empties the cache")
+    t.eq(0, live.used_px, "so the budget is available to the document just opened")
+    t.eq(nil, live.key, "with no stale identity left to match against")
+    session.backend.clear = function() return true end
+  end
+
   controller.refresh = original_refresh
   controller.close(session.source_buf)
   vim.cmd("enew!")
