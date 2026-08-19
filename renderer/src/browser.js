@@ -188,6 +188,13 @@ export class BrowserRenderer {
     // Re-read on every call, ahead of the early return below, so flipping the
     // setting takes effect on the next frame rather than needing a relaunch.
     this.fastPngEncode = options.fast_png_encode !== false;
+    // A browser that has gone away leaves its handles behind, and every one of
+    // them throws. Drop them so the launch below rebuilds rather than the early
+    // return preserving a corpse.
+    if (this.browser && !this.browser.isConnected()) {
+      this.context = this.page = this.cdp = null;
+      this.browser = null;
+    }
     if (!this.browser) {
       const executablePath = this.resolveExecutable(options);
       this.browser = await chromium.launch({
@@ -197,7 +204,16 @@ export class BrowserRenderer {
     }
     // The device scale factor is the only setting that can force a context
     // restart; the network policy below is unconditional and never varies.
-    if (this.context && this.deviceScaleFactor === scale) return;
+    //
+    // Liveness is checked as well, and it is what makes this recoverable. A page
+    // can die under the process -- a renderer tab crashing on a large capture is
+    // the way it has actually happened -- and it leaves `this.context` in place.
+    // Returning early on the context alone therefore preserved the dead page
+    // forever: every later capture failed with "Target page, context or browser
+    // has been closed", including on a freshly opened document, until the whole
+    // renderer process was restarted. Nothing else rebuilds it, because nothing
+    // else was looking.
+    if (this.context && this.page && !this.page.isClosed() && this.deviceScaleFactor === scale) return;
     try { await this.context?.close(); } catch {}
     this.deviceScaleFactor = scale;
     this.context = await this.browser.newContext({ deviceScaleFactor: this.deviceScaleFactor, javaScriptEnabled: false });
@@ -346,6 +362,18 @@ export class BrowserRenderer {
         return "cdp_fast_png";
       } catch (error) {
         this.cdpRegionCaptureUnavailable = String(error?.message ?? error);
+        // The page did not merely refuse the capture, it stopped existing. A
+        // region is the only capture here big enough to take a renderer tab with
+        // it, and the ceiling it is bounded by was measured on one machine and
+        // is being applied on another -- so this is not a contradiction to
+        // explain away, it is a limit that differs by host. Stop asking this
+        // process for regions and let `ensure` rebuild the page. The ordinary
+        // viewport path keeps working, which is the whole point of it remaining.
+        if (this.page?.isClosed?.() || !this.browser?.isConnected?.()) {
+          const closed = new Error(`region capture closed the page: ${this.cdpRegionCaptureUnavailable}`);
+          closed.code = "REGION_TOO_LARGE";
+          throw closed;
+        }
       }
     }
     // Playwright's own Chromium screenshotter sends `captureBeyondViewport` when
