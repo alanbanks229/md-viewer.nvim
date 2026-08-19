@@ -1016,6 +1016,66 @@ return function(t)
   raw_backend.clear_all()
 
   -- ---------------------------------------------------------------------
+  -- A base image taller than the box it is drawn into.
+  --
+  -- The drawn box is the placement's cells times the real cell, and every crop
+  -- above is clamped to it -- `x1`/`y1` take `math.min(drawn_w, ...)`, and the
+  -- pre-pass validates `piece.width + margin` against the sheet. Nothing is ever
+  -- sized against the base image's own pixels, so nothing may be *required*
+  -- against them either.
+  --
+  -- It stopped being an academic distinction when resident regions arrived: a
+  -- region is a capture several viewports tall placed into one viewport of
+  -- cells, so `item.height_px` exceeds the drawn box by whatever K the region
+  -- was planned at. Requiring a sheet that large asks the renderer for one it
+  -- never builds -- `interaction.sheet_dims` sizes every sheet to one viewport --
+  -- so every overlay was refused for as long as a region was on screen. Find and
+  -- selection block panning and so never met it; the caret does not block it, and
+  -- a caret that cannot be drawn is a caret the reader watches disappear.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  stub_cell(10, 10) -- drawn box is exactly 10x10 cells * 10px = 100x100
+  reset_sequences()
+  -- 100x400: the shape of a four-viewport resident region.
+  local region_base = raw_backend.show("\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\100\0\0\1\144", placement)
+  -- A tint of its own, so no sheet cached by the blocks above can serve this.
+  local caret_tint = { r = 200, g = 40, b = 40, a = 0.5 }
+  -- Reset after the base's own upload and placement: `a=p` alone would match
+  -- those and pass whatever the overlay did.
+  reset_sequences()
+  local region_set, region_reason = raw_backend.overlay_apply(
+    nil,
+    region_base,
+    { { x = 10, y = 10, width = 20, height = 25 } },
+    { widthPx = 100, heightPx = 100 },
+    caret_tint,
+    fake_png(), -- 100x100, exactly the drawn box
+    placement
+  )
+  t.ok(
+    region_set ~= nil,
+    "a sheet covering the drawn box serves a base image taller than it: " .. tostring(region_reason)
+  )
+  local region_output = output()
+  t.ok(
+    region_output:find("a=t,f=100", 1, true) ~= nil,
+    "the tint sheet uploads: " .. region_output:gsub("%c", "."):sub(1, 200)
+  )
+  -- The overlay layer, not the base: an overlay crop carries z=-1 and no c/r,
+  -- which is what distinguishes it from the region placement underneath it.
+  t.ok(
+    region_output:match("a=p[^;]*w=%d+,h=%d+,z=%-1") ~= nil,
+    "and the rectangle actually reaches the wire, rather than being refused silently"
+  )
+  t.eq(
+    false,
+    raw_backend.overlay_needs_sheet(region_base, caret_tint, placement),
+    "the sheet requirement is the drawn box, so it does not grow with the region's height"
+  )
+  raw_backend.clear_all()
+
+  -- ---------------------------------------------------------------------
   -- Upstream WezTerm issue #6344: no placement may divide by zero.
   --
   -- `assign_image_to_cells` (term/src/terminalstate/image.rs) has two integer

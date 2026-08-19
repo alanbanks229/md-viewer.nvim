@@ -524,16 +524,30 @@ local function sheet_for(tint, margin, min_width, min_height)
 end
 
 ---How large the tint sheet must be to cover any rectangle this base image can
----produce. Crops are taken in *drawn* pixels (`placement` cells times the real
----cell), which is smaller than the captured image whenever the render viewport
----over-estimated the cell and larger whenever it under-estimated it -- so the
----sheet has to cover whichever is bigger.
+---produce. Crops are taken in *drawn* pixels -- `placement` cells times the real
+---cell -- and clamped to that box by `overlay_apply`'s `math.min(drawn_w, ...)`,
+---so the drawn box is the whole requirement.
+---
+---It used to start from `item.width_px, item.height_px` as well, on the reasoning
+---that a capture can be bigger than the box it is drawn into. It can, but no crop
+---is ever taken against it, so that only ever over-stated the requirement. Harmless
+---while every base was one viewport captured at roughly the drawn size; fatal once
+---resident regions made the base a capture several viewports tall placed into one
+---viewport of cells. `interaction.sheet_dims` sizes every sheet to one viewport, so
+---the requirement could not be met and every overlay was refused for as long as a
+---region was on screen -- silently, since a refusal here just means "not drawn".
+---Find and selection block panning and so never met it. The caret does not.
+---
+---`item` is no longer read and is kept in the signature because ownership of it
+---is what the callers have already established by the time they ask.
 local function required_sheet_size(item, placement)
-  local width, height = item.width_px, item.height_px
+  -- No measured cell means no overlay can be placed at all -- `overlay_apply`
+  -- refuses above this -- so there is no rectangle for a sheet to cover.
   local cell = cellpixels.measure()
+  local width, height = 0, 0
   if cell and placement and placement.width and placement.height then
-    width = math.max(width, math.ceil(placement.width * cell.width))
-    height = math.max(height, math.ceil(placement.height * cell.height))
+    width = math.ceil(placement.width * cell.width)
+    height = math.ceil(placement.height * cell.height)
   end
   -- The margin sits outside the drawn box: a crop runs from `margin - offset`
   -- to `margin + rect width`, so the sheet has to be that much larger again.

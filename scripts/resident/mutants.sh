@@ -44,17 +44,18 @@ fill-claims-applied-scroll	lua/md-viewer/controller.lua	    if not filling then 
 region-freed-as-side-effect	lua/md-viewer/controller.lua	        retain_superseded = resident_holds(session.resident, session.image_id),	        retain_superseded = false,
 occlusion-frees-instead-of-hides	lua/md-viewer/controller.lua	    local hide = resident_holds(session.resident, session.image_id) and session.backend.hide	    local hide = nil
 dead-page-never-rebuilt	renderer/src/browser.js	    if (this.context && this.page && !this.page.isClosed() && this.deviceScaleFactor === scale) return;	    if (this.context && this.deviceScaleFactor === scale) return;
+sheet-sized-by-base-image	lua/md-viewer/backends/kitty_raw.lua	  local width, height = 0, 0	  local width, height = item.width_px, item.height_px
 MUTATIONS
 
 caught=0; missed=0; skipped=0
 declare -a missed_names=()
 
 restore_all() {
-  git checkout -- lua/md-viewer/controller.lua renderer/src/browser.js 2>/dev/null || true
+  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua renderer/src/browser.js 2>/dev/null || true
 }
 trap 'restore_all; rm -f "$mutations"' EXIT
 
-if ! git diff --quiet -- lua/md-viewer/controller.lua renderer/src/browser.js; then
+if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua renderer/src/browser.js; then
   echo "refusing to run: the files this mutates have uncommitted changes" >&2
   echo "commit or stash them first -- restoring would throw them away" >&2
   exit 2

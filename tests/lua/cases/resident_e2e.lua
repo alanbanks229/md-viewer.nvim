@@ -174,6 +174,30 @@ return function(t)
     t.eq(1, live.height_scale, "and the byte cap did not fight the budget for it")
 
     -- ------------------------------------------------------------------
+    -- The base image every overlay is composited over is now the region.
+    --
+    -- This is the fact that turned a harmless over-requirement in
+    -- `required_sheet_size` into a defect: it demanded a tint sheet as large as
+    -- the *base image*, and once the base image became a capture several
+    -- viewports tall, no sheet the renderer builds could satisfy it --
+    -- `interaction.sheet_dims` sizes every one of them to a single viewport. The
+    -- refusal itself is asserted in `backend_kitty.lua`, which can stub the
+    -- measured cell the overlay path needs and a headless session cannot. What
+    -- is asserted here is the part only a real session shows: that the image the
+    -- overlay is handed is the tall one.
+    -- ------------------------------------------------------------------
+    if region then
+      t.eq(region.image_id, session.image_id, "the image on screen is the region, so it is what an overlay sits on")
+      t.ok(
+        (session.image_height_px or 0) > (session.viewport_height_render_px or 0),
+        ("and it is taller than a viewport (%s px of image against %s px of viewport)"):format(
+          tostring(session.image_height_px),
+          tostring(session.viewport_height_render_px)
+        )
+      )
+    end
+
+    -- ------------------------------------------------------------------
     -- The claim: a scroll inside the region costs a placement and no pixels.
     -- ------------------------------------------------------------------
     if region then
@@ -259,6 +283,136 @@ return function(t)
         after_cursor[1] < before_cursor[1],
         ("the shadow cursor follows a pan (row %d -> %d)"):format(before_cursor[1], after_cursor[1])
       )
+    end
+
+    -- ------------------------------------------------------------------
+    -- Holding `j`.
+    --
+    -- A caret motion past the bottom of the viewport scrolls the page, which
+    -- with resident regions may be a pan -- so a run of them alternates between
+    -- the renderer moving the caret and the controller moving the frame, each
+    -- writing the position the other derives from. Reported from a real session
+    -- as the cursor vanishing partway down while the page kept scrolling: the
+    -- caret is resolved from `applied_scroll_y` less the scroll it was measured
+    -- at, and once those two disagree by a viewport it computes as off screen
+    -- and nothing draws it, whether or not the browser still has it in view.
+    -- ------------------------------------------------------------------
+    do
+      local caret = require("md-viewer.caret")
+      local navigation = require("md-viewer.navigation")
+      navigation.attach(session, controller.navigate)
+      vim.api.nvim_set_current_win(session.preview_win)
+
+      local function press(lhs)
+        local mapping = vim.api.nvim_buf_call(
+          session.preview_buf,
+          function() return vim.fn.maparg(lhs, "n", false, true) end
+        )
+        if not mapping.callback then return false end
+        mapping.callback()
+        return true
+      end
+
+      -- Put the caret on screen to begin with, and let it settle.
+      controller.place_caret(session)
+      vim.wait(3000, function() return session.caret_rect ~= nil end, 25)
+
+      t.ok(session.caret_rect ~= nil, "sanity: a caret exists to hold j against")
+      if session.caret_rect then
+        local lost_at, presses, moved, max_drift = nil, 60, 0, 0
+        local scroll_at_start = session.applied_scroll_y or 0
+        for index = 1, presses do
+          t.ok(press("j"), "sanity: j is mapped in the preview")
+          -- Each motion is a real round trip; the caret index moving is how the
+          -- response is known to have landed.
+          local seen = session.caret_index
+          if vim.wait(3000, function() return session.caret_index ~= seen end, 10) then moved = moved + 1 end
+          -- Sampled after everything the motion set off has settled, which is
+          -- when a residue would still be there to find.
+          vim.wait(60, function() return false end, 10)
+          local drift = math.abs((session.applied_scroll_y or 0) - (session.caret_scroll_y or 0))
+          if drift > max_drift then max_drift = drift end
+          if caret.rect(session) == nil and lost_at == nil then lost_at = index end
+        end
+        t.ok(moved > presses / 2, ("sanity: the caret actually moved (%d of %d presses landed)"):format(moved, presses))
+        t.ok(
+          (session.applied_scroll_y or 0) > scroll_at_start,
+          ("sanity: holding j scrolled the page (%s -> %s)"):format(
+            tostring(scroll_at_start),
+            tostring(session.applied_scroll_y)
+          )
+        )
+        t.eq(
+          nil,
+          lost_at,
+          ("the caret stays resolvable while stepping j (lost after %s of %d presses, drift %s)"):format(
+            tostring(lost_at),
+            presses,
+            tostring((session.applied_scroll_y or 0) - (session.caret_scroll_y or 0))
+          )
+        )
+
+        -- And the quantity that decides whether it is drawn at all. The caret is
+        -- resolved as the rect it was measured at, less the scroll travelled
+        -- since; once that drift exceeds a viewport it computes as off screen
+        -- and nothing draws it -- whether or not the browser still has the caret
+        -- in view. So the caret vanishing while `j` keeps scrolling is not the
+        -- caret being lost, it is this number growing.
+        --
+        -- It must not grow at all: every motion re-measures and re-records, so
+        -- each press should reset it to nothing. Anything that writes
+        -- `applied_scroll_y` after the measurement and without a new one -- a
+        -- pan, most obviously -- leaves a residue, and a residue that survives
+        -- the next press is a residue that accumulates.
+        t.ok(
+          max_drift < session.viewport_height_render_px,
+          ("drift stays inside a viewport across a run of motions (%.1f of %s)"):format(
+            max_drift,
+            tostring(session.viewport_height_render_px)
+          )
+        )
+        t.near(0, max_drift, 2.0, "and in fact each motion resets it, so it never accumulates at all")
+
+        -- The same run at the ratio a slow link actually produces.
+        --
+        -- Locally a caret motion answers in tens of milliseconds, so key repeat
+        -- never gets ahead of it and only ever one motion is in flight. Over
+        -- SSH the answer takes hundreds, while key repeat still arrives every
+        -- thirty -- so a reader leaning on `j` stacks several motions, each
+        -- resolved against the scroll the one before it left. That ratio is the
+        -- environment, not the machine, and it is the one thing this suite
+        -- cannot get by running faster.
+        local real_request = process.request
+        process.request = function(method, params, callback)
+          if method ~= "interact" then return real_request(method, params, callback) end
+          return real_request(method, params, function(...)
+            local answer = { ... }
+            vim.defer_fn(function() callback(unpack(answer)) end, 250)
+          end)
+        end
+
+        local slow_scroll, slow_lost = session.applied_scroll_y or 0, nil
+        for index = 1, 40 do
+          press("j")
+          -- Key repeat, not a round trip: the loop turns so the press is
+          -- delivered, and then the next one arrives whether or not the last
+          -- has been answered.
+          vim.wait(30, function() return false end, 5)
+          if caret.rect(session) == nil and slow_lost == nil then slow_lost = index end
+        end
+        vim.wait(6000, function() return false end, 50)
+        process.request = real_request
+
+        t.ok((session.applied_scroll_y or 0) > slow_scroll, "sanity: a held run on a slow link still scrolls")
+        t.eq(
+          nil,
+          slow_lost,
+          ("the caret survives a held run on a slow link (lost at press %s, final drift %.1f)"):format(
+            tostring(slow_lost),
+            math.abs((session.applied_scroll_y or 0) - (session.caret_scroll_y or 0))
+          )
+        )
+      end
     end
 
     controller.close(source)
