@@ -903,7 +903,13 @@ return function(t)
     -- document stamped with another document's identity. The request serial does
     -- not catch this, because the disagreement is created by this very callback
     -- adopting the renderer's viewport before the region is built.
+    -- Anchored to the position the *displayed* fill established, not to
+    -- whatever the previous statement left behind: a fill that wrongly writes
+    -- this on its way to being discarded moves both, and an assertion comparing
+    -- them to each other would agree with itself and prove nothing.
     local stale_before, uploads_before = live.stale_fills, uploads
+    local displayed_scroll_y = session.applied_scroll_y
+    t.eq(1700, displayed_scroll_y, "sanity: the last fill that reached the screen set the position")
     session.scroll_y = 1500
     -- The preview was resized after the last response landed, so the session's
     -- idea of its own viewport is one response out of date. That is precisely
@@ -915,6 +921,11 @@ return function(t)
     t.eq(stale_before + 1, live.stale_fills, "a fill whose document changed under it is discarded, never displayed")
     t.eq(uploads_before, uploads, "without reaching the terminal")
     t.eq(false, live.fill.in_flight, "and the slot is released -- a discarded fill must not disable every later one")
+    -- The screen still shows what it showed. `applied_scroll_y` is what the
+    -- caret's drift, the animation layer's placement and every interact request
+    -- are derived from, so a fill that wrote it while being thrown away would
+    -- put all three at a position no pixels were ever drawn for.
+    t.eq(displayed_scroll_y, session.applied_scroll_y, "a discarded fill leaves the recorded position where it was")
     viewport_answer = { widthPx = 990, heightPx = 1020, tier = "measured" }
     session.viewport_width_px = 990
     live.key = controller._resident_key(session)
@@ -924,6 +935,7 @@ return function(t)
     -- buy nothing, so it is dropped before it costs any.
     local abandoned_before = live.abandoned_fills
     uploads_before = uploads
+    local applied_before = session.applied_scroll_y
     session.scroll_y = 1500
     controller.refresh(session, controller._settle_options(session))
     session.scroll_y = 9000
@@ -931,6 +943,12 @@ return function(t)
     t.eq(abandoned_before + 1, live.abandoned_fills, "a region the reader has left is discarded")
     t.eq(uploads_before, uploads, "without spending a byte on pixels nobody is looking at")
     t.eq(false, live.fill.in_flight, "and releases the slot")
+    -- And without claiming the screen moved. A discarded fill puts no pixels
+    -- anywhere, so `applied_scroll_y` must still describe what is on screen --
+    -- it is what the caret's drift, the animation layer's placement and every
+    -- interact request are all derived from, so a fill that wrote it on the way
+    -- to being thrown away would put all three somewhere the reader is not.
+    t.eq(applied_before, session.applied_scroll_y, "a discarded fill does not claim the view moved")
 
     -- A capture in flight for the position the reader has just panned away from
     -- must not land on top of them. `request_serial` cannot catch this: a pan

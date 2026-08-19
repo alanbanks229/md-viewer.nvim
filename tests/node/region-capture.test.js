@@ -266,3 +266,56 @@ test("captureBeyondViewport is what makes a tall clip correct", async (t) => {
     "with captureBeyondViewport off the same clip returns different pixels -- a quiet failure, not a loud one",
   );
 });
+
+// A renderer tab can die under the process. A region is the only capture here
+// large enough to take one with it, and the pixel ceiling it is bounded by was
+// measured on one machine while the code runs on another -- so this is a limit
+// that differs by host rather than a contradiction to explain away.
+//
+// What made it a permanent failure rather than a hiccup was `ensure` returning
+// early on the presence of a context, never asking whether the page was still
+// alive. A dead page leaves the context handle in place, so nothing rebuilt it
+// and every later capture failed the same way -- including on freshly opened
+// documents, which is how it was reported: "Target page, context or browser has
+// been closed" on a file that had nothing to do with whatever broke.
+//
+// Closing the page here stands in for the crash. What is under test is not why
+// a page dies but that the next capture rebuilds it.
+test("a dead page is rebuilt rather than failing for the life of the process", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+
+  const params = {
+    documentId: "dead-page",
+    contentRevision: 1,
+    viewport: { widthPx: WIDTH, heightPx: HEIGHT, deviceScaleFactor: 2 },
+    browser: { executable_path: executable },
+    theme: "dark",
+    scrollY: 0,
+    captureScale: "device",
+    scrollPastEnd: true,
+    scrollPastEndOffsetPx: 22,
+  };
+  const html = fixtureHtml(20);
+
+  const before = await renderer.render(params, html, 1);
+  assert.ok(fs.existsSync(before.pngPath), "sanity: a capture works to begin with");
+  fs.unlinkSync(before.pngPath);
+
+  const deadPage = renderer.page;
+  await deadPage.close();
+  assert.ok(deadPage.isClosed(), "sanity: the page really is gone");
+
+  // The next request must not inherit the corpse. A second render with a fresh
+  // document id is the ordinary thing a reader does after this happens.
+  const after = await renderer.render({ ...params, documentId: "dead-page-2", contentRevision: 2 }, html, 2);
+  assert.ok(fs.existsSync(after.pngPath), "a capture after the page died still produces a PNG");
+  assert.notEqual(renderer.page, deadPage, "on a rebuilt page rather than the dead one");
+  assert.ok(!renderer.page.isClosed(), "which is alive");
+  fs.unlinkSync(after.pngPath);
+});
