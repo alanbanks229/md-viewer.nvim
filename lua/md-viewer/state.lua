@@ -1,3 +1,5 @@
+local resident = require("md-viewer.resident")
+
 local M = {}
 local sessions = {}
 
@@ -43,6 +45,24 @@ function M.create(source_buf, source_win)
     loading_frame = 0,
     render_failed = false,
     obsolete_files = {},
+    -- What this session has written to the terminal, and what the last write
+    -- cost. Every image byte and every placement byte, not just the PNG: over
+    -- SSH they share one pty, so the PNG alone cannot say whether a change
+    -- removed traffic or merely moved it. See controller.record_ui_bytes.
+    ui_bytes_total = 0,
+    last_ui_bytes = nil,
+    -- The pixel dimensions of the image the terminal is actually holding, read
+    -- from its PNG header rather than inferred from the scale that was
+    -- requested -- the two disagree whenever the renderer falls back to
+    -- Playwright, which cannot express a sub-1x capture factor.
+    image_width_px = nil,
+    image_height_px = nil,
+    -- Resident rendered regions: images the terminal holds that are taller than
+    -- one viewport, so scrolling within them is a re-crop rather than a
+    -- re-upload. Always present and disabled by default -- the capability gate
+    -- is the controller's, and a disabled state costs one boolean on the scroll
+    -- path. See md-viewer.resident for the coordinate model.
+    resident = resident.new_state(),
     -- Selection/find display state, distinct from the button-scoped
     -- `session.pointer` gesture state: it must survive focus changes (a
     -- pointer press does not), so it is never touched by the

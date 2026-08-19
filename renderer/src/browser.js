@@ -70,6 +70,55 @@ function round(value) {
   return Math.round(value * 100) / 100;
 }
 
+/// Ceilings on a resident-region capture, in *device* pixels.
+///
+/// Not the policy. The Lua side's pixel budget binds first in every ordinary
+/// configuration (lua/md-viewer/resident.lua), because what actually limits a
+/// region is how much decoded image a terminal will hold, not how much Chromium
+/// will draw. These bound the pathological cases, and they sit below what was
+/// demonstrated rather than at it: scripts/resident/probe.mjs measured 32.3 Mpx
+/// and a 16,320px-tall capture both succeeding on Chromium 151.
+///
+/// Exported so a test can assert the guard without launching a browser.
+export const MAX_REGION_PIXELS = 12000000;
+export const MAX_REGION_HEIGHT_PX = 16384;
+
+/// Resolve a requested document-space capture region against the document that
+/// actually exists, or refuse.
+///
+/// Clamping and refusal are different answers to different problems. A region
+/// running past the end of the document is ordinary -- the last region of every
+/// document does -- so it is clamped, and the caller is told what it actually
+/// got. A region too large to capture safely is not ordinary, so it is refused
+/// with a code the Lua side can act on (shrink and retry, then disable) rather
+/// than silently reduced to something nobody asked for.
+///
+/// Pure, and exported, for the same reason `CHROMIUM_LAUNCH_ARGS` is: the
+/// arithmetic is the whole of the guard, and a test that needs Chromium to
+/// exercise it is a test that will be skipped on the machine where it matters.
+export function resolveCaptureRegion(requested, { documentHeight, viewportWidth, deviceScaleFactor }) {
+  const rawY = Number(requested?.yPx);
+  const rawHeight = Number(requested?.heightPx);
+  if (!Number.isFinite(rawY) || !Number.isFinite(rawHeight)) {
+    const error = new Error("captureRegion requires finite yPx and heightPx");
+    error.code = "INVALID_REQUEST";
+    throw error;
+  }
+  const yPx = Math.max(0, Math.min(rawY, documentHeight));
+  const heightPx = Math.min(Math.max(1, rawHeight), Math.max(1, documentHeight - yPx));
+  const devicePixelHeight = Math.round(heightPx * deviceScaleFactor);
+  const devicePixelWidth = Math.round(viewportWidth * deviceScaleFactor);
+  if (devicePixelHeight > MAX_REGION_HEIGHT_PX || devicePixelWidth * devicePixelHeight > MAX_REGION_PIXELS) {
+    const error = new Error(
+      `capture region of ${devicePixelWidth}x${devicePixelHeight} device px exceeds the safe ceiling `
+      + `(${MAX_REGION_PIXELS} px, ${MAX_REGION_HEIGHT_PX} px tall)`,
+    );
+    error.code = "REGION_TOO_LARGE";
+    throw error;
+  }
+  return { yPx, heightPx };
+}
+
 /// Bound a CDP round trip.
 ///
 /// `CDPSession.send` has no timeout of its own, so a compositor that never
@@ -116,6 +165,12 @@ export class BrowserRenderer {
     // a browser that does not support it costs one failed round trip rather
     // than one on every frame.
     this.cdpCaptureUnavailable = null;
+    // Deliberately *separate* from the flag above. A region capture asks
+    // Chromium for something a viewport capture never does -- a clip larger than
+    // the surface -- so it can fail on its own, and letting that failure disable
+    // the fast PNG encoder for ordinary frames too would charge every scroll for
+    // a defect in a feature it does not use. Regions degrade; viewports do not.
+    this.cdpRegionCaptureUnavailable = null;
     this.fastPngEncode = true;
     // A field rather than a constant so a test can prove the stall path without
     // waiting out the real budget.
@@ -151,6 +206,7 @@ export class BrowserRenderer {
     // Bound to this page, so it is recreated with it and never outlives it.
     this.cdp = await this.context.newCDPSession(this.page).catch(() => null);
     this.cdpCaptureUnavailable = this.cdp ? null : "newCDPSession failed";
+    this.cdpRegionCaptureUnavailable = this.cdp ? null : "newCDPSession failed";
     // A brand-new page holds no document, so nothing may claim to be active.
     this.layout = this.viewport = this.active = null;
   }
@@ -239,6 +295,69 @@ export class BrowserRenderer {
   /// and reproduces what `page.screenshot` does -- a test asserts the two paths
   /// return byte-identical files. If anything fails, the Playwright call is
   /// still the fallback, so a browser without the option renders normally.
+  /// Write one PNG covering a **document region** taller than the viewport, for
+  /// the terminal to hold and pan within.
+  ///
+  /// Kept separate from `captureViewportPng` rather than folded into it, because
+  /// the two differ in the one place it would be dangerous to blur:
+  ///
+  ///   * **The origin is the region, never the page.** The viewport path reads
+  ///     `window.scrollY` on purpose -- a find match or a fragment jump moves the
+  ///     page from inside, and the picture must follow the page. A region is
+  ///     *defined* in document coordinates, so consulting the page here would
+  ///     make the same capture return different pixels depending on where the
+  ///     reader happened to be standing.
+  ///   * **`captureBeyondViewport` must be true**, and its failure mode is quiet.
+  ///     With it false at a tall clip, Chromium returns a correctly *sized* PNG
+  ///     whose beyond-the-fold band is only ~95% right -- measured, not assumed
+  ///     (scripts/resident/probe.mjs). No exception, no short image, just subtly
+  ///     wrong pixels. That is why a test asserts the flag rather than inferring
+  ///     it from the absence of an error.
+  ///   * **Always device scale.** A region is what the reader looks at while
+  ///     scrolling, not a moving frame, so the `captureScaleFactor` that shrinks
+  ///     moving frames has no business here. Ignored rather than forwarded, on
+  ///     the same principle as the clamps above: this side does not trust the
+  ///     caller's arithmetic.
+  ///
+  /// The viewport is never resized. That is the whole reason a clip is used
+  /// instead: the document's bottom padding is `calc(100vh - Npx)`, so growing
+  /// the viewport to reach past the fold would change `scrollHeight` and move the
+  /// coordinate space out from under every block rect and every resident region.
+  async captureRegionPng(pngPath, region) {
+    const clip = {
+      x: 0,
+      y: region.yPx,
+      width: this.viewport.width,
+      height: region.heightPx,
+    };
+    if (this.cdp && this.fastPngEncode && !this.cdpRegionCaptureUnavailable) {
+      try {
+        const { data } = await withTimeout(
+          this.cdp.send("Page.captureScreenshot", {
+            format: "png",
+            optimizeForSpeed: true,
+            captureBeyondViewport: true,
+            clip: { ...clip, scale: this.deviceScaleFactor },
+          }),
+          this.cdpCaptureTimeoutMs,
+          "Page.captureScreenshot (region)",
+        );
+        fs.writeFileSync(pngPath, Buffer.from(data, "base64"));
+        return "cdp_fast_png";
+      } catch (error) {
+        this.cdpRegionCaptureUnavailable = String(error?.message ?? error);
+      }
+    }
+    // Playwright's own Chromium screenshotter sends `captureBeyondViewport` when
+    // the clip does not fit the viewport, so this is the supported route to the
+    // same capability rather than a second guess at the same trick. It cannot
+    // express `optimizeForSpeed`, so the PNG is smaller and slower to encode --
+    // which for a region, transmitted once and panned within many times, is the
+    // better half of that trade anyway.
+    await this.page.screenshot({ path: pngPath, type: "png", animations: "disabled", scale: "device", clip });
+    return "playwright_png";
+  }
+
   async captureViewportPng(pngPath, scale, scaleFactor) {
     // The moving frame of a scroll may be captured below its natural size. PNG
     // bytes against real content go as pixels^0.69, so half scale is about 2.6x
@@ -314,12 +433,17 @@ export class BrowserRenderer {
   /// Screenshot the current viewport. Shared by render() and by any interaction
   /// that mutates visible state, so the mutation and its frame are produced by
   /// the same queued operation and Lua never has to follow up with a capture.
-  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor }) {
+  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor, region }) {
     const safeDocument = String(documentId ?? "document").replace(/[^a-zA-Z0-9_-]/g, "_");
     const pngPath = path.join(this.tempDir, `${safeDocument}-${requestId}.png`);
-    const scale = captureScale === "css" ? "css" : "device";
+    // A region is always the settle-quality tier whatever the caller said, so
+    // the two-value tier the Lua side keys its fast/settle bookkeeping off stays
+    // honest: there is no such thing as a soft resident region.
+    const scale = region ? "device" : captureScale === "css" ? "css" : "device";
     const started = performance.now();
-    const captureEncoder = await this.captureViewportPng(pngPath, scale, captureScaleFactor);
+    const captureEncoder = region
+      ? await this.captureRegionPng(pngPath, region)
+      : await this.captureViewportPng(pngPath, scale, captureScaleFactor);
     const captureMs = performance.now() - started;
     const pngBytes = fs.statSync(pngPath).size;
     // `captureScale` stays the two-value tier the Lua side keys its fast/settle
@@ -334,6 +458,13 @@ export class BrowserRenderer {
       pngBytes,
       captureMs: round(captureMs),
       captureEncoder,
+      // What was *actually* captured, after clamping to the document's end. The
+      // Lua side derives a region's whole coordinate mapping from this together
+      // with the PNG's own dimensions, so echoing the request rather than the
+      // outcome would put every crop in the last region of every document out by
+      // however much the clamp moved it.
+      regionYPx: region ? region.yPx : undefined,
+      regionHeightPx: region ? region.heightPx : undefined,
     };
   }
 
@@ -424,10 +555,22 @@ export class BrowserRenderer {
     const layoutMs = performance.now() - layoutStarted;
 
     const documentHeight = this.layout.documentHeight;
+    // Applied even for a region capture, whose clip does not consult it. The
+    // page's own scroll position is what every later interaction resolves
+    // against -- hit-testing, the caret, selection, find -- so it has to keep
+    // tracking the reader whether or not this particular frame reads it.
     const scrollY = await this.applyScroll(documentHeight, height, params.scrollY);
+    const region = params.captureRegion
+      ? resolveCaptureRegion(params.captureRegion, {
+        documentHeight,
+        viewportWidth: width,
+        deviceScaleFactor: this.deviceScaleFactor,
+      })
+      : null;
     const capture = await this.captureViewport({
       documentId: params.documentId, requestId, captureScale: params.captureScale,
       captureScaleFactor: params.captureScaleFactor,
+      region,
     });
 
     // The rehydration record. Written on every successful render so an
@@ -467,6 +610,10 @@ export class BrowserRenderer {
       captureScale: capture.captureScale,
       captureScaleFactor: capture.captureScaleFactor,
       captureEncoder: capture.captureEncoder,
+      // Absent entirely on an ordinary viewport capture, so a response that
+      // carries them is exactly a response that captured a region.
+      regionYPx: capture.regionYPx,
+      regionHeightPx: capture.regionHeightPx,
       pngBytes: capture.pngBytes,
       layoutMs: round(layoutMs),
       captureMs: capture.captureMs,

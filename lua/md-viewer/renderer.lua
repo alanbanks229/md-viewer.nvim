@@ -69,6 +69,20 @@ function M.request(session, markdown, options, callback)
     -- moving scroll frame, and ignored by the renderer on the "device" tier --
     -- see `captureViewportPng` for why the settle frame is never scaled.
     captureScaleFactor = options.capture_scale_factor,
+    -- A document-space rectangle to capture instead of the viewport, for a
+    -- resident region the terminal will hold and pan within. Absent on every
+    -- ordinary frame, and a request without it produces exactly the bytes it
+    -- produced before this existed. The renderer clamps it to the document and
+    -- answers with what it actually captured (`regionYPx`/`regionHeightPx`),
+    -- which is what the region's coordinate mapping is derived from -- echoing
+    -- the request instead would misplace every crop in a document's last region.
+    captureRegion = options.capture_region,
+    -- Which supersession lane this request belongs to. Absent means the
+    -- renderer's default for the method, which is what every request has sent
+    -- until now. A region fill asks for "settle" so that it and the moving
+    -- frames of a scroll stop cancelling each other: `lanes.js` invalidates
+    -- per lane, and the two have been sharing one.
+    lane = options.lane,
     fontSizePx = cfg.render.font_size_px,
     scrollPastEnd = cfg.render.scroll_past_end,
     scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,
@@ -84,7 +98,12 @@ function M.request(session, markdown, options, callback)
     browser = cfg.browser,
   }
   if not capture_only then params.markdown = markdown end
-  local request_id = process.request(capture_only and "capture" or "render", params, function(result, err)
+  -- `info` is the renderer's own error classification -- `{ code, detail }` from
+  -- the JSON response. Forwarded rather than dropped so a caller can tell a
+  -- refusal it can act on from a failure it cannot: a region the renderer judged
+  -- too large is answered by asking for a smaller one, where the message-matching
+  -- the retry below does would be guessing at prose.
+  local request_id = process.request(capture_only and "capture" or "render", params, function(result, err, info)
     if M.is_stale(session, serial) then
       if result and result.pngPath then vim.uv.fs_unlink(result.pngPath) end
       callback(nil, nil, true)
@@ -96,7 +115,7 @@ function M.request(session, markdown, options, callback)
       return
     end
     if err then
-      callback(nil, err, false)
+      callback(nil, err, false, info)
       return
     end
     if type(result) ~= "table" or type(result.pngPath) ~= "string" or type(result.blocks) ~= "table" then

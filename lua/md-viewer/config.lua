@@ -87,6 +87,30 @@ M.defaults = {
     raw_overlay_bleed_cells = 1,
     raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
+    -- Whether an image taller than the viewport may be kept in the terminal and
+    -- scrolled by re-cropping it, instead of capturing and sending a fresh frame
+    -- for every position. "auto" follows the terminal profile; "on" and "off"
+    -- override it, the same three-valued shape `interaction.selection_overlay`
+    -- uses and for the same two reasons -- someone has to be able to turn it on
+    -- to qualify a new terminal, and off to escape a defect in one.
+    --
+    -- Only ever active over SSH, where the pixels are the cost. A local terminal
+    -- receives a frame for free, so this would trade terminal memory for nothing.
+    resident_pan = "auto",
+    -- How much decoded image the terminal may hold for one preview, in pixels.
+    --
+    -- Pixels rather than bytes, matching the animation upload budget in
+    -- renderer/src/media.js, because that is the unit both are really spending
+    -- and it makes the two comparable. Four bytes a pixel is the working
+    -- assumption for what it costs, so this is roughly 32 MB.
+    --
+    -- Deliberately small. One region a little under two viewports at a typical
+    -- split size, which buys about a viewport of free scrolling in each
+    -- direction. The failure mode of a low value is less caching; the failure
+    -- mode of a high one is a terminal that grows without bound, which is where
+    -- this project has been burned before (docs/terminal-support.md on
+    -- wezterm#7953). Raise it on a measurement, not on a hunch.
+    resident_budget_px = 8000000,
   },
   sync = {
     source_to_preview = true,
@@ -333,6 +357,14 @@ local function validate(cfg)
   assert(
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
+  )
+  assert(
+    cfg.image.resident_pan == "auto" or cfg.image.resident_pan == "on" or cfg.image.resident_pan == "off",
+    'md-viewer: image.resident_pan must be "auto", "on", or "off"'
+  )
+  assert(
+    type(cfg.image.resident_budget_px) == "number" and cfg.image.resident_budget_px >= 0,
+    "md-viewer: image.resident_budget_px must be non-negative"
   )
   assert(type(cfg.browser.fast_png_encode) == "boolean", "md-viewer: browser.fast_png_encode must be boolean")
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")

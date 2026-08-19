@@ -503,6 +503,176 @@ return function(t)
   )
   raw_backend.clear(raw_id)
 
+  -- Byte accounting. Every operation reports what it actually wrote, because a
+  -- PNG is the largest part of a frame and never the whole of it: the
+  -- placements that position it and the deletions that supersede them ride the
+  -- same pty, and over SSH that pty is the constraint. Counting only the PNG is
+  -- how a change can remove the biggest payload, leave the traffic where it was,
+  -- and still read as a win -- which docs/local-render-design.md records
+  -- happening once already. So the counts must equal the real stream exactly,
+  -- not approximate it.
+  reset_sequences()
+  local before_total = raw_backend.ui_bytes_total()
+  local counted_id, show_stats = raw_backend.show(fake_png(4096), placement)
+  local show_written = #output()
+  t.eq(show_written, show_stats.bytes, "show reports exactly the bytes it wrote")
+  t.eq(100, show_stats.width_px, "show reports the PNG's real pixel width")
+  t.eq(100, show_stats.height_px, "show reports the PNG's real pixel height")
+  t.eq(before_total + show_written, raw_backend.ui_bytes_total(), "the process-wide total grows by the same bytes")
+
+  -- The number the whole resident-panning design rests on: re-placing an image
+  -- already in the terminal costs placement bytes, not image bytes. Asserted as
+  -- an order-of-magnitude relationship rather than a constant so it stays true
+  -- as the fixture changes, but it is the claim being made.
+  reset_sequences()
+  local moved_again, move_stats = raw_backend.move(counted_id, {
+    row = 0,
+    col = 0,
+    width = 10,
+    height = 10,
+    exclusions = { { row = 2, col = 2, width = 4, height = 4 } },
+  })
+  t.eq(counted_id, moved_again, "a move answers with the image it re-placed")
+  t.eq(#output(), move_stats.bytes, "move reports exactly the bytes it wrote")
+  t.ok(
+    move_stats.bytes * 5 < show_stats.bytes,
+    "re-cropping an already-uploaded image costs a small fraction of uploading it"
+  )
+
+  reset_sequences()
+  local replaced_id, update_stats = raw_backend.update(counted_id, fake_png(4096), placement)
+  t.eq(#output(), update_stats.bytes, "update reports exactly the bytes it wrote")
+  t.eq(100, update_stats.width_px, "update reports the replacement PNG's real pixel width")
+  raw_backend.clear(replaced_id)
+
+  -- A refusal answers with a reason in the position a success answers with
+  -- stats -- the convention overlay_apply and animation_apply already follow,
+  -- and the reason callers must read the second value only on the branch they
+  -- asked for.
+  local unowned_id, unowned_reason = raw_backend.move(0x7fffffff, placement)
+  t.eq(nil, unowned_id, "moving an image this backend does not own is refused")
+  t.eq("string", type(unowned_reason), "and the refusal answers with a reason rather than stats")
+
+  -- Source-window cropping: the whole of resident-region panning, at the level
+  -- the terminal sees it. The placement rectangle stays put and the *source*
+  -- rectangle moves, so a scroll costs placement bytes rather than an upload.
+  --
+  -- `fake_png()` declares 100x100 px; the placement is 10x10 cells. A source
+  -- window is stated in image pixels and describes what the whole placement
+  -- shows, so a 100x50 window at y=25 means "the middle half of this image,
+  -- stretched over all ten rows".
+  reset_sequences()
+  local full_id = raw_backend.show(fake_png(), placement)
+  local full_output = output()
+  raw_backend.clear(full_id)
+
+  reset_sequences()
+  local explicit_id = raw_backend.show(fake_png(), placement, { x = 0, y = 0, width = 100, height = 100 })
+  local explicit_output = output()
+  raw_backend.clear(explicit_id)
+  -- Image and placement ids differ between the two runs, so compare the crop
+  -- geometry rather than the whole stream.
+  t.eq(
+    full_output:match("x=%d+,y=%d+,w=%d+,h=%d+,c=%d+,r=%d+"),
+    explicit_output:match("x=%d+,y=%d+,w=%d+,h=%d+,c=%d+,r=%d+"),
+    "a source window covering the whole image is identical to no source window at all"
+  )
+
+  reset_sequences()
+  local panned_id = raw_backend.show(fake_png(), placement, { x = 0, y = 25, width = 100, height = 50 })
+  local panned_output = output()
+  t.eq(
+    "x=0,y=25,w=100,h=50,c=10,r=10",
+    panned_output:match("x=%d+,y=%d+,w=%d+,h=%d+,c=%d+,r=%d+"),
+    "a source window crops the image and leaves the destination cells alone"
+  )
+
+  -- Panning is a move, not an upload. This is the claim the whole feature rests
+  -- on, so it is asserted on the bytes rather than inferred.
+  reset_sequences()
+  raw_backend.move(panned_id, placement, { x = 0, y = 40, width = 100, height = 50 })
+  local repanned = output()
+  t.eq(false, repanned:find("a=t,f=100", 1, true) ~= nil, "panning within a resident image never re-uploads it")
+  t.eq(
+    "x=0,y=40,w=100,h=50,c=10,r=10",
+    repanned:match("x=%d+,y=%d+,w=%d+,h=%d+,c=%d+,r=%d+"),
+    "and the new crop is the only thing that changed"
+  )
+
+  -- A re-place that expresses no opinion about the crop must keep the one on
+  -- screen. `reconcile_placement` is that caller -- a float opening over the
+  -- preview changes the cut-outs and knows nothing about scrolling -- and
+  -- defaulting to the whole image there would jump a panned preview back to the
+  -- top of its region every time a notification appeared.
+  reset_sequences()
+  raw_backend.move(panned_id, placement)
+  t.eq(
+    "x=0,y=40,w=100,h=50,c=10,r=10",
+    output():match("x=%d+,y=%d+,w=%d+,h=%d+,c=%d+,r=%d+"),
+    "a move with no source keeps the crop already on screen rather than resetting it"
+  )
+
+  -- Occlusion composes on top of the source window without ever meeting it in
+  -- the same quantity: the cut-outs are placement-local cells, the window is
+  -- image pixels. Rows 2..5 of ten are excluded, so the surviving strips are
+  -- rows 0..1 and 6..9 -- which at y=40 over a 50px window are 40..49 and
+  -- 60..79 in the image.
+  reset_sequences()
+  raw_backend.move(panned_id, {
+    row = 0,
+    col = 0,
+    width = 10,
+    height = 10,
+    exclusions = { { row = 2, col = 0, width = 10, height = 4 } },
+  })
+  local occluded = output()
+  t.ok(occluded:find("x=0,y=40,w=100,h=10,c=10,r=2", 1, true), "the strip above a cut-out crops from the window's top")
+  t.ok(
+    occluded:find("x=0,y=70,w=100,h=20,c=10,r=4", 1, true),
+    "and the strip below it crops from the window, not from the image's own origin"
+  )
+  raw_backend.clear(panned_id)
+
+  -- A window reaching past the image is refused rather than clamped, and costs
+  -- no placement id -- the same discipline `crop_within` already applies.
+  reset_sequences()
+  local overrun_id = raw_backend.show(fake_png(), placement, { x = 0, y = 80, width = 100, height = 50 })
+  t.eq(false, output():find("\27_Ga=p", 1, true) ~= nil, "a source window running past the image places nothing")
+  raw_backend.clear(overrun_id)
+
+  -- Retaining the superseded image: show a frame over a resident region without
+  -- destroying it. `a=d,d=i` drops placements, `a=d,d=I` drops the pixels; only
+  -- the first may happen here or the region has to be transmitted again.
+  reset_sequences()
+  local retained_base = raw_backend.show(fake_png(), placement)
+  reset_sequences()
+  local over_id = raw_backend.update(retained_base, fake_png(), placement, { retain_superseded = true })
+  local retained_output = output()
+  t.ok(retained_output:find("a=d,d=i", 1, true), "retaining supersedes the old image's placements")
+  t.eq(false, retained_output:find("a=d,d=I", 1, true) ~= nil, "but never frees the image data itself")
+  t.eq(1, #sequences, "and still lands in a single write, so nothing can composite mid-swap")
+  -- The retained image is still owned, so it can be placed again with no upload.
+  reset_sequences()
+  local restored = raw_backend.move(retained_base, placement)
+  t.eq(retained_base, restored, "the retained image is still owned and can be re-placed")
+  t.eq(false, output():find("a=t,f=100", 1, true) ~= nil, "restoring it costs no upload")
+  raw_backend.clear(over_id)
+
+  -- Hiding: placements down, pixels kept. This is what makes an occlusion cost
+  -- a deletion rather than a re-upload.
+  reset_sequences()
+  local hidden, hide_stats = raw_backend.hide(retained_base)
+  local hide_output = output()
+  t.eq(true, hidden, "hiding an owned image succeeds")
+  t.ok(hide_output:find("a=d,d=i", 1, true), "hiding deletes the image's placements")
+  t.eq(false, hide_output:find("a=d,d=I", 1, true) ~= nil, "and never the image data")
+  t.eq(#hide_output, hide_stats.bytes, "hiding reports what it wrote")
+  reset_sequences()
+  t.eq(retained_base, (raw_backend.move(retained_base, placement)), "a hidden image can be shown again")
+  t.eq(false, output():find("a=t,f=100", 1, true) ~= nil, "and showing it again is still an upload-free move")
+  raw_backend.clear(retained_base)
+  t.eq(false, raw_backend.hide(retained_base), "hiding an image this backend no longer owns is refused")
+
   -- Base64 chunking at the 4096-byte boundary: an upload whose encoded form
   -- lands exactly on two full chunks, and one that spills one chunk's worth
   -- of bytes into a third, tiny final chunk.

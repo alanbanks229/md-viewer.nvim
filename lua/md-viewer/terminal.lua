@@ -101,6 +101,16 @@ M.profiles = {
     default_raw_zindex = -3,
     default_double_buffer = true,
     selection_overlay = true,
+    -- The first terminal cleared for resident panning, and so far the only one.
+    --
+    -- It needs less evidence than the overlay does, not more: a resident crop is
+    -- an ordinary base placement with `c`/`r` cell scaling, which iTerm2 has
+    -- drawn correctly since the beginning, and it needs no measured cell size
+    -- because nothing is positioned in device pixels. What it does need is that
+    -- the terminal hold a large image and re-place it repeatedly without its
+    -- memory climbing -- the property the 2026-08-07 overlay probe already
+    -- exercised here, and the one WezTerm fails (see below).
+    resident_pan = true,
     -- Animation is a *mode*, not a flag, because two different workloads hide
     -- behind the word. "frames" is client-driven: one placement swap per
     -- frame, the same operation as an overlay crop, so the profiles validated
@@ -197,6 +207,14 @@ M.profiles = {
     -- carries the fix: run scripts/overlay/geometry and scripts/overlay/stress
     -- against it, and flip the flag only if both pass.
     selection_overlay = false,
+    -- Off for the same defect, and this is the case it bites hardest. Resident
+    -- panning is placement churn over a *large* image by construction: every
+    -- scroll re-places, and the image being re-placed is several viewports of
+    -- pixels rather than a highlight bar. #7953 grows memory per placement, not
+    -- per second, so nothing about scrolling slowly makes it affordable -- and
+    -- unlike a drag, which ends, a reader scrolls a preview for as long as they
+    -- read it. Re-qualify with scripts/overlay/stress once #8035 ships.
+    resident_pan = false,
     -- Off for the same upstream defect, and more firmly. #7953 duplicates a
     -- cell's attachment list on every repeat placement over it -- that is per
     -- placement, not per second, so a slower tick does not make it safe, only
@@ -307,6 +325,11 @@ M.profiles = {
     -- below. WezTerm's `selection_overlay = false` is spelled out for the same
     -- reason.
     selection_overlay = false,
+    -- Off, and this one is not a memory question but a correctness one: Warp
+    -- does not honour the crop keys (`x/y/w/h`), which is the entire mechanism
+    -- resident panning is built on. A pan there would not be slow, it would draw
+    -- the wrong part of the document.
+    resident_pan = false,
     -- Experimental, not Supported: launched and watched, with three defects
     -- found. Animation stays off on the table's own default, having never been
     -- watched here.
@@ -626,6 +649,12 @@ function M.capability(cfg, env)
     -- Only ever true for profiles someone actually looked at, by eye or by
     -- photograph; see the comment above M.profiles.
     selection_overlay = profile.selection_overlay == true,
+    -- A separate gate from the overlay's, not a synonym for it: a resident crop
+    -- needs no measured cell (it scales by cells, not pixels) but does need the
+    -- terminal to hold a large image across sustained placement churn. Those are
+    -- different questions with different answers -- see kitty_raw's
+    -- `resident_pan_supported`.
+    resident_pan = profile.resident_pan == true,
     animation = animation,
     overlay_encoding = profile.overlay_encoding or "sub-cell-offset",
     placement = profile.placement,

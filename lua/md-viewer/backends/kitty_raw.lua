@@ -21,7 +21,24 @@ local next_animation_id = 0x5e000000 + (vim.uv.os_getpid() % 0xffff) * 256
 
 local function command(control, payload) return "\27_G" .. control .. ";" .. (payload or "") .. "\27\\" end
 
-local function send(value) vim.api.nvim_ui_send(value) end
+-- Every byte this backend writes to the terminal passes through here, which
+-- makes this the only place that can answer what it actually costs the wire.
+--
+-- PNG size is not that answer. Placements, deletions and the cursor framing
+-- around them are bytes on the same pty, and over SSH that pty is the whole
+-- constraint -- so a change that removes the largest payload can leave the
+-- traffic where it was and still read as a win. docs/local-render-design.md
+-- records exactly that trap being sprung once already, on a response nobody was
+-- counting. Process-wide rather than per session: `clear_all`, the tint-sheet
+-- cache and the animation-frame cache belong to no single session, and a total
+-- that quietly omitted them would be the flattering number rather than the
+-- true one.
+local ui_bytes_total = 0
+
+local function send(value)
+  ui_bytes_total = ui_bytes_total + #value
+  vim.api.nvim_ui_send(value)
+end
 
 local function chunks(encoded, control)
   local size, offset = 4096, 1
@@ -276,14 +293,38 @@ end
 ---along with the fresh placement IDs they use. Kept separate from sending so
 ---`M.move` can emit a replacement and the deletion it supersedes in a single
 ---write -- see there for why that matters.
-local function placement_sequences(item, placement)
+---
+---`source` is the rectangle of the uploaded image that the **whole placement
+---rectangle** shows, in image pixels. Omitted, it is the entire image, which is
+---the only thing this function could express before resident regions existed:
+---one capture, one viewport, drawn edge to edge. A resident region is an image
+---several viewports tall, and panning within it is exactly a change of `source`
+---with the placement held still.
+---
+---Substituting `{0, 0, item.width_px, item.height_px}` reduces every expression
+---below to the one it replaced, character for character -- which is why the
+---golden byte stream in `tests/lua/cases/backend_kitty.lua` is unchanged by this
+---and why that test is the regression check for the whole feature.
+---
+---Note what does **not** appear here: the destination is still `c`/`r` in cells,
+---so `docs/architecture.md`'s live invariant holds -- placement geometry is
+---independent of capture scale, and now of scroll position too. The exclusion
+---cut-outs `visible_regions` produces are in placement-local *cells* and are
+---composed on top of the source window without ever meeting it in the same
+---quantity. Mixing those two spaces is the defect class this separation exists
+---to make unstateable.
+local function placement_sequences(item, placement, source)
   local sequences, ids = {}, {}
   local offset = cell_offset()
+  local src_x = source and source.x or 0
+  local src_y = source and source.y or 0
+  local src_w = source and source.width or item.width_px
+  local src_h = source and source.height or item.height_px
   for _, region in ipairs(visible_regions(placement)) do
-    local x1 = math.floor(region.x * item.width_px / placement.width)
-    local y1 = math.floor(region.y * item.height_px / placement.height)
-    local x2 = math.floor((region.x + region.width) * item.width_px / placement.width)
-    local y2 = math.floor((region.y + region.height) * item.height_px / placement.height)
+    local x1 = math.floor(src_x + region.x * src_w / placement.width)
+    local y1 = math.floor(src_y + region.y * src_h / placement.height)
+    local x2 = math.floor(src_x + (region.x + region.width) * src_w / placement.width)
+    local y2 = math.floor(src_y + (region.y + region.height) * src_h / placement.height)
     -- This is the c/r branch of #6344: a zero `w`/`h`, or a crop origin at the
     -- image's edge, is the divisor. The pid is allocated after the guard so a
     -- refused region does not consume one.
@@ -326,11 +367,14 @@ end
 local function deletion_command(image_id) return command(("a=d,d=I,q=2,i=%d"):format(image_id)) end
 
 ---Allocate an image id, register it as owned, and build (but do not send) the
----upload and the placements for it. Returns the id and one sequence.
+---upload and the placements for it. Returns the id, one sequence, and the owned
+---item -- the item so callers can report the PNG's real pixel dimensions
+---without parsing the header a second time, the way `M.animation_upload`
+---already answers with `{width_px, height_px}`.
 ---
 ---`M.show` is this plus a `send`. It is split so `M.update` can concatenate the
 ---replacement with the deletion of what it replaces -- see there.
-local function build_show(image_bytes, placement)
+local function build_show(image_bytes, placement, source)
   next_id = next_id + 1
   local id = next_id
   local width_px, height_px = png_dimensions(image_bytes)
@@ -341,10 +385,13 @@ local function build_show(image_bytes, placement)
   -- Upload once, then use cropped placements so passive floating UI can punch
   -- out only its own cells instead of blanking the complete preview.
   local upload = chunks(encoded, ("a=t,f=100,t=d,q=2,i=%d"):format(id))
-  local sequence, ids = placement_sequences(item, placement)
+  local sequence, ids = placement_sequences(item, placement, source)
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
-  return id, upload .. sequence
+  -- Remembered so a later re-place that has no opinion about the crop keeps the
+  -- one on screen; see `M.move`.
+  item.source = source and vim.deepcopy(source) or nil
+  return id, upload .. sequence, item
 end
 
 -- ---------------------------------------------------------------------------
@@ -1208,6 +1255,57 @@ function M.overlay_clear(set_id)
   return true
 end
 
+---Whether this terminal may be asked to hold an image taller than the viewport
+---and re-crop it as the reader scrolls.
+---
+---Its own capability, deliberately not `M.overlay_supported()`. The two look
+---alike -- both are placements over a base image -- and their evidence is
+---genuinely different:
+---
+---  * An overlay rectangle is placed at natural **pixel** size, so it needs a
+---    measured cell (`cellpixels`) or it lands at the capture's scale instead of
+---    the screen's. A resident crop is an ordinary base placement with `c`/`r`
+---    cell scaling, so it needs no pixel measurement at all. Binding the two
+---    would disable resident panning on every terminal whose pty carries no
+---    pixel geometry -- tmux, and anything that does not fill `ws_xpixel` -- for
+---    a reason that does not apply to it.
+---  * What resident panning does need, and the overlay does not, is that the
+---    terminal hold a *large* image across sustained placement churn without its
+---    memory climbing. That is a different question, and on WezTerm it has a
+---    different answer (#7953).
+---
+---So the profiles that pass one are not automatically the profiles that pass the
+---other, and the gates are separate to keep that true.
+---A PNG's real pixel dimensions, or nil for anything this backend would refuse
+---to upload.
+---
+---Public because a resident region's entire coordinate mapping is derived from
+---the image's *measured* size, and the controller has to know it before the
+---upload rather than after: the crop that upload is placed with is computed from
+---it. `M.show` answers the same question for callers that only need it
+---afterwards.
+function M.png_dimensions(bytes) return png_dimensions(bytes) end
+
+function M.resident_pan_supported()
+  local configured = config.get().image.resident_pan
+  if configured == "off" then return false, "image.resident_pan = off" end
+  if configured == "on" then return true, "image.resident_pan = on (explicit override)" end
+  local profile, profile_id = active_profile()
+  if profile.resident_pan ~= true then
+    return false, ("profile %s is not validated for resident panning"):format(profile_id)
+  end
+  return true, ("profile default (%s)"):format(profile_id)
+end
+
+---Every byte this backend has written to the terminal since Neovim started --
+---base frames, placements, deletions, tint sheets and animation frames alike.
+---
+---The number a change to the render loop has to be judged against, because it
+---is the only one that cannot be improved by moving cost from one payload to
+---another. Sessions attribute their own share from the `bytes` each operation
+---returns; this is the total those shares are a subset of.
+function M.ui_bytes_total() return ui_bytes_total end
+
 function M.capability() return terminal.detect() end
 
 function M.detect()
@@ -1225,10 +1323,22 @@ function M.detect()
     )
 end
 
-function M.show(image_bytes, placement)
-  local id, sequence = build_show(image_bytes, placement)
+---Upload an image and place it. Returns the image id, and beside it the same
+---shape `overlay_apply` and `animation_apply` already answer with: what the
+---operation cost the wire, plus the PNG's real pixel dimensions.
+---
+---The dimensions come from the header this function has already parsed, so
+---asking for them costs nothing -- and a caller that derives geometry from the
+---*actual* pixels rather than from the scale it requested is correct on both
+---capture paths, including the Playwright fallback that silently ignores a
+---sub-1x scroll factor.
+---`source` shows only that rectangle of the uploaded image across the whole
+---placement, for an image that is taller than one viewport. Omitted, the image
+---is drawn edge to edge exactly as it always was.
+function M.show(image_bytes, placement, source)
+  local id, sequence, item = build_show(image_bytes, placement, source)
   send(sequence)
-  return id
+  return id, { bytes = #sequence, width_px = item.width_px, height_px = item.height_px }
 end
 
 ---Replace the image on screen, in **one** `nvim_ui_send` write.
@@ -1245,16 +1355,32 @@ end
 ---Which side the deletion goes on is still the double-buffer policy's call:
 ---create-then-delete never has a moment with nothing on screen, and is the
 ---default everywhere a profile does not say otherwise.
-function M.update(image_id, image_bytes, placement)
+---`opts.source` crops the replacement, as `M.show`'s does.
+---
+---`opts.retain_superseded` deletes only the *placements* of the image being
+---replaced, leaving its data resident. That is what lets a captured frame be
+---shown over a resident region without destroying it: the ordinary path frees
+---the superseded image, which for a region would mean re-transmitting several
+---viewports of pixels the terminal was already holding. `M.clear` stays the one
+---and only way an image's data is given up.
+function M.update(image_id, image_bytes, placement, opts)
+  opts = opts or {}
   local double_buffer = resolve_double_buffer()
   local removal = ""
-  if image_id and owned[image_id] then
-    removal = deletion_command(image_id)
-    owned[image_id] = nil
+  local previous = image_id and owned[image_id]
+  if previous then
+    if opts.retain_superseded then
+      removal = deletion_sequences(previous.id, previous.placement_ids or {})
+      previous.placement_ids = {}
+    else
+      removal = deletion_command(image_id)
+      owned[image_id] = nil
+    end
   end
-  local new_id, addition = build_show(image_bytes, placement)
-  send(double_buffer and (addition .. removal) or (removal .. addition))
-  return new_id
+  local new_id, addition, item = build_show(image_bytes, placement, opts.source)
+  local payload = double_buffer and (addition .. removal) or (removal .. addition)
+  send(payload)
+  return new_id, { bytes = #payload, width_px = item.width_px, height_px = item.height_px }
 end
 
 ---Re-place an already-uploaded image, typically because its crop changed: a
@@ -1267,16 +1393,53 @@ end
 ---gap is visible: it was reported as the image blinking and rolling by about a
 ---row for as long as a notification stayed open. Placement IDs are fresh on
 ---every call, so the old and new sets never collide while they briefly overlap.
-function M.move(image_id, placement)
+---`source` re-crops as well as re-places, which is how scrolling within a
+---resident region costs placement bytes rather than an upload.
+---
+---Omitting it means "re-place what is already on screen", **not** "show the
+---whole image again". `reconcile_placement` is the caller that omits it: a float
+---opening over the preview changes the cut-outs and nothing else, and it has no
+---idea whether the image behind them is one viewport or six. Defaulting to the
+---whole image there would silently snap a panned preview back to the top of its
+---region every time a notification appeared.
+function M.move(image_id, placement, source)
   local item = owned[image_id]
   if not item then return nil, "image is not owned by md-viewer" end
+  source = source or item.source
   local superseded = item.placement_ids or {}
-  local sequence, ids = placement_sequences(item, placement)
+  local sequence, ids = placement_sequences(item, placement, source)
   local removal = deletion_sequences(item.id, superseded)
-  if sequence ~= "" or removal ~= "" then send(sequence .. removal) end
+  local payload = sequence .. removal
+  if payload ~= "" then send(payload) end
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
-  return image_id
+  item.source = source and vim.deepcopy(source) or nil
+  -- The second return is a stats table on success and a reason string on
+  -- failure, which is the convention `overlay_apply` and `animation_apply`
+  -- already follow. Callers read it only on the branch they asked for.
+  return image_id, { bytes = #payload }
+end
+
+---Take an image off the screen without giving up its pixels.
+---
+---Deletes this image's placements and leaves its data resident, so putting it
+---back costs a placement rather than an upload. Every reason a preview
+---temporarily stops being drawn -- a focusable float opening over it, a tab
+---switch, a completion popup, a suspend -- currently drops the image outright
+---and pays the full upload again on the way back. For a resident region that
+---bill is several viewports of pixels the terminal never actually forgot.
+---
+---`M.clear` remains the only thing that frees an image. Every path that ends a
+---session's claim on one -- close, retarget, renderer restart, fallback, exit --
+---must keep using it, or the terminal accumulates pixels nobody will place
+---again.
+function M.hide(image_id)
+  local item = owned[image_id]
+  if not item then return false end
+  local removal = deletion_sequences(item.id, item.placement_ids or {})
+  item.placement_ids = {}
+  if removal ~= "" then send(removal) end
+  return true, { bytes = #removal }
 end
 
 function M.clear(image_id)
@@ -1317,6 +1480,7 @@ function M.health()
   local double_buffer_value, double_buffer_source = resolve_double_buffer()
   local offset = config.get().image.raw_cell_offset_px or {}
   local overlay_supported, overlay_reason = M.overlay_supported()
+  local resident_pan, resident_pan_reason = M.resident_pan_supported()
   local animation_supported, animation_reason = M.animation_supported()
   local animation_native, animation_native_reason = M.animation_native_supported()
   local animation_current_mode = (animation_mode())
@@ -1371,6 +1535,13 @@ function M.health()
     probe_succeeded = false,
     owned_images = vim.tbl_count(owned),
     owned_placements = placements,
+    -- Beside the image and placement counts rather than alone: the counts say
+    -- how much is resident, this says what putting it there cost.
+    ui_bytes_total = ui_bytes_total,
+    -- The terminal's half of the answer. The session also has to be over SSH
+    -- and have a budget; `:MdViewerDebug` reports that half.
+    resident_pan = resident_pan,
+    resident_pan_reason = resident_pan_reason,
     zindex = zindex_value,
     zindex_source = zindex_source,
     double_buffer = double_buffer_value,

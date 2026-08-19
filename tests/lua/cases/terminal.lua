@@ -250,6 +250,31 @@ return function(t)
     t.eq(-3, capability.default_raw_zindex, ("%s leaves the frame and overlay layers free"):format(profile))
   end
 
+  -- `resident_pan` is its own gate and deliberately not a synonym for the
+  -- overlay's, even though both are placements over a base image. An overlay
+  -- rectangle is placed at natural pixel size and so needs a measured cell; a
+  -- resident crop scales by cells and needs none. What it needs instead is that
+  -- the terminal hold a *large* image across sustained placement churn -- which
+  -- is why Kitty and Ghostty, both cleared for the overlay, are not cleared for
+  -- this until someone has watched their memory over a long session.
+  local resident_by_profile = {
+    iterm2 = true,
+    ghostty = false,
+    kitty = false,
+    wezterm = false,
+    warp = false,
+    generic_kitty = false,
+    unknown = false,
+  }
+  for profile, want in pairs(resident_by_profile) do
+    local capability = terminal.capability({ profile = profile }, {})
+    t.eq(want, capability.resident_pan, ("resident_pan for the %s profile"):format(profile))
+  end
+  t.ok(
+    terminal.capability({ profile = "kitty" }, {}).selection_overlay,
+    "sanity: kitty passes the overlay gate, so the two gates are genuinely independent"
+  )
+
   -- The flag and the evidence are different grades, and neither may stand in
   -- for the other. WezTerm's geometry was photographed and is correct; its cost
   -- is not, so the encoding ships and the flag does not. The validation string

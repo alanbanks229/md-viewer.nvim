@@ -151,6 +151,8 @@ image ~
     raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
+    resident_pan                 "auto"     |md-viewer-resident-pan|
+    resident_budget_px           8000000    |md-viewer-resident-pan|
 
 sync ~
     source_to_preview            true       the preview follows the source
@@ -785,6 +787,46 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame larger (measured 80 KB -> 224 KB), and it collapses the moving and
 settle captures into one, so the cheap scroll frame stops existing. Raising
 `render.debounce_ms` does help, by cutting how many refreshes an edit makes.
+
+                                                       *md-viewer-resident-pan*
+Resident regions ~
+
+Scaling a frame makes it smaller; it does not stop md-viewer sending one. On
+a session that supports it, the sharp capture taken when scrolling stops is
+replaced by a taller one -- a couple of viewports of the document rather than
+the one on screen -- which the terminal keeps. Scrolling inside that range
+then costs a few hundred bytes of placement commands instead of a frame, and
+the picture stays at full device scale while it moves, which no amount of
+scaling can buy.
+
+The cost is memory in the terminal, so it is bounded and conservative: >lua
+
+    opts = {
+      image = {
+        -- "auto" follows the terminal profile, "on" forces it (to qualify a
+        -- new terminal), "off" disables it.
+        resident_pan = "auto",
+        -- Decoded pixels the terminal may hold for one preview. Roughly four
+        -- bytes each, so this is about 32 MB.
+        resident_budget_px = 8000000,
+      },
+    }
+<
+Only over SSH, and only on a terminal validated for it -- currently iTerm2.
+Everywhere else the ordinary capture path is unchanged. See
+|md-viewer-terminals| for why WezTerm and Warp are excluded.
+
+:MdViewerDebug reports the whole of it under `resident`: `hits` against
+`misses` is whether it is earning its keep, `used_px` against `budget_px` is
+how close the bound is to binding, and `fallback_reason` is non-nil if the
+session gave up -- with the reason why.
+
+Scrolling reverts to the ordinary path while a search or a selection is
+active, and says so as `blocked_by_find` and `blocked_by_selection`. That is
+not a defect: those highlights are painted into the document by the browser,
+and a resident region was captured without them, so panning to it would erase
+what the reader can see. Clearing the search restores panning at no cost --
+the region was never thrown away.
 
 =============================================================================
 REMOTE PROJECTS, LOCAL NEOVIM                    *md-viewer-remote-projects*
