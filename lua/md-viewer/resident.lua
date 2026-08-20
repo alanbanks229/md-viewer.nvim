@@ -45,32 +45,6 @@
 
 local M = {}
 
---- How much of a region's usable travel is spent *behind* the reader.
----
---- Reading is forward-biased, so most of the slack should be ahead -- but not
---- all of it, or an overshoot or a glance back at the previous paragraph is
---- immediately a cache miss.
----
---- Expressed as a share of the available slack rather than as a fraction of a
---- viewport, which matters at small regions: a region only 1.25 viewports tall
---- has a quarter of a viewport of travel in total, and an anchor stated in
---- viewport units would place it outside its own region.
-local BACKWARD_SHARE = 0.25
-
---- The smallest region worth the memory. Below this the region barely exceeds
---- the viewport, so nearly every scroll is still a miss while a full viewport of
---- decoded pixels sits in the terminal paying for it. A document that fits
---- entirely in one region is exempt -- see `M.plan_region`.
-local K_MIN = 1.25
-
---- The largest, whatever the budget allows. A region is transmitted in one
---- uninterrupted upload that nothing can cancel once it has been handed to the
---- terminal, so its size is a stall the reader sits through. Measured on
---- Chromium 151 at 990x1020@2 (scripts/resident/probe.mjs): four viewports is
---- ~1.7 MB, about 2.8s on the 0.80 MB/s link this exists for. Eight would be
---- 5.7s, which is not a preview.
-local K_MAX = 4.0
-
 --- Refuse a region whose two axes disagree about the capture scale. They cannot
 --- disagree legitimately -- the clip is uniform -- so a mismatch means the image
 --- is not what it claims and every crop taken from it would be subtly wrong.
@@ -105,19 +79,9 @@ local WIRE_SAMPLE_WEIGHT = 0.3
 --- would be enormous, which is the direction that silently disables the hold.
 local MIN_WIRE_SAMPLE_BYTES = 65536
 
---- The floor on how far the adaptive PNG cap may shrink a region. A quarter of
---- the budget's height is already below `K_MIN` at any ordinary viewport, so the
---- planner will decline before this binds; it exists so a pathological document
---- cannot drive the height to zero and leave the session filling nothing forever.
-local MIN_HEIGHT_SCALE = 0.25
-
-M.BACKWARD_SHARE = BACKWARD_SHARE
-M.K_MIN = K_MIN
-M.K_MAX = K_MAX
 M.MAX_REGION_PIXELS = MAX_REGION_PIXELS
 M.MAX_REGION_HEIGHT_PX = MAX_REGION_HEIGHT_PX
 M.MIN_WIRE_SAMPLE_BYTES = MIN_WIRE_SAMPLE_BYTES
-M.MIN_HEIGHT_SCALE = MIN_HEIGHT_SCALE
 
 local function finite(value)
   value = tonumber(value)
@@ -261,71 +225,6 @@ function M.source_window(region, scroll_y, viewport)
     region.doc_y + src_y / region.scale_y
 end
 
----Where the next region should start and how tall it should be.
----
----The budget is the invariant and the height is the *output*. Stating a region
----as "two viewports" and checking the budget afterwards is how a budget gets
----quietly exceeded: at 990x1020 CSS and device scale 2 a viewport is 4,039,200
----image pixels, so two of them are 8,078,400 -- over an 8,000,000 budget, by an
----amount nobody would notice until the terminal was holding it. Deriving the
----height from the budget cannot make that mistake.
----
----Returns `{ doc_y, doc_h, k, backward_slack, forward_slack }`, or `nil, reason`
----when no region worth having fits.
----@return table|nil plan, string|nil reason
-function M.plan_region(opts)
-  local scroll_y = finite(opts.scroll_y) or 0
-  local viewport_h = positive(opts.viewport_h)
-  local viewport_w = positive(opts.viewport_w)
-  local document_h = positive(opts.document_height_px)
-  local scale = positive(opts.scale)
-  local budget_px = positive(opts.budget_px)
-  local max_regions = math.max(1, math.floor(finite(opts.max_regions) or 1))
-  if not (viewport_h and viewport_w) then return nil, "viewport dimensions are unknown" end
-  if not document_h then return nil, "document height is unknown" end
-  if not scale then return nil, "capture scale is unknown" end
-  if not budget_px then return nil, "no resident budget" end
-
-  -- Nothing to pan through. Resident pixels would be correct and completely
-  -- useless, so decline rather than spend a viewport of terminal memory on a
-  -- document that cannot scroll.
-  if document_h <= viewport_h + EPS then return nil, "document fits the viewport" end
-
-  local image_w = round(viewport_w * scale)
-  if image_w < 1 then return nil, "capture would have no width" end
-
-  -- Every clamp below is a *ceiling* on the height, applied in image pixels
-  -- where the limits are stated and converted back once at the end.
-  local by_budget = math.floor(budget_px / max_regions / image_w)
-  local by_area = math.floor(MAX_REGION_PIXELS / image_w)
-  local height_img = math.min(by_budget, by_area, MAX_REGION_HEIGHT_PX)
-  local height_doc = math.min(height_img / scale, viewport_h * K_MAX, document_h)
-  if height_doc <= viewport_h + EPS then return nil, "budget is smaller than one viewport" end
-
-  local k = height_doc / viewport_h
-  -- A region that holds the *whole* document is exempt from the minimum: it is
-  -- the best a region can possibly be, and a short document should not be
-  -- refused for the crime of being short.
-  local whole_document = height_doc >= document_h - EPS
-  if k < K_MIN and not whole_document then
-    return nil, ("budget affords only %.2f viewports (minimum %.2f)"):format(k, K_MIN)
-  end
-
-  local slack = height_doc - viewport_h
-  local doc_y = clamp(scroll_y - BACKWARD_SHARE * slack, 0, math.max(0, document_h - height_doc))
-  return {
-    doc_y = doc_y,
-    doc_h = height_doc,
-    k = k,
-    -- What this region actually bought, after the document's ends have clamped
-    -- the anchor. Reported rather than assumed: a region pinned to the top of
-    -- the document has all of its travel ahead of the reader and none behind,
-    -- and a caller reasoning from the nominal share would be wrong there.
-    backward_slack = scroll_y - doc_y,
-    forward_slack = doc_y + height_doc - viewport_h - scroll_y,
-  }
-end
-
 --- How many viewports tall a slice is.
 ---
 --- The boundary between slices is free now -- a viewport spanning two of them is
@@ -348,8 +247,24 @@ local SLICE_VIEWPORTS = 2
 --- pay.
 local OVERLAP_ROWS = 2
 
+--- How much of a slice's height survives the renderer refusing to capture it.
+---
+--- A quarter off rather than a half, and `SLICE_VIEWPORTS` is why: a slice must
+--- still hold a viewport plus the overlap, so halving a two-viewport slice lands
+--- *under* that minimum and leaves no smaller grid to retry with at all. Three
+--- quarters of two viewports is one and a half, which is a legal grid and still
+--- a real reduction -- and under a grid a 1.5-viewport slice is perfectly usable,
+--- because its boundaries are composited rather than being cache misses.
+---
+--- A quarter is also as much as should ever be needed. `slice_grid` clamps to the
+--- same `MAX_REGION_PIXELS` and `MAX_REGION_HEIGHT_PX` the renderer enforces, so
+--- a refusal means the two sides disagree slightly about the geometry rather than
+--- that the request was wildly too large.
+local SLICE_SHRINK = 0.75
+
 M.SLICE_VIEWPORTS = SLICE_VIEWPORTS
 M.OVERLAP_ROWS = OVERLAP_ROWS
+M.SLICE_SHRINK = SLICE_SHRINK
 
 ---The fixed grid of slices that covers a whole document.
 ---
@@ -362,6 +277,12 @@ M.OVERLAP_ROWS = OVERLAP_ROWS
 ---an integer in every slice's own image space, so the two halves of a composite
 ---cannot disagree by half a pixel across the seam.
 ---
+---`slice_scale` shortens every slice by the same factor, which is what a
+---renderer refusing to capture one (`REGION_TOO_LARGE`) is answered with. It is
+---an input to the *whole grid* rather than to one slice on purpose: a grid whose
+---slices are not all the same height has no single overlap, so a viewport
+---straddling one of its boundaries has no row it can be split on.
+---
 ---Returns `nil, reason` when no grid worth having fits.
 ---@return table|nil grid, string|nil reason
 function M.slice_grid(opts)
@@ -370,6 +291,7 @@ function M.slice_grid(opts)
   local document_h = positive(opts.document_height_px)
   local scale = positive(opts.scale)
   local rows = positive(opts.rows)
+  local slice_scale = positive(opts.slice_scale) or 1
   if not (viewport_h and viewport_w) then return nil, "viewport dimensions are unknown" end
   if not document_h then return nil, "document height is unknown" end
   if not scale then return nil, "capture scale is unknown" end
@@ -389,8 +311,9 @@ function M.slice_grid(opts)
   -- measured cell -- it is scaled by `c`/`r` -- and this keeps that true.
   local row_h = viewport_h / rows
   local overlap_img = math.max(1, math.ceil(OVERLAP_ROWS * row_h * scale))
-  local slice_img =
-    math.floor(math.min(SLICE_VIEWPORTS * viewport_h * scale, MAX_REGION_HEIGHT_PX, MAX_REGION_PIXELS / image_w))
+  local slice_img = math.floor(
+    math.min(SLICE_VIEWPORTS * slice_scale * viewport_h * scale, MAX_REGION_HEIGHT_PX, MAX_REGION_PIXELS / image_w)
+  )
   -- A slice shorter than a viewport plus the overlap could be spanned by three
   -- placements, and a stride at or below zero would never reach the document's
   -- end. Both are the same requirement stated twice, so state it once.
@@ -420,11 +343,22 @@ function M.slice_grid(opts)
     rows = rows,
     image_w = image_w,
     slice_h = slice_h,
+    slice_img = slice_img,
     stride = stride,
     overlap = overlap_img / scale,
     count = count,
+    slice_scale = slice_scale,
   }
 end
+
+---What one slice of this grid costs the terminal, in decoded pixels.
+---
+---The cost of the *tallest* slice, which is every slice but the last: the last
+---is clamped to the document's end and so can only be cheaper. Asked before a
+---capture rather than after, because a slice that cannot be kept is several
+---hundred kilobytes of wire spent to learn something the arithmetic already
+---knew.
+function M.slice_cost_px(grid) return grid and grid.image_w * grid.slice_img or 0 end
 
 ---Where slice `index` (0-based) starts and how tall it is, in document CSS px.
 ---@return table|nil slice
@@ -531,13 +465,22 @@ function M.key(parts)
 end
 
 -- ---------------------------------------------------------------------------
--- The cache.
+-- What a session is holding.
 --
 -- Still pure with respect to Neovim: these functions move records between Lua
 -- tables and *return* the regions whose pixels the caller must now free. They
--- never talk to a terminal, so the whole eviction policy is testable without
+-- never talk to a terminal, so the whole retention policy is testable without
 -- one -- and the caller cannot forget to free an evicted image, because the
 -- eviction is what hands it to them.
+--
+-- This was an LRU of at most `max_regions` regions, and that is the policy the
+-- rebuild exists to remove. A region planned around wherever the reader stopped
+-- has edges that move, so crossing one evicted and refilled: a real session
+-- recorded 14 fills and 13 evictions in 141 seconds, ~971 KB each, for 38% more
+-- traffic than sending a frame every time. What replaces it is a *fixed cell per
+-- slice*, so a slice is either the one at its index or absent, and the only
+-- thing that can displace it is the memory ceiling -- which ordinary documents
+-- never reach.
 -- ---------------------------------------------------------------------------
 
 ---A session's resident state. Created for every session, enabled for almost
@@ -549,11 +492,30 @@ function M.new_state(opts)
     enabled = false,
     fallback_reason = nil,
     key = nil,
-    -- Most recently used first, so eviction is `table.remove` from the end.
-    regions = {},
-    budget_px = positive(opts.budget_px) or 0,
-    max_regions = math.max(1, math.floor(finite(opts.max_regions) or 1)),
-    used_px = 0,
+    -- The grid this session's slices are cells of, and which generation of it.
+    -- Derived once and held: a boundary has to be a property of the *document*,
+    -- or "uploaded once and kept" is not a claim anyone can make. The counter
+    -- exists because one thing regenerates a grid without changing the document
+    -- -- a renderer refusing to capture a slice -- and a fill in flight across
+    -- that names a cell of a grid that no longer exists.
+    grid = nil,
+    generation = 0,
+    -- Slice index -> region. A hash rather than a list because the index *is*
+    -- the identity: there is no ordering to maintain, no position to search for,
+    -- and nothing that can be in the structure twice.
+    slices = {},
+    resident_px = 0,
+    -- The ceiling, in decoded pixels rather than bytes so it is the same unit
+    -- the images are measured in. `image.resident_memory_mb` states it in
+    -- megabytes because that is the quantity a reader is actually spending;
+    -- `BYTES_PER_RESIDENT_PX` is the measured conversion between them.
+    memory_px = positive(opts.memory_px) or 0,
+    -- How short this session's slices have had to become because the renderer
+    -- refused to capture one, and how many times that has happened. Bounded at
+    -- one halving: a second refusal means the geometry is outside what this
+    -- Chromium will take at all, which a third attempt would only rediscover.
+    slice_scale = 1,
+    slice_shrinks = 0,
     -- `token` identifies which fill holds the one fill slot, so a superseded one
     -- returning late cannot release a slot it no longer owns.
     fill = { in_flight = false, token = 0 },
@@ -567,17 +529,6 @@ function M.new_state(opts)
     upload_hold_ms = 0,
     wire_bytes_per_ms = nil,
     wire_samples = 0,
-    -- What fraction of the budget's height fills are currently allowed to use,
-    -- reduced when a region's PNG comes back larger than the cap. Monotone
-    -- downward on purpose: it is a session's accumulated evidence that this
-    -- document costs more per viewport than the budget assumed, and letting one
-    -- cheap region undo it would oscillate.
-    height_scale = 1,
-    -- How many times this session has halved its regions because the renderer
-    -- refused to capture one. Bounded at one: a second refusal means the
-    -- geometry is outside what this Chromium will take, which a third attempt
-    -- would only rediscover.
-    region_shrinks = 0,
     -- Diagnostics. Counts and bytes are kept apart deliberately: the size says
     -- what an operation costs, the count says how many were actually paid for,
     -- and neither implies the other.
@@ -602,83 +553,158 @@ function M.new_state(opts)
     -- Captures thrown away because the reader panned while they were in flight.
     -- A pan issues no request, so nothing else can notice it happened.
     superseded_by_pan = 0,
-    height_reduced = 0,
+    -- Scroll positions that spanned two slices. Kept apart from `misses`
+    -- because it is the count of the one case a fixed grid creates and a
+    -- bounded region could not: a boundary that never moves is a boundary the
+    -- reader can park on.
+    straddles = 0,
     upload_bytes = 0,
     placement_bytes = 0,
   }
 end
 
----The region covering `scroll_y`, or nil.
+---The slice this session holds at `index`, or nil.
 ---
----Touches on read, because that is what makes the ordering an LRU rather than a
----queue: the region a reader keeps returning to must not be the one evicted to
----make room for the one they passed through once.
-function M.find(state, scroll_y, viewport_h, key)
-  if not (state and state.regions) then return nil end
-  for index, region in ipairs(state.regions) do
-    if region.key == key and M.covers(region, scroll_y, viewport_h) then
-      if index > 1 then
-        table.remove(state.regions, index)
-        table.insert(state.regions, 1, region)
-      end
-      return region
-    end
-  end
-  return nil
+---No search and no touch-on-read. The index *is* the identity, and there is no
+---ordering to maintain: what replaced the LRU is arithmetic on a fixed grid, so
+---"which slice covers this scroll" is answered by `M.slices_for` before anything
+---looks in here at all.
+function M.hold(state, index)
+  if not (state and state.slices) then return nil end
+  return state.slices[index]
 end
 
----Take `region` into the cache, evicting whatever has to go to make room.
+---Every slice this session holds, in document order.
+---
+---Ordered because several callers hand the result to a terminal -- freeing,
+---hiding, re-placing -- and `pairs` over a hash has no defined order, which
+---makes an emitted stream unassertable. The same reasoning as `ordered_pids` in
+---the raw Kitty backend, and the same cost: nothing, at these sizes.
+function M.slice_records(state)
+  local out = {}
+  if not (state and state.slices) then return out end
+  local indices = {}
+  for index in pairs(state.slices) do
+    indices[#indices + 1] = index
+  end
+  table.sort(indices)
+  for _, index in ipairs(indices) do
+    out[#out + 1] = state.slices[index]
+  end
+  return out
+end
+
+---Give back slices until what is held fits the ceiling, farthest from `center`
+---first. Returns the evicted regions so the caller can free their pixels.
+---
+---A window rather than an LRU, and the difference is the whole point. An LRU
+---asks "which of these was least recently useful", which needs a history and
+---gets it wrong at exactly the moment a reader turns around. A window asks "how
+---far is this from where they are reading", which on a fixed grid is
+---subtraction. Documents under the ceiling never reach this at all: at the
+---default it is about thirteen viewports, and ordinary reading does not leave a
+---band that wide.
+---
+---`center` is never evicted -- it is the slice being read -- and a tie in
+---distance is broken *behind* the reader, because reading is forward-biased and
+---the slice ahead is the one more likely to be wanted next.
+function M.retain_window(state, center)
+  local evicted = {}
+  local ceiling = positive(state and state.memory_px)
+  if not ceiling then return evicted end
+  center = finite(center) or 0
+
+  while state.resident_px > ceiling do
+    local worst, worst_distance = nil, -1
+    for index in pairs(state.slices) do
+      if index ~= center then
+        local distance = math.abs(index - center)
+        -- `>=` with the scan ordered by index would be arbitrary, so the tie is
+        -- broken explicitly: at equal distance the lower index -- the one behind
+        -- the reader -- goes.
+        if distance > worst_distance or (distance == worst_distance and index < worst) then
+          worst, worst_distance = index, distance
+        end
+      end
+    end
+    -- Only the centre is left and it is still over: that is a ceiling smaller
+    -- than one slice, which `M.register` refuses up front and `slice_cost_px`
+    -- lets the controller decline before spending any wire at all.
+    if not worst then break end
+    local gone = state.slices[worst]
+    state.slices[worst] = nil
+    state.resident_px = state.resident_px - gone.image_w * gone.image_h
+    state.evictions = state.evictions + 1
+    evicted[#evicted + 1] = gone
+  end
+  return evicted
+end
+
+---Put `region` in grid cell `index`, evicting whatever has to go to make room.
 ---
 ---Returns `region, evicted` on success and `nil, evicted, reason` on refusal --
----`evicted` in both positions because a refusal can still have had to drop a
----superseded region on the way, and an image nobody frees is an image the
+---`evicted` in both positions because a refusal can still have had to drop the
+---cell's previous occupant on the way, and an image nobody frees is an image the
 ---terminal holds forever.
 ---
----The budget is checked against the region's **actual** pixel count, which is
----the whole point: a size predicted from the scale that was requested is wrong
----on the renderer's Playwright fallback path, and a budget checked against a
----prediction is a budget that can be exceeded without anyone noticing.
-function M.insert(state, region)
+---There is deliberately no half-registered state. A slice either occupies its
+---cell or does not exist: the bounded-region cache had a "kept on screen but
+---refused by the cache" case, and every question anyone asked of it afterwards
+---("is this a hit", "may this be freed", "how much are we holding") had a third
+---answer nobody had thought about.
+---
+---The cost is the region's **actual** pixel count, from the PNG's own header --
+---not a size predicted from the scale that was requested, which is wrong on the
+---renderer's Playwright fallback path.
+function M.register(state, index, region)
   local evicted = {}
+  index = finite(index)
+  if index == nil or index < 0 then return nil, evicted, "a slice needs a grid index" end
+  if not region then return nil, evicted, "no region to register" end
+
+  -- Whatever was in this cell is superseded outright, before the ceiling is
+  -- consulted -- so a refill of the same slice is never blocked by the copy it
+  -- is replacing.
+  local existing = state.slices[index]
+  if existing then
+    state.slices[index] = nil
+    state.resident_px = state.resident_px - existing.image_w * existing.image_h
+    evicted[#evicted + 1] = existing
+  end
+
   local cost = region.image_w * region.image_h
-
-  -- Anything that is no longer valid, and anything this region replaces
-  -- outright, goes first -- before the budget is consulted, so a refill of the
-  -- same range is never blocked by the copy it is replacing.
-  for index = #state.regions, 1, -1 do
-    local existing = state.regions[index]
-    local superseded = existing.key ~= region.key or (existing.doc_y == region.doc_y and existing.doc_h == region.doc_h)
-    if superseded then
-      table.remove(state.regions, index)
-      state.used_px = state.used_px - existing.image_w * existing.image_h
-      evicted[#evicted + 1] = existing
-    end
+  local ceiling = positive(state.memory_px)
+  if ceiling and cost > ceiling then
+    return nil, evicted, ("a slice of %d px exceeds the whole %d px ceiling"):format(cost, ceiling)
   end
 
-  if cost > state.budget_px then
-    return nil, evicted, ("region of %d px exceeds the whole %d px budget"):format(cost, state.budget_px)
-  end
+  region.index = index
+  state.slices[index] = region
+  state.resident_px = state.resident_px + cost
 
-  while #state.regions > 0 and (#state.regions >= state.max_regions or state.used_px + cost > state.budget_px) do
-    local oldest = table.remove(state.regions)
-    state.used_px = state.used_px - oldest.image_w * oldest.image_h
-    state.evictions = state.evictions + 1
-    evicted[#evicted + 1] = oldest
+  -- Centred on the slice just filled, which is where the reader is: that is what
+  -- makes "the slice under the reader is never the one evicted" arithmetic
+  -- rather than a rule someone has to remember.
+  for _, gone in ipairs(M.retain_window(state, index)) do
+    evicted[#evicted + 1] = gone
   end
-
-  table.insert(state.regions, 1, region)
-  state.used_px = state.used_px + cost
   return region, evicted
 end
 
----Empty the cache, returning every region so the caller can free its pixels.
----Used by close, retarget and fallback -- the paths that end a session's claim
----on the terminal's memory.
+---Give up every slice, returning them so the caller can free their pixels.
+---Used by close, retarget, invalidation and fallback -- the paths that end a
+---session's claim on the terminal's memory.
 function M.drain(state)
-  local regions = state.regions
-  state.regions = {}
-  state.used_px = 0
+  local slices = M.slice_records(state)
+  state.slices = {}
+  state.resident_px = 0
   state.key = nil
+  -- The grid goes with them, and the generation moves. A fill in flight was
+  -- planned against cell `n` of the grid that has just stopped existing, and
+  -- nothing else could tell it so: the document key it also carries is unchanged
+  -- when what regenerated the grid was a renderer refusing to capture a slice.
+  state.grid = nil
+  state.generation = (state.generation or 0) + 1
   -- The token carries over rather than resetting, so a fill issued before this
   -- drain cannot release the slot a fill issued after it is holding. Without
   -- that, retargeting mid-capture leaves two fills believing they are the one.
@@ -687,7 +713,7 @@ function M.drain(state)
   -- `upload_hold_until` and `wire_bytes_per_ms` are deliberately untouched: they
   -- describe the link, and closing a document does not make the bytes still
   -- crossing it arrive any sooner.
-  return regions
+  return slices
 end
 
 --- What one resident pixel costs the terminal once decoded, in bytes.
@@ -784,25 +810,6 @@ function M.wire_hold_ms(bytes, bytes_per_ms, elapsed_ms, default_ms, max_ms)
   local rate = positive(bytes_per_ms)
   if not rate then return math.floor(clamp(default_ms, 0, max_ms)) end
   return math.floor(clamp(bytes / rate - elapsed_ms, 0, max_ms))
-end
-
----The new height scale after a region came back at `png_bytes` against a cap.
----
----A hold is damage control; a smaller region is prevention. The cap is stated
----in bytes by the caller because what a viewport costs to encode is a property
----of the document -- a page of prose and a page of syntax-highlighted code are
----not within a factor of each other -- so a constant here would be wrong for
----every document but the one it was measured on.
----
----Only ever reduces. Returning the scale unchanged when the region fits is what
----keeps it from oscillating between two heights on a document whose regions
----straddle the cap.
-function M.png_cap_scale(scale, png_bytes, cap_bytes)
-  scale = positive(scale) or 1
-  png_bytes = positive(png_bytes)
-  cap_bytes = positive(cap_bytes)
-  if not (png_bytes and cap_bytes) or png_bytes <= cap_bytes then return scale end
-  return clamp(scale * (cap_bytes / png_bytes), MIN_HEIGHT_SCALE, scale)
 end
 
 return M

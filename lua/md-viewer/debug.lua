@@ -26,27 +26,43 @@ end
 ---earning its keep.
 ---
 ---`hits` against `misses` is the whole question: a hit is a scroll that cost
----placement bytes instead of a frame. `used_px` beside `budget_px` says how
----close the bound is to binding, and `decoded_mb` is the quantity that bound
----exists to control -- still called an estimate, because it converts pixels to
----bytes at a rate measured on one terminal (iTerm2, 12-13 B/px, see
----`resident.BYTES_PER_RESIDENT_PX`) rather than one any terminal documents.
+---placement bytes instead of a frame. `slices_resident` against `grid_slices`
+---says how much of the document the terminal is holding, `resident_px` beside
+---`memory_px` says how close the ceiling is to binding, and `decoded_mb` is the
+---quantity that ceiling exists to control -- still called an estimate, because
+---it converts pixels to bytes at a rate measured on one terminal (iTerm2,
+---12-13 B/px, see `resident.BYTES_PER_RESIDENT_PX`) rather than one any terminal
+---documents.
+---
+---`evictions` is the number the rebuild was for. Under the bounded region it
+---climbed with every boundary crossing; under a grid a document inside the
+---ceiling should never evict at all, so a non-zero count on an ordinary document
+---is the signal that something is wrong rather than a statistic.
 local function resident_report(session)
   local live = session.resident
   if not live then return nil end
+  local slices = resident.slice_records(live)
   local decoded = 0
-  for _, region in ipairs(live.regions) do
+  for _, region in ipairs(slices) do
     decoded = decoded + resident.decoded_bytes(region)
   end
+  local grid = live.grid
   return {
     enabled = live.enabled,
     -- Non-nil means this session gave up and is on the ordinary capture path
     -- for good; the string says why.
     fallback_reason = live.fallback_reason,
-    regions = #live.regions,
-    max_regions = live.max_regions,
-    used_px = live.used_px,
-    budget_px = live.budget_px,
+    -- The grid, and which generation of it. A generation above 1 without a
+    -- document change means slices were regenerated shorter because the
+    -- renderer refused to capture one.
+    grid_generation = live.generation,
+    grid_slices = grid and grid.count,
+    grid_slice_h = grid and grid.slice_h,
+    grid_overlap = grid and grid.overlap,
+    grid_refusal = live.grid_refusal,
+    slices_resident = #slices,
+    resident_px = live.resident_px,
+    memory_px = live.memory_px,
     decoded_mb_estimate = decoded > 0 and (decoded / 1048576) or 0,
     hits = live.hits,
     misses = live.misses,
@@ -80,15 +96,17 @@ local function resident_report(session)
     upload_hold_ms = live.upload_hold_ms,
     frames_suppressed_by_hold = live.frames_suppressed_by_hold,
     superseded_by_pan = live.superseded_by_pan,
-    -- Below 1 means this document's regions encode larger than the budget
-    -- assumed and fills have been shrunk to bound the stall.
-    height_scale = live.height_scale,
-    height_reduced = live.height_reduced,
+    -- Scroll positions spanning two slices. A grid's boundaries never move, so
+    -- this is the count of the one case it creates -- and until the composite
+    -- draws it, each one is a captured frame.
+    straddles = live.straddles,
+    -- Below 1 means the renderer refused to capture a slice at the full height
+    -- and the whole grid was regenerated with shorter ones.
+    slice_scale = live.slice_scale,
+    slice_shrinks = live.slice_shrinks,
     fill_png_bytes = live.fill_png_bytes,
     fill_capture_ms = live.fill_capture_ms,
     desired_scroll_y = live.desired_scroll_y,
-    plan_refusal = live.plan_refusal,
-    last_insert_refusal = live.last_insert_refusal,
     gate_reason = live.gate_reason,
   }
 end

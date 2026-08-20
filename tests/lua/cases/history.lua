@@ -188,10 +188,12 @@ return function(t)
       return true
     end
     local live = session.resident
-    live.budget_px = 8000000
+    live.memory_px = 32000000
     live.key = "whatever-this-document-was"
-    assert(resident.insert(
+    live.grid = { count = 4 }
+    assert(resident.register(
       live,
+      0,
       assert(resident.region({
         doc_y = 0,
         doc_h = 2020,
@@ -202,13 +204,14 @@ return function(t)
         image_id = 6161,
       }))
     ))
-    t.eq(1, #live.regions, "sanity: the session is holding a region")
+    t.eq(1, #resident.slice_records(live), "sanity: the session is holding a slice")
 
     interaction.activate_link(session, { link = { type = "local_file", href = "b.md" } })
-    t.eq({ 6161 }, freed, "following a link gives the previous document's region back to the terminal")
-    t.eq(0, #live.regions, "and empties the cache")
-    t.eq(0, live.used_px, "so the budget is available to the document just opened")
+    t.eq({ 6161 }, freed, "following a link gives the previous document's slices back to the terminal")
+    t.eq(0, #resident.slice_records(live), "and holds nothing")
+    t.eq(0, live.resident_px, "so the ceiling is available to the document just opened")
     t.eq(nil, live.key, "with no stale identity left to match against")
+    t.eq(nil, live.grid, "and no grid describing a document the preview has left")
     session.backend.clear = function() return true end
   end
 

@@ -152,7 +152,7 @@ image ~
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
     resident_pan                 "auto"     |md-viewer-resident-pan|
-    resident_budget_px           8000000    |md-viewer-resident-pan|
+    resident_memory_mb           512        |md-viewer-resident-pan|
 
 sync ~
     source_to_preview            true       the preview follows the source
@@ -806,10 +806,9 @@ The cost is memory in the terminal, so it is bounded and conservative: >lua
         -- "auto" follows the terminal profile, "on" forces it (to qualify a
         -- new terminal), "off" disables it.
         resident_pan = "auto",
-        -- Decoded pixels the terminal may hold for one preview. Measured at
-        -- 12-13 bytes each on iTerm2, so this is about 100 MB -- not the
-        -- 32 MB an assumed four bytes a pixel once made it look like.
-        resident_budget_px = 8000000,
+        -- How much decoded image the terminal may hold for one preview,
+        -- in megabytes. 0 disables resident panning outright.
+        resident_memory_mb = 512,
       },
     }
 <

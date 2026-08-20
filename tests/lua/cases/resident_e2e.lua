@@ -79,8 +79,16 @@ return function(t)
 
   local ok, err = pcall(function()
     require("md-viewer").setup({
-      image = { backend = "kitty_raw", resident_pan = "on" },
-      -- The settle is what becomes a region fill, so a long one would make this
+      image = {
+        backend = "kitty_raw",
+        resident_pan = "on",
+        -- Stated rather than defaulted, so what this case holds is a property of
+        -- the case: how many slices fit before the window starts sliding is the
+        -- difference between "nothing is ever re-uploaded" and "everything is",
+        -- and a default that moved would move that silently.
+        resident_memory_mb = 4096,
+      },
+      -- The settle is what becomes a slice fill, so a long one would make this
       -- case spend most of its time waiting. Everything it gates is unchanged.
       render = { scroll_settle_ms = 40, ssh_scroll_settle_ms = 40 },
     })
@@ -130,40 +138,44 @@ return function(t)
     )
 
     -- ------------------------------------------------------------------
-    -- A region fills, and it is the size the budget derived rather than the
-    -- size a moving frame's scale would have implied.
+    -- A slice fills, at the scale the capture will actually arrive at rather
+    -- than the one a moving frame would have implied.
     --
     -- This is the assertion that would have caught the scale defect. The
     -- settle fires once scrolling has stopped, so the frame on screen then is
     -- always a moving one captured at `ssh_scroll_scale`; reading the capture
-    -- scale off it plans a region four times too tall, which is then refused
-    -- by the renderer or by the cache and never becomes a region at all.
+    -- scale off it builds a grid whose slices claim a quarter of the pixels
+    -- they will really cost, so the ceiling is overrun fourfold.
     -- ------------------------------------------------------------------
+    local resident = require("md-viewer.resident")
     local live = session.resident
-    controller.scroll_to(session, math.floor(session.viewport_height_px * 1.5))
-    vim.wait(20000, function() return #live.regions > 0 or live.fallback_reason ~= nil end, 25)
+    local function held() return resident.slice_records(live) end
+    controller.scroll_to(session, math.floor(session.viewport_height_px * 0.5))
+    vim.wait(20000, function() return #held() > 0 or live.fallback_reason ~= nil end, 25)
     t.ok(
-      #live.regions > 0,
-      ("a region fills after the settle (fills %d, refusal %s, fallback %s)"):format(
+      #held() > 0,
+      ("a slice fills after the settle (fills %d, refusal %s, fallback %s)"):format(
         live.fills,
-        tostring(live.plan_refusal),
+        tostring(live.grid_refusal),
         tostring(live.fallback_reason)
       )
     )
     t.eq(nil, live.fallback_reason, "without falling back")
-    t.eq(nil, live.plan_refusal, "and without the planner declining")
+    t.eq(nil, live.grid_refusal, "and without the grid declining")
 
-    local region = live.regions[1]
-    t.ok(region ~= nil, "a region is resident")
+    local grid = assert(controller._resident_grid(session))
+    local region = held()[1]
+    t.ok(region ~= nil, "a slice is resident")
     if region then
+      t.eq(0, region.index, "the first fill occupies the cell the reader is in")
       t.ok(region.doc_h > session.viewport_height_px, "taller than the viewport, or it could never be a hit")
       t.ok(
-        region.image_w * region.image_h <= live.budget_px,
-        "and within the pixel budget, measured from the PNG rather than predicted"
+        region.image_w * region.image_h <= live.memory_px,
+        "and within the memory ceiling, measured from the PNG rather than predicted"
       )
-      -- The scale the region was actually captured at, against the scale the
-      -- session is calibrated for. A region planned from a reduced moving frame
-      -- comes back at twice the assumed scale and blows the budget.
+      -- The scale the slice was actually captured at, against the scale the
+      -- session is calibrated for. A grid planned from a reduced moving frame
+      -- gets slices at twice the assumed scale and blows the ceiling.
       t.near(
         config.get().render.device_scale_factor,
         region.image_w / session.viewport_width_px,
@@ -171,7 +183,8 @@ return function(t)
         "captured at the device scale, not at the moving frame's reduced one"
       )
     end
-    t.eq(1, live.height_scale, "and the byte cap did not fight the budget for it")
+    t.eq(1, live.slice_scale, "and the renderer took the slice at its full height")
+    t.eq(0, live.evictions, "with nothing evicted, which on a document inside the ceiling must stay true")
 
     -- ------------------------------------------------------------------
     -- The base image every overlay is composited over is now the region.
@@ -208,8 +221,12 @@ return function(t)
       local uploads_before = live.upload_bytes
       emitted = {}
 
-      -- Somewhere inside the range that is not where it was filled.
-      local target = math.floor(first + (last - first) * 0.5)
+      -- Somewhere inside the range that is not where it was filled. Whichever
+      -- end is further, because a scroll to the position already displayed
+      -- produces no event at all and would measure nothing.
+      local at_now = session.applied_scroll_y or 0
+      local target = math.abs(last - at_now) > math.abs(first - at_now) and math.floor(last) or math.floor(first)
+      t.ok(math.abs(target - at_now) > 1, "sanity: that is a scroll rather than a no-op")
       controller.scroll_to(session, target)
       vim.wait(200, function() return false end, 25)
 
@@ -286,7 +303,102 @@ return function(t)
     end
 
     -- ------------------------------------------------------------------
-    -- A region is given back when the document changes, not when the reader
+    -- The claim the whole rebuild exists to make: a second pass over the same
+    -- document sends no pixels at all.
+    --
+    -- The bounded region could not make it. Its edges moved with the reader, so
+    -- crossing one evicted and refilled -- a real session recorded 14 fills and
+    -- 13 evictions in 141 seconds, ~971 KB each, for 38% more traffic than
+    -- sending a frame every time. A grid's boundaries belong to the document, so
+    -- a slice is paid for once and re-reading is free.
+    --
+    -- Bounded to the first few slices rather than the whole fixture, and said out
+    -- loud rather than left to look like whole-document coverage: this document
+    -- is dozens of viewports and every slice is a real Chromium capture.
+    -- ------------------------------------------------------------------
+    local WALK_SLICES = 4
+    if region and grid.count > WALK_SLICES then
+      -- The middle of each slice's own travel, which is a position that slice
+      -- alone covers -- a straddle is a miss until the composite exists, and a
+      -- miss here would be measuring the boundary rather than the claim.
+      local stops = {}
+      for index = 0, WALK_SLICES - 1 do
+        local slice = assert(resident.slice(grid, index))
+        stops[#stops + 1] = math.floor(slice.doc_y + (slice.doc_h - session.viewport_height_px) / 2)
+      end
+
+      local function walk()
+        for index, stop in ipairs(stops) do
+          local cell = index - 1
+          controller.scroll_to(session, stop)
+          -- Long enough for a settle to fire, the fill to cross, and the next
+          -- pan to be answered from what it left behind.
+          vim.wait(20000, function() return resident.hold(live, cell) ~= nil end, 25)
+          vim.wait(150, function() return false end, 25)
+        end
+      end
+
+      walk()
+      local filled_after_first = live.fills
+      t.eq(WALK_SLICES, #held(), ("each of the %d slices walked is resident"):format(WALK_SLICES))
+      t.eq(0, live.evictions, "and nothing was evicted to make room, at this ceiling")
+      for index = 0, WALK_SLICES - 1 do
+        t.ok(resident.hold(live, index) ~= nil, ("slice %d is held, in its own cell"):format(index))
+      end
+
+      -- And back over exactly the same ground.
+      emitted = {}
+      local uploads_before, requests_before = live.upload_bytes, session.request_serial
+      walk()
+      local stream = table.concat(emitted)
+      t.eq(nil, stream:match("\27_Ga=t"), "a second pass over the same slices transmits no image at all")
+      t.eq(uploads_before, live.upload_bytes, "so it spends no upload bytes")
+      t.eq(requests_before, session.request_serial, "and asks the renderer for nothing")
+      t.eq(filled_after_first, live.fills, "with no slice filled twice")
+      t.eq(0, live.evictions, "and still nothing evicted")
+    end
+
+    -- ------------------------------------------------------------------
+    -- Over the ceiling: a window that slides, and every slice it drops is
+    -- given back rather than merely forgotten.
+    -- ------------------------------------------------------------------
+    if region and grid.count > WALK_SLICES then
+      local records = held()
+      local one_slice = records[1].image_w * records[1].image_h
+      -- Room for two slices, so walking four has to drop two.
+      live.memory_px = one_slice * 2
+      emitted = {}
+      local evictions_before = live.evictions
+      local dropped = {}
+      for _, gone in ipairs(resident.retain_window(live, records[#records].index)) do
+        dropped[#dropped + 1] = gone.image_id
+      end
+      t.ok(#dropped > 0, "a ceiling below what is held slides the window")
+      t.eq(evictions_before + #dropped, live.evictions, "counting each slice it dropped")
+      t.ok(
+        resident.hold(live, records[#records].index) ~= nil,
+        "and never the slice the reader is in, which is what centring the window buys"
+      )
+      t.ok(live.resident_px <= live.memory_px, "leaving what is held inside the ceiling")
+
+      -- The pixels, not just the bookkeeping. A slice dropped from the grid and
+      -- not freed is a slice the terminal holds forever with nobody left to
+      -- place it.
+      for _, image_id in ipairs(dropped) do
+        pcall(session.backend.clear, image_id)
+      end
+      local stream = table.concat(emitted)
+      for _, image_id in ipairs(dropped) do
+        t.ok(
+          stream:find(("a=d,d=I,q=2,i=%d"):format(image_id), 1, true) ~= nil,
+          ("the evicted slice %d has its pixels given back"):format(image_id)
+        )
+      end
+      live.memory_px = one_slice * 64
+    end
+
+    -- ------------------------------------------------------------------
+    -- Slices are given back when the document changes, not when the reader
     -- next happens to scroll.
     --
     -- The key check lived in `try_pan` alone, so a resize, a colorscheme change,
@@ -296,19 +408,29 @@ return function(t)
     -- covering the document it is the whole document, per invalidation.
     -- ------------------------------------------------------------------
     if region then
-      local doomed = region.image_id
-      t.ok(doomed ~= nil, "sanity: the resident region has an image to give back")
+      local doomed = {}
+      for _, slice in ipairs(held()) do
+        doomed[#doomed + 1] = slice.image_id
+      end
+      t.ok(#doomed > 0, "sanity: the session is holding slices to give back")
       emitted = {}
       -- What an explicit refresh does, without depending on which window is
       -- current: the epoch is in the content revision, which is in the key.
       session.render_epoch = (session.render_epoch or 0) + 1
       controller.refresh(session)
-      settled(function() return #live.regions == 0 end, "a changed document drops the regions it invalidated")
-      t.ok(
-        table.concat(emitted):find(("a=d,d=I,q=2,i=%d"):format(doomed), 1, true) ~= nil,
-        "and the terminal gets the pixels back, with no scroll to prompt it"
-      )
-      t.eq(0, live.used_px, "with the cache's accounting emptied to match")
+      settled(function() return #held() == 0 end, "a changed document drops every slice it invalidated")
+      local stream = table.concat(emitted)
+      -- Every one of them, not just whichever happened to be on screen. Two
+      -- slices can be resident with only one displayed, and the one nobody was
+      -- looking at is the one a screen-driven free would miss.
+      for _, image_id in ipairs(doomed) do
+        t.ok(
+          stream:find(("a=d,d=I,q=2,i=%d"):format(image_id), 1, true) ~= nil,
+          ("slice %d goes back to the terminal, with no scroll to prompt it"):format(image_id)
+        )
+      end
+      t.eq(0, live.resident_px, "with the accounting emptied to match")
+      t.eq(nil, live.grid, "and the grid dropped, since its boundaries described the old document")
     end
 
     -- ------------------------------------------------------------------

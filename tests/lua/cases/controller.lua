@@ -628,79 +628,124 @@ return function(t)
     local live = session.resident
     live.enabled = true
     live.fallback_reason = nil
-    live.budget_px = 8000000
+    live.memory_px = 8000000 * 4
     live.key = controller._resident_key(session)
-    local region = assert(resident.region({
-      doc_y = 1000,
-      doc_h = 2020,
-      css_w = 990,
-      image_w = 1980,
-      image_h = 4040,
-      key = live.key,
-      image_id = 4242,
-    }))
-    assert(resident.insert(live, region))
+
+    -- The grid, and positions derived from it rather than written down. A slice
+    -- boundary is a function of the pane's row count, which is whatever window
+    -- this test happens to get -- so hard-coded scroll positions would be
+    -- asserting about the terminal size rather than about the mechanism.
+    local grid = assert(controller._resident_grid(session))
+    local function slice_at(index) return (assert(resident.slice(grid, index))) end
+    -- A position comfortably inside slice `index`: halfway through the travel it
+    -- affords, so a small step in either direction stays inside it.
+    local function inside(index)
+      local slice = slice_at(index)
+      return slice.doc_y + math.floor((slice.doc_h - 1020) / 2)
+    end
+    -- What a crop of that position looks like in the slice's own image pixels.
+    local function crop_y(index, scroll_y) return (scroll_y - slice_at(index).doc_y) * 2 end
+
+    local function make_slice(index, image_id)
+      local slice = slice_at(index)
+      return assert(resident.region({
+        doc_y = slice.doc_y,
+        doc_h = slice.doc_h,
+        css_w = 990,
+        image_w = grid.image_w,
+        image_h = slice.doc_h * 2,
+        key = live.key,
+        image_id = image_id,
+      }))
+    end
+
+    local region = make_slice(0, 4242)
+    assert(resident.register(live, 0, region))
     session.image_id = 4242
 
-    -- A scroll to a position the region covers.
-    scroll_to(1500)
+    -- A scroll to a position the slice covers.
+    local at = inside(0)
+    scroll_to(at)
     t.eq(0, requests, "a resident hit sends the renderer nothing at all")
     t.eq(0, uploads, "and uploads no image")
     t.eq(1, moves, "it is one placement command")
-    t.eq(1000, move_sources[1].y, "cropping 500 CSS px into the region, which is 1000 image px at scale 2")
-    t.eq(1500, session.applied_scroll_y, "and the position recorded is the one the pixels show")
+    t.eq(crop_y(0, at), move_sources[1].y, "cropping into the slice at the capture scale")
+    t.eq(at, session.applied_scroll_y, "and the position recorded is the one the pixels show")
     t.eq(1, live.hits, "counted as a hit")
     t.eq(210, live.placement_bytes, "with the bytes it actually cost")
 
     -- Scrolling back is free too -- the case a smaller frame can never help
     -- with, because the pixels have already been paid for.
-    scroll_to(1100)
+    local back = math.floor(at / 2)
+    scroll_to(back)
     t.eq(0, requests, "scrolling back through resident content is also free")
-    t.eq(200, move_sources[#move_sources].y, "and crops backwards within the same image")
+    t.eq(crop_y(0, back), move_sources[#move_sources].y, "and crops backwards within the same image")
 
-    -- Leaving the region is an ordinary miss, on exactly the path that existed
-    -- before any of this.
-    scroll_to(4000)
+    -- Leaving the slice is an ordinary miss, on exactly the path that existed
+    -- before any of this. Two slices further on, so this is a cell nothing has
+    -- filled rather than a boundary.
+    scroll_to(inside(2))
     t.ok(requests > 0, "leaving the resident range falls through to a capture")
     t.eq(0, moves, "and does not pretend to pan")
     t.ok(live.misses > 0, "counted as a miss")
+
+    -- A viewport spanning two slices is a miss as well, and counted apart. A
+    -- grid's boundaries never move, so this is the one case it creates that a
+    -- region planned around the reader could not -- and until the composite
+    -- writes both bands in one go, the honest answer is today's captured frame.
+    -- Never one band stretched over the pane: that is a picture of the wrong
+    -- part of the document, and it would arrive looking perfectly fine.
+    local straddles_before = live.straddles
+    -- One pixel past the last position slice 0 can cover on its own, which is
+    -- the first that needs both.
+    local boundary = math.floor(slice_at(0).doc_y + slice_at(0).doc_h - 1020) + 1
+    local straddle_first, straddle_last = resident.slices_for(grid, boundary, 1020)
+    t.eq(0, straddle_first, "sanity: that position starts in slice 0")
+    t.eq(1, straddle_last, "and genuinely needs slice 1 as well")
+    scroll_to(boundary)
+    t.eq(0, moves, "a viewport spanning two slices places nothing")
+    t.eq(straddles_before + 1, live.straddles, "and is counted as the straddle it is")
+    t.ok(requests > 0, "falling through to the capture path")
 
     -- Browser-painted state that a clean region does not carry. Refusing to
     -- *fill* while a search is up is not enough on its own: a region captured
     -- before the search is still valid by key, so it would be eligible to pan
     -- straight over the marks and erase them.
     session.find_active = true
-    scroll_to(1500)
-    t.eq(0, moves, "an active search refuses to pan even over a region that covers the viewport")
+    scroll_to(inside(0))
+    t.eq(0, moves, "an active search refuses to pan even over a slice that covers the viewport")
     t.ok(live.blocked_by_find > 0, "and says why")
     t.ok(requests > 0, "falling through to the capture path that shows the marks")
 
     session.find_active = false
     session.selection_active = true
-    scroll_to(1400)
+    scroll_to(inside(0) - 50)
     t.eq(0, moves, "a live selection refuses for the same reason")
     t.ok(live.blocked_by_selection > 0, "and is counted separately")
 
     -- Clearing it restores panning at no cost: the region was never discarded,
     -- so the next scroll is a placement rather than a capture.
     session.selection_active = false
-    scroll_to(1300)
+    scroll_to(inside(0) - 100)
     t.eq(0, requests, "clearing the search or selection makes scrolling free again")
     t.eq(1, moves, "at the cost of one placement")
-    t.eq(0, uploads, "and no re-upload -- the region was kept throughout")
+    t.eq(0, uploads, "and no re-upload -- the slice was kept throughout")
 
-    -- New content supersedes every region, and the pixels go back.
+    -- New content supersedes every slice, and the pixels go back.
     local freed = {}
     session.backend.clear = function(image_id)
       freed[#freed + 1] = image_id
       return true
     end
     session.renderer_revision = "2:0"
-    scroll_to(1200)
-    t.eq(0, moves, "a new content revision invalidates every region")
-    t.eq(0, #live.regions, "dropping them from the cache")
+    local generation_before = live.generation
+    scroll_to(inside(0) - 150)
+    t.eq(0, moves, "a new content revision invalidates every slice")
+    t.eq(0, #resident.slice_records(live), "dropping them")
     t.ok(vim.tbl_contains(freed, 4242), "and freeing their pixels rather than leaking them")
-    t.eq(0, live.used_px, "so the budget is given back")
+    t.eq(0, live.resident_px, "so the ceiling is given back")
+    t.eq(nil, live.grid, "the grid goes with them, since its boundaries described the old document")
+    t.ok(live.generation > generation_before, "and the generation moves, so a fill in flight knows it is orphaned")
 
     -- ------------------------------------------------------------------
     -- The wire: at most one image payload outstanding per session.
@@ -724,26 +769,16 @@ return function(t)
       session.render_epoch or 0
     )
     live.key = controller._resident_key(session)
-    assert(resident.insert(
-      live,
-      assert(resident.region({
-        doc_y = 1000,
-        doc_h = 2020,
-        css_w = 990,
-        image_w = 1980,
-        image_h = 4040,
-        key = live.key,
-        image_id = 4242,
-      }))
-    ))
+    grid = assert(controller._resident_grid(session))
+    assert(resident.register(live, 0, make_slice(0, 4242)))
     session.image_id = 4242
 
     -- A pan during a drain is not merely allowed but preferred: two hundred
-    -- bytes queue trivially behind the region they crop into, and they show the
+    -- bytes queue trivially behind the slice they crop into, and they show the
     -- reader where they actually are.
     live.upload_hold_until = vim.uv.now() + 120
-    scroll_to(1500)
-    t.eq(1, moves, "a pan during a region's drain is emitted rather than held")
+    scroll_to(inside(0))
+    t.eq(1, moves, "a pan during a slice's drain is emitted rather than held")
     t.eq(0, requests, "and still asks the renderer for nothing")
     t.eq(0, live.frames_suppressed_by_hold, "so there was nothing to suppress")
 
@@ -775,18 +810,29 @@ return function(t)
     -- ------------------------------------------------------------------
 
     live.upload_hold_until = 0
-    session.scroll_y = 1500
+    session.scroll_y = inside(1)
     local first_plan = controller._settle_options(session)
-    t.ok(first_plan.capture_region ~= nil, "a settled scroll asks for a region rather than a viewport")
+    t.ok(first_plan.capture_region ~= nil, "a settled scroll asks for a slice rather than a viewport")
+    t.eq(slice_at(1).doc_y, first_plan.capture_region.yPx, "the slice under the reader, at its own fixed position")
+    t.eq(1, first_plan.resident_slice, "named by the cell it will occupy rather than by where the reader is")
     -- Planning must not claim the slot. The settle timer re-plans on every event
     -- of a burst and fires once, so a slot taken at planning time is taken by an
     -- event that issued nothing -- and denied to the one that did.
-    t.eq(false, live.fill.in_flight, "planning a region does not claim the fill slot")
-    session.scroll_y = 4000
+    t.eq(false, live.fill.in_flight, "planning a fill does not claim the fill slot")
+    session.scroll_y = inside(3)
     local later_plan = controller._settle_options(session)
     t.ok(
       later_plan.capture_region.yPx > first_plan.capture_region.yPx,
       "so a later event in the same burst still plans, around wherever the reader has got to"
+    )
+    -- And the property that makes "uploaded once" true: the same position asks
+    -- for the same rectangle however the reader arrived at it. A region anchored
+    -- on the reader would have moved with them.
+    session.scroll_y = inside(1)
+    t.eq(
+      first_plan.capture_region.yPx,
+      controller._settle_options(session).capture_region.yPx,
+      "and coming back to a position asks for exactly the capture it asked for before"
     )
     live.fill.in_flight = true
     t.eq(nil, controller._settle_options(session).capture_region, "but a fill already in flight refuses a second")
@@ -800,14 +846,17 @@ return function(t)
     -- nothing refused and nothing failed. animation.lua was caught by this same
     -- table once already.
     session.pointer = { pressed = true }
-    t.eq(nil, controller._settle_options(session).capture_region, "a drag in progress plans no region")
-    session.scroll_y = 1500
+    session.scroll_y = inside(1)
+    t.eq(nil, controller._settle_options(session).capture_region, "a drag in progress plans no fill")
+    session.scroll_y = inside(0)
     t.eq(false, controller._try_pan(session), "and pans nothing")
     session.pointer = { pressed = false }
+    session.scroll_y = inside(1)
     t.ok(
       controller._settle_options(session).capture_region ~= nil,
       "a released drag leaves the table but not the gesture"
     )
+    session.scroll_y = inside(0)
     t.eq(true, controller._try_pan(session), "so scrolling after a click still pans")
     session.pointer = nil
 
@@ -815,19 +864,21 @@ return function(t)
     -- whatever is on screen. Over SSH those differ every time it matters: the
     -- settle fires once scrolling stopped, so the frame on screen is a moving
     -- one captured at ssh_scroll_scale, whose PNG at 0.5 and device scale 2 is
-    -- exactly viewport-width. Reading 1.0 for a capture that arrives at 2.0 asks
-    -- for four times the region the budget holds, because height is derived as
-    -- budget / (width * scale^2).
+    -- exactly viewport-width. Reading 1.0 for a capture that will arrive at 2.0
+    -- builds a grid whose slices claim a quarter of the pixels they will really
+    -- cost, so the ceiling is silently overrun fourfold.
     session.image_width_px = 990 -- the moving frame: 990 CSS * 2 * 0.5
     session.device_image_width_px = 1980 -- what a settle actually comes back at
-    session.scroll_y = 1500
-    local planned = controller._settle_options(session)
-    t.eq(2020, planned.capture_region.heightPx, "the region is sized for the scale the capture will arrive at")
-    t.ok(
-      planned.capture_region.heightPx * 2 * 1980 <= live.budget_px,
-      "so its device pixels fit the budget rather than overrunning it fourfold"
-    )
+    -- The grid is derived once and held, so it has to be dropped to be re-derived
+    -- from those two. That is exactly the property being relied on everywhere
+    -- else, and the reason this poke is needed here and nowhere else.
+    live.grid = nil
+    local rebuilt = assert(controller._resident_grid(session))
+    t.eq(1980, rebuilt.image_w, "a slice is as wide as a device-tier capture, not as the moving frame on screen")
+    t.eq(1980 * 4080, resident.slice_cost_px(rebuilt), "so what it will cost the terminal is what it is judged by")
+    t.ok(resident.slice_cost_px(rebuilt) <= live.memory_px, "and fits the ceiling rather than overrunning it fourfold")
     session.image_width_px = 1980
+    grid = rebuilt
 
     -- A fill, end to end. The viewport is pinned for the duration because this
     -- callback adopts whatever the renderer reports, and a viewport that moved
@@ -846,7 +897,17 @@ return function(t)
     end
 
     local update_opts = {}
-    session.backend.png_dimensions = function() return 1980, 4040 end
+    -- The rectangle the renderer says it actually captured, remembered so the
+    -- PNG's "real" dimensions below can agree with it. `resident.region` derives
+    -- the scale from those two and refuses a disagreement over a hundredth --
+    -- correctly, since a region built on numbers that do not add up would crop
+    -- wrongly everywhere -- so a stub that answers a fixed size would refuse
+    -- every fill and fall the session back before any of this could be measured.
+    local captured_region
+    session.backend.png_dimensions = function()
+      local height = captured_region and captured_region.heightPx or 1020
+      return grid.image_w, math.floor(height * 2 + 0.5)
+    end
     session.backend.update = function(image_id, _, _, opts)
       uploads = uploads + 1
       update_opts[#update_opts + 1] = opts
@@ -874,33 +935,37 @@ return function(t)
         regionYPx = pending.params.captureRegion and pending.params.captureRegion.yPx,
         regionHeightPx = pending.params.captureRegion and pending.params.captureRegion.heightPx,
       }, overrides or {})
+      captured_region = pending.params.captureRegion
       local callback = pending.callback
       pending = nil
       callback(answer, nil)
     end
 
-    -- One sharp viewport frame, for the adaptive cap to judge regions against.
+    -- One sharp viewport frame, so a fill can be told apart from one.
     session.retina_png_bytes = 305000
     freed = {}
     uploads, requests = 0, 0
-    session.scroll_y = 1500
+    session.scroll_y = inside(1)
     controller.refresh(session, controller._settle_options(session))
     t.eq(true, live.fill.in_flight, "issuing a fill claims the one fill slot")
-    t.eq(1250, pending.params.captureRegion.yPx, "and asks for a region anchored a quarter of its slack behind")
+    t.eq(slice_at(1).doc_y, pending.params.captureRegion.yPx, "and asks for the slice's own fixed rectangle")
 
-    -- The reader keeps reading while it captures. Nothing supersedes the fill:
-    -- a resident hit issues no request, so scrolling inside a region does not
+    -- The reader keeps reading while it captures. Nothing supersedes the fill: a
+    -- resident hit issues no request, so scrolling inside a slice does not
     -- invalidate the fill that is capturing the next one.
-    session.scroll_y = 1700
+    local landed_at = inside(1) + 100
+    session.scroll_y = landed_at
     complete_fill()
     t.eq(false, live.fill.in_flight, "which is released when it lands")
-    t.eq(1700, session.scroll_y, "a fill never drags the reader back to where it was planned")
-    t.eq(1700, session.applied_scroll_y, "and the position recorded is the one the crop actually shows")
-    t.eq(900, update_opts[#update_opts].source.y, "cropped 450 CSS px into the region, at scale 2")
+    t.eq(landed_at, session.scroll_y, "a fill never drags the reader back to where it was planned")
+    t.eq(landed_at, session.applied_scroll_y, "and the position recorded is the one the crop actually shows")
+    t.eq(crop_y(1, landed_at), update_opts[#update_opts].source.y, "cropped into the slice at the capture scale")
     t.eq(true, update_opts[#update_opts].retain_superseded, "the image it replaced keeps its pixels through the swap")
-    t.ok(vim.tbl_contains(freed, 4242), "and is freed deliberately, once evicted, rather than as a side effect")
-    t.eq(1, #live.regions, "leaving one region cached")
-    t.eq(305000, session.retina_png_bytes, "a region is never counted as the cost of a sharp viewport frame")
+    t.eq(2, #resident.slice_records(live), "leaving two slices held, each in its own cell")
+    t.eq(4343, live.slices[1].image_id, "the new one registered against the id the backend handed back")
+    t.eq(4242, live.slices[0].image_id, "beside the one that was already there, which nothing displaced")
+    t.eq(0, live.evictions, "and nothing evicted, which is the property the whole rebuild is for")
+    t.eq(305000, session.retina_png_bytes, "a fill is never counted as the cost of a sharp viewport frame")
 
     -- The hold, from the one number this link has already been tuned around.
     t.eq(160, live.upload_hold_ms, "with no throughput estimate yet the hold is the session's settle delay")
@@ -918,8 +983,8 @@ return function(t)
     -- them to each other would agree with itself and prove nothing.
     local stale_before, uploads_before = live.stale_fills, uploads
     local displayed_scroll_y = session.applied_scroll_y
-    t.eq(1700, displayed_scroll_y, "sanity: the last fill that reached the screen set the position")
-    session.scroll_y = 1500
+    t.eq(landed_at, displayed_scroll_y, "sanity: the last fill that reached the screen set the position")
+    session.scroll_y = inside(2)
     -- The preview was resized after the last response landed, so the session's
     -- idea of its own viewport is one response out of date. That is precisely
     -- when this happens: the key is computed from the stale width when the fill
@@ -945,7 +1010,7 @@ return function(t)
     local abandoned_before = live.abandoned_fills
     uploads_before = uploads
     local applied_before = session.applied_scroll_y
-    session.scroll_y = 1500
+    session.scroll_y = inside(2)
     controller.refresh(session, controller._settle_options(session))
     session.scroll_y = 9000
     complete_fill()
@@ -969,23 +1034,24 @@ return function(t)
     do
       local superseded_before = live.superseded_by_pan or 0
       local uploads_at_start = uploads
-      session.scroll_y = 1500
+      local requested, panned_to = inside(0), inside(0) - 100
+      session.scroll_y = requested
       controller.refresh(session, { capture_scale = "device", capture_only = true })
       t.ok(pending ~= nil, "sanity: an ordinary settle capture is in flight")
       -- The reader pans away. No request is issued, by design -- that is the
       -- whole feature -- so the capture above is not stale by any existing test.
-      session.scroll_y = 1400
+      session.scroll_y = panned_to
       t.eq(true, controller._try_pan(session), "sanity: the scroll away was a pan")
-      complete_fill({ scrollY = 1500 })
+      complete_fill({ scrollY = requested })
       t.eq(uploads_at_start, uploads, "the frame for the position they left never reaches the terminal")
-      t.eq(1400, session.scroll_y, "and cannot rewind the reader to where it was requested")
-      t.eq(1400, session.applied_scroll_y, "nor claim the screen is showing that position")
+      t.eq(panned_to, session.scroll_y, "and cannot rewind the reader to where it was requested")
+      t.eq(panned_to, session.applied_scroll_y, "nor claim the screen is showing that position")
       t.eq(superseded_before + 1, live.superseded_by_pan, "counted, since nothing else can see a pan happen")
     end
 
     -- A failed capture must release the slot too. This is the shape of the bug
     -- that would silently disable region fills for the rest of a session.
-    session.scroll_y = 1500
+    session.scroll_y = inside(2)
     controller.refresh(session, controller._settle_options(session))
     t.eq(true, live.fill.in_flight, "a fill is in flight")
     local notified = pending.callback
@@ -1000,38 +1066,42 @@ return function(t)
     t.eq(false, live.fill.in_flight, "and a failed capture gives the slot back rather than keeping it forever")
     session.render_failed = false
 
-    -- The adaptive cap: bound the payload, not just the queue behind it. Three
-    -- sharp frames is 915,000 bytes here, so a region encoding at 1,016,667
-    -- shrinks the next one to nine tenths of the height the budget would allow.
-    session.scroll_y = 1500
-    controller.refresh(session, controller._settle_options(session))
-    local planned_height = pending.params.captureRegion.heightPx
-    session.scroll_y = 1500
-
-    -- The cap must not bind before K_MAX does. A region's PNG scales about
-    -- linearly with its pixels, so a region of k viewports costs about k settle
-    -- frames -- which makes this cap and K_MAX two limits on the same quantity
-    -- in different units. Set below K_MAX it wins every time and silently
-    -- overrides the height the budget derived: shipped at 3 against a K_MAX of
-    -- 4, it ratcheted real regions to 43% of their allowed height, leaving about
-    -- a third of a screen of travel and turning nearly every scroll into a
-    -- refill.
-    local at_k_max = 305000 * resident.K_MAX
-    complete_fill({ pngBytes = at_k_max })
-    t.eq(1, live.height_scale, "a region as large as K_MAX allows is not cut down by the byte cap")
-    t.eq(0, live.height_reduced, "so the two limits never fight over the same region")
-
+    -- The boundaries are the document's, not the reader's, and a fill does not
+    -- move them. This is what the bounded region could not do and what the whole
+    -- rebuild is for: there used to be an adaptive byte cap here that ratcheted
+    -- every later region's height down, which -- being a second limit on the
+    -- same quantity as the budget, in different units -- always bound first and
+    -- silently overrode it. Regions ended up at 43% of their allowed height,
+    -- leaving about a third of a screen of travel, so nearly every scroll
+    -- missed and refilled: 25% *more* traffic than sending a frame every time.
+    -- A grid has no such knob, and a huge PNG must not create one.
     live.upload_hold_until = 0
-    session.scroll_y = 1500
+    session.scroll_y = inside(2)
+    local boundaries_before = {}
+    for index = 0, grid.count - 1 do
+      boundaries_before[index] = slice_at(index).doc_y
+    end
     controller.refresh(session, controller._settle_options(session))
-    session.scroll_y = 1500
-    complete_fill({ pngBytes = 2033334 })
-    t.near(0.9, live.height_scale, 1e-6, "a region well outside that relationship still shrinks the fills after it")
-    t.eq(1, live.height_reduced, "and records that it did")
+    local asked_at = pending.params.captureRegion
+    session.scroll_y = inside(2)
+    complete_fill({ pngBytes = 6000000 })
+    t.eq(grid, live.grid, "a fill does not re-derive the grid, however large its PNG turned out to be")
+    for index = 0, grid.count - 1 do
+      t.eq(boundaries_before[index], slice_at(index).doc_y, ("slice %d starts where it always did"):format(index))
+    end
     live.upload_hold_until = 0
-    local shorter = controller._settle_options(session)
-    t.ok(shorter.capture_region.heightPx < planned_height, "so the next region asks for less of the document")
-    t.ok(shorter.capture_region.heightPx > 1020, "but still more than a viewport, or it would buy nothing")
+    session.scroll_y = inside(2)
+    t.eq(
+      nil,
+      controller._settle_options(session).capture_region,
+      "and a slice already held is never asked for again, whatever it cost"
+    )
+    session.scroll_y = inside(4)
+    t.eq(
+      asked_at.heightPx,
+      controller._settle_options(session).capture_region.heightPx,
+      "while the next slice along is the same height as every other one"
+    )
 
     -- A drag's clean base and an interact frame both replace whatever is on
     -- screen, and what is on screen may be a resident region. Freeing it there
@@ -1060,7 +1130,7 @@ return function(t)
     animation.repaint = function() repaints = repaints + 1 end
     session.base_selection_painted = false
     live.upload_hold_until = 0
-    scroll_to(1400)
+    scroll_to(inside(0) - 200)
     t.eq(1, moves, "sanity: that scroll was a pan")
     t.eq(1, repaints, "a pan repaints the animation layer, which is placed from the position it just changed")
     animation.repaint = real_repaint
@@ -1095,19 +1165,12 @@ return function(t)
     live.upload_hold_until = 0
     resident.drain(live)
     live.key = controller._resident_key(session)
-    local held = assert(resident.region({
-      doc_y = 1000,
-      doc_h = 2020,
-      css_w = 990,
-      image_w = 1980,
-      image_h = 4040,
-      key = live.key,
-      image_id = 5151,
-    }))
-    assert(resident.insert(live, held))
+    grid = assert(controller._resident_grid(session))
+    local held = make_slice(0, 5151)
+    assert(resident.register(live, 0, held))
     held.placed = true
     session.image_id = 5151
-    session.scroll_y = 1500
+    session.scroll_y = inside(0)
     uploads, moves, requests = 0, 0, 0
 
     local rect = preview.placement(session.preview_win, "kitty_raw")
@@ -1124,7 +1187,7 @@ return function(t)
     controller.refresh(session)
     t.eq({ 5151 }, hidden, "a float over the preview hides the region's placements")
     t.eq({}, freed_now, "and leaves its pixels in the terminal")
-    t.eq(1, #live.regions, "the cache still holds it")
+    t.eq(1, #resident.slice_records(live), "the grid still holds it")
     t.eq(false, held.placed, "recorded as resident but not on screen")
 
     -- And back. This is the fourth cache state the design calls
@@ -1144,9 +1207,9 @@ return function(t)
     -- paths that end a session's claim on the pixels must still free them.
     hidden, freed_now = {}, {}
     controller.free_resident(session)
-    t.eq({ 5151 }, freed_now, "giving up a session's regions frees them for real")
+    t.eq({ 5151 }, freed_now, "giving up a session's slices frees them for real")
     t.eq({}, hidden, "hiding is never a substitute for that")
-    t.eq(0, #live.regions, "and the cache is empty")
+    t.eq(0, #resident.slice_records(live), "and nothing is held")
 
     -- ------------------------------------------------------------------
     -- Refusals, and where they land.
@@ -1167,24 +1230,46 @@ return function(t)
       callback(nil, reason, { code = "REGION_TOO_LARGE" })
     end
 
-    -- A budget with room for a smaller region, so the retry has somewhere to go.
-    live.height_scale, live.region_shrinks, live.height_reduced = 1, 0, 0
-    live.budget_px, live.upload_hold_until = 16000000, 0
+    -- A slice Chromium will not capture means the *slice height* is beyond it,
+    -- so the answer is a whole new grid at a shorter height rather than one
+    -- shorter slice. Slice height and boundary position are the same fact: a
+    -- grid whose slices are not all the same height has no single overlap, and a
+    -- viewport straddling one of its boundaries would have no row to split on.
+    live.slice_scale, live.slice_shrinks = 1, 0
+    live.memory_px, live.upload_hold_until = 8000000 * 4, 0
+    live.enabled, live.fallback_reason = true, nil
+    live.grid = nil
+    resident.drain(live)
+    live.key = controller._resident_key(session)
+    grid = assert(controller._resident_grid(session))
+    assert(resident.register(live, 0, make_slice(0, 6161)))
     session.render_failed = false
-    session.scroll_y = 1500
+    session.scroll_y = inside(1)
     controller.refresh(session, controller._settle_options(session))
     local asked_for = pending.params.captureRegion.heightPx
-    local requests_before = requests
+    local requests_before, generation_at_refusal = requests, live.generation
     refuse_region("capture region of 1980x40000 device px exceeds the safe ceiling")
-    t.eq(0.5, live.height_scale, "a region Chromium will not capture is asked for again at half the height")
-    t.eq(1, live.region_shrinks, "once, and recorded as once")
+    t.eq(resident.SLICE_SHRINK, live.slice_scale, "a slice Chromium will not capture is retried a quarter shorter")
+    t.eq(1, live.slice_shrinks, "once, and recorded as once")
+    t.ok(live.generation > generation_at_refusal, "the grid is regenerated rather than patched")
+    t.eq(0, #resident.slice_records(live), "so everything of the old generation goes back to the terminal")
+    t.ok(vim.tbl_contains(freed_now, 6161), "by being freed, not merely forgotten")
     t.eq(false, session.render_failed, "and not reported as a render failure -- the frame on screen is untouched")
     t.eq(nil, live.fallback_reason, "with the feature still on")
     t.ok(
       vim.wait(500, function() return requests > requests_before end, 5),
       "retried straight away rather than waiting for the reader to scroll again"
     )
-    t.ok(pending.params.captureRegion.heightPx < asked_for, "asking for less of the document than last time")
+    local retried = pending.params.captureRegion.heightPx
+    t.ok(retried < asked_for, "asking for less of the document than last time")
+    t.ok(retried > 1020, "but still more than a viewport, or no slice could ever be a hit")
+    -- Every slice of the new grid, not just the one being asked for. A halving
+    -- applied per fill would leave a grid of mixed heights, which is the shape
+    -- with no overlap invariant left.
+    local shrunk = assert(controller._resident_grid(session))
+    for index = 0, shrunk.count - 2 do
+      t.eq(retried, resident.slice(shrunk, index).doc_h, ("slice %d is the new height too"):format(index))
+    end
 
     -- A second refusal is not a size problem. No third size is tried: the
     -- geometry is outside what this Chromium will capture at all, and a smaller
@@ -1193,28 +1278,32 @@ return function(t)
     t.ok(live.fallback_reason ~= nil, "a second refusal gives up for the rest of the session")
     t.ok(live.fallback_reason:find("twice", 1, true) ~= nil, "saying it had already tried")
     t.eq(false, live.enabled, "so nothing tries again")
-    t.eq(0, #live.regions, "and the terminal gets its pixels back")
+    t.eq(0, #resident.slice_records(live), "and the terminal gets its pixels back")
 
-    -- At the shipped budget there is no smaller region to retry with: half of it
-    -- is under one viewport, and a region that cannot hold the viewport can
-    -- never be a hit. The refusal has to say so rather than quietly planning
-    -- nothing on every settle from then on.
+    -- And when the shorter grid does not fit either, the refusal has to say so
+    -- rather than quietly planning nothing on every settle from then on. A
+    -- ceiling below one slice is the way there: no grid whose slices cannot be
+    -- held is worth capturing.
     live.enabled, live.fallback_reason = true, nil
-    live.height_scale, live.region_shrinks = 1, 0
-    live.budget_px, live.upload_hold_until = 8000000, 0
-    session.scroll_y = 1500
+    live.slice_scale, live.slice_shrinks = 1, 0
+    live.grid, live.upload_hold_until = nil, 0
+    session.scroll_y = inside(1)
     controller.refresh(session, controller._settle_options(session))
+    live.memory_px = 1000
     refuse_region("capture region of 1980x40000 device px exceeds the safe ceiling")
-    t.eq(false, live.enabled, "one refusal is final when the budget cannot afford a smaller region")
+    t.eq(false, live.enabled, "one refusal is final when no smaller grid can be held either")
     t.ok(
-      live.fallback_reason:find("no smaller one fits", 1, true) ~= nil,
+      live.fallback_reason:find("no smaller grid fits", 1, true) ~= nil,
       "and the reason names that, not just the refusal that started it"
     )
-    t.ok(live.fallback_reason:find("viewport", 1, true) ~= nil, "carrying the planner's own words for why nothing fits")
+    t.ok(
+      live.fallback_reason:find("ceiling", 1, true) ~= nil,
+      "carrying the grid's own words for why nothing smaller fits"
+    )
 
     -- The destination.
     require("md-viewer.debounce").close(session, "scroll_settle_timer")
-    scroll_to(1500)
+    scroll_to(500)
     t.eq(0, moves, "scrolling after a fallback never pans")
     t.ok(requests > 0, "it captures, exactly as it did before any of this existed")
     require("md-viewer.debounce").close(session, "scroll_settle_timer")

@@ -97,22 +97,27 @@ M.defaults = {
     -- Only ever active over SSH, where the pixels are the cost. A local terminal
     -- receives a frame for free, so this would trade terminal memory for nothing.
     resident_pan = "auto",
-    -- How much decoded image the terminal may hold for one preview, in pixels.
+    -- How much decoded image the terminal may hold for one preview, in
+    -- megabytes. 0 disables resident panning outright.
     --
-    -- Pixels rather than bytes, matching the animation upload budget in
-    -- renderer/src/media.js, because that is the unit both are really spending
-    -- and it makes the two comparable. A resident pixel costs a *measured*
-    -- 12-13 bytes on iTerm2 (scripts/resident/rss-calibrate.py), not the 4 a
-    -- naive RGBA surface would suggest, so this default is roughly 100 MB --
-    -- three times what it was documented as while the 4-byte figure stood.
+    -- Megabytes rather than the pixels this used to be stated in, because
+    -- megabytes are what a reader is actually spending and pixels only became a
+    -- proxy for them through a conversion nobody had measured. The measurement
+    -- exists now -- 12-13 bytes per resident pixel on iTerm2,
+    -- scripts/resident/rss-calibrate.py -- so the honest unit is available and
+    -- the proxy is not worth keeping. The key is renamed rather than
+    -- reinterpreted: an existing `resident_budget_px = 8000000` silently read as
+    -- 8 MB would be a twelvefold reduction nobody asked for.
     --
-    -- Deliberately small. One region a little under two viewports at a typical
-    -- split size, which buys about a viewport of free scrolling in each
-    -- direction. The failure mode of a low value is less caching; the failure
-    -- mode of a high one is a terminal that grows without bound, which is where
-    -- this project has been burned before (docs/terminal-support.md on
-    -- wezterm#7953). Raise it on a measurement, not on a hunch.
-    resident_budget_px = 8000000,
+    -- 512 MB holds about 41 megapixels: roughly thirteen viewports at a typical
+    -- split, or a document of ~10,400 CSS px held whole. Documents shorter than
+    -- that never evict anything at all, which is the property the whole rebuild
+    -- exists to buy. The same calibration showed the memory is returned when a
+    -- slice is freed and that iTerm2 does not self-evict, so this is a ceiling
+    -- on what is held rather than a guess at what is safe -- but the sustained
+    -- question, whether a real session plateaus over half an hour, is still open
+    -- (scripts/resident/rss.sh). Raise it on that measurement, not on a hunch.
+    resident_memory_mb = 512,
   },
   sync = {
     source_to_preview = true,
@@ -365,8 +370,17 @@ local function validate(cfg)
     'md-viewer: image.resident_pan must be "auto", "on", or "off"'
   )
   assert(
-    type(cfg.image.resident_budget_px) == "number" and cfg.image.resident_budget_px >= 0,
-    "md-viewer: image.resident_budget_px must be non-negative"
+    type(cfg.image.resident_memory_mb) == "number" and cfg.image.resident_memory_mb >= 0,
+    "md-viewer: image.resident_memory_mb must be non-negative"
+  )
+  -- Loud rather than ignored. The two keys mean the same thing in different
+  -- units, so a config still setting the old one is a reader who believes a
+  -- bound is in force that is not -- and an unknown key here is silently
+  -- accepted, which would leave them believing it for good.
+  assert(
+    cfg.image.resident_budget_px == nil,
+    "md-viewer: image.resident_budget_px has been replaced by image.resident_memory_mb, which states the same "
+      .. "bound in megabytes (a resident pixel costs a measured ~13 bytes, so the old 8000000 px default was ~100 MB)"
   )
   assert(type(cfg.browser.fast_png_encode) == "boolean", "md-viewer: browser.fast_png_encode must be boolean")
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")

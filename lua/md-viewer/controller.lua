@@ -103,10 +103,10 @@ end
 
 function M.free_resident(session) free_resident(session) end
 
----Is this image one the resident cache is still counting on?
+---Is this image one the resident grid is still counting on?
 local function resident_holds(live, image_id)
   if not (live and image_id) then return false end
-  for _, region in ipairs(live.regions) do
+  for _, region in ipairs(resident.slice_records(live)) do
     if region.image_id == image_id then return true end
   end
   return false
@@ -168,7 +168,7 @@ end
 local function mark_regions_unplaced(session)
   local live = session.resident
   if not live then return end
-  for _, region in ipairs(live.regions) do
+  for _, region in ipairs(resident.slice_records(live)) do
     region.placed = false
   end
 end
@@ -260,6 +260,15 @@ end
 ---render/capture path and `display_interact_result`'s interact path funnel
 ---through, so there is exactly one place that knows how to show/update a
 ---backend image.
+---
+---Returns the backend's image id, or `false`. Every caller that only wants to
+---know whether it worked reads it as the boolean it used to be; the one that
+---needs the id -- a fill, which must record its slice against the id it was
+---*handed* -- gets it in the same statement rather than reading it back off
+---`session.image_id` a few lines later. Two sources of truth for "which image
+---did that put up" is one too many the moment a composite can put a different
+---one at the head of the screen.
+---@return integer|false image_id
 local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder, opts)
   opts = opts or {}
   preview.stop_loading(session)
@@ -427,7 +436,7 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- step in this same tick, so a scroll frame does not drop the animation for
   -- 200ms on its way past.
   animation.adopt(session)
-  return true
+  return image_id
 end
 
 ---Put a selection-free frame back on screen so drag-overlay rectangles have a
@@ -720,7 +729,7 @@ end
 -- Defined further down, beside `scroll_settle_delay`, which they need and which
 -- belongs with the capture-scale rule it is the twin of. Declared here because
 -- `M.refresh` -- which sits between the two -- is what calls them.
-local hold_wire, cap_region_png, settle_options
+local hold_wire, settle_options
 
 ---Whether this session may keep resident regions at all, and why not when it
 ---may not. Evaluated once, when the preview opens.
@@ -745,7 +754,7 @@ local function resident_gate(session)
   if capability.multiplexer ~= "none" then
     return false, ("multiplexer %s is not validated for resident panning"):format(capability.multiplexer)
   end
-  if (cfg.image.resident_budget_px or 0) <= 0 then return false, "image.resident_budget_px is zero" end
+  if (cfg.image.resident_memory_mb or 0) <= 0 then return false, "image.resident_memory_mb is zero" end
   return true, reason
 end
 
@@ -772,8 +781,11 @@ function M.reevaluate_resident(session)
   live.gate_reason = reason
   live.fallback_reason = nil
   if not ok then live.fallback_reason = reason end
-  live.budget_px = config.get().image.resident_budget_px
-  live.height_scale, live.region_shrinks = 1, 0
+  -- The ceiling in the unit the images are measured in. Stated in megabytes
+  -- because that is what a reader is really spending, converted here by the one
+  -- measured constant so no other site has to know the rate.
+  live.memory_px = math.floor((config.get().image.resident_memory_mb or 0) * 1048576 / resident.BYTES_PER_RESIDENT_PX)
+  live.slice_scale, live.slice_shrinks = 1, 0
   return ok, reason
 end
 
@@ -809,21 +821,109 @@ local function resident_fallback(session, reason)
   free_resident(session)
 end
 
----Drop every region and remember the key they were replaced by.
+---Drop every slice and remember the key they were replaced by.
 ---
----A region of this generation that is on screen becomes, a line below, pixels
----the terminal has been told to forget -- so the screen bookkeeping must stop
----naming it. Left in place, the next `clear_image` tries to hide an image nobody
----owns and `apply_image` asks to supersede one.
+---A slice of this generation that is on screen becomes, a line below, pixels the
+---terminal has been told to forget -- so the screen bookkeeping must stop naming
+---it. Left in place, the next `clear_image` tries to hide an image nobody owns
+---and `apply_image` asks to supersede one.
+---
+---Every part, not just the head. A composite puts two slices on screen and they
+---are not invalidated as a pair: the reader can be at a boundary whose upper
+---slice was refilled while the lower one still holds. Filtering only
+---`session.image_id` left the surviving band drawn and the dropped one still
+---named, which is the same shape of defect `stale-part-list-trusted` scores from
+---the other direction.
 local function resident_invalidate(session, key)
   local live = session.resident
   local dropped = {}
-  for _, region in ipairs(live.regions or {}) do
+  for _, region in ipairs(resident.slice_records(live)) do
     if region.image_id then dropped[region.image_id] = true end
   end
   free_resident(session)
   live.key = key
-  if session.image_id and dropped[session.image_id] then set_screen(session, {}) end
+  if next(dropped) == nil then return end
+  local parts, kept = screen_parts(session), {}
+  for _, part in ipairs(parts) do
+    if not (part.image_id and dropped[part.image_id]) then kept[#kept + 1] = part end
+  end
+  if #kept ~= #parts then set_screen(session, kept) end
+end
+
+---The scale a device-tier capture will actually come back at.
+---
+---Measured from the last *device-tier* image rather than from whatever is on
+---screen. Those are the same thing locally and never the same thing over SSH: a
+---settle fires once scrolling has stopped, so the frame on screen at that moment
+---is a moving one captured at `ssh_scroll_scale`, whose PNG at the default 0.5
+---and device scale 2 is exactly viewport-width. Reading the scale off that gives
+---1.0 for a capture that will arrive at 2.0 -- and since a slice's pixel count
+---goes as width times scale squared, halving the scale asks for four times the
+---slice the ceiling can hold. It is then refused, either by the renderer or by
+---the grid, and nothing is ever resident.
+---
+---Measured rather than configured because the Playwright fallback cannot express
+---a sub-1x factor and returns a full-size frame, so the requested number is wrong
+---on one encoder path.
+---
+---One home, deliberately: the grid and the fill it plans must agree about this
+---exactly, and two copies of an expression this easy to get subtly wrong is how
+---they would stop agreeing.
+local function capture_scale_measured(session)
+  return (session.device_image_width_px and session.viewport_width_px)
+      and (session.device_image_width_px / session.viewport_width_px)
+    or config.get().render.device_scale_factor
+end
+
+---The grid of slices covering this document: derived once, then held.
+---
+---Held is the whole point. The bounded region this replaces was planned around
+---wherever the reader happened to stop, so its edges moved with them and
+---crossing one meant an eviction and a refill. A grid's boundaries belong to the
+---*document*, which is what makes "uploaded once and kept" a claim anyone can
+---make -- and re-deriving it per fill would quietly take that back while every
+---diagnostic still said the cache was working.
+---
+---Returns `nil, reason` when no grid worth having fits. That is a decline rather
+---than a fallback: the session simply keeps taking ordinary frames.
+local function resident_grid(session)
+  local live = session.resident
+  if not live then return nil, "session has no resident state" end
+  if live.grid then return live.grid end
+  if not (session.viewport_width_px and session.viewport_height_px and session.document_height_px) then
+    return nil, "viewport or document dimensions are unknown"
+  end
+  if not valid(session) then return nil, "session is not displaying anything" end
+  local grid, reason = resident.slice_grid({
+    viewport_h = session.viewport_height_px,
+    viewport_w = session.viewport_width_px,
+    document_height_px = session.document_height_px,
+    scale = capture_scale_measured(session),
+    -- The pane's own row count, which is what makes a whole-cell split possible
+    -- without anyone measuring a pixel cell. `docs/terminal-support.md` states
+    -- that a resident crop needs no measured cell, and this keeps that true.
+    rows = preview.placement(session.preview_win, session.backend.name).height,
+    slice_scale = live.slice_scale,
+  })
+  if not grid then
+    live.grid_refusal = reason
+    return nil, reason
+  end
+  -- Asked here, before any wire is spent, rather than at registration after a
+  -- slice has crossed the link: a ceiling smaller than one slice is a property
+  -- of the geometry, and discovering it from a capture costs several hundred
+  -- kilobytes to learn something arithmetic already knew.
+  local cost = resident.slice_cost_px(grid)
+  if live.memory_px > 0 and cost > live.memory_px then
+    live.grid_refusal = ("a slice of %d px exceeds the %d px ceiling this session may hold "):format(
+      cost,
+      live.memory_px
+    ) .. "(image.resident_memory_mb)"
+    return nil, live.grid_refusal
+  end
+  live.grid_refusal = nil
+  live.grid = grid
+  return grid
 end
 
 ---Show an already-resident region at the newest scroll position, if one covers
@@ -874,8 +974,33 @@ function try_pan(session)
 
   local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
   local desired = session.scroll_y or 0
-  local region = resident.find(live, desired, viewport.heightPx, key)
-  if not region then
+  local grid = resident_grid(session)
+  if not grid then
+    live.misses = live.misses + 1
+    return false
+  end
+  local first, last = resident.slices_for(grid, desired, viewport.heightPx)
+  if not first then
+    live.misses = live.misses + 1
+    return false
+  end
+  -- A viewport spanning two slices has to be written as two bands in one write,
+  -- which is the composite. Until that exists it is a miss: the reader gets
+  -- today's captured frame at the boundary, which is correct and merely slow.
+  -- Never a single band stretched over the pane -- that is a picture of the
+  -- wrong part of the document, and it would arrive looking perfectly fine.
+  if first ~= last then
+    live.straddles = live.straddles + 1
+    live.misses = live.misses + 1
+    return false
+  end
+  local region = resident.hold(live, first)
+  -- The key as well as the cell. Every slice held was registered under
+  -- `live.key`, which was compared against the session's a few lines above -- so
+  -- this can only fire if those two ever come apart, and a slice of another
+  -- document panned into view is the one failure this whole mechanism must not
+  -- be able to produce.
+  if not (region and region.key == key) then
     live.misses = live.misses + 1
     return false
   end
@@ -901,7 +1026,7 @@ function try_pan(session)
     return false
   end
 
-  for _, other in ipairs(live.regions) do
+  for _, other in ipairs(resident.slice_records(live)) do
     other.placed = other == region
   end
 
@@ -1028,6 +1153,12 @@ function M.refresh(session, render_options)
     -- the region is built, so a key computed only at the end would stamp a
     -- resized document's identity onto pixels of the old one.
     filling.fill.key = resident_key(session)
+    -- Which cell of which grid this capture is of. The index alone is not enough:
+    -- a `REGION_TOO_LARGE` shrink regenerates the grid with the same document
+    -- key and different boundaries, so cell 3 before and cell 3 after are
+    -- different parts of the document. The generation is what tells them apart.
+    filling.fill.slice_index = render_options.resident_slice
+    filling.fill.generation = filling.generation
     filling.fill.doc_y = render_options.capture_region and render_options.capture_region.yPx
     filling.fill.doc_h = render_options.capture_region and render_options.capture_region.heightPx
     filling.desired_scroll_y = session.scroll_y or 0
@@ -1064,22 +1195,29 @@ function M.refresh(session, render_options)
       -- First, because planning the replacement asks whether a fill is already
       -- in flight -- and this one is, until it is finished with.
       finish()
-      if filling.region_shrinks >= 1 then
-        resident_fallback(session, "renderer refused the region twice: " .. tostring(err))
+      if filling.slice_shrinks >= 1 then
+        resident_fallback(session, "renderer refused the slice twice: " .. tostring(err))
         return
       end
-      filling.region_shrinks = filling.region_shrinks + 1
-      filling.height_scale = math.max(resident.MIN_HEIGHT_SCALE, filling.height_scale * 0.5)
-      filling.height_reduced = filling.height_reduced + 1
+      filling.slice_shrinks = filling.slice_shrinks + 1
+      filling.slice_scale = filling.slice_scale * resident.SLICE_SHRINK
+      -- A *new grid*, not the same one with one shorter slice. Slice height and
+      -- boundary position are the same fact, so a grid whose slices are not all
+      -- the same height has no single overlap -- and a viewport straddling one
+      -- of its boundaries would have no row it could be split on. Everything of
+      -- the old generation goes back to the terminal, which is what
+      -- `resident_invalidate` is: drain, bump the generation, and stop the
+      -- screen naming pixels nobody owns any more.
+      resident_invalidate(session, resident_key(session))
       local retry = settle_options(session)
       if not retry.capture_region then
-        -- Halving left nothing worth having, which at a small budget is the
-        -- ordinary outcome: half a region is under a viewport, and a region that
-        -- cannot hold the viewport can never be a hit. Said out loud rather than
-        -- left to plan nothing on every settle for the rest of the session.
+        -- Halving left nothing worth having, which at a small ceiling is the
+        -- ordinary outcome: a slice must still hold a viewport plus its overlap,
+        -- and one that cannot can never be a hit. Said out loud rather than left
+        -- to plan nothing on every settle for the rest of the session.
         resident_fallback(
           session,
-          ("renderer refused the region and no smaller one fits (%s)"):format(filling.plan_refusal or tostring(err))
+          ("renderer refused the slice and no smaller grid fits (%s)"):format(filling.grid_refusal or tostring(err))
         )
         return
       end
@@ -1259,6 +1397,18 @@ function M.refresh(session, render_options)
         finish()
         return
       end
+      -- And the grid these pixels are a *cell of*, against the grid there is now.
+      -- The key above cannot catch this: the one thing that regenerates a grid
+      -- without touching the document is the renderer refusing to capture a
+      -- slice, and after that halving, cell 3 is a different part of the
+      -- document than the cell 3 this capture was asked for. Registering it
+      -- anyway would put correct pixels at a wrong document position, which is
+      -- the one failure a resident slice must not be able to produce.
+      if live.fill.generation ~= live.generation then
+        live.stale_fills = live.stale_fills + 1
+        finish()
+        return
+      end
       local region, region_reason = region_from_fill(session, result.image, meta)
       if not region then
         -- Not a transient failure: the renderer or the image is not answering in
@@ -1282,21 +1432,24 @@ function M.refresh(session, render_options)
         finish()
         return
       end
-      if
-        not apply_image(
-          session,
-          result.image,
-          meta.captureScale,
-          session.last_png_bytes,
-          session.last_capture_ms,
-          meta.captureEncoder,
-          { source = source, resident_fill = true }
-        )
-      then
+      -- The id the backend hands back, recorded against the slice in the same
+      -- statement that receives it. Reading it off `session.image_id` afterwards
+      -- is a second source of truth for "which image did that put up", and the
+      -- two come apart the moment something else can write the head of the
+      -- screen between the two lines.
+      region.image_id = apply_image(
+        session,
+        result.image,
+        meta.captureScale,
+        session.last_png_bytes,
+        session.last_capture_ms,
+        meta.captureEncoder,
+        { source = source, resident_fill = true }
+      )
+      if not region.image_id then
         finish()
         return
       end
-      region.image_id = session.image_id
       region.placed = true
       session.applied_scroll_y = applied
       local emitted = session.last_ui_bytes or 0
@@ -1307,19 +1460,22 @@ function M.refresh(session, render_options)
       -- that same payload against its own estimate is circular, and the answer
       -- it converges on is "however long the write happened to block".
       resident.note_wire_sample(live, emitted, session.last_image_update_ms)
-      cap_region_png(session)
-      local stored, evicted, insert_reason = resident.insert(live, region)
+      local stored, evicted, refusal = resident.register(live, live.fill.slice_index, region)
       for _, gone in ipairs(evicted) do
         if gone.image_id and gone.image_id ~= region.image_id then pcall(session.backend.clear, gone.image_id) end
       end
-      -- A region that cannot be kept is still on screen and still correct; it
-      -- simply will not be there for the next scroll, which is the ordinary
-      -- capture path rather than a defect. The next `apply_image` frees its
-      -- image, since nothing in the cache holds it.
-      live.last_insert_refusal = nil
-      if not stored then live.last_insert_refusal = insert_reason end
+      -- A slice the grid will not take is still on screen and still correct; it
+      -- simply will not be there for the next scroll. It can only happen when
+      -- one slice exceeds the whole ceiling, which `resident_grid` declines
+      -- before any wire is spent -- so reaching here means the two disagree, and
+      -- that is a reason to distrust the machinery rather than the moment.
+      if not stored then
+        resident_fallback(session, refusal)
+        finish()
+        return
+      end
       live.key = region.key
-      for _, other in ipairs(live.regions) do
+      for _, other in ipairs(resident.slice_records(live)) do
         other.placed = other == region
       end
       finish()
@@ -1401,28 +1557,22 @@ local function scroll_settle_delay(render)
   return render.scroll_settle_ms, "render.scroll_settle_ms"
 end
 
----How many settle frames a region may cost before it is judged too large.
----
----A multiple rather than a byte count, because what a viewport costs to encode
----is a property of the document: a page of prose and a page of syntax-
----highlighted code are not within a factor of each other, and a constant here
----would be wrong for every document but the one it was measured on.
----
----**It must stay above `resident.K_MAX`, and the reason is not obvious.** A
----region's PNG scales close to linearly with its pixel count
----(scripts/resident/probe.mjs), so a region of *k* viewports costs about *k*
----settle frames. That makes this cap and `K_MAX` two limits on the same
----quantity, expressed in different units -- and set below `K_MAX` this one
----always binds first, silently overriding the height the budget derived.
----
----It shipped at 3 against a `K_MAX` of 4 and did exactly that on the first real
----run: regions were ratcheted to 43% of the budget's height, which at that
----viewport left about a third of a screen of travel, so nearly every scroll
----missed and refilled. 6 fills and 5 evictions in 149 seconds, and 25% *more*
----traffic than the baseline. The budget is what bounds size; this exists only to
----catch a region so far outside the linear relationship that the budget's
----estimate of its cost was wrong. Hence the headroom.
-local REGION_PNG_CAP_FRAMES = 6
+-- There used to be an adaptive PNG cap here: a region encoding larger than a
+-- multiple of a settle frame ratcheted every later region's height down. It was
+-- a second limit on the same quantity the budget bounded, stated in different
+-- units, and it shipped set below the budget's own ceiling -- so it always bound
+-- first and silently overrode the height that had been derived. Regions were
+-- ratcheted to 43% of the budget's height, which left about a third of a screen
+-- of travel, so nearly every scroll missed and refilled: 6 fills and 5 evictions
+-- in 149 seconds, and 25% *more* traffic than the baseline.
+--
+-- A grid has no such knob to get wrong. Slice height is `SLICE_VIEWPORTS`
+-- viewports and nothing adapts it downward on encoded size, because size is no
+-- longer what decides whether a slice is worth having: a slice is uploaded once
+-- and never refilled, so a large one is a one-off cost rather than a recurring
+-- one. The only thing that shortens a slice is the renderer refusing to capture
+-- it, which is a Chromium limit rather than a byte count, and that regenerates
+-- the whole grid.
 
 ---Keep the wire to this session's region upload for as long as it is likely to
 ---still be crossing it.
@@ -1443,43 +1593,55 @@ function hold_wire(session, bytes, elapsed_ms)
   live.upload_hold_until = vim.uv.now() + live.upload_hold_ms
 end
 
----Shrink future regions if this one encoded larger than the cap.
+---Which slice of the grid this settle should fill, or nil when there is nothing
+---to fill.
 ---
----A hold is damage control -- it stops a big payload collecting a queue. This is
----prevention: it stops the payload being big. Both are needed, because a hold
----long enough to cover a genuinely oversized region is a hold long enough for
----the reader to notice.
-function cap_region_png(session)
+---The slice under the reader, and if they are straddling a boundary, whichever
+---of the two they do not already have. Nearest first rather than lowest: a
+---reader at the bottom of a boundary is reading the *lower* slice, and filling
+---the upper one first would leave them looking at a captured frame for a whole
+---extra round trip.
+---
+---nil means every slice this position needs is already resident, which on a
+---miss can only be the straddle -- both slices held, no composite to draw them
+---with yet. The settle then takes its ordinary sharp frame.
+local function slice_to_fill(session, grid)
   local live = session.resident
-  local baseline = session.retina_png_bytes
-  -- No sharp frame measured yet means no basis to judge against. A region is not
-  -- compared to itself: `apply_image` keeps fills out of `retina_png_bytes`
-  -- exactly so this number stays the cost of one *viewport*.
-  if not (live and baseline and baseline > 0) then return end
-  local reduced = resident.png_cap_scale(live.height_scale, live.fill_png_bytes, baseline * REGION_PNG_CAP_FRAMES)
-  if reduced < live.height_scale then
-    live.height_scale = reduced
-    live.height_reduced = live.height_reduced + 1
+  local first, last = resident.slices_for(grid, session.scroll_y or 0, session.viewport_height_px)
+  if not first then return nil end
+  if first == last then
+    if resident.hold(live, first) then return nil end
+    return first
   end
+  local upper = resident.slice(grid, first)
+  -- Whichever of the two the viewport shows more of.
+  local from_upper = (upper.doc_y + upper.doc_h) - (session.scroll_y or 0)
+  local nearest, other = last, first
+  if from_upper >= session.viewport_height_px - from_upper then
+    nearest, other = first, last
+  end
+  if not resident.hold(live, nearest) then return nearest end
+  if not resident.hold(live, other) then return other end
+  return nil
 end
 
 ---What the settle timer should ask for once scrolling stops.
 ---
 ---Ordinarily the sharp viewport frame it has always taken. On a session keeping
----resident regions the *same* request becomes a region fill instead: one
----capture, a couple of viewports tall, after which scrolling inside it needs no
----capture at all. One request either way -- the settle is repurposed, not
----doubled up, so a miss costs what it always cost plus the region's extra
----height and nothing more.
+---resident slices the *same* request becomes a slice fill instead: one capture,
+---a couple of viewports tall, after which scrolling inside it needs no capture
+---at all. One request either way -- the settle is repurposed, not doubled up, so
+---a miss costs what it always cost plus the slice's extra height and nothing
+---more.
 ---
----Falls back to the plain settle whenever a region would be wrong to take: while
----a selection or a search is painted into the document (a region outlives the
----frame it was captured with by minutes, so either would become a highlight that
----never clears), while a fill is already in flight, and when no region worth
----having fits the budget.
+---Falls back to the plain settle whenever a fill would be wrong to take: while a
+---selection or a search is painted into the document (a slice outlives the frame
+---it was captured with by minutes, so either would become a highlight that never
+---clears), while a fill is already in flight, when no grid worth having fits,
+---and when every slice this position needs is already held.
 ---
 ---Called when the settle timer *fires*, not when it is armed (see `M.schedule`),
----so the region is planned around where the reader actually stopped.
+---so the fill is chosen around where the reader actually stopped.
 function settle_options(session)
   local live = session.resident
   local plain = { capture_scale = "device", capture_only = true }
@@ -1494,44 +1656,22 @@ function settle_options(session)
   if live.fill.in_flight then return plain end
   if not (session.viewport_width_px and session.viewport_height_px and session.document_height_px) then return plain end
 
-  local render = config.get().render
-  local plan, refusal = resident.plan_region({
-    scroll_y = session.scroll_y or 0,
-    viewport_h = session.viewport_height_px,
-    viewport_w = session.viewport_width_px,
-    document_height_px = session.document_height_px,
-    -- The scale the capture will come back at, measured from the last
-    -- *device-tier* image rather than from whatever is on screen. Those are the
-    -- same thing locally and never the same thing over SSH: a settle fires once
-    -- scrolling has stopped, so the frame on screen at that moment is a moving
-    -- one captured at `ssh_scroll_scale`, whose PNG at the default 0.5 and
-    -- device scale 2 is exactly viewport-width. Reading the scale off that gives
-    -- 1.0 for a capture that will arrive at 2.0 -- and since the height below is
-    -- derived as budget / (width * scale^2), halving the scale asks for four
-    -- times the region the budget can hold. Measured rather than configured
-    -- because the Playwright fallback cannot express a sub-1x factor and returns
-    -- a full-size frame, so the requested number is wrong on one encoder path.
-    scale = (session.device_image_width_px and session.viewport_width_px)
-        and (session.device_image_width_px / session.viewport_width_px)
-      or render.device_scale_factor,
-    -- Not the whole budget when this session has already been shown that its
-    -- regions encode larger than the budget assumed. The height is derived from
-    -- the budget, so shrinking what the planner may spend is what shrinks the
-    -- region -- and every other clamp, including the memory bound itself, still
-    -- applies to the result unchanged.
-    budget_px = live.budget_px * (live.height_scale or 1),
-    max_regions = live.max_regions,
-  })
-  if not plan then
-    live.plan_refusal = refusal
-    return plain
-  end
-  live.plan_refusal = nil
+  local grid = resident_grid(session)
+  if not grid then return plain end
+  local index = slice_to_fill(session, grid)
+  if not index then return plain end
+  local slice = resident.slice(grid, index)
+  if not slice then return plain end
 
   return {
     capture_scale = "device",
     capture_only = true,
-    capture_region = { yPx = plan.doc_y, heightPx = plan.doc_h },
+    -- The slice's own fixed rectangle, not one anchored on the reader. That is
+    -- the whole change: a boundary is a property of the document, so the same
+    -- position asks for the same capture however the reader arrived at it, and
+    -- a slice already held is never asked for again.
+    capture_region = { yPx = slice.doc_y, heightPx = slice.doc_h },
+    resident_slice = index,
     -- The renderer has had a `settle` lane since the interaction work and has
     -- never been sent one: `capture` has been carrying both the moving frames
     -- and the settle frame, which invalidate each other. A fill is expensive
@@ -2630,6 +2770,7 @@ M._scroll_settle_delay = scroll_settle_delay
 M._resident_gate = resident_gate
 M._settle_options = settle_options
 M._resident_key = resident_key
+M._resident_grid = resident_grid
 -- Exported so the interaction gates can be asserted directly rather than
 -- inferred from whether a scroll happened to produce a placement. The pointer
 -- gate in particular refuses *silently* and correctly-looking -- nothing fails,

@@ -10,9 +10,11 @@
 --     viewport of travel, not two -- the viewport itself occupies the other one.
 --     That is easy to state wrongly and impossible to notice from a screenshot.
 --
---   * the budget boundary. The budget is the invariant and the height is derived
---     from it; nominating a height and checking afterwards is how a budget gets
---     exceeded by an amount nobody sees until the terminal is holding it.
+--   * the retention window. A slice occupies a fixed cell of a fixed grid, and
+--     the only thing that can displace it is the memory ceiling -- so what gets
+--     evicted is decided by distance from the reader rather than by a history,
+--     and "this document never evicts anything" is a property that can be
+--     asserted rather than hoped for.
 return function(t)
   local resident = require("md-viewer.resident")
 
@@ -20,8 +22,7 @@ return function(t)
   -- so the numbers below are the real ones rather than round ones.
   local VW, VH, SCALE = 990, 1020, 2
   local IMAGE_W = VW * SCALE -- 1980
-  local VIEWPORT_PX = IMAGE_W * VH * SCALE -- 4,039,200 -- one viewport, decoded
-  local BUDGET = 8000000
+  local CEILING = 8000000
   local DOC_H = 10891
   local viewport = { widthPx = VW, heightPx = VH }
 
@@ -149,147 +150,16 @@ return function(t)
   -- Budget: the invariant, and the case that produced it.
   -- ---------------------------------------------------------------------------
 
-  -- Two viewports at this geometry is 8,078,400 decoded pixels, which is over an
-  -- 8,000,000 budget. Nominating "2.0 viewports" and checking afterwards would
-  -- exceed it; deriving the height from the budget cannot.
-  t.ok(VIEWPORT_PX * 2 > BUDGET, "sanity: two viewports genuinely exceed this budget")
-
-  local plan = assert(resident.plan_region({
-    scroll_y = 4000,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = DOC_H,
-    scale = SCALE,
-    budget_px = BUDGET,
-    max_regions = 1,
-  }))
-  t.eq(2020, plan.doc_h, "the derived region is 2020 CSS px, not two viewports")
-  t.near(1.98039, plan.k, 1e-4, "which is 1.98 viewports -- an output of the budget, not an input")
-  t.eq(7999200, IMAGE_W * plan.doc_h * SCALE, "and costs 7,999,200 decoded pixels")
-  t.ok(IMAGE_W * plan.doc_h * SCALE <= BUDGET, "which is inside the budget, as the invariant requires")
-
-  -- The anchor: most of the travel ahead of the reader, some behind, and the
-  -- split stated as a share of the slack so it stays valid at every region size.
-  t.eq(1000, plan.backward_slack + plan.forward_slack, "total travel is doc_h - viewport_h whatever the anchor")
-  t.near(250, plan.backward_slack, 1e-6, "a quarter of the travel is behind the reader")
-  t.near(750, plan.forward_slack, 1e-6, "and three quarters ahead of them")
-  t.eq(3750, plan.doc_y, "so the region starts a quarter of its slack above the current position")
-
-  -- The budget bound holds across sizes, not just the one that motivated it.
-  for _, budget in ipairs({ 4500000, 8000000, 12000000, 40000000, 200000000 }) do
-    local sized = resident.plan_region({
-      scroll_y = 4000,
-      viewport_h = VH,
-      viewport_w = VW,
-      document_height_px = DOC_H,
-      scale = SCALE,
-      budget_px = budget,
-      max_regions = 1,
-    })
-    if sized then
-      local pixels = IMAGE_W * sized.doc_h * SCALE
-      t.ok(pixels <= budget, ("a region planned against a %d px budget costs %d"):format(budget, pixels))
-      t.ok(pixels <= resident.MAX_REGION_PIXELS, "and never exceeds the absolute pixel ceiling")
-      t.ok(sized.doc_h <= VH * resident.K_MAX + 1e-6, "and never exceeds K_MAX viewports")
-    end
-  end
-
-  -- Sharing the budget between regions shrinks each one rather than overrunning.
-  local shared = assert(resident.plan_region({
-    scroll_y = 4000,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = DOC_H,
-    scale = SCALE,
-    budget_px = BUDGET * 3,
-    max_regions = 3,
-  }))
-  t.eq(plan.doc_h, shared.doc_h, "three regions out of triple the budget are each the size one was")
-
-  -- ---------------------------------------------------------------------------
-  -- The refusals: better a cache miss than a useless region.
-  -- ---------------------------------------------------------------------------
-
-  local starved, starved_reason = resident.plan_region({
-    scroll_y = 0,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = DOC_H,
-    scale = SCALE,
-    budget_px = 4400000,
-    max_regions = 1,
-  })
-  t.eq(nil, starved, "a budget affording less than K_MIN viewports is declined")
-  t.ok(starved_reason and starved_reason:match("viewports"), "and says how many it could afford")
-
-  local unscrollable, unscrollable_reason = resident.plan_region({
-    scroll_y = 0,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = VH,
-    scale = SCALE,
-    budget_px = BUDGET,
-    max_regions = 1,
-  })
-  t.eq(nil, unscrollable, "a document that cannot scroll gets no region")
-  t.ok(unscrollable_reason and unscrollable_reason:match("fits the viewport"), "and says so plainly")
-
-  -- A short document is exempt from the minimum. A region holding the whole
-  -- document is the best a region can be; refusing it for being under K_MIN
-  -- would penalise exactly the documents this helps most.
-  local short = assert(resident.plan_region({
-    scroll_y = 0,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = 1100,
-    scale = SCALE,
-    budget_px = BUDGET,
-    max_regions = 1,
-  }))
-  t.eq(1100, short.doc_h, "a document shorter than one region becomes a single region covering all of it")
-  t.ok(short.k < resident.K_MIN, "even though that is under the minimum a partial region must meet")
-  t.eq(0, short.doc_y, "and it starts at the top of the document")
-
-  -- ---------------------------------------------------------------------------
-  -- The document's ends: where the anchor cannot have what it asked for.
-  -- ---------------------------------------------------------------------------
-
-  local at_top = assert(resident.plan_region({
-    scroll_y = 0,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = DOC_H,
-    scale = SCALE,
-    budget_px = BUDGET,
-    max_regions = 1,
-  }))
-  t.eq(0, at_top.doc_y, "at the top of the document the region starts at zero")
-  t.eq(0, at_top.backward_slack, "so none of its travel is behind the reader")
-  t.eq(1000, at_top.forward_slack, "and all of it is ahead")
-
+  -- Maximum scroll must be a hit, or the last screen of every document is a
+  -- permanent miss. This is the property that needs no special case *because*
+  -- the last slice is clamped to end with the document.
   local scroll_max = DOC_H - VH
-  local at_bottom = assert(resident.plan_region({
-    scroll_y = scroll_max,
-    viewport_h = VH,
-    viewport_w = VW,
-    document_height_px = DOC_H,
-    scale = SCALE,
-    budget_px = BUDGET,
-    max_regions = 1,
-  }))
-  t.eq(DOC_H - at_bottom.doc_h, at_bottom.doc_y, "at the bottom the region ends with the document")
-  t.eq(0, at_bottom.forward_slack, "so none of its travel is ahead of the reader")
-  t.eq(1000, at_bottom.backward_slack, "and all of it is behind")
-
-  -- Maximum scroll must be a hit, or the last screen of every document falls out
-  -- of the cache. This is the property that needs no special case *because* the
-  -- region is clamped to end with the document.
   local bottom_region = assert(resident.region({
-    doc_y = at_bottom.doc_y,
-    doc_h = at_bottom.doc_h,
+    doc_y = DOC_H - 2020,
+    doc_h = 2020,
     css_w = VW,
     image_w = IMAGE_W,
-    image_h = at_bottom.doc_h * SCALE,
+    image_h = 2020 * SCALE,
   }))
   t.ok(resident.covers(bottom_region, scroll_max, VH), "the document's maximum scroll position is covered")
   local bottom_src = resident.source_window(bottom_region, scroll_max, viewport)
@@ -351,9 +221,18 @@ return function(t)
   )
 
   -- ---------------------------------------------------------------------------
-  -- The cache: bounded, deterministic, and it hands back what it evicts.
+  -- What a session holds: a fixed cell per slice, and a window around the reader.
+  --
+  -- This replaced an LRU of at most `max_regions` regions, and the difference is
+  -- the whole rebuild. An LRU asks "which of these was least recently useful",
+  -- which needs a history and gets it wrong exactly when a reader turns around;
+  -- a fixed grid asks "how far is this slice from where they are reading", which
+  -- is subtraction. A slice is either the one at its index or absent, so the
+  -- "kept on screen but refused by the cache" state -- a third answer to every
+  -- question anyone asked -- cannot be reached.
   -- ---------------------------------------------------------------------------
 
+  local SLICE_PX = IMAGE_W * 2020 * SCALE -- one two-viewport slice, decoded
   local function make(doc_y, doc_h, key, id)
     return assert(resident.region({
       doc_y = doc_y,
@@ -366,73 +245,106 @@ return function(t)
     }))
   end
 
-  local cache = resident.new_state({ budget_px = BUDGET * 3, max_regions = 3 })
-  t.eq(false, cache.enabled, "a fresh resident state is disabled until the controller says otherwise")
-  t.eq(0, cache.used_px, "and holds nothing")
+  local held = resident.new_state({ memory_px = SLICE_PX * 3 })
+  t.eq(false, held.enabled, "a fresh resident state is disabled until the controller says otherwise")
+  t.eq(0, held.resident_px, "and holds nothing")
+  t.eq(0, #resident.slice_records(held), "with no slices in it")
 
   local a = make(0, 2020, "k1", 101)
-  local kept, evicted = resident.insert(cache, a)
-  t.eq(a, kept, "the first region is taken")
+  local kept, evicted = resident.register(held, 0, a)
+  t.eq(a, kept, "the first slice is taken")
   t.eq(0, #evicted, "and evicts nothing")
-  t.eq(IMAGE_W * 4040, cache.used_px, "the budget is charged the region's real pixel count")
+  t.eq(SLICE_PX, held.resident_px, "charged the slice's real pixel count, from the PNG's own header")
+  t.eq(a, resident.hold(held, 0), "and it is what cell 0 holds")
+  t.eq(0, a.index, "the region knows which cell it is in")
+  t.eq(nil, resident.hold(held, 1), "a cell nothing has filled holds nothing")
 
-  local b = make(2020, 2020, "k1", 102)
-  local c = make(4040, 2020, "k1", 103)
-  resident.insert(cache, b)
-  resident.insert(cache, c)
-  t.eq(3, #cache.regions, "three regions fit in a three-region cache")
-  t.ok(cache.used_px <= cache.budget_px, "and stay inside the budget")
+  resident.register(held, 1, make(2020, 2020, "k1", 102))
+  resident.register(held, 2, make(4040, 2020, "k1", 103))
+  t.eq(3, #resident.slice_records(held), "three slices are held")
+  t.ok(held.resident_px <= held.memory_px, "and stay inside the ceiling")
+  t.eq(0, held.evictions, "with nothing evicted, which is the property the rebuild is for")
 
-  -- LRU, not FIFO: the region a reader keeps returning to must survive the one
-  -- they passed through once.
-  t.eq(a, resident.find(cache, 500, VH, "k1"), "a covered position finds its region")
-  t.eq(a, cache.regions[1], "and finding it makes it the most recently used")
+  -- Ordered by index, because several callers hand this list straight to a
+  -- terminal and `pairs` over a hash makes the emitted stream unassertable.
+  local ordered = resident.slice_records(held)
+  t.eq(101, ordered[1].image_id, "slice records come back in document order")
+  t.eq(103, ordered[3].image_id, "lowest index first, whatever order they were filled in")
 
-  local d = make(6060, 2020, "k1", 104)
-  local _, spilled = resident.insert(cache, d)
-  t.eq(1, #spilled, "a fourth region evicts exactly one")
-  t.eq(102, spilled[1].image_id, "and it is the least recently used, not the oldest inserted")
-  t.eq(3, #cache.regions, "the region count stays bounded")
-  t.ok(cache.used_px <= cache.budget_px, "and so does the budget")
+  -- The window: farthest from the reader goes, and the reader's own slice never
+  -- does. Not an LRU -- nothing here records when anything was last used.
+  local fourth = make(6060, 2020, "k1", 104)
+  local _, spilled = resident.register(held, 3, fourth)
+  t.eq(1, #spilled, "a fourth slice over the ceiling evicts exactly one")
+  t.eq(101, spilled[1].image_id, "the farthest from the slice just filled, not the oldest or the least used")
+  t.eq(fourth, resident.hold(held, 3), "and the slice just filled is still held")
+  t.eq(1, held.evictions, "counted, because on a document inside the ceiling this must stay at zero")
+  t.eq(SLICE_PX * 3, held.resident_px, "the accounting follows what was actually dropped")
 
-  -- The hard invariant, across a long random-ish sequence.
-  local churn = resident.new_state({ budget_px = BUDGET * 2, max_regions = 2 })
-  for index = 1, 40 do
-    local height = 1100 + (index * 137) % 900
-    local ok_region, dropped = resident.insert(churn, make(index * 500, height, "k1", 200 + index))
-    t.ok(ok_region ~= nil, ("insert %d succeeds"):format(index))
+  -- Returning to a slice already held costs nothing and evicts nothing: it is a
+  -- lookup, not a use that has to be recorded.
+  t.eq(nil, resident.hold(held, 0), "the evicted cell is empty")
+  for _ = 1, 3 do
+    t.ok(resident.hold(held, 2) ~= nil, "and re-reading a held slice neither moves nor drops anything")
+  end
+  t.eq(1, held.evictions, "so repeated reads evict nothing")
+
+  -- A tie in distance is broken behind the reader: reading is forward-biased, so
+  -- at equal distance the slice ahead is the one more likely to be wanted next.
+  local tied = resident.new_state({ memory_px = SLICE_PX * 2 })
+  resident.register(tied, 0, make(0, 2020, "k1", 501))
+  resident.register(tied, 2, make(4040, 2020, "k1", 502))
+  local _, tie_spill = resident.register(tied, 1, make(2020, 2020, "k1", 503))
+  t.eq(1, #tie_spill, "a third slice over the ceiling drops one of the two equidistant neighbours")
+  t.eq(501, tie_spill[1].image_id, "the one behind the reader")
+  t.eq(nil, resident.hold(tied, 0), "so the cell behind them is empty")
+  t.ok(resident.hold(tied, 2) ~= nil, "and the one ahead of them is kept")
+
+  -- The hard invariant, across a long walk: the ceiling is never exceeded, and
+  -- everything dropped comes back with an image id so its pixels can be freed.
+  local walk = resident.new_state({ memory_px = SLICE_PX * 2 })
+  for index = 0, 40 do
+    local stored, dropped = resident.register(walk, index, make(index * 2020, 2020, "k1", 200 + index))
+    t.ok(stored ~= nil, ("registering slice %d succeeds"):format(index))
     for _, gone in ipairs(dropped) do
-      t.ok(gone.image_id ~= nil, "every evicted region is handed back with its image id so it can be freed")
+      t.ok(gone.image_id ~= nil, "every evicted slice is handed back with its image id so it can be freed")
     end
-    t.ok(churn.used_px <= churn.budget_px, ("used_px stays within budget at step %d"):format(index))
-    t.ok(#churn.regions <= churn.max_regions, ("region count stays bounded at step %d"):format(index))
+    t.ok(walk.resident_px <= walk.memory_px, ("resident_px stays within the ceiling at slice %d"):format(index))
+    t.ok(resident.hold(walk, index) ~= nil, ("and the slice just filled is the one kept at %d"):format(index))
   end
 
-  -- A region larger than the whole budget is refused rather than evicting
-  -- everything to make room for something that still would not fit.
-  local tiny = resident.new_state({ budget_px = 1000, max_regions = 2 })
-  local refused, refused_evicted, refused_reason = resident.insert(tiny, make(0, 2020, "k1", 900))
-  t.eq(nil, refused, "a region larger than the entire budget is refused")
+  -- A slice larger than the whole ceiling is refused rather than evicting
+  -- everything to make room for something that still would not fit. The
+  -- controller declines the grid before spending any wire on this, so reaching
+  -- it means the two disagree -- but it is a refusal either way, never a
+  -- half-registered slice.
+  local tiny = resident.new_state({ memory_px = 1000 })
+  local refused, refused_evicted, refused_reason = resident.register(tiny, 0, make(0, 2020, "k1", 900))
+  t.eq(nil, refused, "a slice larger than the entire ceiling is refused")
   t.eq(0, #refused_evicted, "and nothing was thrown away for it")
-  t.ok(refused_reason and refused_reason:match("budget"), "with a reason naming the budget")
-  t.eq(0, tiny.used_px, "and the cache is left as it was")
+  t.ok(refused_reason and refused_reason:match("ceiling"), "with a reason naming the ceiling")
+  t.eq(0, tiny.resident_px, "leaving the session holding exactly what it held before")
+  t.eq(nil, resident.hold(tiny, 0), "and cell 0 empty rather than half filled")
 
-  -- A new content revision supersedes every region, whatever it covers.
-  local rev = resident.new_state({ budget_px = BUDGET * 3, max_regions = 3 })
-  resident.insert(rev, make(0, 2020, "old", 301))
-  resident.insert(rev, make(2020, 2020, "old", 302))
-  local _, stale = resident.insert(rev, make(4040, 2020, "new", 303))
-  t.eq(2, #stale, "a region under a new key supersedes every region under the old one")
-  t.eq(1, #rev.regions, "leaving only the new one")
-  t.eq(nil, resident.find(rev, 100, VH, "new"), "and a stale region is not findable even where it covered")
-
-  -- Refilling the same range replaces rather than duplicates.
-  local refill = resident.new_state({ budget_px = BUDGET * 3, max_regions = 3 })
-  resident.insert(refill, make(0, 2020, "k1", 401))
-  local _, replaced = resident.insert(refill, make(0, 2020, "k1", 402))
-  t.eq(1, #replaced, "refilling the same range supersedes the copy it replaces")
+  -- Refilling a cell replaces its occupant rather than holding both.
+  local refill = resident.new_state({ memory_px = SLICE_PX * 3 })
+  resident.register(refill, 1, make(2020, 2020, "k1", 401))
+  local _, replaced = resident.register(refill, 1, make(2020, 2020, "k1", 402))
+  t.eq(1, #replaced, "refilling a cell supersedes the copy it replaces")
   t.eq(401, replaced[1].image_id, "handing back the old image so its pixels are freed")
-  t.eq(1, #refill.regions, "rather than holding both")
+  t.eq(1, #resident.slice_records(refill), "rather than holding both")
+  t.eq(SLICE_PX, refill.resident_px, "and the accounting is the one slice, not two")
+
+  -- Draining is what close, retarget, invalidation and fallback use: everything
+  -- back at once, and the grid goes with it.
+  refill.grid = { count = 4 }
+  local before_generation = refill.generation
+  local drained = resident.drain(refill)
+  t.eq(1, #drained, "draining returns every slice")
+  t.eq(0, #resident.slice_records(refill), "and empties the state")
+  t.eq(0, refill.resident_px, "and its accounting")
+  t.eq(nil, refill.grid, "the grid goes too, so the next fill re-derives it")
+  t.eq(before_generation + 1, refill.generation, "and the generation moves, so a fill in flight knows it is orphaned")
 
   -- ---------------------------------------------------------------------------
   -- The wire.
@@ -465,7 +377,7 @@ return function(t)
     "and a session that asked not to settle is not held either"
   )
 
-  local ssh = resident.new_state({ budget_px = BUDGET })
+  local ssh = resident.new_state({ memory_px = CEILING })
   resident.note_wire_sample(ssh, SSH_BYTES, SSH_BLOCKED_MS)
   t.near(1345.7, ssh.wire_bytes_per_ms, 0.1, "the first sample is the estimate outright")
   t.eq(1, ssh.wire_samples, "and is counted")
@@ -489,7 +401,7 @@ return function(t)
   -- than the transfer could possibly take is not held at all -- and it is zero
   -- by arithmetic rather than by a special case, which is what makes the local
   -- path byte-identical to the one that existed before any of this.
-  local fast = resident.new_state({ budget_px = BUDGET })
+  local fast = resident.new_state({ memory_px = CEILING })
   resident.note_wire_sample(fast, SSH_BYTES, LOCAL_BLOCKED_MS)
   t.eq(
     0,
@@ -509,7 +421,7 @@ return function(t)
   -- Small payloads measure the scheduler, not the link. Admitting one would put
   -- the estimate up by orders of magnitude, which is the direction that silently
   -- disables the hold rather than the one that makes it visible.
-  local guarded = resident.new_state({ budget_px = BUDGET })
+  local guarded = resident.new_state({ memory_px = CEILING })
   resident.note_wire_sample(guarded, 210, 0.01) -- a placement command
   t.eq(nil, guarded.wire_bytes_per_ms, "a placement-sized write is not a throughput measurement")
   resident.note_wire_sample(guarded, SSH_BYTES, 0)
@@ -517,7 +429,7 @@ return function(t)
 
   -- The estimate follows the link rather than averaging over the session: a
   -- tunnel that gets slower has to be noticed in seconds, not minutes.
-  local drifting = resident.new_state({ budget_px = BUDGET })
+  local drifting = resident.new_state({ memory_px = CEILING })
   resident.note_wire_sample(drifting, SSH_BYTES, SSH_BLOCKED_MS)
   local before = drifting.wire_bytes_per_ms
   resident.note_wire_sample(drifting, SSH_BYTES, SSH_BLOCKED_MS * 4)
@@ -534,39 +446,12 @@ return function(t)
 
   -- The fill slot survives a drain as a token rather than a boolean, so a fill
   -- issued before a retarget cannot release the slot a later one is holding.
-  local slotted = resident.new_state({ budget_px = BUDGET })
+  local slotted = resident.new_state({ memory_px = CEILING })
   slotted.fill.token = 7
   slotted.fill.in_flight = true
   resident.drain(slotted)
   t.eq(false, slotted.fill.in_flight, "draining releases the slot")
   t.eq(7, slotted.fill.token, "but keeps the counter monotone, so a late fill knows it is not the holder")
-
-  -- ---------------------------------------------------------------------------
-  -- The adaptive PNG cap: bounding the payload, not just the queue behind it.
-  -- ---------------------------------------------------------------------------
-
-  local CAP = 305000 * 3 -- three settle frames
-  t.eq(1, resident.png_cap_scale(1, CAP - 1, CAP), "a region inside the cap changes nothing")
-  t.eq(1, resident.png_cap_scale(1, CAP, CAP), "and one exactly at it is still inside")
-  t.near(0.5, resident.png_cap_scale(1, CAP * 2, CAP), 1e-9, "a region twice the cap halves the height allowed")
-  -- Cumulative and monotone: it is a session's accumulated evidence that this
-  -- document costs more per viewport than the budget assumed, and letting one
-  -- cheap region undo it would oscillate between two heights forever.
-  t.near(0.25, resident.png_cap_scale(0.5, CAP * 2, CAP), 1e-9, "reductions compound")
-  t.eq(0.5, resident.png_cap_scale(0.5, CAP - 1, CAP), "and a later region that fits does not undo one")
-  t.eq(
-    resident.MIN_HEIGHT_SCALE,
-    resident.png_cap_scale(1, CAP * 1000, CAP),
-    "a pathological document cannot drive the height to nothing"
-  )
-  t.eq(1, resident.png_cap_scale(1, 500, nil), "with no cap measured yet there is nothing to judge against")
-
-  -- Draining is what close, retarget and fallback use: everything back, at once.
-  local drained = resident.drain(cache)
-  t.eq(3, #drained, "draining returns every region")
-  t.eq(0, #cache.regions, "and empties the cache")
-  t.eq(0, cache.used_px, "and its accounting")
-  t.eq(nil, resident.find(cache, 500, VH, "k1"), "so nothing is findable afterwards")
 
   -- ---------------------------------------------------------------------
   -- The slice grid: a fixed cover of the whole document.

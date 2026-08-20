@@ -34,10 +34,9 @@ mutations="$(mktemp)"
 trap 'rm -f "$mutations"' EXIT
 cat >"$mutations" <<'MUTATIONS'
 caret-shadow-on-pan	lua/md-viewer/controller.lua	  caret.shadow_cursor(session)\n  animation.repaint(session)	  animation.repaint(session)
-capture-scale-from-moving-frame	lua/md-viewer/controller.lua	session.device_image_width_px and session.viewport_width_px)\n        and (session.device_image_width_px	session.image_width_px and session.viewport_width_px)\n        and (session.image_width_px
+capture-scale-from-moving-frame	lua/md-viewer/controller.lua	session.device_image_width_px and session.viewport_width_px)\n      and (session.device_image_width_px	session.image_width_px and session.viewport_width_px)\n      and (session.image_width_px
 pointer-table-not-press-pan	lua/md-viewer/controller.lua	  if session.pointer and session.pointer.pressed then return false end	  if session.pointer then return false end
 pointer-table-not-press-fill	lua/md-viewer/controller.lua	(session.pointer and session.pointer.pressed) then\n    return plain	session.pointer then\n    return plain
-byte-cap-fights-budget	lua/md-viewer/controller.lua	local REGION_PNG_CAP_FRAMES = 6	local REGION_PNG_CAP_FRAMES = 3
 late-capture-overwrites-pan	lua/md-viewer/controller.lua	    if not filling and (session.pan_serial or 0) ~= pan_at then	    if false then
 fill-rewinds-the-reader	lua/md-viewer/controller.lua	    if not (newer_scroll_pending or filling) then session.scroll_y = meta.scrollY end	    if not newer_scroll_pending then session.scroll_y = meta.scrollY end
 fill-claims-applied-scroll	lua/md-viewer/controller.lua	    if not filling then session.applied_scroll_y = meta.scrollY end	    session.applied_scroll_y = meta.scrollY
@@ -52,6 +51,11 @@ stale-part-list-trusted	lua/md-viewer/controller.lua	  if parts and parts[1] and
 compose-ignores-refused-band	lua/md-viewer/backends/kitty_raw.lua	    if refused > 0 or #ids == 0 then	    if false then
 compose-splits-the-write	lua/md-viewer/backends/kitty_raw.lua	  if payload ~= "" then send(payload) end\n\n  local placed = 0	  if addition ~= "" then send(addition) end\n  if removal ~= "" then send(removal) end\n\n  local placed = 0
 sheet-sized-by-base-image	lua/md-viewer/backends/kitty_raw.lua	  local width, height = 0, 0\n  if cell and placement and placement.width and placement.height then\n    width = math.ceil(placement.width * cell.width)\n    height = math.ceil(placement.height * cell.height)	  local width, height = item.width_px, item.height_px\n  if cell and placement and placement.width and placement.height then\n    width = math.max(width, math.ceil(placement.width * cell.width))\n    height = math.max(height, math.ceil(placement.height * cell.height))
+fill-anchored-on-the-reader	lua/md-viewer/controller.lua	    capture_region = { yPx = slice.doc_y, heightPx = slice.doc_h },	    capture_region = { yPx = session.scroll_y, heightPx = slice.doc_h },
+grid-outlives-the-document	lua/md-viewer/resident.lua	  state.grid = nil\n  state.generation = (state.generation or 0) + 1	  state.generation = (state.generation or 0) + 1
+slice-shrink-without-regrid	lua/md-viewer/controller.lua	      resident_invalidate(session, resident_key(session))\n      local retry = settle_options(session)	      local retry = settle_options(session)
+evicted-slice-not-freed	lua/md-viewer/resident.lua	    state.evictions = state.evictions + 1\n    evicted[#evicted + 1] = gone	    state.evictions = state.evictions + 1
+window-keeps-the-farthest	lua/md-viewer/resident.lua	        if distance > worst_distance or (distance == worst_distance and index < worst) then	        if worst == nil or distance < worst_distance then
 MUTATIONS
 
 caught=0; missed=0; skipped=0

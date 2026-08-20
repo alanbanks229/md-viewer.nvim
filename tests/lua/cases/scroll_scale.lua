@@ -144,10 +144,18 @@ return function(t)
     t.eq(false, session.resident.enabled, "re-applying a refusal disables it")
     t.ok(session.resident.fallback_reason ~= nil, "and says why, on the session")
 
-    config.setup({ image = { resident_pan = "on", resident_budget_px = 0 } })
+    config.setup({ image = { resident_pan = "on", resident_memory_mb = 0 } })
     local broke_ok, broke_reason = controller._resident_gate(session)
-    t.eq(false, broke_ok, "a zero budget cannot hold a region")
-    t.ok(broke_reason:match("budget"), "and says so")
+    t.eq(false, broke_ok, "a zero memory ceiling cannot hold a slice")
+    t.ok(broke_reason:match("memory"), "and says so")
+
+    -- The key this replaced meant the same bound in a different unit, so a
+    -- config still setting it is a reader who believes a ceiling is in force
+    -- that is not. An unknown key is otherwise accepted in silence, which would
+    -- leave them believing it for good.
+    local kept, refusal = pcall(config.setup, { image = { resident_budget_px = 8000000 } })
+    t.eq(false, kept, "the pixel budget this replaced is refused rather than ignored")
+    t.ok(tostring(refusal):match("resident_memory_mb"), "naming what replaced it: " .. tostring(refusal))
     config.reset()
 
     state.remove(buf)
