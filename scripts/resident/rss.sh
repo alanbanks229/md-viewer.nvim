@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Sustained-memory sampler for resident regions.
 #
-# The one measurement that has to exist before `image.resident_budget_px` is
+# The one measurement that has to exist before `image.resident_memory_mb` is
 # raised. Budgeting is done in pixels because a terminal holding a compressed
 # PNG does not consume `png_bytes`, it consumes a decoded surface -- and what
 # that surface costs is a property of the terminal rather than of the image.
@@ -59,9 +59,15 @@ ceiling:      $((ceiling_kb / 1024)) MB
 out:          $out
 
 Now, in the preview on the far end:
-  1. Let one region fill, then scroll inside it for a few minutes.
-  2. Cross a boundary so the first region is evicted, and repeat.
-  3. Keep going until this exits. Then CLOSE the preview and watch the last
+  1. Let the slice under you fill, then scroll inside it for a few minutes.
+  2. Walk the whole document, letting each slice fill as you reach it. Crossing
+     a boundary is NOT an eviction any more -- a slice is uploaded once and
+     kept -- so what this is measuring is the terminal holding all of them at
+     once, which is the case the old bounded region never reached.
+  3. Walk back through the same slices. \`evictions\` in :MdViewerDebug should
+     still be 0; if it is not, the document is over image.resident_memory_mb and
+     the window is sliding, which is a different measurement.
+  4. Keep going until this exits. Then CLOSE the preview and watch the last
      samples: resident size returning to near baseline is question 2.
 EOF
 
@@ -81,7 +87,7 @@ while [ "$elapsed" -lt "$seconds" ]; do
   if [ "$rss" -gt "$ceiling_kb" ] 2>/dev/null; then
     echo "CEILING EXCEEDED at ${elapsed}s: $((rss / 1024)) MB > $((ceiling_kb / 1024)) MB" \
       | tee "$out/exceeded.txt" >&2
-    echo "Close the preview now. Do not raise image.resident_budget_px." >&2
+    echo "Close the preview now. Do not raise image.resident_memory_mb." >&2
     break
   fi
   sleep 1
@@ -110,12 +116,15 @@ final third   $((end_avg / 1024)) MB average
 csv           $out/rss.csv
 
 Read it against :MdViewerDebug's resident block from the same run --
-\`decoded_mb_estimate\` is the 4-bytes-per-pixel guess this measurement exists to
-check, and \`evictions\` says how many times the terminal was asked to give
-memory back.
+\`decoded_mb_estimate\` converts \`resident_px\` at the measured ~13 bytes per
+resident pixel, so these two numbers are directly comparable and a large gap
+between them is the thing this run exists to find. \`evictions\` says how many
+times the terminal was asked to give memory back; on a document inside
+\`image.resident_memory_mb\` it should be zero, because a grid of slices is
+uploaded once and kept.
 
-A budget may be raised only if BOTH hold: the final third is not materially
+The ceiling may be raised only if BOTH hold: the final third is not materially
 above the middle third (it plateaued), and resident size returns to near
 baseline after the preview closes (eviction genuinely frees). Take the largest
-budget where both hold and halve it.
+ceiling where both hold and halve it.
 EOF

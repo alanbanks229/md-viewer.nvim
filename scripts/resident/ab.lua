@@ -1,4 +1,4 @@
--- Resident-region A/B, driven by hand in a real session.
+-- Resident-slice A/B, driven by hand in a real session.
 --
 -- What it proves: whether scrolling back through content the terminal is
 -- already holding sends **no new pixels**, measured as total bytes handed to
@@ -7,6 +7,16 @@
 -- "the payload fell to zero" and "the traffic fell to zero" are different
 -- claims, and docs/local-render-design.md records this project being wrong
 -- about exactly that difference once already.
+--
+-- What changed under it: the document is now covered by a *fixed grid of
+-- slices* rather than by one region planned around wherever the reader stopped.
+-- That moves what this harness is asking. The old question was "is scrolling
+-- inside the region free", and the answer was yes while the honest whole-phase
+-- number went *up*, because crossing the region's moving edge evicted and
+-- refilled it -- 14 fills and 13 evictions in 141 seconds on the real link, for
+-- 38% more traffic than sending a frame every time. The new question is whether
+-- a **second pass over the same ground** is free, which is the one a grid can
+-- answer and a bounded region could not.
 --
 -- What it needs: Neovim running on the far end of the link (this measures a
 -- wire, and a local terminal does not have one), on iTerm2, outside tmux, with
@@ -19,19 +29,24 @@
 --     :runtime scripts/resident/ab.lua     -- arms phase 1 (resident panning off)
 --     ...scroll the protocol below...
 --     :ResidentAB                          -- arms phase 2 (resident panning on)
---     ...scroll the same way; :ResidentABMark once a region has filled...
+--     ...scroll the same way; :ResidentABMark after the first pass...
 --     :ResidentAB                          -- prints the report
 --
 -- The protocol, run identically in both phases:
 --
---   1. Wait for the first frame. In phase 2, wait for `regions 1` in
---      `:MdViewerDebug`, then run `:ResidentABMark`.
---   2. Wheel forward, staying inside the resident range; stop; repeat 5 times.
---   3. Wheel back through the same range.
---   4. THE CLAIM: upload bytes since the mark should be 0 and fills should be 1.
---   5. Cross a region boundary once, and keep wheeling while it fills -- this is
---      the case the shared-wire hold exists for.
---   6. Continue inside the new region.
+--   1. Wait for the first frame.
+--   2. Walk forward through four or five screens, pausing at each so the settle
+--      fires and the slice under you fills. In phase 2, `:MdViewerDebug`'s
+--      `resident` block should show `slices_resident` climbing by one per stop
+--      and `evictions` staying at 0.
+--   3. In phase 2, run `:ResidentABMark` here. Everything before the mark is the
+--      warm-up this feature charges for; everything after is what it buys.
+--   4. Walk back through exactly the same screens, then forward again.
+--   5. THE CLAIM: upload bytes since the mark are 0, fills since the mark are 0,
+--      and hits are however many times you scrolled.
+--   6. Park on a boundary -- a position that shows the bottom of one screen and
+--      the top of the next. `straddles` should climb; `straddle_misses` should
+--      not, once both slices either side are held.
 --
 -- The original configuration is restored at the end, and by :ResidentABCancel
 -- if you stop partway. Nothing is written to disk.
@@ -48,7 +63,7 @@ local BYTES_PER_SECOND = 800000
 
 local PHASES = {
   { key = "baseline", label = "baseline", pan = "off", note = "today's path -- every scroll is a frame" },
-  { key = "treatment", label = "treatment", pan = "on", note = "resident regions -- a scroll may be a crop" },
+  { key = "treatment", label = "treatment", pan = "on", note = "resident slices -- a scroll may be a crop" },
 }
 
 local step = 0
@@ -68,9 +83,13 @@ local phase_started = 0
 
 ---Blank the per-phase counters so each arm reports only its own traffic.
 ---
----Deliberately does *not* touch the regions themselves in the treatment arm:
----what is being measured is a cache, and emptying it between the counters and
----the scrolling would measure a cold start twice.
+---Deliberately does *not* touch the slices themselves in the treatment arm: what
+---is being measured is pixels the terminal is holding, and giving them back
+---between the counters and the scrolling would measure a cold start twice.
+---
+---The names are listed rather than "every numeric field", so a counter that is
+---added and not listed here shows up as a phase total rather than silently
+---carrying the previous phase's value into this one.
 local function reset_counters(current)
   current.ui_bytes_total = 0
   current.coalesced_scroll_events = 0
@@ -87,13 +106,16 @@ local function reset_counters(current)
     "pans",
     "unplaced_places",
     "fills",
+    "prefetches",
     "stale_fills",
     "abandoned_fills",
     "evictions",
+    "straddles",
+    "straddle_misses",
     "blocked_by_find",
     "blocked_by_selection",
     "frames_suppressed_by_hold",
-    "height_reduced",
+    "superseded_by_pan",
     "upload_bytes",
     "placement_bytes",
   }) do
@@ -131,11 +153,13 @@ end
 
 local function snapshot(current)
   local live = current.resident
-  local decoded = 0
   local resident = require("md-viewer.resident")
-  for _, region in ipairs(live.regions) do
-    decoded = decoded + resident.decoded_bytes(region)
+  local slices = resident.slice_records(live)
+  local decoded = 0
+  for _, slice in ipairs(slices) do
+    decoded = decoded + resident.decoded_bytes(slice)
   end
+  local grid = live.grid
   return {
     -- The measure. Everything else on the report is a component of it or an
     -- explanation for it.
@@ -147,17 +171,33 @@ local function snapshot(current)
     pans = live.pans,
     unplaced = live.unplaced_places,
     fills = live.fills,
+    prefetches = live.prefetches or 0,
     stale_fills = live.stale_fills,
     abandoned_fills = live.abandoned_fills,
     evictions = live.evictions,
+    straddles = live.straddles or 0,
+    straddle_misses = live.straddle_misses or 0,
     suppressed = live.frames_suppressed_by_hold,
     blocked_find = live.blocked_by_find,
     blocked_selection = live.blocked_by_selection,
     hold_ms = live.upload_hold_ms,
     wire_rate = live.wire_bytes_per_ms,
-    height_scale = live.height_scale,
-    regions = #live.regions,
+    -- Below 1 means the renderer refused a slice at its full height and the
+    -- whole grid was regenerated shorter.
+    slice_scale = live.slice_scale,
+    -- How much of the document is held, against how much there is. The pair is
+    -- the point: `4 / 20` says the warm-up is a fifth done, and a phase that
+    -- ends there has not yet bought anything a second pass could show.
+    resident_slices = #slices,
+    grid_slices = grid and grid.count or nil,
+    slice_h = grid and grid.slice_h or nil,
     decoded_mb = decoded / 1048576,
+    ceiling_mb = live.memory_px * resident.BYTES_PER_RESIDENT_PX / 1048576,
+    -- Why no grid could be built, when there is none. Replaces the bounded
+    -- region's `plan_refusal`, and means something narrower: the grid is only
+    -- refused for a document that cannot scroll, a geometry with no room for a
+    -- viewport plus its overlap, or a ceiling below one slice.
+    grid_refusal = live.grid_refusal,
     fallback = live.fallback_reason,
     gate = live.gate_reason,
     fast_frames = current.fast_frame_count or 0,
@@ -194,7 +234,7 @@ local function row(label, a, b) return ("%-28s %14s %14s"):format(label, a, b) e
 local function report()
   local a, b = results.baseline, results.treatment
   local lines = {
-    "md-viewer resident-region A/B",
+    "md-viewer resident-slice A/B",
     "",
     row("", "baseline (off)", "treatment (on)"),
     row("TOTAL nvim_ui_send BYTES", number(a.ui_bytes), number(b.ui_bytes)),
@@ -205,7 +245,7 @@ local function report()
     ),
     row("  over", ("%.0fs"):format(a.seconds), ("%.0fs"):format(b.seconds)),
     "",
-    row("region uploads", number(a.upload_bytes), number(b.upload_bytes)),
+    row("slice uploads", number(a.upload_bytes), number(b.upload_bytes)),
     row("placement commands", number(a.placement_bytes), number(b.placement_bytes)),
     row(
       "moving frames",
@@ -220,16 +260,34 @@ local function report()
     "",
     row("resident hits / misses", ("%d / %d"):format(a.hits, a.misses), ("%d / %d"):format(b.hits, b.misses)),
     row("  pans / re-places", ("%d / %d"):format(a.pans, a.unplaced), ("%d / %d"):format(b.pans, b.unplaced)),
+    -- A viewport spanning two slices, drawn as two bands in one write, against
+    -- one that had to fall back to a captured frame because only one of the two
+    -- was held. A grid's boundaries never move, so a reader can park on one --
+    -- which is exactly what the bounded region could not survive.
+    row(
+      "boundaries: drawn / missed",
+      ("%d / %d"):format(a.straddles, a.straddle_misses),
+      ("%d / %d"):format(b.straddles, b.straddle_misses)
+    ),
     row(
       "fills (stale / abandoned)",
       ("%d (%d/%d)"):format(a.fills, a.stale_fills, a.abandoned_fills),
       ("%d (%d/%d)"):format(b.fills, b.stale_fills, b.abandoned_fills)
     ),
+    row("  of those, prefetched", number(a.prefetches), number(b.prefetches)),
+    -- The number the whole rebuild was for. Under the bounded region this
+    -- climbed with every boundary crossing; under a grid, a document inside the
+    -- ceiling should never evict at all.
     row("evictions", number(a.evictions), number(b.evictions)),
     row(
-      "regions / decoded",
-      ("%d / %.0f MB"):format(a.regions, a.decoded_mb),
-      ("%d / %.0f MB"):format(b.regions, b.decoded_mb)
+      "slices held / in grid",
+      ("%d / %s"):format(a.resident_slices, a.grid_slices and tostring(a.grid_slices) or "--"),
+      ("%d / %s"):format(b.resident_slices, b.grid_slices and tostring(b.grid_slices) or "--")
+    ),
+    row(
+      "  decoded / ceiling",
+      ("%.0f / %.0f MB"):format(a.decoded_mb, a.ceiling_mb),
+      ("%.0f / %.0f MB"):format(b.decoded_mb, b.ceiling_mb)
     ),
     "",
     row("frames held off the wire", number(a.suppressed), number(b.suppressed)),
@@ -249,7 +307,7 @@ local function report()
       ("%d / %d"):format(a.blocked_find, a.blocked_selection),
       ("%d / %d"):format(b.blocked_find, b.blocked_selection)
     ),
-    row("region height scale", ("%.2f"):format(a.height_scale or 1), ("%.2f"):format(b.height_scale or 1)),
+    row("slice height scale", ("%.2f"):format(a.slice_scale or 1), ("%.2f"):format(b.slice_scale or 1)),
     "",
   }
 
@@ -261,14 +319,20 @@ local function report()
     -- Deliberately not "check gate_reason". The gate passing is the *common*
     -- case here and it reports its success in the same field it reports refusal,
     -- so pointing at it sends a reader to a line that looks fine. Every field
-    -- below is a place a settle can decline to ask for a region while nothing
-    -- has failed and nothing has been counted.
-    verdict = ("NO REGION WAS EVER FILLED, though %d settle frames were taken -- so the settles ran "):format(
+    -- below is a place a settle can decline to ask for a slice while nothing has
+    -- failed and nothing has been counted.
+    verdict = ("NO SLICE WAS EVER FILLED, though %d settle frames were taken -- so the settles ran "):format(
       b.retina_frames
-    ) .. "and none of them asked for a region. In :MdViewerDebug's `resident` block, in order: " .. "`plan_refusal` (no region fits the budget at this viewport), " .. "`fallback_reason` (it gave up earlier in the session), " .. "then check whether a drag is still registered -- a click leaves state behind that a " .. "settle will not fill through. If `fills` is above 0 but `regions` is 0 instead, the " .. "capture happened and `last_insert_refusal` says why the cache would not keep it."
+    ) .. "and none of them asked for a slice. In :MdViewerDebug's `resident` block, in order: " .. ("`grid_refusal` (no grid fits this geometry%s), "):format(
+      b.grid_refusal and (": " .. b.grid_refusal) or ""
+    ) .. "`fallback_reason` (it gave up earlier in the session), " .. "then check whether a drag is still registered -- a click leaves state behind that a " .. "settle will not fill through. A slice already held is also never asked for again, so " .. "if `slices_resident` is above 0 this arm simply never left the ground it had."
   elseif not mark_base then
-    verdict = "NO MARK TAKEN: run :ResidentABMark in phase 2 once `regions 1` appears, then scroll "
-      .. "inside the region. Without it the report cannot separate the one fill from the scrolling."
+    verdict = ("NO MARK TAKEN: walk forward a few screens until `slices_resident` reaches 3 or 4 "):format()
+      .. "(it is "
+      .. tostring(b.resident_slices)
+      .. " now), run :ResidentABMark, and only then walk back over "
+      .. "the same ground. Without the mark the report cannot separate the warm-up this feature "
+      .. "charges for from the re-reading it buys, and those are the two halves of the claim."
   else
     local since = {}
     for key, value in pairs(b) do
@@ -282,27 +346,46 @@ local function report()
       since.fills
     )
     -- The success criterion, stated as the plan states it: not "smaller", not
-    -- "fewer" -- none.
+    -- "fewer" -- none. Under a grid this is a claim about a *second pass*, which
+    -- is what the bounded region could not make: its edges moved with the
+    -- reader, so returning to ground already paid for refilled it.
     if since.upload_bytes == 0 and since.hits > 0 then
-      lines[#lines + 1] = ("%d scrolls inside resident content cost %s bytes of placement and no pixels at all."):format(
+      lines[#lines + 1] = ("%d scrolls over ground already paid for cost %s bytes of placement and no pixels."):format(
         since.hits,
         number(since.placement_bytes)
       )
-      verdict = ("WORKING: repeated scrolling through resident content sent zero new pixel payload "):format()
-        .. ("(%s placement bytes for %d scrolls, %.0f bytes each)."):format(
+      verdict = ("WORKING: re-reading resident content sent zero new pixel payload "):format()
+        .. ("(%s placement bytes for %d scrolls, %.0f bytes each), across %d boundaries drawn as "):format(
           number(since.placement_bytes),
           since.hits,
-          since.placement_bytes / math.max(since.hits, 1)
+          since.placement_bytes / math.max(since.hits, 1),
+          since.straddles
         )
+        .. ("two bands, with %d evictions."):format(since.evictions)
+      if since.evictions > 0 then
+        verdict = verdict
+          .. " Evictions above zero after the mark means this document is larger than "
+          .. ("image.resident_memory_mb (%.0f MB) and the window is sliding -- the second pass "):format(b.ceiling_mb)
+          .. "was free only because you stayed inside what survived."
+      end
     elseif since.hits == 0 then
-      verdict = "NOT HITTING: no scroll after the mark landed inside a resident region. Scroll a "
-        .. "smaller distance -- a region is only about twice the viewport, so it holds one "
-        .. "viewport of travel in total."
+      verdict = "NOT HITTING: no scroll after the mark landed on a slice this session holds. Walk "
+        .. "back over ground you covered *before* the mark -- the claim is about re-reading, and "
+        .. "new ground costs a slice however good the cache is."
+    elseif since.straddle_misses > 0 and since.fills > 0 then
+      verdict = ("WARMING UP: %d hits and %d fills since the mark, %d of them at a boundary with only "):format(
+        since.hits,
+        since.fills,
+        since.straddle_misses
+      ) .. "one of its two slices held. That is the grid still filling in, not a defect -- mark again " .. "once `slices_resident` has stopped climbing and repeat the walk."
     else
-      verdict = ("PARTIAL: %d hits but %s upload bytes since the mark. Something refilled. Check "):format(
+      verdict = ("PARTIAL: %d hits but %s upload bytes since the mark. Something refilled. `evictions` "):format(
         since.hits,
         number(since.upload_bytes)
-      ) .. "`stale_fills` and `evictions` in the table above."
+      ) .. ("is %d and `stale_fills` %d in the table above; evictions mean the document is over the "):format(
+        since.evictions,
+        since.stale_fills
+      ) .. "ceiling, stale fills mean something invalidated the grid mid-capture."
     end
   end
   lines[#lines + 1] = ""
@@ -320,13 +403,34 @@ local function report()
       number(b.ui_bytes)
     )
     if delta > 0 then
-      lines[#lines + 1] = "  Higher is expected on a one-pass traversal: a region is a bigger single "
-        .. "payload than the settle frame it replaces, and nothing was re-read to earn it back."
+      lines[#lines + 1] = "  Higher is expected on a one-pass traversal: a slice is a bigger single "
+        .. "payload than the settle frame it replaces, and nothing was re-read to earn it back. "
+        .. "The whole-phase number only turns over once a reader covers ground twice."
+    end
+    -- The specific failure the grid replaced, named so a run that still shows it
+    -- is not read as ordinary warm-up. Under the bounded region this was the
+    -- result: 14 fills and 13 evictions in 141 seconds, +38% traffic.
+    if b.evictions > 0 and b.fills > b.resident_slices then
+      lines[#lines + 1] = ("  %d fills for %d slices held, with %d evictions -- this document is over "):format(
+        b.fills,
+        b.resident_slices,
+        b.evictions
+      ) .. ("image.resident_memory_mb (%.0f MB) and slices are being uploaded, evicted and uploaded "):format(
+        b.ceiling_mb
+      ) .. "again. That is the churn the grid exists to remove; raise the ceiling or test a shorter " .. "document."
     end
   end
   if b.suppressed > 0 then
-    lines[#lines + 1] = ("%d moving frames were held off the wire while a region drained -- the "):format(b.suppressed)
+    lines[#lines + 1] = ("%d moving frames were held off the wire while a slice drained -- the "):format(b.suppressed)
       .. "anti-backlog rule. Compare `coalesced` between arms: both mean a scroll that sent nothing."
+  end
+  if b.grid_slices and b.resident_slices < b.grid_slices then
+    lines[#lines + 1] = ("%d of %d slices are held (%.0f of %.0f MB). The rest of the document has not "):format(
+      b.resident_slices,
+      b.grid_slices,
+      b.decoded_mb,
+      b.ceiling_mb
+    ) .. "been visited or prefetched yet, so this run measures the part that has."
   end
 
   local buf = vim.api.nvim_create_buf(false, true)
@@ -385,23 +489,25 @@ vim.api.nvim_create_user_command("ResidentAB", function()
   end
 end, { desc = "md-viewer: step through the resident-region A/B" })
 
----Take the "a region is now resident" reading, so the report can separate the
----one fill that paid for it from the scrolling that spends it. Without this the
----phase total mixes the two and the claim being tested -- that the *scrolling*
----is free -- cannot be read out of it at all.
+---Take the "this much of the document is now resident" reading, so the report
+---can separate the warm-up this feature charges for from the re-reading it buys.
+---Without it the phase total mixes the two, and the claim being tested -- that
+---the *second pass* is free -- cannot be read out of it at all.
 vim.api.nvim_create_user_command("ResidentABMark", function()
   local ok, err = pcall(function()
     local current = session()
     mark_base = snapshot(current)
     print(
-      ("md-viewer: marked at %d region(s), %s upload bytes so far. Now scroll inside the region, then :ResidentAB."):format(
-        mark_base.regions,
+      ("md-viewer: marked at %d of %s slices (%.0f MB), %s upload bytes so far. Now walk back over the "):format(
+        mark_base.resident_slices,
+        mark_base.grid_slices and tostring(mark_base.grid_slices) or "?",
+        mark_base.decoded_mb,
         number(mark_base.upload_bytes)
-      )
+      ) .. "same ground, then :ResidentAB."
     )
   end)
   if not ok then vim.notify(tostring(err), vim.log.levels.ERROR) end
-end, { desc = "md-viewer: mark the point a region became resident" })
+end, { desc = "md-viewer: mark the point the warm-up is done and re-reading begins" })
 
 vim.api.nvim_create_user_command("ResidentABCancel", function()
   restore()

@@ -60,17 +60,23 @@ composite-emits-only-the-top-band	lua/md-viewer/controller.lua	    { image_id = 
 seam-without-row-quantisation	lua/md-viewer/resident.lua	  local split = math.ceil((lower.doc_y - scroll_y) / row_h - EPS)	  local split = (lower.doc_y - scroll_y) / row_h
 bands-snapped-independently	lua/md-viewer/resident.lua	  local lower_top = round((seam - lower.doc_y) * lower.scale_y)	  local lower_top = round(seam * lower.scale_y) - round(lower.doc_y * lower.scale_y) + 1
 reconcile-moves-one-band	lua/md-viewer/controller.lua	    if #screen_parts(session) > 1 then	    if false then
+ab-reads-the-region-cache	scripts/resident/ab.lua	  local slices = resident.slice_records(live)	  local slices = live.regions
 MUTATIONS
 
 caught=0; missed=0; skipped=0
 declare -a missed_names=()
 
+# `scripts/resident/ab.lua` is in here because it is the operator's only
+# instrument and the plugin never loads it: nothing else compiles that file, so
+# a field it reads can be removed from under it with every test still green.
+# That is exactly what the grid rewrite did -- scored below as
+# `ab-reads-the-region-cache`.
 restore_all() {
-  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js 2>/dev/null || true
+  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js scripts/resident/ab.lua 2>/dev/null || true
 }
 trap 'restore_all; rm -f "$mutations"' EXIT
 
-if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js; then
+if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js scripts/resident/ab.lua; then
   echo "refusing to run: the files this mutates have uncommitted changes" >&2
   echo "commit or stash them first -- restoring would throw them away" >&2
   exit 2

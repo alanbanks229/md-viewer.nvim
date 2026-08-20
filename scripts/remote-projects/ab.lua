@@ -104,7 +104,11 @@ local function report()
     "md-viewer remote-project A/B",
     "",
     ("%-28s %14s %14s"):format("", "local file", "remote file"),
-    ("%-28s %14s %14s"):format("session kind", a.remote and "REMOTE(?)" or "local", b.remote and "remote" or "LOCAL(?)"),
+    ("%-28s %14s %14s"):format(
+      "session kind",
+      a.remote and "REMOTE(?)" or "local",
+      b.remote and "remote" or "LOCAL(?)"
+    ),
     ("%-28s %14s %14s"):format(
       "moving frames delivered",
       ("%d in %.0fs"):format(a.fast_frames, a.seconds),
@@ -174,13 +178,17 @@ local function advance()
     hook_transport()
     reset_counters(session())
     step = 1
-    print("md-viewer remote A/B 1/3 -- baseline armed on the CURRENT (local) preview. "
-      .. "Wheel-scroll the whole document, then run :RemoteProjectAB")
+    print(
+      "md-viewer remote A/B 1/3 -- baseline armed on the CURRENT (local) preview. "
+        .. "Wheel-scroll the whole document, then run :RemoteProjectAB"
+    )
   elseif step == 1 then
     results.local_doc = collect(session())
     step = 2
-    print("md-viewer remote A/B 2/3 -- baseline recorded. Now open the preview on your REMOTE "
-      .. "document, WAIT for its images to appear, then run :RemoteProjectAB to arm the scroll phase.")
+    print(
+      "md-viewer remote A/B 2/3 -- baseline recorded. Now open the preview on your REMOTE "
+        .. "document, WAIT for its images to appear, then run :RemoteProjectAB to arm the scroll phase."
+    )
   elseif step == 2 then
     local current = session()
     reset_counters(current)
