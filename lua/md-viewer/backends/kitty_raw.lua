@@ -375,6 +375,33 @@ end
 ---so `M.update` can pack it into the same write as the image superseding it.
 local function deletion_command(image_id) return command(("a=d,d=I,q=2,i=%d"):format(image_id)) end
 
+---Build (but do not send) the deletions that take a list of images off screen.
+---
+---`retain` drops an image's placements and keeps its pixels -- what a resident
+---slice scrolled out of view needs; without it the data goes as well. `skip` is
+---the set of ids being re-placed by the same operation, which supersede
+---themselves and must not be deleted afterwards.
+---
+---Shared by `M.compose`, `M.update` and `M.retire` so the retain-or-free
+---decision, and the mutation of `owned` that follows from it, exist once.
+local function retirement_sequences(retired, skip)
+  local out, freed = {}, 0
+  for _, gone in ipairs(retired or {}) do
+    local item = gone.image_id and owned[gone.image_id]
+    if item and not (skip and skip[item.id]) then
+      if gone.retain then
+        out[#out + 1] = deletion_sequences(item.id, item.placement_ids or {})
+        item.placement_ids = {}
+      else
+        out[#out + 1] = deletion_command(item.id)
+        owned[item.id] = nil
+        freed = freed + 1
+      end
+    end
+  end
+  return table.concat(out), freed
+end
+
 ---Allocate an image id, register it as owned, and build (but do not send) the
 ---upload and the placements for it. Returns the id, one sequence, and the owned
 ---item -- the item so callers can report the PNG's real pixel dimensions
@@ -1386,6 +1413,13 @@ end
 ---the superseded image, which for a region would mean re-transmitting several
 ---viewports of pixels the terminal was already holding. `M.clear` stays the one
 ---and only way an image's data is given up.
+---
+---`opts.retired` names *further* images to take down in the same write, each
+---with its own retain decision. A captured frame replacing a two-slice composite
+---has two placement sets to remove and neither one's pixels to give up, and a
+---second write for the other band would leave it drawn over the new frame until
+---the write landed. Empty for every single-image caller, which is why the golden
+---stream does not move.
 function M.update(image_id, image_bytes, placement, opts)
   opts = opts or {}
   local double_buffer = resolve_double_buffer()
@@ -1400,6 +1434,7 @@ function M.update(image_id, image_bytes, placement, opts)
       owned[image_id] = nil
     end
   end
+  removal = removal .. (retirement_sequences(opts.retired))
   local new_id, addition, item = build_show(image_bytes, placement, opts.source)
   local payload = double_buffer and (addition .. removal) or (removal .. addition)
   send(payload)
@@ -1512,22 +1547,11 @@ function M.compose(parts, retired)
     additions[#additions + 1] = entry.sequence
     deletions[#deletions + 1] = deletion_sequences(entry.item.id, entry.superseded)
   end
-  local freed = 0
-  for _, gone in ipairs(retired or {}) do
-    local item = gone.image_id and owned[gone.image_id]
-    -- An image being re-placed this call supersedes itself above; naming it here
-    -- as well would delete the placements that were just made.
-    if item and not placing[item.id] then
-      if gone.retain then
-        deletions[#deletions + 1] = deletion_sequences(item.id, item.placement_ids or {})
-        item.placement_ids = {}
-      else
-        deletions[#deletions + 1] = deletion_command(item.id)
-        owned[item.id] = nil
-        freed = freed + 1
-      end
-    end
-  end
+  -- `placing` is the skip set: an image being re-placed by this call supersedes
+  -- itself above, and deleting it again here would take down the placements that
+  -- were just made.
+  local retirement, freed = retirement_sequences(retired, placing)
+  deletions[#deletions + 1] = retirement
 
   local double_buffer = resolve_double_buffer()
   local addition, removal = table.concat(additions), table.concat(deletions)
@@ -1542,6 +1566,20 @@ function M.compose(parts, retired)
     placed = placed + #entry.ids
   end
   return true, { bytes = #payload, placed = placed, parts = #built, freed = freed }
+end
+
+---Take a list of images off the screen in one write, each keeping or giving up
+---its pixels as `retain` says.
+---
+---`M.hide` is this for one image and one decision. A composite has to come down
+---as a unit: hiding two bands with two calls leaves one of them drawn alone for
+---as long as the second write takes, which is a half-erased preview at every
+---float, tab switch and completion popup.
+---@return boolean ok, table stats
+function M.retire(retired)
+  local removal, freed = retirement_sequences(retired)
+  if removal ~= "" then send(removal) end
+  return true, { bytes = #removal, freed = freed }
 end
 
 ---Take an image off the screen without giving up its pixels.

@@ -603,6 +603,15 @@ return function(t)
       move_sources[#move_sources + 1] = source
       return image_id, { bytes = 210 }
     end
+    -- A pan places through `compose` rather than `move`: whatever it replaces has
+    -- to come down in the same write, and a `move` can only name one predecessor.
+    -- Counted as the same thing, because it is -- one placement command for one
+    -- band.
+    session.backend.compose = function(parts, _)
+      moves = moves + 1
+      move_sources[#move_sources + 1] = parts[1] and parts[1].source
+      return true, { bytes = 210 }
+    end
     session.backend.show = function()
       uploads = uploads + 1
       return 4242, { bytes = 810000, width_px = 1980, height_px = 4040 }

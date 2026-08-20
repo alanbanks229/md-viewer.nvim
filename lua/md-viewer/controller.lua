@@ -112,6 +112,57 @@ local function resident_holds(live, image_id)
   return false
 end
 
+---Record what is on the screen, as the parts a composite is made of.
+---
+---`session.image_id` survives as the *first* part, because three of the four
+---things that read it still mean exactly that: whether anything of ours is
+---displayed at all, which image an overlay is composited over (an ownership
+---token, since `required_sheet_size` stopped consulting the base's own pixels),
+---and what a re-place moves when there is one image. The fourth -- what to take
+---down -- is the one that cannot be a single id once a viewport can span two
+---resident slices, and it is what this list answers.
+local function set_screen(session, parts)
+  session.screen_parts = parts or {}
+  session.image_id = parts and parts[1] and parts[1].image_id or nil
+end
+
+---The parts on screen, as a list, whoever wrote them.
+---
+---`session.image_id` remains the head and is the authority. A list whose head no
+---longer matches it was written by an operation something has since replaced, so
+---it is discarded rather than trusted: any path that sets only `image_id` --
+---and there are several, including every test fixture -- then reads as the one
+---image it actually put there, instead of as whatever composite used to be up.
+---Trusting a non-empty list instead freed a stale band and left the live one on
+---screen.
+local function screen_parts(session)
+  local parts = session.screen_parts
+  if parts and parts[1] and parts[1].image_id == session.image_id then return parts end
+  if session.image_id then return { { image_id = session.image_id } } end
+  return {}
+end
+
+---Everything on screen, each with the retain decision it needs on the way off.
+---
+---Derived here for the reason `apply_image` already gives about
+---`retain_superseded`: an image the resident grid still counts on must lose its
+---placements and keep its pixels, anything else is nothing to anybody, and there
+---is no third case -- so asking call sites to remember is how two of them forgot.
+---`skip_id` is the image being re-placed by the same operation, which supersedes
+---itself and must not also be retired.
+local function retire_screen(session, skip_id)
+  local retired = {}
+  for _, part in ipairs(screen_parts(session)) do
+    if part.image_id and part.image_id ~= skip_id then
+      retired[#retired + 1] = {
+        image_id = part.image_id,
+        retain = resident_holds(session.resident, part.image_id),
+      }
+    end
+  end
+  return retired
+end
+
 ---Nothing this session owns is on the screen any more. Placement state only --
 ---the pixels are a separate question, and `clear_image` answers it.
 local function mark_regions_unplaced(session)
@@ -137,19 +188,42 @@ local function clear_image(session)
     -- of pixels the terminal has not forgotten means paying to send them all
     -- again seconds later, over the one link this whole feature exists to spare.
     -- `free_resident` stays the only thing that gives a region's pixels back.
-    local hide = resident_holds(session.resident, session.image_id) and session.backend.hide
-    local hidden, stats
-    if hide then
-      hidden, stats = select(2, pcall(hide, session.image_id))
+    --
+    -- A composite comes down as a unit. Retiring two bands with two calls leaves
+    -- one of them drawn on its own for as long as the second write takes, which
+    -- is a half-erased preview at every float, tab switch and completion popup.
+    local retired = retire_screen(session)
+    local retired_ok, stats = nil, nil
+    if session.backend.retire and #retired > 0 then
+      retired_ok, stats = select(2, pcall(session.backend.retire, retired))
     end
-    if hidden then
+    if retired_ok then
       record_ui_bytes(session, stats)
       mark_regions_unplaced(session)
     else
-      session.backend.clear(session.image_id)
+      -- Per part, and the hide-or-free decision is still `retain`'s: a backend
+      -- with no `retire` -- and every backend but the raw Kitty one -- has no
+      -- composite either, so this is exactly the single-image path it always
+      -- took. Freeing a retained part here is the defect `mutants.sh` scores as
+      -- `occlusion-frees-instead-of-hides`.
+      local hid_any = false
+      for _, gone in ipairs(retired) do
+        local hide = gone.retain and session.backend.hide
+        local hidden, hide_stats
+        if hide then
+          hidden, hide_stats = select(2, pcall(hide, gone.image_id))
+        end
+        if hidden then
+          record_ui_bytes(session, hide_stats)
+          hid_any = true
+        else
+          session.backend.clear(gone.image_id)
+        end
+      end
+      if hid_any then mark_regions_unplaced(session) end
     end
   end
-  session.image_id = nil
+  set_screen(session, {})
   session.last_placement = nil
   animation.clear(session)
 end
@@ -210,6 +284,11 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
       return session.backend.update(session.image_id, image_bytes, placement, {
         source = opts.source,
         retain_superseded = resident_holds(session.resident, session.image_id),
+        -- And every other band of a composite, in the same write. A frame
+        -- landing over two resident slices has two placement sets to remove and
+        -- neither one's pixels to give up; leaving the second band up draws it
+        -- over the new frame, in disjoint cells, with nothing reporting a fault.
+        retired = retire_screen(session, session.image_id),
       })
     end
     return session.backend.show(image_bytes, placement, opts.source)
@@ -296,7 +375,7 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
     session.retina_frame_count = (session.retina_frame_count or 0) + 1
     session.retina_bytes_total = (session.retina_bytes_total or 0) + (session.last_png_bytes or 0)
   end
-  session.image_id = image_id
+  set_screen(session, { { image_id = image_id, placement = placement, source = opts.source } })
   session.last_placement = placement
   -- Whether this frame has a browser-painted selection baked into it. Any
   -- capture taken while a DOM selection exists does, and `selection_active` is
@@ -589,14 +668,28 @@ local function show_cached(session)
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
-  local ok, image_id, image_stats = pcall(session.backend.show, session.last_image_bytes, placement)
+  -- Through `update` when something of ours is still displayed, so what it
+  -- replaces comes down in the same write. `show` alone left the previous
+  -- image's placements on screen underneath the cached frame *and* orphaned it
+  -- from the bookkeeping that would have freed it -- invisible while every
+  -- caller happened to clear first, and a leak per restore once a composite can
+  -- put more than one image up.
+  local ok, image_id, image_stats
+  if session.image_id and session.backend.update then
+    ok, image_id, image_stats = pcall(session.backend.update, session.image_id, session.last_image_bytes, placement, {
+      retain_superseded = resident_holds(session.resident, session.image_id),
+      retired = retire_screen(session, session.image_id),
+    })
+  else
+    ok, image_id, image_stats = pcall(session.backend.show, session.last_image_bytes, placement)
+  end
   if not ok or not image_id then
     session.render_failed = true
     notify_error(ok and (image_stats or "failed to display cached image") or image_id)
     return false
   end
   record_ui_bytes(session, image_stats)
-  session.image_id = image_id
+  set_screen(session, { { image_id = image_id, placement = placement } })
   session.last_placement = placement
   -- This path does not go through `apply_image`, so nothing else would put the
   -- frames back: a preview restored from cache after an occlusion would show a
@@ -785,17 +878,19 @@ function try_pan(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
   local previous = session.image_id
   local restoring = previous ~= region.image_id
-  local ok, moved, stats = pcall(session.backend.move, region.image_id, placement, source)
+  -- Whatever was on screen before goes down in the same write that puts this
+  -- region up. It used to be a `move` followed by a separate `clear`, correct in
+  -- that order but two writes, and only ever able to name one predecessor -- so
+  -- a *second region* still on screen kept its placements, which with one region
+  -- in the cache could not happen and with a grid of slices happens constantly.
+  local ok, moved, stats = pcall(session.backend.compose, {
+    { image_id = region.image_id, placement = placement, source = source },
+  }, retire_screen(session, region.image_id))
   if not ok or not moved then
     resident_fallback(session, ok and (stats or "placement refused") or tostring(moved))
     return false
   end
 
-  -- Whatever was on screen before, if it was not itself a region, is now
-  -- unreferenced. Freed *after* the replacement is up, never before: deleting
-  -- first leaves the terminal a moment with nothing to composite, which is the
-  -- blink `M.move` documents at length.
-  if previous and restoring and not resident_holds(live, previous) then pcall(session.backend.clear, previous) end
   for _, other in ipairs(live.regions) do
     other.placed = other == region
   end
@@ -820,7 +915,7 @@ function try_pan(session)
     live.pans = live.pans + 1
   end
 
-  session.image_id = region.image_id
+  set_screen(session, { { image_id = region.image_id, placement = placement, source = source } })
   session.last_placement = placement
   session.image_width_px, session.image_height_px = region.image_w, region.image_h
   -- The scroll the pixels genuinely show, snapped to a whole image pixel. Three
