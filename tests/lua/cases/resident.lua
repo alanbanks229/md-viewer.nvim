@@ -558,4 +558,121 @@ return function(t)
   t.eq(0, #cache.regions, "and empties the cache")
   t.eq(0, cache.used_px, "and its accounting")
   t.eq(nil, resident.find(cache, 500, VH, "k1"), "so nothing is findable afterwards")
+
+  -- ---------------------------------------------------------------------
+  -- The slice grid: a fixed cover of the whole document.
+  --
+  -- The bounded region was planned around wherever the reader stopped, so its
+  -- edges moved and crossing one meant an eviction and a refill. A grid's
+  -- boundaries belong to the document instead, which is what makes them
+  -- permanent -- and permanent boundaries can only work if a viewport that
+  -- straddles one is *composited* rather than treated as a miss.
+  -- ---------------------------------------------------------------------
+  local ROWS = 60
+  local grid = assert(resident.slice_grid({
+    viewport_h = 1020,
+    viewport_w = 990,
+    document_height_px = 10891,
+    scale = 2,
+    rows = ROWS,
+  }))
+
+  t.eq(1980, grid.image_w, "a slice is as wide as the viewport at the capture scale")
+  t.near(2040, grid.slice_h, 0.5, "and two viewports tall")
+  local row_h = 1020 / ROWS
+  t.ok(grid.overlap >= row_h, "neighbours overlap by at least one pane row, which is what makes a split possible")
+  t.ok(grid.overlap < grid.slice_h * 0.05, ("and by little: %.1f of %.1f CSS px"):format(grid.overlap, grid.slice_h))
+  t.near(grid.slice_h - grid.overlap, grid.stride, 1e-9, "the stride is what a slice adds beyond its predecessor")
+
+  -- Boundaries are whole image pixels, so the same document position is an
+  -- integer in every slice's own image space and the two halves of a composite
+  -- cannot disagree by half a pixel across the seam.
+  for index = 0, grid.count - 1 do
+    local slice = assert(resident.slice(grid, index))
+    t.near(
+      math.floor(slice.doc_y * grid.scale + 0.5),
+      slice.doc_y * grid.scale,
+      1e-6,
+      ("slice %d starts on a whole image pixel"):format(index)
+    )
+  end
+
+  -- The property the whole design rests on: every scroll position a reader can
+  -- reach is drawn from slices that exist, and never more than two of them.
+  local last_scroll = grid.document_h - grid.viewport_h
+  local straddles, singles = 0, 0
+  for step = 0, 400 do
+    local scroll_y = last_scroll * step / 400
+    local first, last = resident.slices_for(grid, scroll_y, grid.viewport_h)
+    t.ok(first ~= nil, ("a slice covers scroll %.1f"):format(scroll_y))
+    if first then
+      t.ok(last - first <= 1, ("at most two slices at scroll %.1f"):format(scroll_y))
+      local upper = assert(resident.slice(grid, first))
+      if first == last then
+        singles = singles + 1
+        t.ok(
+          upper.doc_y <= scroll_y + 1e-6 and upper.doc_y + upper.doc_h >= scroll_y + grid.viewport_h - 1e-6,
+          ("a single slice genuinely contains the viewport at %.1f"):format(scroll_y)
+        )
+      else
+        straddles = straddles + 1
+        local lower = assert(resident.slice(grid, last))
+        local split, why = resident.split_rows(grid, upper, lower, scroll_y)
+        t.ok(split ~= nil, ("a straddle at %.1f has a row to split on: %s"):format(scroll_y, tostring(why)))
+        if split then
+          -- The two bands are complementary in the document: the upper supplies
+          -- rows 0..split-1 and the lower the rest, and the document position at
+          -- the seam is inside both. No scanline is shown twice or skipped.
+          local seam = scroll_y + split * row_h
+          t.ok(seam >= lower.doc_y - 1e-6, ("the seam at %.1f is inside the lower slice"):format(scroll_y))
+          t.ok(
+            seam <= upper.doc_y + upper.doc_h + 1e-6,
+            ("and still inside the upper one, which is what the overlap buys"):format()
+          )
+        end
+      end
+    end
+  end
+  t.ok(straddles > 0, ("straddles are exercised, not hypothetical (%d of 401 positions)"):format(straddles))
+  t.ok(singles > 0, ("and so is the single-slice case (%d)"):format(singles))
+
+  -- The last slice reaches the document's end, or the final screen would be a
+  -- permanent miss.
+  local final = assert(resident.slice(grid, grid.count - 1))
+  t.ok(
+    final.doc_y + final.doc_h >= grid.document_h - 1e-6,
+    ("the grid reaches the document's end (%.1f of %.1f)"):format(final.doc_y + final.doc_h, grid.document_h)
+  )
+  t.eq(nil, resident.slice(grid, grid.count), "and there is nothing past the last slice")
+  t.eq(nil, resident.slice(grid, -1), "or before the first")
+
+  -- Refusals, each naming the thing it could not do.
+  t.eq(nil, resident.slice_grid({ viewport_h = 1020, viewport_w = 990, scale = 2, rows = ROWS }))
+  local short_reason = select(
+    2,
+    resident.slice_grid({
+      viewport_h = 1020,
+      viewport_w = 990,
+      document_height_px = 900,
+      scale = 2,
+      rows = ROWS,
+    })
+  )
+  t.ok(
+    tostring(short_reason):match("fits the viewport"),
+    "a document that cannot scroll is declined: " .. tostring(short_reason)
+  )
+  -- A pane of one row makes the overlap a whole viewport, which leaves no slice
+  -- height that can hold a viewport as well.
+  local thin_reason = select(
+    2,
+    resident.slice_grid({
+      viewport_h = 1020,
+      viewport_w = 990,
+      document_height_px = 10891,
+      scale = 8,
+      rows = 1,
+    })
+  )
+  t.ok(thin_reason ~= nil, "and a geometry with no room for a viewport plus its overlap: " .. tostring(thin_reason))
 end

@@ -326,6 +326,180 @@ function M.plan_region(opts)
   }
 end
 
+--- How many viewports tall a slice is.
+---
+--- The boundary between slices is free now -- a viewport spanning two of them is
+--- composited from both -- so nothing pushes this upwards except the per-capture
+--- round trip. Everything pushes it down: a slice is one uninterrupted upload
+--- that cannot be cancelled once handed to the terminal, so its size is the
+--- longest a reader can be stuck behind bytes for somewhere they are not looking.
+--- Two viewports is 810 KB at 990x1020 CSS and device scale 2, about 1.35 s on
+--- the 0.80 MB/s link this exists for.
+local SLICE_VIEWPORTS = 2
+
+--- How many pane rows neighbouring slices share.
+---
+--- This is what makes the boundary free. The pane is split at a whole cell row:
+--- the rows above it come from one slice, the rows below from the next. For that
+--- split to exist, the upper slice has to reach at least to the first row
+--- boundary at or after the lower slice's start -- which is less than one row
+--- away. Two rows rather than one is float slack; at a 60-row pane it is 3% of a
+--- slice, against the 100% a design that overlapped by a whole viewport would
+--- pay.
+local OVERLAP_ROWS = 2
+
+M.SLICE_VIEWPORTS = SLICE_VIEWPORTS
+M.OVERLAP_ROWS = OVERLAP_ROWS
+
+---The fixed grid of slices that covers a whole document.
+---
+---Derived once per document generation and then held, which is the point: a
+---boundary has to be a property of the *document*, not of wherever the reader
+---happened to stop when a region was last planned. Re-deriving it per fill is how
+---slices stop lining up and the overlap invariant below stops holding.
+---
+---Boundaries are whole **image** pixels. The same document position then maps to
+---an integer in every slice's own image space, so the two halves of a composite
+---cannot disagree by half a pixel across the seam.
+---
+---Returns `nil, reason` when no grid worth having fits.
+---@return table|nil grid, string|nil reason
+function M.slice_grid(opts)
+  local viewport_h = positive(opts.viewport_h)
+  local viewport_w = positive(opts.viewport_w)
+  local document_h = positive(opts.document_height_px)
+  local scale = positive(opts.scale)
+  local rows = positive(opts.rows)
+  if not (viewport_h and viewport_w) then return nil, "viewport dimensions are unknown" end
+  if not document_h then return nil, "document height is unknown" end
+  if not scale then return nil, "capture scale is unknown" end
+  if not rows then return nil, "pane row count is unknown" end
+
+  -- Nothing to pan through. Resident pixels would be correct and completely
+  -- useless, so decline rather than spend terminal memory on a document that
+  -- cannot scroll.
+  if document_h <= viewport_h + EPS then return nil, "document fits the viewport" end
+
+  local image_w = round(viewport_w * scale)
+  if image_w < 1 then return nil, "capture would have no width" end
+
+  -- One pane row in CSS px, without asking anyone for a measured cell size: the
+  -- pane shows exactly one viewport across `rows` rows, so the two are the same
+  -- fact. `docs/terminal-support.md` states that a resident crop needs no
+  -- measured cell -- it is scaled by `c`/`r` -- and this keeps that true.
+  local row_h = viewport_h / rows
+  local overlap_img = math.max(1, math.ceil(OVERLAP_ROWS * row_h * scale))
+  local slice_img =
+    math.floor(math.min(SLICE_VIEWPORTS * viewport_h * scale, MAX_REGION_HEIGHT_PX, MAX_REGION_PIXELS / image_w))
+  -- A slice shorter than a viewport plus the overlap could be spanned by three
+  -- placements, and a stride at or below zero would never reach the document's
+  -- end. Both are the same requirement stated twice, so state it once.
+  local minimum_img = math.ceil((viewport_h * scale)) + overlap_img
+  if slice_img < minimum_img then
+    return nil,
+      ("a slice of %d image px cannot hold a viewport of %d plus %d of overlap"):format(
+        slice_img,
+        math.ceil(viewport_h * scale),
+        overlap_img
+      )
+  end
+  local stride_img = slice_img - overlap_img
+
+  local slice_h = slice_img / scale
+  local stride = stride_img / scale
+  -- Enough slices that the last one reaches the document's end. The last is
+  -- allowed to run past it -- the renderer clamps a capture to the document and
+  -- reports what it actually took -- so this only has to cover, not to fit.
+  local count = math.max(1, math.ceil((document_h - slice_h) / stride) + 1)
+
+  return {
+    document_h = document_h,
+    viewport_h = viewport_h,
+    viewport_w = viewport_w,
+    scale = scale,
+    rows = rows,
+    image_w = image_w,
+    slice_h = slice_h,
+    stride = stride,
+    overlap = overlap_img / scale,
+    count = count,
+  }
+end
+
+---Where slice `index` (0-based) starts and how tall it is, in document CSS px.
+---@return table|nil slice
+function M.slice(grid, index)
+  if not grid then return nil end
+  index = finite(index)
+  if index == nil or index < 0 or index >= grid.count then return nil end
+  local doc_y = index * grid.stride
+  -- Clamped at the document's end so `doc_h` is what a capture can actually
+  -- contain. A slice claiming pixels past the end would build a region whose
+  -- measured scale disagrees with its nominal height, which `M.region` refuses.
+  local doc_h = math.min(grid.slice_h, grid.document_h - doc_y)
+  if doc_h <= 0 then return nil end
+  return { index = index, doc_y = doc_y, doc_h = doc_h }
+end
+
+---Which slices a viewport at `scroll_y` is drawn from, as `first, last`.
+---
+---One when the viewport lies wholly inside a slice, two when it straddles a
+---boundary. Never three: `slice_grid` refuses a slice shorter than a viewport
+---plus the overlap, which is exactly the condition that bounds this at two.
+---
+---The straddle is the case the bounded-region design treated as a miss and
+---answered with a screenshot. A grid cannot: its boundaries are permanent, so
+---that fallback would fire forever at the same places.
+---@return number|nil first, number|nil last
+function M.slices_for(grid, scroll_y, viewport_h)
+  if not grid then return nil end
+  scroll_y = finite(scroll_y)
+  viewport_h = positive(viewport_h) or (grid and grid.viewport_h)
+  if scroll_y == nil or not viewport_h then return nil end
+  scroll_y = clamp(scroll_y, 0, math.max(0, grid.document_h - viewport_h))
+
+  -- The latest slice that starts at or before the reader. An earlier one would
+  -- start further back and therefore end sooner, so it can never cover more of
+  -- this viewport -- there is nothing to search.
+  local first = clamp(math.floor(scroll_y / grid.stride + EPS), 0, grid.count - 1)
+  local slice = M.slice(grid, first)
+  if not slice then return nil end
+  if slice.doc_y + slice.doc_h >= scroll_y + viewport_h - EPS then return first, first end
+  if first + 1 >= grid.count then return first, first end
+  return first, first + 1
+end
+
+---Where to split the pane between two slices, as a whole number of rows from
+---its top.
+---
+---`upper` supplies rows `0 .. split-1` and `lower` the rest. The split has to be
+---a row boundary because a Kitty placement occupies whole cells, and it has to
+---lie inside both slices at once -- which is what the overlap buys: the window
+---`[lower.doc_y, upper.doc_y + upper.doc_h]` is `overlap` tall, and a row is
+---shorter than that, so a row boundary always falls inside it.
+---
+---Returns `nil, reason` when no such row exists, which must never happen for a
+---grid `slice_grid` built and is a refusal rather than a guess when it does.
+---@return number|nil split_rows, string|nil reason
+function M.split_rows(grid, upper, lower, scroll_y)
+  if not (grid and upper and lower) then return nil, "no slices to split between" end
+  scroll_y = finite(scroll_y)
+  if scroll_y == nil then return nil, "scroll position is unknown" end
+  local row_h = grid.viewport_h / grid.rows
+  -- The first row boundary at or after the lower slice begins.
+  local split = math.ceil((lower.doc_y - scroll_y) / row_h - EPS)
+  if split < 1 then return nil, "the lower slice starts above the pane" end
+  if split >= grid.rows then return nil, "the lower slice starts below the pane" end
+  -- And the upper slice must actually reach it, or its band would be sourced
+  -- from pixels it does not have. `crop_within` would refuse the placement and
+  -- the band would simply not draw, so this is checked here where it can be
+  -- explained rather than there where it cannot.
+  if scroll_y + split * row_h > upper.doc_y + upper.doc_h + EPS then
+    return nil, "the upper slice does not reach the split"
+  end
+  return split
+end
+
 ---Everything that must match for a resident region to be reusable.
 ---
 ---A region outlives the frame it was captured with by minutes, so the key has to

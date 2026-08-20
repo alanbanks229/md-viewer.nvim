@@ -44,6 +44,7 @@ fill-claims-applied-scroll	lua/md-viewer/controller.lua	    if not filling then 
 region-freed-as-side-effect	lua/md-viewer/controller.lua	        retain_superseded = resident_holds(session.resident, session.image_id),	        retain_superseded = false,
 occlusion-frees-instead-of-hides	lua/md-viewer/controller.lua	        local hide = gone.retain and session.backend.hide	        local hide = nil
 dead-page-never-rebuilt	renderer/src/browser.js	    if (this.context && this.page && !this.page.isClosed() && this.deviceScaleFactor === scale) return;	    if (this.context && this.deviceScaleFactor === scale) return;
+slices-without-row-overlap	lua/md-viewer/resident.lua	  local overlap_img = math.max(1, math.ceil(OVERLAP_ROWS * row_h * scale))	  local overlap_img = 1
 invalidate-only-when-scrolled	lua/md-viewer/controller.lua	    if not filling and session.resident and session.resident.key then	    if false and session.resident and session.resident.key then
 invalidate-during-a-fill	lua/md-viewer/controller.lua	    if not filling and session.resident and session.resident.key then	    if session.resident and session.resident.key then
 stale-part-list-trusted	lua/md-viewer/controller.lua	  if parts and parts[1] and parts[1].image_id == session.image_id then return parts end	  if parts and #parts > 0 then return parts end
@@ -56,11 +57,11 @@ caught=0; missed=0; skipped=0
 declare -a missed_names=()
 
 restore_all() {
-  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua renderer/src/browser.js 2>/dev/null || true
+  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js 2>/dev/null || true
 }
 trap 'restore_all; rm -f "$mutations"' EXIT
 
-if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua renderer/src/browser.js; then
+if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js; then
   echo "refusing to run: the files this mutates have uncommitted changes" >&2
   echo "commit or stash them first -- restoring would throw them away" >&2
   exit 2
