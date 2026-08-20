@@ -96,10 +96,12 @@ local function resident_report(session)
     upload_hold_ms = live.upload_hold_ms,
     frames_suppressed_by_hold = live.frames_suppressed_by_hold,
     superseded_by_pan = live.superseded_by_pan,
-    -- Scroll positions spanning two slices. A grid's boundaries never move, so
-    -- this is the count of the one case it creates -- and until the composite
-    -- draws it, each one is a captured frame.
+    -- Scroll positions spanning two slices, drawn as two bands in one write --
+    -- and those that had to fall back to a captured frame because only one of
+    -- the two was held. The second climbing while the first does not means fills
+    -- are not keeping up with the reader, not that the composite is wrong.
     straddles = live.straddles,
+    straddle_misses = live.straddle_misses,
     -- Below 1 means the renderer refused to capture a slice at the full height
     -- and the whole grid was regenerated with shorter ones.
     slice_scale = live.slice_scale,

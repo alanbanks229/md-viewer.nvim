@@ -530,6 +530,114 @@ return function(t)
   t.ok(straddles > 0, ("straddles are exercised, not hypothetical (%d of 401 positions)"):format(straddles))
   t.ok(singles > 0, ("and so is the single-slice case (%d)"):format(singles))
 
+  -- ---------------------------------------------------------------------
+  -- The two bands of a straddle, in each slice's own image pixels.
+  --
+  -- The property a screenshot could not show: the upper band ends at exactly
+  -- the document position the lower one begins at, so no scanline is drawn
+  -- twice and none is skipped. Both are derived from one snapped position; two
+  -- independently snapped positions is precisely how the backend's two floors
+  -- end up a pixel apart.
+  -- ---------------------------------------------------------------------
+  local band_positions = 0
+  for step = 0, 400 do
+    local scroll_y = last_scroll * step / 400
+    local first, last = resident.slices_for(grid, scroll_y, grid.viewport_h)
+    if first and last > first then
+      local upper = assert(resident.region({
+        doc_y = assert(resident.slice(grid, first)).doc_y,
+        doc_h = assert(resident.slice(grid, first)).doc_h,
+        css_w = grid.viewport_w,
+        image_w = grid.image_w,
+        image_h = assert(resident.slice(grid, first)).doc_h * grid.scale,
+      }))
+      local lower = assert(resident.region({
+        doc_y = assert(resident.slice(grid, last)).doc_y,
+        doc_h = assert(resident.slice(grid, last)).doc_h,
+        css_w = grid.viewport_w,
+        image_w = grid.image_w,
+        image_h = assert(resident.slice(grid, last)).doc_h * grid.scale,
+      }))
+      local applied = resident.snap(upper, scroll_y)
+      t.near(scroll_y, applied, 1 / grid.scale, ("the snap moves less than an image pixel at %.1f"):format(scroll_y))
+      local split = assert(resident.split_rows(grid, upper, lower, applied, ROWS))
+      local bands, why = resident.band_sources(
+        upper,
+        lower,
+        applied,
+        { widthPx = grid.viewport_w, heightPx = grid.viewport_h },
+        ROWS,
+        split
+      )
+      t.ok(bands ~= nil, ("a straddle at %.1f has two bands: %s"):format(scroll_y, tostring(why)))
+      if bands then
+        band_positions = band_positions + 1
+        -- Back into document space, where the two are comparable.
+        local upper_top = upper.doc_y + bands.upper.y / upper.scale_y
+        local upper_end = upper.doc_y + (bands.upper.y + bands.upper.height) / upper.scale_y
+        local lower_top = lower.doc_y + bands.lower.y / lower.scale_y
+        local lower_end = lower.doc_y + (bands.lower.y + bands.lower.height) / lower.scale_y
+        -- Exactly, not approximately, and that is what quantising the grid's
+        -- boundaries to whole image pixels buys. Both slices start on an integer
+        -- image pixel and share a scale, so the same document position rounds
+        -- the same way in both -- there is no half-pixel of slack to hide a
+        -- band that was snapped on its own, which is a scanline drawn twice or
+        -- skipped at the seam.
+        t.near(applied, upper_top, 1e-6, ("the pane's top row shows the applied position at %.1f"):format(scroll_y))
+        t.near(upper_end, lower_top, 1e-6, ("the bands meet exactly, with no gap or overlap, at %.1f"):format(scroll_y))
+        t.near(
+          applied + grid.viewport_h,
+          lower_end,
+          1e-6,
+          ("and the bottom row is one viewport below the top at %.1f"):format(scroll_y)
+        )
+        -- Both bands are inside the slices they are cropped from -- `crop_within`
+        -- refuses rather than clamps, so one pixel outside draws nothing at all
+        -- while the write still reports success.
+        t.ok(
+          bands.upper.y >= 0 and bands.upper.y + bands.upper.height <= upper.image_h,
+          "the upper band fits its slice"
+        )
+        t.ok(
+          bands.lower.y >= 0 and bands.lower.y + bands.lower.height <= lower.image_h,
+          "the lower band fits its slice"
+        )
+      end
+    end
+  end
+  t.ok(band_positions > 0, ("every straddle produced two bands (%d positions)"):format(band_positions))
+
+  -- The refusals, each naming what it could not do rather than guessing.
+  local viewport_box = { widthPx = grid.viewport_w, heightPx = grid.viewport_h }
+  local upper_one = assert(resident.slice(grid, 0))
+  local lower_one = assert(resident.slice(grid, 1))
+  local pair_upper = assert(resident.region({
+    doc_y = upper_one.doc_y,
+    doc_h = upper_one.doc_h,
+    css_w = grid.viewport_w,
+    image_w = grid.image_w,
+    image_h = upper_one.doc_h * grid.scale,
+  }))
+  local pair_lower = assert(resident.region({
+    doc_y = lower_one.doc_y,
+    doc_h = lower_one.doc_h,
+    css_w = grid.viewport_w,
+    image_w = grid.image_w,
+    image_h = lower_one.doc_h * grid.scale,
+  }))
+  t.eq(
+    nil,
+    (resident.band_sources(pair_upper, pair_lower, 0, viewport_box, ROWS, 0)),
+    "a split at row zero is not a split -- one band would be a placement of nothing"
+  )
+  t.eq(
+    nil,
+    (resident.band_sources(pair_upper, pair_lower, 0, viewport_box, ROWS, ROWS)),
+    "and neither is a split at the last row"
+  )
+  local outside = select(2, resident.band_sources(pair_upper, pair_lower, -grid.viewport_h, viewport_box, ROWS, 5))
+  t.ok(tostring(outside):match("inside its slice"), "a band outside its slice is refused: " .. tostring(outside))
+
   -- The last slice reaches the document's end, or the final screen would be a
   -- permanent miss.
   local final = assert(resident.slice(grid, grid.count - 1))

@@ -148,12 +148,19 @@ end
 ---`retain_superseded`: an image the resident grid still counts on must lose its
 ---placements and keep its pixels, anything else is nothing to anybody, and there
 ---is no third case -- so asking call sites to remember is how two of them forgot.
----`skip_id` is the image being re-placed by the same operation, which supersedes
----itself and must not also be retired.
-local function retire_screen(session, skip_id)
+---`keep` is the list of images being re-placed by the same operation, which
+---supersede themselves and must not also be retired. A list rather than one id
+---because a composite re-places two: naming only its head would retire the other
+---band a line before putting it back, which is a write that takes down what the
+---same write is drawing.
+local function retire_screen(session, keep)
+  local kept = {}
+  for _, image_id in ipairs(keep or {}) do
+    kept[image_id] = true
+  end
   local retired = {}
   for _, part in ipairs(screen_parts(session)) do
-    if part.image_id and part.image_id ~= skip_id then
+    if part.image_id and not kept[part.image_id] then
       retired[#retired + 1] = {
         image_id = part.image_id,
         retain = resident_holds(session.resident, part.image_id),
@@ -297,7 +304,7 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
         -- landing over two resident slices has two placement sets to remove and
         -- neither one's pixels to give up; leaving the second band up draws it
         -- over the new frame, in disjoint cells, with nothing reporting a fault.
-        retired = retire_screen(session, session.image_id),
+        retired = retire_screen(session, { session.image_id }),
       })
     end
     return session.backend.show(image_bytes, placement, opts.source)
@@ -687,7 +694,7 @@ local function show_cached(session)
   if session.image_id and session.backend.update then
     ok, image_id, image_stats = pcall(session.backend.update, session.image_id, session.last_image_bytes, placement, {
       retain_superseded = resident_holds(session.resident, session.image_id),
-      retired = retire_screen(session, session.image_id),
+      retired = retire_screen(session, { session.image_id }),
     })
   else
     ok, image_id, image_stats = pcall(session.backend.show, session.last_image_bytes, placement)
@@ -926,10 +933,86 @@ local function resident_grid(session)
   return grid
 end
 
----Show an already-resident region at the newest scroll position, if one covers
----it. This is the whole optimization: no renderer request, no capture, no image
----bytes -- a few hundred bytes of placement commands and the terminal pans
----pixels it is already holding.
+---One band of a composite: the pane's own rectangle, cut down to `height` rows
+---starting `row_offset` below its top.
+---
+---The pane's `exclusions` come along untouched because they are absolute cell
+---rectangles -- `visible_regions` subtracts the placement's own origin from each
+---one, so a float over the seam is cut out of whichever band it actually covers,
+---or out of both.
+local function band_placement(placement, row_offset, height)
+  local band = vim.tbl_extend("force", {}, placement)
+  band.row = placement.row + row_offset
+  band.height = height
+  return band
+end
+
+---The parts a viewport at `scroll_y` is drawn from, ready for `backend.compose`.
+---
+---One when the viewport lies inside a slice, two when it straddles a boundary --
+---and never three, because `slice_grid` refuses a slice shorter than a viewport
+---plus the overlap, which is exactly the condition that bounds this at two.
+---
+---**Every refusal here is a cache miss, never a fallback.** The bounded region
+---could treat a straddle as a permanent defect because its boundaries moved; a
+---grid's do not, so a refusal has to be something the next fill can fix. A slice
+---can also legitimately be shorter than the grid cell it occupies -- the
+---renderer clamps a capture to the document's end -- and disabling the feature
+---for the session over ordinary geometry would be the worst possible answer.
+---
+---Returns `parts, applied, straddled, head` or `nil, reason, straddled`.
+local function compose_parts(session, scroll_y, placement)
+  local live = session.resident
+  local grid = resident_grid(session)
+  if not grid then return nil, live.grid_refusal or "no grid", false end
+  local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
+  local first, last = resident.slices_for(grid, scroll_y, viewport.heightPx)
+  if not first then return nil, "no slice covers this position", false end
+  local straddled = first ~= last
+
+  local upper = resident.hold(live, first)
+  -- The key as well as the cell. Every slice held was registered under
+  -- `live.key`, which `try_pan` compares against the session's -- so this can
+  -- only fire if those two ever come apart, and a slice of another document
+  -- drawn into view is the one failure this whole mechanism must not be able to
+  -- produce.
+  if not (upper and upper.key == live.key) then return nil, "the slice under the reader is not resident", straddled end
+
+  if not straddled then
+    local source, applied = resident.source_window(upper, scroll_y, viewport)
+    if not source then return nil, tostring(applied), false end
+    return { { image_id = upper.image_id, placement = placement, source = source } }, applied, false, upper
+  end
+
+  local lower = resident.hold(live, last)
+  if not (lower and lower.key == live.key) then return nil, "the lower slice of a straddle is not resident", true end
+
+  -- The pane being drawn into, not the one the grid was derived from. They can
+  -- differ without the document changing, and a seam computed against the wrong
+  -- row count lands on the wrong row.
+  local rows = placement.height
+  -- One document position, snapped once, and everything below derived from it.
+  -- Two independently snapped positions is a duplicated or dropped scanline at
+  -- the seam -- see `resident.band_sources`.
+  local applied = resident.snap(upper, scroll_y)
+  local split, why = resident.split_rows(grid, upper, lower, applied, rows)
+  if not split then return nil, why, true end
+  local bands, reason = resident.band_sources(upper, lower, applied, viewport, rows, split)
+  if not bands then return nil, reason, true end
+
+  return {
+    { image_id = upper.image_id, placement = band_placement(placement, 0, split), source = bands.upper },
+    { image_id = lower.image_id, placement = band_placement(placement, split, rows - split), source = bands.lower },
+  },
+    applied,
+    true,
+    upper
+end
+
+---Show the resident slices covering the newest scroll position, if this session
+---holds them. This is the whole optimization: no renderer request, no capture,
+---no image bytes -- a few hundred bytes of placement commands and the terminal
+---pans pixels it is already holding.
 ---
 ---Returns false for every reason not to, and every one of them lands on exactly
 ---the behaviour that existed before this feature.
@@ -972,62 +1055,43 @@ function try_pan(session)
     return false
   end
 
-  local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
   local desired = session.scroll_y or 0
-  local grid = resident_grid(session)
-  if not grid then
-    live.misses = live.misses + 1
-    return false
-  end
-  local first, last = resident.slices_for(grid, desired, viewport.heightPx)
-  if not first then
-    live.misses = live.misses + 1
-    return false
-  end
-  -- A viewport spanning two slices has to be written as two bands in one write,
-  -- which is the composite. Until that exists it is a miss: the reader gets
-  -- today's captured frame at the boundary, which is correct and merely slow.
-  -- Never a single band stretched over the pane -- that is a picture of the
-  -- wrong part of the document, and it would arrive looking perfectly fine.
-  if first ~= last then
-    live.straddles = live.straddles + 1
-    live.misses = live.misses + 1
-    return false
-  end
-  local region = resident.hold(live, first)
-  -- The key as well as the cell. Every slice held was registered under
-  -- `live.key`, which was compared against the session's a few lines above -- so
-  -- this can only fire if those two ever come apart, and a slice of another
-  -- document panned into view is the one failure this whole mechanism must not
-  -- be able to produce.
-  if not (region and region.key == key) then
-    live.misses = live.misses + 1
-    return false
-  end
-  local source, applied = resident.source_window(region, desired, viewport)
-  if not source then
-    live.misses = live.misses + 1
-    return false
-  end
-
   local placement = preview.placement(session.preview_win, session.backend.name)
+  local parts, applied, straddled, head = compose_parts(session, desired, placement)
+  if not parts then
+    live.misses = live.misses + 1
+    -- A boundary the reader can park on with only one of its two slices held.
+    -- Counted apart because it is the one miss a grid creates and a region
+    -- planned around the reader could not, and because it is transient: the
+    -- settle behind it is already filling the slice that is absent.
+    if straddled then live.straddle_misses = live.straddle_misses + 1 end
+    return false
+  end
+  if straddled then live.straddles = live.straddles + 1 end
+
+  local keep = {}
+  for _, part in ipairs(parts) do
+    keep[#keep + 1] = part.image_id
+  end
   local previous = session.image_id
-  local restoring = previous ~= region.image_id
-  -- Whatever was on screen before goes down in the same write that puts this
-  -- region up. It used to be a `move` followed by a separate `clear`, correct in
+  local restoring = previous ~= parts[1].image_id
+  -- Whatever was on screen before goes down in the same write that puts these
+  -- bands up. It used to be a `move` followed by a separate `clear`, correct in
   -- that order but two writes, and only ever able to name one predecessor -- so
   -- a *second region* still on screen kept its placements, which with one region
   -- in the cache could not happen and with a grid of slices happens constantly.
-  local ok, moved, stats = pcall(session.backend.compose, {
-    { image_id = region.image_id, placement = placement, source = source },
-  }, retire_screen(session, region.image_id))
+  local ok, moved, stats = pcall(session.backend.compose, parts, retire_screen(session, keep))
   if not ok or not moved then
     resident_fallback(session, ok and (stats or "placement refused") or tostring(moved))
     return false
   end
 
+  local drawn = {}
+  for _, part in ipairs(parts) do
+    drawn[part.image_id] = true
+  end
   for _, other in ipairs(resident.slice_records(live)) do
-    other.placed = other == region
+    other.placed = drawn[other.image_id] == true
   end
 
   record_ui_bytes(session, stats)
@@ -1050,9 +1114,13 @@ function try_pan(session)
     live.pans = live.pans + 1
   end
 
-  set_screen(session, { { image_id = region.image_id, placement = placement, source = source } })
+  set_screen(session, parts)
+  -- The whole pane, not either band's sub-rectangle. `interaction`, `caret`,
+  -- `animation` and the backend's own overlay geometry all derive from this and
+  -- all mean the box the document is drawn into; a band would put every one of
+  -- them inside the top half of the preview.
   session.last_placement = placement
-  session.image_width_px, session.image_height_px = region.image_w, region.image_h
+  session.image_width_px, session.image_height_px = head.image_w, head.image_h
   -- The scroll the pixels genuinely show, snapped to a whole image pixel. Three
   -- things read this as exactly that -- the caret's drift, the animation layer's
   -- placement, and the scroll every interact request carries -- so recording the
@@ -2244,23 +2312,59 @@ local function reconcile_placement(session, force)
   if not coordinates.window_is_displayed(session.preview_win) then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
   if force or not coordinates.same(session.last_placement, placement) then
-    -- Third value is a stats table when `moved` is truthy and a reason string
-    -- when it is not; each branch below reads only the one it asked for.
-    local ok, moved, stats_or_err = pcall(session.backend.move, session.image_id, placement)
-    if not ok then
-      notify_error(moved)
-      return
+    -- A composite cannot be re-placed by moving its head. `M.move` would draw
+    -- the *upper* slice across the whole pane -- a picture of the wrong part of
+    -- the document -- and report success, with nothing anywhere reporting a
+    -- fault. This runs on every float opening and closing, every `CmdlineEnter`
+    -- and `CmdlineLeave`, every `WinNew`, and every 50 ms poll tick, so a
+    -- composite would survive about one keystroke.
+    --
+    -- The split has to be recomputed against the pane's new row count, which is
+    -- what `compose_parts` does. Nothing else here changes: the same clean-up
+    -- follows either way, because a composite re-placed and an image re-cropped
+    -- are the same event to everything downstream.
+    if #screen_parts(session) > 1 then
+      local parts, applied = compose_parts(session, session.applied_scroll_y or session.scroll_y or 0, placement)
+      if not parts then
+        -- The pane has changed into a shape this composite cannot be drawn in.
+        -- Take it down rather than leave one band across a pane it no longer
+        -- fits, and let the ordinary capture path put something correct back.
+        clear_image(session)
+        M.schedule(session, 0)
+        return
+      end
+      local keep = {}
+      for _, part in ipairs(parts) do
+        keep[#keep + 1] = part.image_id
+      end
+      local composed, drawn, compose_stats = pcall(session.backend.compose, parts, retire_screen(session, keep))
+      if not (composed and drawn) then
+        notify_error(composed and (compose_stats or "failed to re-place the composite") or tostring(drawn))
+        return
+      end
+      record_ui_bytes(session, compose_stats)
+      set_screen(session, parts)
+      session.applied_scroll_y = applied
+      clear_selection_overlay(session)
+    else
+      -- Third value is a stats table when `moved` is truthy and a reason string
+      -- when it is not; each branch below reads only the one it asked for.
+      local ok, moved, stats_or_err = pcall(session.backend.move, session.image_id, placement)
+      if not ok then
+        notify_error(moved)
+        return
+      end
+      if not moved then
+        notify_error(stats_or_err or "failed to update image placement")
+        return
+      end
+      record_ui_bytes(session, stats_or_err)
+      -- The base just moved or re-cropped (a float opened or closed over it);
+      -- overlay rectangles computed against the old placement are wrong now.
+      -- Cleared after the move rather than re-derived: the next drag frame
+      -- repaints them against the new placement within one round trip.
+      clear_selection_overlay(session)
     end
-    if not moved then
-      notify_error(stats_or_err or "failed to update image placement")
-      return
-    end
-    record_ui_bytes(session, stats_or_err)
-    -- The base just moved or re-cropped (a float opened or closed over it);
-    -- overlay rectangles computed against the old placement are wrong now.
-    -- Cleared after the move rather than re-derived: the next drag frame
-    -- repaints them against the new placement within one round trip.
-    clear_selection_overlay(session)
   end
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.
@@ -2776,5 +2880,9 @@ M._resident_grid = resident_grid
 -- gate in particular refuses *silently* and correctly-looking -- nothing fails,
 -- nothing is counted -- which is exactly the shape that reached a real session.
 M._try_pan = try_pan
+-- Exposed because it is the one path that re-places what is on screen without a
+-- render, and it is reached only from autocommands and a 50 ms poll -- so a test
+-- that drove it through those would be asserting about timers.
+M._reconcile_placement = reconcile_placement
 
 return M

@@ -202,6 +202,25 @@ end
 ---Chromium scrolls to the position being pointed at. Recording the *requested*
 ---scroll instead would put all three half a device pixel out.
 ---@return table|nil source, number|string applied_scroll_y_or_reason
+---The document position a whole image pixel of `region` lands on, nearest to
+---`scroll_y`.
+---
+---The snap `source_window` applies, on its own, because a composite needs it
+---before it knows what to crop: the two bands of a straddle must be derived from
+---**one** document position, and that position has to be one both slices can
+---express exactly. Deriving each band's crop from the raw scroll instead lets
+---the two `math.floor`s in the backend disagree by a pixel, which is a
+---duplicated or dropped scanline at the seam.
+---
+---Without `source_window`'s clamp, which exists to keep a *viewport*-tall window
+---inside the image and would be wrong for a band that is a fraction of one.
+function M.snap(region, scroll_y)
+  if not region then return nil end
+  scroll_y = finite(scroll_y)
+  if scroll_y == nil then return nil end
+  return region.doc_y + round((scroll_y - region.doc_y) * region.scale_y) / region.scale_y
+end
+
 function M.source_window(region, scroll_y, viewport)
   if not region then return nil, "no region" end
   local viewport_h = positive(viewport and viewport.heightPx)
@@ -412,18 +431,26 @@ end
 ---`[lower.doc_y, upper.doc_y + upper.doc_h]` is `overlap` tall, and a row is
 ---shorter than that, so a row boundary always falls inside it.
 ---
+---`rows` overrides the grid's own row count, and callers that have a live
+---placement should pass it. The two can differ without the document changing --
+---`image.raw_statusline_guard_cells` is one way -- and a split computed against
+---a pane that is not the one being drawn into lands the seam on the wrong row.
+---A disagreement large enough that no row fits is refused here, which is a miss;
+---guessing would be a misdrawn seam.
+---
 ---Returns `nil, reason` when no such row exists, which must never happen for a
 ---grid `slice_grid` built and is a refusal rather than a guess when it does.
 ---@return number|nil split_rows, string|nil reason
-function M.split_rows(grid, upper, lower, scroll_y)
+function M.split_rows(grid, upper, lower, scroll_y, rows)
   if not (grid and upper and lower) then return nil, "no slices to split between" end
   scroll_y = finite(scroll_y)
   if scroll_y == nil then return nil, "scroll position is unknown" end
-  local row_h = grid.viewport_h / grid.rows
+  rows = positive(rows) or grid.rows
+  local row_h = grid.viewport_h / rows
   -- The first row boundary at or after the lower slice begins.
   local split = math.ceil((lower.doc_y - scroll_y) / row_h - EPS)
   if split < 1 then return nil, "the lower slice starts above the pane" end
-  if split >= grid.rows then return nil, "the lower slice starts below the pane" end
+  if split >= rows then return nil, "the lower slice starts below the pane" end
   -- And the upper slice must actually reach it, or its band would be sourced
   -- from pixels it does not have. `crop_within` would refuse the placement and
   -- the band would simply not draw, so this is checked here where it can be
@@ -432,6 +459,77 @@ function M.split_rows(grid, upper, lower, scroll_y)
     return nil, "the upper slice does not reach the split"
   end
   return split
+end
+
+---The two crops a straddling viewport is drawn from, in each slice's own image
+---pixels.
+---
+---Both derived from **one** document position -- `applied`, which `M.snap` has
+---already put on a whole image pixel -- and never independently. The backend
+---floors each crop edge, so two rects computed from two numbers that ought to be
+---the same can end up a pixel apart: a scanline shown twice, or one dropped, at
+---exactly the seam. Deriving them together makes that unstateable.
+---
+---The seam itself is a document position, `applied + split * row_h`, converted
+---into each slice's image space. Grid boundaries are whole image pixels and both
+---slices were captured at the same scale, so the same document position has the
+---same fractional part in both and rounds the same way in both.
+---
+---Returns `nil, reason` for anything that cannot be drawn -- and every one of
+---those is a cache miss for the caller, never a fallback: a slice can
+---legitimately be shorter than the grid cell it occupies, because the renderer
+---clamps a capture to the document's end.
+---@return table|nil bands, string|nil reason
+function M.band_sources(upper, lower, applied, viewport, rows, split)
+  if not (upper and lower) then return nil, "a composite needs two slices" end
+  local viewport_h = positive(viewport and viewport.heightPx)
+  local viewport_w = positive(viewport and viewport.widthPx)
+  rows = positive(rows)
+  applied = finite(applied)
+  split = finite(split)
+  if not (viewport_h and viewport_w and rows) then return nil, "viewport or pane dimensions are unknown" end
+  if applied == nil then return nil, "scroll position is unknown" end
+  if split == nil or split < 1 or split >= rows then return nil, "the split is not a row inside the pane" end
+
+  local row_h = viewport_h / rows
+  local seam = applied + split * row_h
+  local bottom = applied + viewport_h
+
+  local upper_top = round((applied - upper.doc_y) * upper.scale_y)
+  local upper_bottom = round((seam - upper.doc_y) * upper.scale_y)
+  local lower_top = round((seam - lower.doc_y) * lower.scale_y)
+  local lower_bottom = round((bottom - lower.doc_y) * lower.scale_y)
+  if upper_top < 0 or upper_bottom > upper.image_h then return nil, "the upper band is not inside its slice" end
+  if lower_top < 0 or lower_bottom > lower.image_h then return nil, "the lower band is not inside its slice" end
+
+  local upper_h, lower_h = upper_bottom - upper_top, lower_bottom - lower_top
+  if upper_h < 1 or lower_h < 1 then return nil, "a band would draw no pixels" end
+
+  -- Each band's source height is scaled into its own row count by the terminal,
+  -- so the two have to agree about what a row is worth or the seam is a visible
+  -- change of scale. Rounding costs at most half a pixel at each edge; more than
+  -- a whole image pixel per row means the two were derived from different
+  -- numbers, which is exactly the mistake this function exists to prevent.
+  local per_row_upper, per_row_lower = upper_h / split, lower_h / (rows - split)
+  if math.abs(per_row_upper - per_row_lower) > 1 then
+    return nil,
+      ("the bands disagree about scale (%.3f against %.3f image px per row)"):format(per_row_upper, per_row_lower)
+  end
+
+  return {
+    upper = {
+      x = 0,
+      y = upper_top,
+      width = math.min(round(viewport_w * upper.scale_x), upper.image_w),
+      height = upper_h,
+    },
+    lower = {
+      x = 0,
+      y = lower_top,
+      width = math.min(round(viewport_w * lower.scale_x), lower.image_w),
+      height = lower_h,
+    },
+  }
 end
 
 ---Everything that must match for a resident region to be reusable.
@@ -553,11 +651,15 @@ function M.new_state(opts)
     -- Captures thrown away because the reader panned while they were in flight.
     -- A pan issues no request, so nothing else can notice it happened.
     superseded_by_pan = 0,
-    -- Scroll positions that spanned two slices. Kept apart from `misses`
-    -- because it is the count of the one case a fixed grid creates and a
-    -- bounded region could not: a boundary that never moves is a boundary the
-    -- reader can park on.
+    -- Scroll positions that spanned two slices, drawn as two bands in one
+    -- write; and those that spanned two of which only one was held, which fall
+    -- to a captured frame. Kept apart from `misses` and from each other because
+    -- they are the one case a fixed grid creates and a bounded region could not:
+    -- a boundary that never moves is a boundary the reader can park on. The
+    -- first is the composite working; the second is transient, and the settle
+    -- behind it is already filling the slice that was absent.
     straddles = 0,
+    straddle_misses = 0,
     upload_bytes = 0,
     placement_bytes = 0,
   }

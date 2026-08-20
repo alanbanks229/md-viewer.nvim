@@ -607,9 +607,11 @@ return function(t)
     -- to come down in the same write, and a `move` can only name one predecessor.
     -- Counted as the same thing, because it is -- one placement command for one
     -- band.
+    local compose_parts_seen = {}
     session.backend.compose = function(parts, _)
       moves = moves + 1
       move_sources[#move_sources + 1] = parts[1] and parts[1].source
+      compose_parts_seen = vim.deepcopy(parts)
       return true, { bytes = 210 }
     end
     session.backend.show = function()
@@ -689,23 +691,109 @@ return function(t)
     t.eq(0, moves, "and does not pretend to pan")
     t.ok(live.misses > 0, "counted as a miss")
 
-    -- A viewport spanning two slices is a miss as well, and counted apart. A
-    -- grid's boundaries never move, so this is the one case it creates that a
-    -- region planned around the reader could not -- and until the composite
-    -- writes both bands in one go, the honest answer is today's captured frame.
-    -- Never one band stretched over the pane: that is a picture of the wrong
-    -- part of the document, and it would arrive looking perfectly fine.
-    local straddles_before = live.straddles
+    -- ------------------------------------------------------------------
+    -- The boundary. A grid's edges never move, so a reader can park on one --
+    -- which is exactly what the bounded region could not survive, because its
+    -- edges moved with them. The viewport is drawn as two bands, split at a
+    -- whole cell row, in one write.
+    -- ------------------------------------------------------------------
     -- One pixel past the last position slice 0 can cover on its own, which is
     -- the first that needs both.
     local boundary = math.floor(slice_at(0).doc_y + slice_at(0).doc_h - 1020) + 1
     local straddle_first, straddle_last = resident.slices_for(grid, boundary, 1020)
     t.eq(0, straddle_first, "sanity: that position starts in slice 0")
     t.eq(1, straddle_last, "and genuinely needs slice 1 as well")
+
+    -- With only the upper slice held there is nothing to composite with, so the
+    -- honest answer is today's captured frame -- never one band stretched over
+    -- the pane, which is a picture of the wrong part of the document that would
+    -- arrive looking perfectly fine.
+    local misses_before = live.straddle_misses
     scroll_to(boundary)
-    t.eq(0, moves, "a viewport spanning two slices places nothing")
-    t.eq(straddles_before + 1, live.straddles, "and is counted as the straddle it is")
+    t.eq(0, moves, "a straddle with only one of its two slices held places nothing")
+    t.eq(misses_before + 1, live.straddle_misses, "and is counted apart from an ordinary miss")
     t.ok(requests > 0, "falling through to the capture path")
+
+    -- And with both.
+    assert(resident.register(live, 1, make_slice(1, 4343)))
+    local straddles_before = live.straddles
+    scroll_to(boundary - 1)
+    scroll_to(boundary)
+    t.eq(0, requests, "with both slices held the boundary asks the renderer for nothing")
+    t.eq(straddles_before + 1, live.straddles, "and is drawn as the straddle it is")
+    t.eq(2, #compose_parts_seen, "as two bands")
+    local upper_part, lower_part = compose_parts_seen[1], compose_parts_seen[2]
+    t.eq(4242, upper_part.image_id, "the upper band from the slice above the boundary")
+    t.eq(4343, lower_part.image_id, "the lower band from the slice below it")
+
+    -- Disjoint in whole cells, and together exactly the pane. Two base-layer
+    -- placements over the *same* cells is the 2026-08-08 Ghostty defect; over
+    -- disjoint ones the protocol's id tie-break is never consulted at all.
+    local pane = preview.placement(session.preview_win, "kitty_raw")
+    t.eq(pane.row, upper_part.placement.row, "the upper band starts at the top of the pane")
+    t.eq(
+      upper_part.placement.row + upper_part.placement.height,
+      lower_part.placement.row,
+      "the lower band starts exactly where the upper one ends -- no gap, no overlap"
+    )
+    t.eq(
+      pane.height,
+      upper_part.placement.height + lower_part.placement.height,
+      "and between them they are the whole pane"
+    )
+    t.ok(upper_part.placement.height >= 1, "with at least one row each")
+    t.ok(lower_part.placement.height >= 1, "so neither band is a placement of nothing")
+
+    -- Complementary in the document, which is the part a screenshot could not
+    -- show: the upper band ends at the document position the lower one starts
+    -- at, so no scanline is drawn twice or skipped across the seam.
+    local upper_region, lower_region = resident.hold(live, 0), resident.hold(live, 1)
+    local seam_from_upper = upper_region.doc_y + (upper_part.source.y + upper_part.source.height) / upper_region.scale_y
+    local seam_from_lower = lower_region.doc_y + lower_part.source.y / lower_region.scale_y
+    -- Exactly. Both slices start on a whole image pixel and share a scale, so
+    -- the seam rounds the same way in both -- there is no slack to hide a band
+    -- that was snapped on its own, which is a scanline drawn twice or skipped.
+    t.near(seam_from_upper, seam_from_lower, 1e-6, "the two bands meet at exactly one document position")
+    t.near(
+      session.applied_scroll_y,
+      upper_region.doc_y + upper_part.source.y / upper_region.scale_y,
+      0.75,
+      "and the pane's top row shows the position recorded as displayed"
+    )
+    t.near(
+      session.applied_scroll_y + 1020,
+      lower_region.doc_y + (lower_part.source.y + lower_part.source.height) / lower_region.scale_y,
+      1.5,
+      "with the bottom row exactly one viewport below it"
+    )
+
+    -- The whole pane, not either band. `interaction`, `caret`, `animation` and
+    -- the backend's overlay geometry all derive from this and all mean the box
+    -- the document is drawn into; a band would put every one of them inside the
+    -- top half of the preview.
+    t.eq(pane.height, session.last_placement.height, "the recorded placement stays the whole pane")
+
+    -- A float opening over the preview re-places what is on screen. Against a
+    -- composite that cannot be `move(session.image_id, ...)`: it would draw the
+    -- upper slice across the whole pane and report success. It runs on every
+    -- float, every cmdline entry and every 50 ms poll tick, so a composite would
+    -- survive about one keystroke.
+    compose_parts_seen = {}
+    local moved_ids = {}
+    local real_move = session.backend.move
+    session.backend.move = function(image_id, ...)
+      moved_ids[#moved_ids + 1] = image_id
+      return real_move(image_id, ...)
+    end
+    controller._reconcile_placement(session, true)
+    session.backend.move = real_move
+    t.eq({}, moved_ids, "a composite is never re-placed by moving its head")
+    t.eq(2, #compose_parts_seen, "it is recomposed, both bands together")
+    t.eq(4242, compose_parts_seen[1].image_id, "still the upper slice above")
+    t.eq(4343, compose_parts_seen[2].image_id, "and the lower one below")
+
+    -- Back inside a single slice for the assertions that follow.
+    scroll_to(inside(0))
 
     -- Browser-painted state that a clean region does not carry. Refusing to
     -- *fill* while a search is up is not enough on its own: a region captured

@@ -56,6 +56,10 @@ grid-outlives-the-document	lua/md-viewer/resident.lua	  state.grid = nil\n  stat
 slice-shrink-without-regrid	lua/md-viewer/controller.lua	      resident_invalidate(session, resident_key(session))\n      local retry = settle_options(session)	      local retry = settle_options(session)
 evicted-slice-not-freed	lua/md-viewer/resident.lua	    state.evictions = state.evictions + 1\n    evicted[#evicted + 1] = gone	    state.evictions = state.evictions + 1
 window-keeps-the-farthest	lua/md-viewer/resident.lua	        if distance > worst_distance or (distance == worst_distance and index < worst) then	        if worst == nil or distance < worst_distance then
+composite-emits-only-the-top-band	lua/md-viewer/controller.lua	    { image_id = lower.image_id, placement = band_placement(placement, split, rows - split), source = bands.lower },	
+seam-without-row-quantisation	lua/md-viewer/resident.lua	  local split = math.ceil((lower.doc_y - scroll_y) / row_h - EPS)	  local split = (lower.doc_y - scroll_y) / row_h
+bands-snapped-independently	lua/md-viewer/resident.lua	  local lower_top = round((seam - lower.doc_y) * lower.scale_y)	  local lower_top = round(seam * lower.scale_y) - round(lower.doc_y * lower.scale_y) + 1
+reconcile-moves-one-band	lua/md-viewer/controller.lua	    if #screen_parts(session) > 1 then	    if false then
 MUTATIONS
 
 caught=0; missed=0; skipped=0

@@ -356,6 +356,49 @@ return function(t)
       t.eq(requests_before, session.request_serial, "and asks the renderer for nothing")
       t.eq(filled_after_first, live.fills, "with no slice filled twice")
       t.eq(0, live.evictions, "and still nothing evicted")
+
+      -- ----------------------------------------------------------------
+      -- The boundary, in bytes the real backend produced.
+      --
+      -- A grid's edges never move, so a reader can park on one -- which is what
+      -- the bounded region could not survive, because its edges moved with
+      -- them and every crossing was an eviction and a refill. Here the viewport
+      -- is written as two bands, split at a whole cell row, in one write.
+      -- ----------------------------------------------------------------
+      local boundary = math.floor(resident.slice(grid, 0).doc_h - session.viewport_height_px) + 1
+      local at_first, at_last = resident.slices_for(grid, boundary, session.viewport_height_px)
+      t.eq(0, at_first, "sanity: that position starts in slice 0")
+      t.eq(1, at_last, "and genuinely needs slice 1 as well")
+
+      local straddles_before = live.straddles
+      emitted = {}
+      controller.scroll_to(session, boundary)
+      vim.wait(300, function() return false end, 25)
+      local seam_stream = table.concat(emitted)
+
+      t.eq(straddles_before + 1, live.straddles, "a viewport spanning two slices is composited")
+      t.eq(nil, seam_stream:match("\27_Ga=t"), "with no image transmitted for it")
+
+      -- Both bands, not merely a call that returned true. `crop_within` refuses
+      -- rather than clamps, so a band one pixel outside its slice places
+      -- *nothing* while the write still reports success -- which on screen is
+      -- half a preview and whatever was underneath the other half.
+      local placed = {}
+      for command in seam_stream:gmatch("\27_G([^\27]*)") do
+        if command:match("a=p") then
+          local id = command:match("i=(%d+)")
+          if id then placed[id] = (placed[id] or 0) + 1 end
+        end
+      end
+      t.eq(2, vim.tbl_count(placed), "two images are placed, which is both bands rather than one drawn twice")
+      for id, count in pairs(placed) do
+        t.ok(count >= 1, ("image %s places at least one region"):format(id))
+      end
+      local upper_id = tostring(resident.hold(live, 0).image_id)
+      local lower_id = tostring(resident.hold(live, 1).image_id)
+      t.ok(placed[upper_id] ~= nil, "one of them is the slice above the boundary")
+      t.ok(placed[lower_id] ~= nil, "and the other is the slice below it")
+      t.near(boundary, session.applied_scroll_y, 1.0, "and the position recorded is the one asked for")
     end
 
     -- ------------------------------------------------------------------
