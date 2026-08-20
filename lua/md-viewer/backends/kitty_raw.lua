@@ -313,8 +313,15 @@ end
 ---composed on top of the source window without ever meeting it in the same
 ---quantity. Mixing those two spaces is the defect class this separation exists
 ---to make unstateable.
+---
+---The fourth return is how many visible regions were **refused** by
+---`crop_within` and so emitted nothing. Callers that place one image edge to
+---edge have always ignored it and still do -- the arithmetic there cannot
+---produce an out-of-bounds crop. `M.compose` cannot ignore it: a band that
+---places nothing is a band of whatever was underneath it, and the caller is
+---told "success" either way.
 local function placement_sequences(item, placement, source)
-  local sequences, ids = {}, {}
+  local sequences, ids, refused = {}, {}, 0
   local offset = cell_offset()
   local src_x = source and source.x or 0
   local src_y = source and source.y or 0
@@ -349,9 +356,11 @@ local function placement_sequences(item, placement, source)
         col = placement.col + region.x,
       }, command(control))
       ids[#ids + 1] = pid
+    else
+      refused = refused + 1
     end
   end
-  return table.concat(sequences), ids
+  return table.concat(sequences), ids, refused
 end
 
 local function deletion_sequences(image_id, placement_ids)
@@ -1432,6 +1441,107 @@ function M.move(image_id, placement, source)
   -- failure, which is the convention `overlay_apply` and `animation_apply`
   -- already follow. Callers read it only on the branch they asked for.
   return image_id, { bytes = #payload }
+end
+
+---Place several already-uploaded images over one pane, in **one** write.
+---
+---`M.move` is this for one image and stays the primitive for every caller that
+---has one. What it cannot express is a viewport that spans two resident slices:
+---the pane is split at a whole cell row, the rows above it come from one image
+---and the rows below from another, and both have to arrive together. Two
+---`M.move` calls are two writes with a visible state between them -- the same
+---gap that made the preview blink and roll when a deletion went out ahead of
+---its replacement.
+---
+---`parts` is `{ { image_id, placement, source }, ... }`, each `placement` a cell
+---rectangle (a sub-rect of the pane, carrying the pane's own exclusion list --
+---the cut-outs are absolute, so `visible_regions` clips them per part) and each
+---`source` the rectangle of that image the part shows.
+---
+---`retired` is `{ { image_id, retain }, ... }`: images leaving the screen.
+---`retain` deletes only their placements, as `M.update`'s `retain_superseded`
+---does, so a resident slice scrolled out of view keeps its pixels. Images named
+---in `parts` supersede themselves and must not be listed.
+---
+---Nothing is mutated until every crop has been proved placeable. A part refused
+---halfway through would otherwise strand the placement ids of the parts already
+---committed, and they would never be deleted -- which is why `overlay_apply`
+---validates its whole rectangle set before touching its own bookkeeping.
+---@return boolean|nil ok, table|string stats_or_reason
+function M.compose(parts, retired)
+  if type(parts) ~= "table" or #parts == 0 then return nil, "compose needs at least one part" end
+
+  local built = {}
+  for index, part in ipairs(parts) do
+    local item = part.image_id and owned[part.image_id]
+    if not item then
+      return nil, ("part %d names image %s, which is not owned by md-viewer"):format(index, tostring(part.image_id))
+    end
+    if not (part.placement and (part.placement.width or 0) >= 1 and (part.placement.height or 0) >= 1) then
+      return nil, ("part %d has no placement rectangle"):format(index)
+    end
+    -- Building allocates placement ids but writes nothing to the item, so a
+    -- refusal below discards them harmlessly: ids are monotone and never reused,
+    -- which is the same property that lets old and new sets briefly coexist.
+    local sequence, ids, refused = placement_sequences(item, part.placement, part.source)
+    if refused > 0 or #ids == 0 then
+      return nil,
+        ("part %d places %d of %d regions; a band that draws nothing is worse than a refusal"):format(
+          index,
+          #ids,
+          #ids + refused
+        )
+    end
+    built[index] = {
+      item = item,
+      sequence = sequence,
+      ids = ids,
+      superseded = item.placement_ids or {},
+      placement = part.placement,
+      source = part.source,
+    }
+  end
+
+  local placing = {}
+  for _, entry in ipairs(built) do
+    placing[entry.item.id] = true
+  end
+
+  local additions, deletions = {}, {}
+  for _, entry in ipairs(built) do
+    additions[#additions + 1] = entry.sequence
+    deletions[#deletions + 1] = deletion_sequences(entry.item.id, entry.superseded)
+  end
+  local freed = 0
+  for _, gone in ipairs(retired or {}) do
+    local item = gone.image_id and owned[gone.image_id]
+    -- An image being re-placed this call supersedes itself above; naming it here
+    -- as well would delete the placements that were just made.
+    if item and not placing[item.id] then
+      if gone.retain then
+        deletions[#deletions + 1] = deletion_sequences(item.id, item.placement_ids or {})
+        item.placement_ids = {}
+      else
+        deletions[#deletions + 1] = deletion_command(item.id)
+        owned[item.id] = nil
+        freed = freed + 1
+      end
+    end
+  end
+
+  local double_buffer = resolve_double_buffer()
+  local addition, removal = table.concat(additions), table.concat(deletions)
+  local payload = double_buffer and (addition .. removal) or (removal .. addition)
+  if payload ~= "" then send(payload) end
+
+  local placed = 0
+  for _, entry in ipairs(built) do
+    entry.item.placement_ids = entry.ids
+    entry.item.placement = vim.deepcopy(entry.placement)
+    entry.item.source = entry.source and vim.deepcopy(entry.source) or nil
+    placed = placed + #entry.ids
+  end
+  return true, { bytes = #payload, placed = placed, parts = #built, freed = freed }
 end
 
 ---Take an image off the screen without giving up its pixels.

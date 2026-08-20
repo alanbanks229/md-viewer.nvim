@@ -60,6 +60,19 @@ return function(t)
   local function output() return table.concat(sequences) end
   local function reset_sequences() sequences = {} end
 
+  ---Every `a=p` placement in an output blob, as its numeric keys.
+  local function placements_in(text)
+    local found = {}
+    for control in text:gmatch("\27_G(a=p[^;]*);") do
+      local keys = {}
+      for key, value in control:gmatch("([%a])=(%-?%d+)") do
+        keys[key] = tonumber(value)
+      end
+      found[#found + 1] = keys
+    end
+    return found
+  end
+
   local function fake_png(extra_bytes)
     local header = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\100\0\0\0\100"
     if not extra_bytes then return header end
@@ -438,6 +451,108 @@ return function(t)
   t.ok(deletes_second < shows_second, "double_buffer=false deletes the old image before showing the new one")
   t.eq(1, #sequences, "the delete-then-place order is one write too -- only the order differs")
   raw_backend.clear(fourth_id)
+  config.reset()
+
+  -- ---------------------------------------------------------------------
+  -- M.compose: two images over one pane, in one write.
+  --
+  -- A viewport that spans two resident slices is shown as two bands -- the rows
+  -- above a split from one image, the rows below it from another. Both have to
+  -- arrive together: two `M.move` calls are two writes, and the terminal is free
+  -- to composite in between, which is the gap that made the preview blink and
+  -- roll when a deletion went out ahead of its replacement.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ terminal = { profile = "kitty" } })
+  local top_image = raw_backend.show(fake_png(), placement)
+  local bottom_image = raw_backend.show(fake_png(), placement)
+
+  -- The pane is 10 rows; the split is at row 4. Rows 0-3 show the last 40 px of
+  -- the top image, rows 4-9 the first 60 px of the bottom one -- complementary,
+  -- which is what makes the seam invisible.
+  local top_part = {
+    image_id = top_image,
+    placement = { row = 0, col = 0, width = 10, height = 4 },
+    source = { x = 0, y = 60, width = 100, height = 40 },
+  }
+  local bottom_part = {
+    image_id = bottom_image,
+    placement = { row = 4, col = 0, width = 10, height = 6 },
+    source = { x = 0, y = 0, width = 100, height = 60 },
+  }
+
+  reset_sequences()
+  local composed, compose_stats = raw_backend.compose({ top_part, bottom_part })
+  t.eq(true, composed, "a two-part compose succeeds: " .. tostring(compose_stats))
+  t.eq(1, #sequences, "and is one write, so nothing can be composited between the two bands")
+  local compose_output = output()
+  local compose_places = placements_in(compose_output)
+  t.eq(2, #compose_places, "one placement per band")
+  t.ok(compose_places[1].i ~= compose_places[2].i, "the two bands name different images")
+  t.eq(4, compose_places[1].r, "the top band is four rows")
+  t.eq(6, compose_places[2].r, "the bottom band is the remaining six")
+  t.eq(10, compose_places[1].r + compose_places[2].r, "and together they are exactly the pane")
+  -- The crops: complementary in the document, so no scanline is shown twice or
+  -- skipped. This is the seam, and it is arithmetic rather than z-order.
+  t.eq(60, compose_places[1].y, "the top band starts 60 px down its own image")
+  t.eq(40, compose_places[1].h, "and runs to that image's end")
+  t.eq(0, compose_places[2].y, "the bottom band starts at the top of its image")
+  t.eq(60, compose_places[2].h, "and covers the rest of the pane")
+  t.ok(compose_output:find("\27[s\27[1;1H", 1, true) ~= nil, "the top band is positioned at the pane's first row")
+  t.ok(compose_output:find("\27[s\27[5;1H", 1, true) ~= nil, "the bottom band at the row the split falls on")
+  t.eq(nil, compose_output:match("a=t,f=100"), "and nothing is uploaded: both images were already resident")
+
+  -- A refused part must take the whole call down, and must not have moved any
+  -- bookkeeping on its way. `placement_sequences` skips a region it cannot crop
+  -- and reports success, so without this a band simply does not draw and the
+  -- reader sees whatever was underneath it.
+  reset_sequences()
+  local off_end = {
+    image_id = bottom_image,
+    placement = { row = 4, col = 0, width = 10, height = 6 },
+    -- 80 + 60 runs 40 px past a 100 px image.
+    source = { x = 0, y = 80, width = 100, height = 60 },
+  }
+  local refused, refusal = raw_backend.compose({ top_part, off_end })
+  t.eq(nil, refused, "a part whose crop runs off its image refuses the compose")
+  t.ok(tostring(refusal):match("draws nothing"), "and says so: " .. tostring(refusal))
+  t.eq(0, #sequences, "a refused compose writes nothing at all")
+  -- The placements from the successful call are still the live ones: a refusal
+  -- that had already committed the first part would strand them forever.
+  reset_sequences()
+  t.eq(true, (raw_backend.compose({ top_part, bottom_part })), "the previous composite is still re-placeable")
+  local recompose = output()
+  for _, place in ipairs(compose_places) do
+    t.ok(
+      recompose:find(("a=d,d=i,q=2,i=%d,p=%d"):format(place.i, place.p), 1, true) ~= nil,
+      ("the placement %d of the refused call's predecessor is deleted, not stranded"):format(place.p)
+    )
+  end
+
+  t.eq(nil, raw_backend.compose({}), "a compose with no parts refuses")
+  t.eq(nil, raw_backend.compose({ { image_id = 999999, placement = placement } }), "as does one naming a foreign image")
+
+  -- Retirement: `retain` is the difference between a slice leaving the screen
+  -- and a slice being given up. Both go out in the same write as the placements
+  -- that replace them.
+  reset_sequences()
+  local kept_ok = raw_backend.compose({ top_part }, { { image_id = bottom_image, retain = true } })
+  t.eq(true, kept_ok, "a retained image is retired from the screen")
+  t.eq(1, #sequences, "in the same write as the band that replaces it")
+  t.eq(nil, output():match("d=I"), "and its pixels are not given up")
+  reset_sequences()
+  t.eq(
+    true,
+    (raw_backend.compose({ top_part, bottom_part })),
+    "so it can be placed again with no upload, which is the whole point of retaining it"
+  )
+  t.eq(nil, output():match("a=t,f=100"), "no upload was needed to bring it back")
+
+  reset_sequences()
+  t.eq(true, (raw_backend.compose({ top_part }, { { image_id = bottom_image, retain = false } })), "or given up")
+  t.ok(output():find(("a=d,d=I,q=2,i=%d"):format(bottom_image), 1, true) ~= nil, "which frees its data with d=I")
+  t.eq(nil, raw_backend.compose({ bottom_part }), "after which it is no longer owned")
+  raw_backend.clear_all()
   config.reset()
 
   -- Sub-cell calibration: the Kitty X/Y placement keys cancel the origin
@@ -1122,19 +1237,6 @@ return function(t)
   -- in it, which is `draw_width == 0`: the WezTerm panic itself.
   local zero_png = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\0\0\0\0\0"
   t.eq(false, pcall(raw_backend.show, zero_png, placement), "a PNG declaring 0x0 is rejected outright")
-
-  ---Every `a=p` placement in an output blob, as its numeric keys.
-  local function placements_in(text)
-    local found = {}
-    for control in text:gmatch("\27_G(a=p[^;]*);") do
-      local keys = {}
-      for key, value in control:gmatch("([%a])=(%-?%d+)") do
-        keys[key] = tonumber(value)
-      end
-      found[#found + 1] = keys
-    end
-    return found
-  end
 
   ---Assert #6344's preconditions against every placement in `text`, given the
   ---pixel dimensions of each image id it may reference.
