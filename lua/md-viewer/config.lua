@@ -186,6 +186,26 @@ M.defaults = {
     -- megabyte, and raising it on the plateau alone would be raising it on a
     -- unit nobody has confirmed.
     resident_memory_mb = 512,
+    -- Fill the whole document into the terminal when a preview opens, rather
+    -- than only the parts somebody has already scrolled through.
+    --
+    -- The wire is spent either way; this decides what on. A session measured on
+    -- an SSM tunnel sent 16.2 MB of moving frames that were thrown away against
+    -- 11.9 MB of slices that were kept, and 64% of its scroll positions could
+    -- not be drawn from pixels the terminal already had. Warming costs one
+    -- transfer per slice, once -- six of them on that document, ~8s at 0.80 MB/s
+    -- -- after which every scroll is a placement command.
+    --
+    -- It is not extra traffic. The one-payload invariant still holds: one slice
+    -- in flight, the wire held for its transfer, the next queued behind it. What
+    -- changes is that the slices go out in a run instead of waiting for the
+    -- reader to pause between each one, and that moving frames are not sent on
+    -- top of them while they do.
+    --
+    -- "auto" means wherever reusing sent pixels is already active, which is
+    -- gated to SSH -- a local terminal has no wire to save, so warming one would
+    -- spend memory to buy nothing.
+    warm_document = "auto",
   },
   sync = {
     source_to_preview = true,
@@ -440,6 +460,10 @@ local function validate(cfg)
   assert(
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
+  )
+  assert(
+    cfg.image.warm_document == "auto" or cfg.image.warm_document == "on" or cfg.image.warm_document == "off",
+    'md-viewer: image.warm_document must be "auto", "on", or "off"'
   )
   local reuse = cfg.image.reuse_sent_pixels
   assert(

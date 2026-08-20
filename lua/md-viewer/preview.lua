@@ -135,6 +135,18 @@ local function title_text(session)
   if session.visual_active then
     text = text .. "  %#ModeMsg#-- VISUAL" .. (session.visual_linewise and " LINE" or "") .. " --%*"
   end
+  -- The document filling itself into the terminal, while that is happening. In
+  -- the winbar rather than in the centred spinner (`M.start_loading`), because
+  -- the reader is looking at a real preview throughout -- a float over the middle
+  -- of it would cover the thing they are waiting to be able to scroll. The
+  -- spinner keeps its own job: when there is nothing on screen at all.
+  --
+  -- `session.warm_progress` is a string the controller stashes, not a number to
+  -- be interpreted here. The winbar renders; what counts as progress belongs to
+  -- the resident policy, and this file knows nothing about slices.
+  if session.warm_progress then
+    text = text .. ("  %%#Comment#optimising preview %s%%*"):format(session.warm_progress)
+  end
   local notice = fallback_notice(session)
   if notice then text = text .. "  " .. notice end
   return text

@@ -156,6 +156,7 @@ image ~
     ui_poll_ms                   50         poll for no-autocmd floats
     reuse_sent_pixels            "auto"     |md-viewer-reuse-sent-pixels|
     resident_memory_mb           512        |md-viewer-reuse-sent-pixels|
+    warm_document                "auto"     |md-viewer-reuse-sent-pixels|
 
 sync ~
     source_to_preview            true       the preview follows the source
@@ -846,9 +847,29 @@ The cost is memory in the terminal, so it is bounded: >lua
         -- How much decoded image the terminal may hold for one preview,
         -- in megabytes. 0 disables the reuse outright.
         resident_memory_mb = 512,
+        -- Fill the whole document in when the preview opens, rather than
+        -- only the parts you have already scrolled through.
+        warm_document = "auto",
       },
     }
 <
+`warm_document` is what makes the first pass cheap as well as the second. Left
+to itself, a slice is only captured when you scroll onto it, so the document
+fills in behind you and every screen you have not visited costs a frame -- one
+measured session spent 16.2 MB on moving frames it threw away against 11.9 MB
+of slices it kept, and could not draw 64% of its scroll positions from pixels
+the terminal already had.
+
+Warming sends the slices in a run instead, nearest to you first, and does not
+send moving frames on top of them while it does. The preview's winbar counts
+them off. It is not extra traffic -- one slice is in flight at a time and the
+wire is held for each transfer, exactly as before -- it is the same wire spent
+on pixels that are kept. Six slices is about eight seconds at 0.80 MB/s, after
+which every scroll is a placement command.
+
+A document larger than `resident_memory_mb` warms as much of itself as fits and
+then stops, so the count reaches its total rather than climbing forever.
+:MdViewerHealth names the value that would hold the whole thing.
 `image.resident_pan` was this option's name in the withdrawn 0.3.0-remote
 prereleases. A configuration still setting it keeps working -- it is converted,
 and warned about once per session, never refused.

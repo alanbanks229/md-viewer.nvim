@@ -1402,6 +1402,50 @@ return function(t)
       refuses("and not at all once the session has fallen back")
       live.fallback_reason = nil
       require("md-viewer.debounce").close(session, "scroll_settle_timer")
+
+      -- Warm-up: the same prefetch, driven as a phase rather than as something
+      -- that happens when the reader remembers to pause. Left to itself a slice
+      -- is only captured when somebody scrolls onto it, so the document fills in
+      -- behind the reader and every screen they have not visited costs a frame.
+      -- One measured session spent 16.2 MB on moving frames it threw away
+      -- against 11.9 MB of slices it kept.
+      do
+        local grid = assert(controller._resident_grid(session))
+        local fits = select(1, resident.slices_that_fit(grid, live.memory_px))
+        t.ok(fits >= 2, "sanity: this ceiling holds more than one slice, so there is a warm-up to have")
+        t.ok(controller._warming(session), "a document with slices still to fill is warming")
+
+        -- What the reader sees while it happens, and it is a count rather than a
+        -- spinner: the question they have is "how much longer", and a count
+        -- answers it where a spinner does not.
+        controller._refresh_warm_progress(session)
+        t.eq(
+          ("%d/%d"):format(#resident.slice_records(live), fits),
+          session.warm_progress,
+          "and says how far along it is"
+        )
+
+        -- Completion is what the ceiling can hold, not what the grid contains. A
+        -- document larger than image.resident_memory_mb never reaches every
+        -- slice, and a warm-up that could not finish would be an indicator that
+        -- never goes away and a suppression rule that never lifts.
+        local held, ceiling_at = #resident.slice_records(live), live.memory_px
+        live.memory_px = held * resident.slice_cost_px(grid)
+        t.eq(false, controller._warming(session), "a document that has filled the ceiling has finished warming")
+        controller._refresh_warm_progress(session)
+        t.eq(nil, session.warm_progress, "so the indicator goes away rather than counting to a total it cannot reach")
+        live.memory_px = ceiling_at
+
+        -- And the off switch, because this is a visible behaviour change.
+        local restore_warm = vim.deepcopy(config.get())
+        local warm_off = vim.deepcopy(config.get())
+        warm_off.image.warm_document = "off"
+        config.setup(warm_off)
+        t.eq(false, controller._warming(session), "image.warm_document = off means no warm-up at all")
+        config.setup(restore_warm)
+        t.ok(controller._warming(session), "and turning it back on resumes one")
+        controller._refresh_warm_progress(session)
+      end
     end
 
     -- A drag's clean base and an interact frame both replace whatever is on

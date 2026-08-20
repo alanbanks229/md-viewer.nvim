@@ -185,6 +185,17 @@ end
 -- and `show_cached` -- which sits between the two -- is what asks.
 local try_pan
 
+-- The warm-up, same reason: a fill landing has to tick the progress the reader
+-- is watching, and that happens well above where the policy that computes it
+-- lives.
+local warming
+local refresh_warm_progress
+
+-- The resident policy's own entry points, for the same reason: `apply_image`
+-- arms a prefetch when a frame lands, and it sits a long way above where the
+-- prefetch is decided.
+local hold_wire, settle_options, schedule_prefetch
+
 local function clear_image(session)
   clear_selection_overlay(session)
   M.clear_caret_overlay(session)
@@ -393,6 +404,12 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   end
   set_screen(session, { { image_id = image_id, placement = placement, source = opts.source } })
   session.last_placement = placement
+  -- A document warms itself from here, so a reader who opens a preview and reads
+  -- without scrolling still ends up with the whole thing held. Previously the
+  -- only things that armed a prefetch were a resident hit and a fill landing --
+  -- both of which need the reader to have scrolled first, so the feature only
+  -- ever helped someone who had already paid for a miss.
+  schedule_prefetch(session)
   -- Whether this frame has a browser-painted selection baked into it. Any
   -- capture taken while a DOM selection exists does, and `selection_active` is
   -- always updated before the frame is applied (interaction.lua sets it in the
@@ -748,7 +765,6 @@ end
 -- Defined further down, beside `scroll_settle_delay`, which they need and which
 -- belongs with the capture-scale rule it is the twin of. Declared here because
 -- `M.refresh` -- which sits between the two -- is what calls them.
-local hold_wire, settle_options, schedule_prefetch
 
 ---Whether this session may keep resident regions at all, and why not when it
 ---may not. Evaluated once, when the preview opens.
@@ -1618,6 +1634,10 @@ function M.refresh(session, render_options)
       -- between them, rather than in a burst -- which would be exactly the
       -- backlog the one-payload invariant exists to prevent.
       schedule_prefetch(session)
+      -- The reader is watching a count, so it has to move when the thing it
+      -- counts moves. Also the moment warm-up can *finish*, which is what takes
+      -- the indicator away and lifts the capture suppression.
+      refresh_warm_progress(session)
       finish()
       return
     end
@@ -1940,12 +1960,66 @@ end
 ---rather than inventing a second one nobody has measured. Re-armed after each
 ---prefetch lands, so the document fills outward one slice at a time with the
 ---wire idle between them.
+---Is this session still filling the document out for the first time?
+---
+---True until every slice the ceiling can hold is held. Not "every slice of the
+---grid": a document larger than `image.resident_memory_mb` never reaches that,
+---and a warm-up that could not finish would be a progress indicator that never
+---goes away and a suppression rule that never lifts.
+---
+---`image.warm_document` gates it. `"auto"` means "wherever reusing sent pixels is
+---already active", which is already gated to SSH -- there is no wire to save
+---locally, so warming one would be spending memory to buy nothing.
+function warming(session)
+  local live = session and session.resident
+  if not (live and live.enabled) or live.fallback_reason or not live.grid then return false end
+  local mode = config.get().image.warm_document
+  if mode == "off" then return false end
+  local fits = select(1, resident.slices_that_fit(live.grid, live.memory_px)) or 0
+  return #resident.slice_records(live) < fits
+end
+
+M._warming = warming
+
+---What the reader is told while that is happening, or nil once it is not.
+---
+---Stashed on the session rather than derived in `preview.lua`, which knows
+---nothing about slices and should keep it that way: the winbar's job is to
+---render a string, and deciding what the string says is policy.
+function refresh_warm_progress(session)
+  local live = session and session.resident
+  local was = session.warm_progress
+  if not (live and live.grid) or not warming(session) then
+    session.warm_progress = nil
+  else
+    local fits = select(1, resident.slices_that_fit(live.grid, live.memory_px)) or 0
+    session.warm_progress = ("%d/%d"):format(#resident.slice_records(live), fits)
+  end
+  if session.warm_progress ~= was then preview.update_title(session) end
+end
+
+M._refresh_warm_progress = refresh_warm_progress
+
+---Arm one prefetch for the moment the wire is next free.
+---
+---Two speeds, and the difference is what makes a warm-up a *phase* rather than
+---something that happens when nobody is looking. While the document is still
+---filling out, this waits only for the wire -- one slice follows the last as
+---soon as its bytes are through, so a six-slice document is warm in six
+---transfers rather than in six pauses the reader has to remember to take.
+---Afterwards it goes back to the settle delay, because then a prefetch really is
+---speculative and the reader stopping is the signal it was waiting for.
+---
+---Never faster than the wire either way. `upload_hold_until` is the one-payload
+---invariant and warming does not get to break it: the whole point is to spend
+---the link on pixels that are kept, not to spend more of it.
 function schedule_prefetch(session)
   local live = session and session.resident
   if not (live and live.enabled) or live.fallback_reason then return end
-  local settle = scroll_settle_delay(config.get().render)
   local draining = math.max(0, (live.upload_hold_until or 0) - vim.uv.now())
-  debounce.call(session, "resident_prefetch_timer", math.max(settle, draining), function()
+  local delay = draining
+  if not warming(session) then delay = math.max(scroll_settle_delay(config.get().render), draining) end
+  debounce.call(session, "resident_prefetch_timer", delay, function()
     if valid(session) then prefetch_slice(session) end
   end)
 end
@@ -1968,6 +2042,17 @@ local function hold_scroll(session)
   local live = session.resident
   if not (live and live.enabled) or live.fallback_reason then return false end
   local remaining = (live.upload_hold_until or 0) - vim.uv.now()
+  -- And the other half of the same argument. `upload_hold_until` covers the wire
+  -- still carrying a slice; this covers the slice still being *captured*, which
+  -- on this link is a second of renderer time with the transfer still to come.
+  -- A moving frame emitted in that window is bytes spent on a picture that will
+  -- be thrown away, in front of bytes spent on pixels that are kept -- and the
+  -- reader has already been told the preview is catching up, so the honest thing
+  -- is to let it. Bounded by the capture: there is no state here that can leave
+  -- the preview suppressed indefinitely.
+  if remaining <= 0 and live.fill.in_flight and warming(session) then
+    remaining = scroll_settle_delay(config.get().render)
+  end
   if remaining <= 0 then return false end
   live.desired_scroll_y = session.scroll_y or 0
   live.frames_suppressed_by_hold = live.frames_suppressed_by_hold + 1
