@@ -107,7 +107,9 @@ M.defaults = {
     -- scripts/resident/rss-calibrate.py -- so the honest unit is available and
     -- the proxy is not worth keeping. The key is renamed rather than
     -- reinterpreted: an existing `resident_budget_px = 8000000` silently read as
-    -- 8 MB would be a twelvefold reduction nobody asked for.
+    -- 8 MB would be a twelvefold reduction nobody asked for. A configuration
+    -- still setting the old key is converted at that measured rate and warned
+    -- about once -- see `migrate_resident_budget` for why it is not refused.
     --
     -- 512 MB holds about 41 megapixels: roughly thirteen viewports at a typical
     -- split, or a document of ~10,400 CSS px held whole. Documents shorter than
@@ -373,15 +375,11 @@ local function validate(cfg)
     type(cfg.image.resident_memory_mb) == "number" and cfg.image.resident_memory_mb >= 0,
     "md-viewer: image.resident_memory_mb must be non-negative"
   )
-  -- Loud rather than ignored. The two keys mean the same thing in different
-  -- units, so a config still setting the old one is a reader who believes a
-  -- bound is in force that is not -- and an unknown key here is silently
-  -- accepted, which would leave them believing it for good.
-  assert(
-    cfg.image.resident_budget_px == nil,
-    "md-viewer: image.resident_budget_px has been replaced by image.resident_memory_mb, which states the same "
-      .. "bound in megabytes (a resident pixel costs a measured ~13 bytes, so the old 8000000 px default was ~100 MB)"
-  )
+  -- `image.resident_budget_px` is not asserted against here. It is converted in
+  -- `M.setup` before this runs, loudly and once, because refusing a whole
+  -- configuration over a renamed key costs the reader their preview -- and on
+  -- the slow remote link this feature exists for, "no preview at all" is the
+  -- worst available way to learn about a rename.
   assert(type(cfg.browser.fast_png_encode) == "boolean", "md-viewer: browser.fast_png_encode must be boolean")
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")
   assert(
@@ -483,14 +481,79 @@ local function invalidate_terminal()
   if terminal and terminal.invalidate then terminal.invalidate() end
 end
 
+---Whether this Neovim has already been told about the key that was renamed.
+---Once per session, not once per `setup()`: the A/B harness re-applies a whole
+---configuration on every phase change, and a warning per call would be noise
+---nobody reads by the third one.
+local warned_about_budget_px = false
+
+---Accept `image.resident_budget_px`, the key `image.resident_memory_mb`
+---replaced, instead of refusing to load because of it.
+---
+---The two state the same bound in different units, so a config still setting the
+---old one is a reader who believes a ceiling is in force that is not. Refusing
+---outright says so loudly -- and costs them the preview entirely, which on the
+---slow remote link this whole feature exists for is the worst available way to
+---learn about a rename. Converting says it just as loudly and still renders the
+---document.
+---
+---The conversion is the measured one: ~13 bytes per resident pixel
+---(`scripts/resident/rss-calibrate.py`), so the old 8,000,000 px default becomes
+---99 MB rather than the "~32 MB" it was documented as. That is deliberately the
+---bound they *had*, not the bound they thought they had -- silently changing how
+---much a working configuration holds is the thing a rename must not do.
+---
+---`0` converts to `0`, which is what disables resident panning, so a
+---configuration that had turned it off stays off.
+local function migrate_resident_budget(opts)
+  local image = opts.image
+  local legacy = image and image.resident_budget_px
+  if legacy == nil then return end
+  image.resident_budget_px = nil
+
+  local note
+  if image.resident_memory_mb ~= nil then
+    note = (
+      "image.resident_budget_px has been replaced by image.resident_memory_mb, which you have already "
+      .. "set to %s -- the old key is being ignored."
+    ):format(tostring(image.resident_memory_mb))
+  elseif type(legacy) ~= "number" or legacy < 0 then
+    note = (
+      "image.resident_budget_px has been replaced by image.resident_memory_mb, and %s is not a pixel "
+      .. "count that can be converted -- the default of %d MB is in force."
+    ):format(vim.inspect(legacy), M.defaults.image.resident_memory_mb)
+  else
+    -- Lazily, so the one module config must not depend on at load time stays
+    -- that way; this runs only for a configuration that names the old key.
+    local bytes_per_px = require("md-viewer.resident").BYTES_PER_RESIDENT_PX
+    local megabytes = legacy == 0 and 0 or math.max(1, math.floor(legacy * bytes_per_px / 1048576 + 0.5))
+    image.resident_memory_mb = megabytes
+    note = (
+      "image.resident_budget_px has been replaced by image.resident_memory_mb. Converted %s px to "
+      .. "%d MB at the measured %d bytes per resident pixel; set image.resident_memory_mb = %d to silence "
+      .. "this."
+    ):format(tostring(legacy), megabytes, bytes_per_px, megabytes)
+  end
+
+  if not warned_about_budget_px then
+    warned_about_budget_px = true
+    vim.notify("md-viewer: " .. note, vim.log.levels.WARN)
+  end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
+  migrate_resident_budget(opts)
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_terminal()
   return current
 end
+
+---Exposed for the one test that has to observe the warning without a second
+---`setup()` having already consumed it.
+function M._forget_budget_px_warning() warned_about_budget_px = false end
 
 function M.get() return current end
 

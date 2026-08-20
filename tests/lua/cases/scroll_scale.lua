@@ -149,13 +149,35 @@ return function(t)
     t.eq(false, broke_ok, "a zero memory ceiling cannot hold a slice")
     t.ok(broke_reason:match("memory"), "and says so")
 
-    -- The key this replaced meant the same bound in a different unit, so a
-    -- config still setting it is a reader who believes a ceiling is in force
-    -- that is not. An unknown key is otherwise accepted in silence, which would
-    -- leave them believing it for good.
-    local kept, refusal = pcall(config.setup, { image = { resident_budget_px = 8000000 } })
-    t.eq(false, kept, "the pixel budget this replaced is refused rather than ignored")
-    t.ok(tostring(refusal):match("resident_memory_mb"), "naming what replaced it: " .. tostring(refusal))
+    -- The key this replaced meant the same bound in a different unit. It is
+    -- converted rather than refused: an unknown key accepted in silence would
+    -- leave a reader believing a ceiling is in force that is not, but refusing
+    -- the whole configuration costs them the preview -- and on the slow remote
+    -- link this exists for, "no preview at all" is the worst available way to
+    -- learn about a rename.
+    local warnings = {}
+    local real_notify = vim.notify
+    vim.notify = function(message) warnings[#warnings + 1] = message end
+    config._forget_budget_px_warning()
+    local kept = pcall(config.setup, { image = { resident_pan = "on", resident_budget_px = 8000000 } })
+    vim.notify = real_notify
+    t.eq(true, kept, "a configuration naming the replaced key still loads")
+    t.eq(nil, config.get().image.resident_budget_px, "with the old key gone")
+    -- 8,000,000 px at the measured 13 bytes each. Deliberately the bound they
+    -- *had* rather than the "~32 MB" it was documented as: silently changing how
+    -- much a working configuration holds is the one thing a rename must not do.
+    t.eq(99, config.get().image.resident_memory_mb, "converted at the measured bytes per resident pixel")
+    t.eq(1, #warnings, "and said so exactly once")
+    t.ok(tostring(warnings[1]):match("resident_memory_mb"), "naming what replaced it: " .. tostring(warnings[1]))
+
+    -- Zero has to survive the conversion, or a configuration that had turned
+    -- resident panning off comes back on.
+    config._forget_budget_px_warning()
+    vim.notify = function() end
+    config.setup({ image = { resident_pan = "on", resident_budget_px = 0 } })
+    vim.notify = real_notify
+    t.eq(0, config.get().image.resident_memory_mb, "a zero budget converts to a zero ceiling, which still disables")
+    t.eq(false, (controller._resident_gate(session)), "so the feature stays off rather than switching itself on")
     config.reset()
 
     state.remove(buf)
