@@ -3,42 +3,59 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.0-rc2] - 2026-08-20
+## [0.3.0-rc3] - 2026-08-20
 
-A cursor left standing on a cell the caret had already left.
+The preview showing you somewhere you had already left.
 
-Everything in `0.3.0-rc1` still applies, including that it is a validation
+Everything in `0.3.0-rc1` still applies, including that this is a validation
 prerelease and that stable `0.3.0` stays reserved until the throughput A/B has
 been re-run on the 0.80 MB/s link.
 
 ### Fixed
 
-- **Scrolling no longer leaves a second cursor behind.** Once the caret scrolled
-  out of the viewport, Neovim's own block cursor came back on screen — on the
-  reasoning that with no highlight drawn the real cursor is the only caret there
-  is. It is not one: it cannot move while the caret is off screen, so what
-  appeared was a block parked on the cell the caret occupied *before* it scrolled
-  away, pointing at whatever text had since moved under it and then sitting
-  perfectly still for the rest of the scroll. A caret scrolled out of view is
-  simply not drawn, which is what the code said everywhere except here. Focus
-  leaving the preview still gives your cursor back, from out of view as well.
-- **A notification opening over the preview no longer strands the caret.** When
-  the image is re-cropped around a float, the highlight rectangles measured
-  against the old geometry are dropped — the drag selection's always were, the
-  caret's were not, so it stayed drawn at its pre-float position until some later
-  motion or frame happened to redraw it. It now comes down and goes straight back
-  where it belongs, and only when the image actually moved: the same
-  reconciliation runs on a 50 ms tick, and redrawing on each one would be a
-  steady drip of writes down the link this release exists to keep quiet.
+- **Scrolling no longer falls minutes behind on a slow link.** md-viewer pauses
+  after a large upload so the frames produced during it do not queue up behind
+  it — and that pause had never once run. It is a timer over a link rate, and
+  the rate md-viewer worked out for itself on an SSM tunnel was 101,169 bytes
+  per millisecond, about 101 MB/s, which made the pause 2 ms. Forty-six
+  megabytes went at a link that could not carry them, so scrolling to the top of
+  a document put a few hundred bytes of "show me the top" behind minutes of
+  stale pixels, and what you saw was wherever you had been a while ago.
+- **md-viewer no longer guesses that rate at all.** It could not measure it and
+  the reason turns out to be structural: `nvim_ui_send` hands bytes to Neovim's
+  own queue and returns, so from inside a plugin a slow link and a fast one are
+  indistinguishable. Measured against a host shaped to 0.80 MB/s, 24 MB was
+  accepted from inside Neovim in 0.03 seconds. **Set
+  `render.ssh_link_bytes_per_sec`** — `scripts/ssh-link-speed.sh` measures it
+  from the shell, where a write does meet the link, and prints the line to
+  paste. `:MdViewerHealth` names the path and says so once per session if you
+  have not.
+- **A stated rate is no longer truncated.** The pause was capped at twice the
+  settle delay, which is right for a number md-viewer inferred and wrong for one
+  you told it: at 0.80 MB/s a 1.1 MB slice needs about 1.4 seconds and was held
+  for 0.8. Cutting a measurement short does not make the bytes arrive sooner.
 
 ### Added
 
+- **The document is filled in when the preview opens**, nearest to you first,
+  instead of only the parts you have already scrolled through — and moving
+  frames are not sent on top of the slices while it happens. The same measured
+  session spent 16.2 MB on frames it discarded against 11.9 MB it kept; this is
+  the same wire spent on the pixels that stay. The winbar counts the slices off.
+  About eight seconds for a six-slice document at 0.80 MB/s, after which every
+  scroll is a placement command. `image.warm_document = "off"` disables it.
+- **`:MdViewerHealth` now names the number.** A document that does not fit said
+  so; it now also says what to set `image.resident_memory_mb` to so that it does.
 - **`scripts/rig/provision.sh`** turns an SSH host into a machine you can
-  reproduce the remote-Neovim mode on — Neovim, Node, Chrome, your config and a
-  fixed scroll fixture — so a report from that mode no longer needs a second
-  computer to chase down. `--shape` puts it behind an 800 kbit/s link, because a
-  LAN is not where these get reported. See `scripts/README.md`; nothing in the
-  plugin itself changes.
+  reproduce the remote-Neovim mode on, which is where this was found and fixed.
+
+### Fixed in 0.3.0-rc2
+
+- Scrolling the caret out of view left Neovim's own block cursor standing on the
+  cell it had left, pointing at whatever had moved under it. A caret scrolled out
+  of view is simply not drawn.
+- A notification opening over the preview left the caret drawn at its
+  pre-re-crop position until some later motion redrew it.
 
 ## [0.3.0-rc1] - 2026-08-20
 
