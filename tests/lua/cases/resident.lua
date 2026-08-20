@@ -339,7 +339,16 @@ return function(t)
   with_selection.selection_active = true
   t.eq(baseline, resident.key(with_selection), "selection state is not part of a region's identity")
 
-  t.eq(4 * IMAGE_W * 4040, resident.decoded_bytes(region), "the decoded-size estimate is four bytes a pixel")
+  -- Measured by scripts/resident/rss-calibrate.py rather than assumed: iTerm2
+  -- holds 12-13 bytes for every resident pixel, not the 4 a naive RGBA surface
+  -- would suggest. Pinned here because every budget and every diagnostic stated
+  -- in these units was understating the real cost by more than 3x.
+  t.eq(13, resident.BYTES_PER_RESIDENT_PX, "a resident pixel costs what the calibration measured")
+  t.eq(
+    13 * IMAGE_W * 4040,
+    resident.decoded_bytes(region),
+    "so the decoded-size estimate is thirteen bytes a pixel, measured"
+  )
 
   -- ---------------------------------------------------------------------------
   -- The cache: bounded, deterministic, and it hands back what it evicts.

@@ -27,9 +27,10 @@ end
 ---
 ---`hits` against `misses` is the whole question: a hit is a scroll that cost
 ---placement bytes instead of a frame. `used_px` beside `budget_px` says how
----close the bound is to binding, and `decoded_mb` is the estimate that bound
----exists to control -- labelled an estimate because 4 bytes a pixel is an
----assumption about a representation no terminal documents.
+---close the bound is to binding, and `decoded_mb` is the quantity that bound
+---exists to control -- still called an estimate, because it converts pixels to
+---bytes at a rate measured on one terminal (iTerm2, 12-13 B/px, see
+---`resident.BYTES_PER_RESIDENT_PX`) rather than one any terminal documents.
 local function resident_report(session)
   local live = session.resident
   if not live then return nil end

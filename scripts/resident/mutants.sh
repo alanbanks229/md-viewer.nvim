@@ -45,6 +45,7 @@ region-freed-as-side-effect	lua/md-viewer/controller.lua	        retain_supersed
 occlusion-frees-instead-of-hides	lua/md-viewer/controller.lua	        local hide = gone.retain and session.backend.hide	        local hide = nil
 dead-page-never-rebuilt	renderer/src/browser.js	    if (this.context && this.page && !this.page.isClosed() && this.deviceScaleFactor === scale) return;	    if (this.context && this.deviceScaleFactor === scale) return;
 slices-without-row-overlap	lua/md-viewer/resident.lua	  local overlap_img = math.max(1, math.ceil(OVERLAP_ROWS * row_h * scale))	  local overlap_img = 1
+decoded-bytes-assumes-four	lua/md-viewer/resident.lua	local BYTES_PER_RESIDENT_PX = 13	local BYTES_PER_RESIDENT_PX = 4
 invalidate-only-when-scrolled	lua/md-viewer/controller.lua	    if not filling and session.resident and session.resident.key then	    if false and session.resident and session.resident.key then
 invalidate-during-a-fill	lua/md-viewer/controller.lua	    if not filling and session.resident and session.resident.key then	    if session.resident and session.resident.key then
 stale-part-list-trusted	lua/md-viewer/controller.lua	  if parts and parts[1] and parts[1].image_id == session.image_id then return parts end	  if parts and #parts > 0 then return parts end

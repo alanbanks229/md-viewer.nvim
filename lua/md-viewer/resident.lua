@@ -690,14 +690,34 @@ function M.drain(state)
   return regions
 end
 
----An estimate of what a region costs the terminal once decoded, in bytes.
+--- What one resident pixel costs the terminal once decoded, in bytes.
 ---
----Labelled an estimate because it is one: iTerm2's internal representation is
----not documented, and 4 bytes per pixel is the assumption a measurement has to
----check rather than a fact it can rest on. Budgeting is done in pixels for
----exactly that reason -- `renderer/src/media.js` already states the animation
----upload budget the same way, so the two are comparable.
-function M.decoded_bytes(region) return (region.image_w or 0) * (region.image_h or 0) * 4 end
+--- **Measured, not assumed.** `scripts/resident/rss-calibrate.py` transmits
+--- PNGs of known pixel counts, places each one (a terminal may decode lazily,
+--- so an image never drawn would report nothing), samples iTerm2's RSS and then
+--- frees them. Three runs of 6/8/10 slices at 1980x4080 on iTerm2 3.6.11 /
+--- macOS 15 put it at **12-13 bytes per pixel**, and this budgets at the top of
+--- that band.
+---
+--- Everything here previously assumed 4, which is what a naive RGBA surface
+--- would cost. It is not what a terminal actually holds, and the difference is
+--- not a rounding error: every diagnostic and every budget stated in these
+--- units understated the real cost by more than 3x. The shipped
+--- `resident_budget_px` default of 8,000,000 px was documented as "~32 MB" and
+--- is ~100 MB.
+local BYTES_PER_RESIDENT_PX = 13
+
+M.BYTES_PER_RESIDENT_PX = BYTES_PER_RESIDENT_PX
+
+---What a region costs the terminal once decoded, in bytes.
+---
+---Still called an estimate, because the number it multiplies by is a
+---measurement of one terminal on one platform rather than a documented
+---representation -- but a measured estimate, not a guessed one. Budgeting is
+---done in pixels so the figure has exactly one home:
+---`renderer/src/media.js` already states the animation upload budget the same
+---way, so the two are comparable.
+function M.decoded_bytes(region) return (region.image_w or 0) * (region.image_h or 0) * BYTES_PER_RESIDENT_PX end
 
 -- ---------------------------------------------------------------------------
 -- The wire.

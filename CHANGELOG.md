@@ -5,6 +5,26 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+### Fixed
+
+- **A resident pixel costs about 13 bytes in the terminal, not 4, so
+  `image.resident_budget_px` has always been worth roughly three times what it
+  was documented as.** The default of 8,000,000 px was described here and in
+  `:help md-viewer-resident-pan` as "~32 MB"; measured, it is ~100 MB. Nothing
+  about how much the plugin actually holds has changed — only what it told you
+  it was holding, which was wrong by a factor of three in the reassuring
+  direction. `:MdViewerDebug`'s `decoded_mb_estimate` now reports the measured
+  figure. `scripts/resident/rss-calibrate.py` is the measurement: PNGs of known
+  pixel counts transmitted *and placed* (a terminal may decode lazily, so an
+  image never drawn reports nothing), iTerm2's RSS sampled, then freed and
+  sampled again. Three runs on iTerm2 3.6.11 / macOS 15 put it at 12–13 B/px,
+  and it also settled two open questions: 94% of a first pass's pages were
+  served to an identical second pass, so the memory does come back, and a slice
+  still answered a placement after ten more had arrived, so iTerm2 does not
+  self-evict. The sustained-memory question — does it plateau over half an hour
+  on a real link — is still unanswered; `scripts/resident/rss.sh` has never
+  been run.
+
 ## [0.3.0-remote.2] - 2026-08-19
 
 Prerelease, on the same validation channel as `0.3.0-remote.1`. This is the
@@ -35,7 +55,9 @@ the sustained-memory run exist.
   it was and byte-for-byte identical otherwise.
 
   Two bounds are load-bearing and both are stated as invariants rather than
-  intentions. `image.resident_budget_px` (default 8,000,000 px, ~32 MB estimated)
+  intentions. `image.resident_budget_px` (default 8,000,000 px — stated here as
+  "~32 MB estimated" on an assumed 4 bytes a pixel, and since **measured** at
+  ~100 MB; see the Unreleased entry above)
   is the *invariant* and the region's height is derived from it, checked against
   the PNG's real dimensions at upload — a region nominated as "two viewports" and
   checked afterwards is how a budget gets exceeded by an amount nobody sees until

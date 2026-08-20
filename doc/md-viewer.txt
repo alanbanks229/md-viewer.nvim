@@ -806,8 +806,9 @@ The cost is memory in the terminal, so it is bounded and conservative: >lua
         -- "auto" follows the terminal profile, "on" forces it (to qualify a
         -- new terminal), "off" disables it.
         resident_pan = "auto",
-        -- Decoded pixels the terminal may hold for one preview. Roughly four
-        -- bytes each, so this is about 32 MB.
+        -- Decoded pixels the terminal may hold for one preview. Measured at
+        -- 12-13 bytes each on iTerm2, so this is about 100 MB -- not the
+        -- 32 MB an assumed four bytes a pixel once made it look like.
         resident_budget_px = 8000000,
       },
     }

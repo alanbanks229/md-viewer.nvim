@@ -3,11 +3,15 @@
 #
 # The one measurement that has to exist before `image.resident_budget_px` is
 # raised. Budgeting is done in pixels because a terminal holding a compressed
-# PNG does not consume `png_bytes`, it consumes a decoded surface -- and 4 bytes
-# per pixel is an assumption about a representation no terminal documents. This
-# is what checks it.
+# PNG does not consume `png_bytes`, it consumes a decoded surface -- and what
+# that surface costs is a property of the terminal rather than of the image.
+# `scripts/resident/rss-calibrate.py` has since measured it at 12-13 bytes per
+# pixel on iTerm2, against the 4 this project assumed for its first three
+# releases; that answers questions 1 and 2 below in a minute, on a synthetic
+# workload. This is the sustained run, and it is still the only thing that can
+# answer 3.
 #
-# Three questions, and all three need the same run:
+# Three questions, and only the third now needs half an hour:
 #
 #   1. How much resident size does the terminal take per resident megapixel?
 #   2. Does it come back when the region is evicted (`a=d,d=I`)?

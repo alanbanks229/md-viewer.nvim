@@ -101,8 +101,10 @@ M.defaults = {
     --
     -- Pixels rather than bytes, matching the animation upload budget in
     -- renderer/src/media.js, because that is the unit both are really spending
-    -- and it makes the two comparable. Four bytes a pixel is the working
-    -- assumption for what it costs, so this is roughly 32 MB.
+    -- and it makes the two comparable. A resident pixel costs a *measured*
+    -- 12-13 bytes on iTerm2 (scripts/resident/rss-calibrate.py), not the 4 a
+    -- naive RGBA surface would suggest, so this default is roughly 100 MB --
+    -- three times what it was documented as while the 4-byte figure stood.
     --
     -- Deliberately small. One region a little under two viewports at a typical
     -- split size, which buys about a viewport of free scrolling in each
