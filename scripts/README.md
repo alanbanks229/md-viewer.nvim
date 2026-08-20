@@ -14,6 +14,10 @@ a *network with no direct route out*, and `remote-projects/` needs a *reachable
 ssh host*. `resident/` additionally needs a *real terminal holding real
 pixels*, since what it measures is that terminal's memory.
 
+`rig/` is the odd one out: it measures nothing, it *builds* one of those pieces
+of hardware. Given an SSH host it installs what md-viewer needs to run on the
+far end, so the remote mode can be reproduced without a second computer.
+
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
 ## `overlay/live/` — end-to-end gesture regression
@@ -283,6 +287,53 @@ and nothing is written to disk. An INCONCLUSIVE verdict names what was wrong
 with the run itself — the second phase was not a remote buffer, or this
 Neovim is itself over SSH, which is the other feature (`:help
 md-viewer-ssh`).
+
+## `rig/provision.sh` — a host you can reproduce the SSH mode on
+
+Not a measurement. This is the one harness whose output is a *machine*: an SSH
+host set up to run Neovim on the far end, so the mode most defects are reported
+in can be reproduced without a second computer.
+
+Note which remote mode this is. `remote-projects/` above is the other one —
+Neovim local, only file contents crossing — where `terminal.detect().ssh` is
+false and reusing sent pixels stays off by design. Here Neovim runs on the host,
+every frame comes back through the pty, and the resident-slice machinery is
+live.
+
+```sh
+scripts/rig/provision.sh              # the default host
+scripts/rig/provision.sh some-host
+scripts/rig/provision.sh --check      # report state, change nothing
+scripts/rig/provision.sh --shape      # throttle egress to 800kbit/40ms
+scripts/rig/provision.sh --unshape
+```
+
+Installs Neovim from the release tarball (jammy ships 0.6, and the snap has
+already failed on one of these hosts), Node from NodeSource, and **Google
+Chrome rather than the Chromium snap** — a snap is confined and Playwright hands
+`chromium.launch` a profile directory outside the paths it may read, so a
+confined binary fails at launch instead of degrading. Then it clones the vault,
+symlinks `~/.config/nvim` at it exactly as on the Mac, and generates
+`~/mdv-rig/scroll-test.md` — several viewports of mixed content, generated
+rather than committed so that "scroll to the end and watch it" is the same
+observation every time.
+
+The check that matters most is the cheapest to skip. `TERM_PROGRAM` does not
+survive SSH, so iTerm2 and WezTerm are identified through `LC_TERMINAL`, which
+arrives only because sshd accepts `LC_*`. Without it the profile falls back,
+`resident_pan` is not enabled for it, and the rig exercises a *different code
+path* than the machine being reproduced — with nothing reporting a fault. Run
+`--check` from the terminal you will actually test in; it reports the variable
+as it arrived on that connection rather than guessing.
+
+Confirm the host is really in the mode you wanted before trusting a run:
+`:MdViewerHealth` should say `ssh session` and name your terminal's profile, and
+`reuse sent pixels` should be on rather than `off -- local session`.
+
+`--shape` throttles everything leaving the host, this ssh session included. A
+LAN is not the link defects get reported over, and a timing-sensitive one will
+not reproduce at LAN speed; 800 kbit/s is the rate `resident.lua`'s wire
+constants were tuned against.
 
 ## `remote-images/probe.lua` — does a blocked image still cost the whole preview?
 
