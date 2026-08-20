@@ -849,10 +849,10 @@ The cost is memory in the terminal, so it is bounded: >lua
       },
     }
 <
-`image.resident_pan` was this option's name up to 0.3.0-remote.2. A
-configuration still setting it keeps working -- it is converted, and warned
-about once per session, never refused.
-<
+`image.resident_pan` was this option's name in the withdrawn 0.3.0-remote
+prereleases. A configuration still setting it keeps working -- it is converted,
+and warned about once per session, never refused.
+
 Only over SSH, and only on a terminal validated for it -- currently iTerm2.
 Everywhere else the ordinary capture path is unchanged. See
 |md-viewer-terminals| for why WezTerm and Warp are excluded.

@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """What a resident megapixel actually costs the terminal.
 
-`image.resident_budget_px` is stated in pixels and reported as megabytes through
-one assumption -- four bytes per pixel -- about a representation no terminal
-documents. Every budget decision this project has made rests on that number and
-none of them has measured it. This does.
+`image.resident_memory_mb` is stated in megabytes and converted to pixels through
+one number -- bytes per resident pixel -- about a representation no terminal
+documents. Every budget decision this project makes rests on it, and for three
+releases it was an assumed four. This is the measurement that replaced the
+assumption: 12-13 B/px on iTerm2 3.6.11 / macOS 15, across three runs.
+
+It is not corroborated. The only real session ever sampled held twelve slices,
+budgeted at ~342 MB by that conversion, while `ps -o rss=` saw ~10 MB move --
+see `rss.sh` and docs/terminal-support.md. Re-running this against real document
+slices rather than the synthetic gradients below is the cheap experiment that
+would separate "the sampler cannot see it" from "gradients do not generalise".
 
 It is deliberately not `rss.sh`. That samples a real preview on the far end of a
 real link for half an hour and answers "does it plateau"; this answers the prior

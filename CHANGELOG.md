@@ -3,272 +3,25 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0-rc1] - 2026-08-20
 
-### Changed
+Two remote topologies, opposite ways round.
 
-- **Resident panning now covers the whole document, as a grid of slices, instead
-  of one region that followed you around.** The mechanism shipped in
-  `0.3.0-remote.2` worked and the policy around it did not: the region was
-  planned around wherever you had stopped, so its edges moved with you and
-  crossing one threw it away and paid for it again. On the link this was built
-  for that measured **38% more traffic than sending a frame every time** — 14
-  fills and 13 evictions in 141 seconds, ~971 KB each. A small sharp window that
-  kept having to be repaid for.
+If Neovim runs on your own machine and only the *project* is on the far end —
+`rsync://`/`scp://` buffers, as remote-ssh.nvim and netrw create them — the
+preview now renders at full local quality. The document's text is already in the
+local buffer, so no rendered pixel and no render request ever touches SSH; only
+the files a document references cross, once each, off the interactive path.
 
-  The document is now cut into fixed slices of about two viewports, and a
-  boundary is a property of the *document* rather than of where you happened to
-  stop. A slice is captured once and kept, so going back over ground you have
-  already read costs a placement command and nothing else — and unlike before,
-  that stays true across boundaries, because a viewport spanning two slices is
-  drawn from both, split at a whole character row, in a single write. On a
-  document that fits the memory ceiling nothing is ever given up; `evictions` in
-  `:MdViewerDebug` staying at zero is the property, and it is asserted directly
-  rather than hoped for.
+If Neovim itself runs on the far end and your terminal is local, scrolling stops
+re-sending pixels the terminal already has. 0.2.0 made each frame smaller; this
+removes the frame. The two are kept deliberately distinct: SSH detection answers
+for Neovim's own transport, never for a buffer's origin.
 
-  While you are reading rather than scrolling, the idle link fills in the slices
-  around you, nearest first, so the rest of the document is usually already
-  there when you reach it. That never delays anything you are waiting for: a
-  slice you actually need always goes first, only one payload is ever in flight,
-  and a prefetch is refused outright rather than evicting to make room for a
-  guess — evicting on a guess is the exact churn this release removes.
-
-- **`image.resident_pan` is now `image.reuse_sent_pixels`.** Same three values,
-  same behaviour; only the name changes. The old one was the mechanism's name —
-  pixels held resident in the terminal, a crop panned across them — and a reader
-  setting an option wants to know what they get. What they get is: **a slice is
-  sent once and never sent again while it stays in the window.**
-
-  Deliberately not named "keep the document": no memory ceiling can promise that,
-  because there is always a longer document, and this project does not ship
-  claims it cannot enforce. The promise above holds at every size — past
-  `image.resident_memory_mb` the window slides and crossing it costs an upload,
-  while pixels still in the window are still reused.
-
-  A configuration still setting `image.resident_pan` keeps working: it is
-  converted and warned about once per session, never refused. Refusing over a
-  renamed key costs you the preview, which on a slow remote link is the worst
-  available way to find out about a rename. `image.resident_memory_mb` keeps its
-  name — it was renamed itself one release ago, and a second migration for one
-  option in consecutive prereleases is a cost you would be paying for our
-  tidiness.
-
-- **Both diagnostics now say when a document does not fit the memory allowed for
-  it.** `:MdViewerHealth`'s `reuse sent pixels` line reports either "whole
-  document held (N slices)" or "N of M slices fit — crossing the rest costs an
-  upload each time"; `:MdViewerDebug` reports `document_fits` and
-  `slices_that_fit`. Not an error and not a refusal: a document larger than its
-  memory bound is an ordinary situation. It was simply only visible as
-  `evictions` climbing, which you had to know to look for.
-
-- **`image.resident_budget_px` is now `image.resident_memory_mb`, default 512.**
-  Megabytes are what you are actually spending; pixels were only ever a proxy for
-  them through a conversion nobody had measured, and now that the conversion is
-  measured the proxy is not worth keeping. A configuration still setting the old
-  key keeps working: it is converted at the measured ~13 bytes per pixel and
-  warned about once, so `resident_budget_px = 8000000` becomes 99 MB — the bound
-  you had, not the "~32 MB" it was documented as. Refusing the configuration
-  outright would have cost you the preview over a rename, which on a slow remote
-  link is the worst possible way to find out about one.
-
-  `:MdViewerDebug`'s `resident` block changes with it: `slices_resident` against
-  `grid_slices` says how much of the document is held, `resident_px` against
-  `memory_px` how close the ceiling is, and `straddles` / `straddle_misses`
-  whether boundaries are being drawn or falling back. `plan_refusal` becomes
-  `grid_refusal`, which has only three causes and names which.
-
-- **New `render.ssh_link_bytes_per_sec`: tell md-viewer how fast your link
-  actually is.** Default `nil`, and only resident panning reads it. While an
-  uploaded slice is still crossing a slow link, md-viewer declines to send moving
-  frames that would only queue behind it and arrive at positions you have already
-  left — and how long that lasts is arithmetic on a link speed. Set it to
-  `800000` for a 0.80 MB/s tunnel; `scp` of a large file reports the same
-  quantity. Unset, the pause falls back to the settle delay, which is a safe
-  guess rather than an answer.
-
-  Asked for rather than inferred, because it cannot be found out. Writing to the
-  terminal returns when the operating system accepts the bytes, not when they
-  arrive, so on a healthy connection the write looks instantaneous however slow
-  the link is — and the terminal *can* be asked to acknowledge an upload, but its
-  reply lands on Neovim's own stdin, which a plugin cannot read.
-
-### Fixed
-
-- **Opening `:MdViewerDebug` or `:MdViewerHealth` threw away every resident
-  slice, and the report said `evictions: 0` while it did.** Both opened a
-  full-width split at the bottom of the screen, which takes rows from the
-  preview — and the preview's height is part of what resident slices are keyed
-  on, because the document reflows at a different viewport. So checking the
-  numbers invalidated the whole grid and paid for it again, twice per look: once
-  opening the split, once closing it. On a slow link that is the entire document
-  re-uploaded because you wanted to see how it was doing. Both commands now open
-  in a new tab, which leaves every window in the current tab exactly where it
-  was. `scripts/resident/ab.lua`'s report does the same.
-
-- **A quarter of a real session's traffic was spent on slices that were dropped,
-  and nothing reported it.** 18 fills, 12 slices held, `stale 0 / abandoned 0 /
-  evictions 0` — the six that went missing were ~2.5 MB, and the only way to
-  notice was to subtract two numbers on opposite ends of the report. They had
-  been *drained*: invalidating the grid gives every slice back at once, which is
-  correct — a resize, a colorscheme change, an edit or `:MdViewerRefresh` makes
-  the held pixels stop describing the document — but it is not an eviction, and
-  `evictions` was the only thing anyone was watching.
-
-  `:MdViewerDebug`'s `resident` block gains `dropped_slices` and `drains` (the
-  slices, and the occasions), plus `undisplayed_fills` for a fill the backend
-  refused to draw, which was the one path out of the fill code with no counter on
-  it at all. A capture superseded before it landed is now `superseded_fills`
-  rather than `stale_fills`: it never reached the point `fills` is counted at, so
-  folding it in made `stale_fills` a population `fills` did not contain. What
-  those add up to is now an identity —
-  `fills == slices_resident + stale + abandoned + undisplayed + evictions +
-  dropped_slices` — asserted across a whole-document walk, and printed as
-  `UNACCOUNTED` by `ab.lua` when it fails. An identity rather than a counter
-  because a counter only catches the drop somebody thought to count, which is
-  exactly how these six got out.
-
-- **The link speed `:MdViewerDebug` reported was wrong by about 170×, and the
-  anti-backlog pause it feeds had therefore never run.** A real session showed
-  `measured link: 139,058 B/ms` for a tunnel doing 800 — because the figure came
-  from timing md-viewer's own write to the terminal, and that write returned as
-  soon as SSH had buffered the payload rather than when it had carried it. The
-  pause computed from a link 170× too fast is no pause at all, so
-  `frames_suppressed_by_hold` sat at 0 while the documentation claimed at most
-  one image payload was outstanding per session.
-
-  Three changes, none of which invent a measurement that does not exist. A sample
-  implying a link faster than gigabit line rate is now discarded rather than
-  averaged in, and counted as `wire_samples_discarded`. The rate the pause is
-  computed from now prefers `render.ssh_link_bytes_per_sec` above anything
-  inferred. And the diagnostics stop presenting an inference as a measurement:
-  `:MdViewerDebug` reports `link_bytes_per_ms` beside `link_rate_source`
-  (`configured`, `estimated` or `unknown`), and `scripts/resident/ab.lua` prints
-  `link rate used` rather than `measured link` — saying `not measurable` where it
-  used to print a number. `docs/architecture.md` now states what actually holds a
-  session to one payload (a single fill slot, plus coalescing) and describes the
-  pause as the best-effort damage control it is.
-
-- **A resident pixel costs about 13 bytes in the terminal, not 4, so
-  `image.resident_budget_px` has always been worth roughly three times what it
-  was documented as.** The default of 8,000,000 px was described here and in
-  `:help md-viewer-resident-pan` as "~32 MB"; measured, it is ~100 MB. Nothing
-  about how much the plugin actually holds has changed — only what it told you
-  it was holding, which was wrong by a factor of three in the reassuring
-  direction. `:MdViewerDebug`'s decoded-megabyte figure now uses it.
-  `scripts/resident/rss-calibrate.py` is the measurement: PNGs of known pixel
-  counts transmitted *and placed* (a terminal may decode lazily, so an image
-  never drawn reports nothing), iTerm2's RSS sampled, then freed and sampled
-  again. Three runs on iTerm2 3.6.11 / macOS 15 put it at 12–13 B/px, and it also
-  settled two open questions: 94% of a first pass's pages were served to an
-  identical second pass, so the memory does come back, and a slice still answered
-  a placement after ten more had arrived, so iTerm2 does not self-evict.
-
-### Measured
-
-- **iTerm2 plateaus. The sustained-memory question is closed.** Open since
-  `0.3.0-remote.2` and deferred to by both `docs/terminal-support.md` and
-  `scripts/resident/rss.sh`, which had never been run: does a terminal holding a
-  whole document's slices creep over half an hour, or hold steady? A real session
-  over the 0.80 MB/s link says it holds steady. Resident size rose ~10 MB above
-  baseline across the run, with transient peaks on resize that relaxed
-  afterwards. No creep, no leak. `image.resident_memory_mb` is no longer waiting
-  on that measurement.
-
-- **The same run put the megabyte figure itself in doubt, and the diagnostics now
-  say so.** The session held twelve slices, which the plugin budgets at ~342 MB
-  at 13 bytes per resident pixel — against the ~10 MB the sampler actually saw
-  move. Those are 34× apart and cannot both be the terminal's memory. Either
-  `ps -o rss=` cannot see where iTerm2 keeps decoded slices, in which case
-  `rss.sh` can answer "does it creep" and never "what does it cost"; or 13 B/px
-  does not generalise, because `rss-calibrate.py` transmits synthetic gradients
-  chosen to be incompressible while a real slice is mostly flat background and
-  text. Nothing here picks between them, and nothing in the plugin's behaviour
-  changes — but `:MdViewerDebug`'s `decoded_mb_estimate` becomes
-  `decoded_mb_budgeted` with a `decoded_basis` line beside it, and
-  `scripts/resident/ab.lua` reports `budgeted / ceiling`, because a figure
-  contradicted by the only session ever measured should not be presented as
-  though it were corroborated. Re-running `rss-calibrate.py` against real
-  document slices is the cheap experiment that would separate the two readings.
-
-## [0.3.0-remote.2] - 2026-08-19
-
-Prerelease, on the same validation channel as `0.3.0-remote.1`. This is the
-resident-region work built and verified locally, tagged so it can be exercised
-on a real throttled link. **Nothing here has been measured on that link yet:**
-the entry below describes a mechanism the suite proves, not a throughput result,
-and `image.resident_budget_px` is still the deliberately small provisional value
-rather than a measured one. Stable `0.3.0` stays reserved until both the A/B and
-the sustained-memory run exist.
-
-### Added
-
-- **Resident regions: scrolling over SSH stops re-sending pixels it has already
-  sent.** Where the earlier SSH work made each frame smaller, this removes the
-  frame. One capture a couple of viewports tall is uploaded once, and every
-  scroll position inside it is shown as a different *crop* of the same image — so
-  scrolling back through a paragraph you have just read costs a few hundred bytes
-  of placement command instead of a photograph, and shows sharp device-scale
-  pixels while moving rather than the half-size ones `render.ssh_scroll_scale`
-  trades for bytes. A hit issues no renderer request, takes no screenshot and
-  uploads no image at all; that is asserted directly in the suite rather than
-  inferred from a byte count.
-
-  Narrowly gated, because what it trades is terminal memory for wire time and
-  only one of those is free: raw Kitty backend, over SSH, outside a multiplexer,
-  on a terminal profile qualified for it — today iTerm2 alone. Everywhere else,
-  including every local session, the scroll path is one boolean test longer than
-  it was and byte-for-byte identical otherwise.
-
-  Two bounds are load-bearing and both are stated as invariants rather than
-  intentions. `image.resident_budget_px` (default 8,000,000 px — stated here as
-  "~32 MB estimated" on an assumed 4 bytes a pixel, and since **measured** at
-  ~100 MB; see the Unreleased entry above)
-  is the *invariant* and the region's height is derived from it, checked against
-  the PNG's real dimensions at upload — a region nominated as "two viewports" and
-  checked afterwards is how a budget gets exceeded by an amount nobody sees until
-  the terminal is holding it. And because a region and the moving frames it
-  replaces share one `nvim_ui_send` queue and one pty, **at most one image payload
-  is outstanding per session**: a scroll that misses while a region is still
-  crossing the link emits nothing at all and resumes once, at the newest position,
-  when the wire is free. Without that the feature would rebuild the very backlog
-  it exists to remove.
-
-  Panning is refused, and today's capture path used instead, while a search or a
-  selection is live — a resident region was captured without them, so panning to
-  it would erase highlights the reader can see. Clearing the search costs one
-  placement command and no upload: the region was never discarded.
-
-- `image.resident_pan` (`"auto"` / `"on"` / `"off"`) and
-  `image.resident_budget_px`. `:MdViewerHealth` reports the terminal's half of the
-  gate, `:MdViewerDebug`'s `resident` block the session's half, including why it
-  refused. `scripts/resident/ab.lua` is the two-phase harness that measures the
-  claim on a real link, in total `nvim_ui_send` bytes rather than PNG bytes —
-  "the payload fell to zero" and "the traffic fell to zero" are different claims.
-
-### Fixed
-
-- The caret overlay recorded the literal string `"nil"` as its refusal reason,
-  reading the reason from the wrong return position — so the one case that field
-  exists to explain was the one case it could not.
-
-## [0.3.0-remote.1] - 2026-08-18
-
-Prerelease. Stable `0.3.0` is reserved until this work has had real-world
-validation and `main` represents it.
-
-Remote projects, local Neovim: previews of `rsync://`/`scp://` buffers at
-full local quality.
-
-0.2.0 made the preview survivable when Neovim runs on the far side of a slow
-link by shrinking what crosses it. This release removes that traffic from the
-render loop altogether for the opposite topology — Neovim, the renderer and
-Chromium on your machine, only the project on the other one, as
-remote-ssh.nvim and netrw arrange it. The document's text is already in the
-local buffer, so no rendered pixel and no render request ever touches SSH;
-only the files a document references cross, once each, off the interactive
-path. The existing SSH-session behavior is untouched, and the two are kept
-deliberately distinct: SSH detection answers for Neovim's own transport,
-never for a buffer's origin.
+**This is a validation prerelease.** The mechanisms are proved by the suite and
+the memory ceiling is measured, but the throughput A/B has not been re-run on the
+0.80 MB/s link since the slice grid replaced the single region it started as.
+Stable `0.3.0` stays reserved until it has.
 
 ### Added
 
@@ -311,6 +64,146 @@ never for a buffer's origin.
   outcome.
 - **`docs/remote-projects.md`** — the onboarding guide for the whole
   arrangement, from SSH keys to where LSP and git run.
+
+- **Scrolling over SSH stops re-sending pixels it has already sent.** The
+  document is cut into a fixed grid of *slices*, each about two viewports tall,
+  each captured once and kept — and every scroll position is shown as a **crop**
+  of pixels the terminal is already holding. Scrolling back through a paragraph
+  you have just read costs a few hundred bytes of placement command instead of a
+  photograph, and shows sharp device-scale pixels while moving rather than the
+  half-size ones `render.ssh_scroll_scale` trades for bytes. A hit issues no
+  renderer request, takes no screenshot and uploads no image at all; that is
+  asserted directly in the suite rather than inferred from a byte count.
+
+  The promise, stated exactly, because it is what the option is named for: **a
+  slice is sent once and never sent again while it stays in the window.**
+  Deliberately not "the whole document is held" — no memory ceiling can promise
+  that, because there is always a longer document, and this project does not ship
+  claims it cannot enforce. Past `image.resident_memory_mb` the window slides and
+  crossing it costs an upload, while pixels still in the window are still reused.
+
+  Boundaries belong to the *document* rather than to where you happened to stop,
+  which is what makes them worth having: a slice is paid for once, and that stays
+  true across a boundary, because a viewport spanning two slices is drawn from
+  both, split at a whole character row, in a single write. On a document that
+  fits the ceiling nothing is ever given up; `evictions` staying at zero is the
+  property, asserted directly rather than hoped for.
+
+  While you are reading rather than scrolling, the idle link fills in the slices
+  around you, nearest first, so the rest of the document is usually already there
+  when you reach it. That never delays anything you are waiting for: a slice you
+  actually need always goes first, only one payload is ever in flight, and a
+  prefetch is refused outright rather than evicting to make room for a guess.
+
+  Narrowly gated, because what it trades is terminal memory for wire time and
+  only one of those is free: raw Kitty backend, over SSH, outside a multiplexer,
+  on a terminal profile qualified for it — today iTerm2 alone. Everywhere else,
+  including every local session, the scroll path is one boolean test longer than
+  it was and byte-for-byte identical otherwise. Panning is also refused while a
+  search or a selection is live, because a slice was captured without those
+  highlights and panning to it would erase what the reader can see; clearing the
+  search costs one placement command and no upload.
+
+- **`image.reuse_sent_pixels`** (`"auto"` / `"on"` / `"off"`) and
+  **`image.resident_memory_mb`** (default 512) — how much decoded image the
+  terminal may hold for one preview. The megabyte figure converts at a *measured*
+  ~13 bytes per resident pixel (`scripts/resident/rss-calibrate.py`, three runs on
+  iTerm2 3.6.11 / macOS 15), against the 4 bytes this project assumed for its
+  first three releases. That measurement also settled two open questions: the
+  memory does come back, and iTerm2 does not self-evict. It is **not
+  corroborated**, though — the only real session ever sampled held twelve slices
+  budgeted at ~342 MB while `ps -o rss=` saw ~10 MB move, and nothing yet picks
+  between "the sampler cannot see it" and "synthetic gradients do not generalise
+  to a real document". `:MdViewerDebug` reports the figure as
+  `decoded_mb_budgeted` with a `decoded_basis` line beside it for that reason.
+  See `:help md-viewer-reuse-sent-pixels` and
+  [docs/terminal-support.md](docs/terminal-support.md).
+
+- **`render.ssh_link_bytes_per_sec`: tell md-viewer how fast your link actually
+  is.** Default `nil`, and only the reuse path reads it. While an uploaded slice
+  is still crossing a slow link, md-viewer declines to send moving frames that
+  would only queue behind it and arrive at positions you have already left — and
+  how long that lasts is arithmetic on a link speed. Set it to `800000` for a
+  0.80 MB/s tunnel; `scp` of a large file reports the same quantity. Unset, the
+  pause falls back to the settle delay, which is a safe guess rather than an
+  answer.
+
+  Asked for rather than inferred, because it cannot be found out. Writing to the
+  terminal returns when the operating system accepts the bytes, not when they
+  arrive, so on a healthy connection the write looks instantaneous however slow
+  the link is — and the terminal *can* be asked to acknowledge an upload, but its
+  reply lands on Neovim's own stdin, which a plugin cannot read.
+
+- **Diagnostics for all of it.** `:MdViewerHealth`'s `reuse sent pixels` line
+  reports the terminal's half of the gate and whether the open document fits its
+  memory bound — "whole document held (N slices)" or "N of M slices fit —
+  crossing the rest costs an upload each time". A document that does not fit is
+  not an error and is not refused; it was simply only visible as `evictions`
+  climbing, which you had to know to look for. `:MdViewerDebug`'s `resident`
+  block reports the session's half: `hits` against `misses`, `slices_resident`
+  against `grid_slices`, `resident_px` against `memory_px`, `straddles` /
+  `straddle_misses`, `document_fits` / `slices_that_fit`, and `grid_refusal`,
+  which has only three causes and names which.
+
+  Every capture that lands is accounted for by an identity rather than a counter
+  — `fills == slices_resident + stale + abandoned + undisplayed + evictions +
+  dropped_slices` — asserted across a whole-document walk and printed as
+  `UNACCOUNTED` by `scripts/resident/ab.lua` when it fails. A counter only
+  catches the drop somebody thought to count. `dropped_slices` and `drains` are
+  the quiet pair worth knowing: invalidating the grid (a resize, a colorscheme
+  change, an edit, `:MdViewerRefresh`) gives every slice back at once, which is
+  correct — the held pixels stop describing the document — but it is not an
+  eviction, and it costs the whole warm-up again.
+
+### Changed
+
+- **`:MdViewerDebug` and `:MdViewerHealth` open in a new tab rather than a
+  full-width split.** A split takes rows from the preview, and the preview's
+  height is part of what reused pixels are keyed on, because the document reflows
+  at a different viewport — so checking the numbers invalidated the whole grid and
+  paid for it again, twice per look, while the report said `evictions: 0`. On a
+  slow link that is the entire document re-uploaded because you wanted to see how
+  it was doing. A tab leaves every window in the current tab exactly where it was.
+
+### Fixed
+
+- The caret overlay recorded the literal string `"nil"` as its refusal reason,
+  reading the reason from the wrong return position — so the one case that field
+  exists to explain was the one case it could not.
+
+### If you were on a 0.3.0 prerelease
+
+None of this affects an upgrade from 0.2.1. The `v0.3.0-remote.*` tags have been
+withdrawn and replaced by this `-rc` channel; every configuration key they
+introduced still loads, converted and warned about once per session rather than
+refused, because refusing over a renamed key costs you the preview and a slow
+remote link is the worst place to find out about a rename.
+
+- `image.resident_pan` is now `image.reuse_sent_pixels` — same three values, same
+  behaviour. The old name was the mechanism's; the new one is what you get.
+  `:help md-viewer-resident-pan` still resolves.
+- `image.resident_budget_px` is now `image.resident_memory_mb`. An existing
+  `resident_budget_px = 8000000` converts to 99 MB at the measured ~13 B/px — the
+  bound you actually had, not the "~32 MB" it was documented as.
+- `:MdViewerDebug` field renames: `decoded_mb_estimate` → `decoded_mb_budgeted`
+  (with `decoded_basis`), `wire_bytes_per_ms` → `link_bytes_per_ms` (with
+  `link_rate_source`: `configured`, `estimated` or `unknown`), `plan_refusal` →
+  `grid_refusal`, and `stale_fills` split so that a capture superseded before it
+  landed counts as `superseded_fills` instead — it never reached the point `fills`
+  is counted at, so folding it in made `stale_fills` a population `fills` did not
+  contain.
+- The link speed the diagnostics reported was wrong by about 170× — 139,058 B/ms
+  for a tunnel doing 800 — because it came from timing md-viewer's own write,
+  which returns once SSH has buffered the payload rather than when it has carried
+  it. The anti-backlog pause computed from it had therefore never run. Samples
+  implying a link faster than gigabit line rate are now discarded rather than
+  averaged in, and the diagnostics say `unknown` rather than printing an
+  inference as a measurement.
+- The first shipped policy bounded *one region planned around wherever you had
+  stopped*, so its edges moved with you and crossing one threw it away and paid
+  for it again: 14 fills and 13 evictions in 141 seconds, ~971 KB each — **38%
+  more traffic than sending a frame every time**. The fixed grid above replaced
+  it.
 
 ## [0.2.1] - 2026-08-13
 
@@ -492,8 +385,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
-[0.3.0-remote.2]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-remote.2
-[0.3.0-remote.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-remote.1
+[0.3.0-rc1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1
