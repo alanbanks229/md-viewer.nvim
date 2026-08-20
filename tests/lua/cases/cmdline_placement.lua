@@ -42,6 +42,39 @@ return function(t)
   t.eq(0, clear_calls, "leaving the command line never deletes the image")
   t.eq(0, show_calls, "leaving the command line never re-uploads the image")
 
+  -- The caret is part of what a re-place invalidates, and it was the part nobody
+  -- cleaned up. Its rectangle is measured against the placement being superseded,
+  -- exactly like the selection overlay's -- which this path has always dropped
+  -- for that reason. The caret's was left drawn, so a notification opening over
+  -- the preview parked a block at its pre-re-crop cell until some later motion or
+  -- frame happened to redraw it. Clearing alone would be wrong: the caret has not
+  -- moved and is still on its glyph, so it comes down and goes straight back.
+  local overlay_applies, overlay_clears = 0, 0
+  session.backend.overlay_supported = function() return true end
+  session.backend.overlay_apply = function()
+    overlay_applies = overlay_applies + 1
+    return 7, { rects = 1 }
+  end
+  session.backend.overlay_clear = function() overlay_clears = overlay_clears + 1 end
+  vim.api.nvim_set_current_win(session.preview_win)
+  session.caret_tint = "#ffffff"
+  session.caret_rect = { x = 10, y = 20, width = 9, height = 18 }
+  session.caret_scroll_y, session.applied_scroll_y = 0, 0
+  session.caret_overlay_set = 7
+
+  vim.api.nvim_exec_autocmds("CmdlineEnter", {})
+  t.eq(1, overlay_clears, "a re-place takes the caret's rectangle down with the base it was measured against")
+  t.eq(1, overlay_applies, "and puts it straight back, against the placement now on screen")
+
+  -- But only when the base actually moved. This reconciliation also runs on a
+  -- 50 ms poll tick, where the placement is unchanged and nothing is emitted --
+  -- a caret placement on every one of those would be a steady drip of writes down
+  -- the link that reusing sent pixels exists to keep quiet.
+  overlay_applies, overlay_clears = 0, 0
+  controller._reconcile_placement(session)
+  t.eq(0, overlay_clears, "an unchanged placement re-places nothing")
+  t.eq(0, overlay_applies, "so it redraws no caret either")
+
   controller.close(source)
   config.reset()
 end

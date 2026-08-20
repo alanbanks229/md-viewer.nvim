@@ -380,11 +380,42 @@ return function(t)
       "and returning hides it again, rather than leaving both up until the next motion"
     )
 
-    -- Scrolled out of view, there is no block to see -- so the real cursor has
-    -- to come back rather than leave the reader with no caret at all.
+    -- Scrolled out of view the block comes down, and Neovim's own cursor stays
+    -- hidden rather than taking its place.
+    --
+    -- It used to be restored here, on the reasoning that with no block drawn the
+    -- real cursor is the only caret there is. It is not one. `shadow_cursor`
+    -- refuses to move while the rect is nil, so what came back was a block parked
+    -- on the cell the caret occupied *before* it scrolled away -- pointing at
+    -- whatever content has since moved under it, and then sitting perfectly still
+    -- for the rest of the scroll. Reported as a remnant cursor, which is exactly
+    -- what it was.
+    local cleared = 0
+    session.backend.overlay_clear = function() cleared = cleared + 1 end
     session.applied_scroll_y = 5000
     t.eq(false, controller.display_caret_overlay(session), "a caret scrolled off screen is not drawn")
-    t.eq(original_guicursor, vim.o.guicursor, "and Neovim's cursor is given back")
+    t.eq(1, cleared, "and its rectangle comes down with it")
+    t.ok(
+      vim.o.guicursor:find("MdViewerHiddenCursor", 1, true) ~= nil,
+      "Neovim's cursor stays hidden -- a block on the cell the caret has left is not a caret"
+    )
+
+    -- And the caret comes back on its own when it scrolls into view again.
+    overlay_rects = nil
+    requests = {}
+    session.applied_scroll_y = 0
+    t.eq(true, controller.display_caret_overlay(session), "scrolling back into view draws it again")
+    t.eq(0, #requests, "locally -- the caret never moved, so nobody has to be asked where it went")
+    t.ok(overlay_rects ~= nil, "as an overlay rectangle once more")
+
+    -- The safety net the change above leans on: focus leaving restores
+    -- unconditionally, including from out of view. Leaving a reader with an
+    -- invisible cursor somewhere it would mean something is far worse than the
+    -- artifact being fixed.
+    session.applied_scroll_y = 5000
+    controller.display_caret_overlay(session)
+    vim.api.nvim_exec_autocmds("FocusLost", { modeline = false })
+    t.eq(original_guicursor, vim.o.guicursor, "leaving gives Neovim's cursor back even with the caret off screen")
     session.applied_scroll_y = 0
 
     -- A backend that cannot draw the overlay never hides the cursor either:

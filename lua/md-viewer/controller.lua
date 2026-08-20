@@ -548,8 +548,9 @@ end
 ---
 ---Returns false when the caret cannot be drawn -- no overlay support (the
 ---backend, or the terminal profile), no base image, or the caret has scrolled
----out of view. The terminal's own cursor is left visible in exactly those
----cases; see `preview.hide_cursor`.
+---out of view. The first two never hid the terminal's own cursor in the first
+---place, so it is still there and *is* the caret; see `preview.hide_cursor`. The
+---third is different in kind and is handled at the branch itself.
 function M.display_caret_overlay(session, tint, sheet_png)
   if not valid(session) or session.backend.name == "cells" then return false end
   local backend = session.backend
@@ -557,11 +558,22 @@ function M.display_caret_overlay(session, tint, sheet_png)
   if not (session.image_id and session.last_placement) then return false end
   local rect = caret.rect(session)
   if not rect then
+    -- Scrolled out of the viewport, and that is all it is: the caret has not
+    -- moved, it is simply not on screen, which is exactly what caret.lua says
+    -- happens to one. So the rectangle comes down and Neovim's own cursor stays
+    -- hidden.
+    --
+    -- It used to be restored here, on the reasoning that with no block drawn the
+    -- real cursor is the only caret there is. It is not one. `shadow_cursor`
+    -- refuses to move while the rect is nil, so what came back was a block
+    -- parked on the cell the caret occupied *before* it scrolled away -- pointing
+    -- at whatever content has since moved under it, and then sitting perfectly
+    -- still for the rest of the scroll. Reported as a remnant cursor, and it is:
+    -- there is no caret at that cell to be the cursor for. Every path that can
+    -- take focus away from the preview restores unconditionally (the
+    -- WinLeave/BufLeave/TabLeave/FocusLost/VimSuspend/VimLeavePre autocmds), so
+    -- nobody is left without a cursor anywhere it would mean something.
     M.clear_caret_overlay(session)
-    -- No block on screen means Neovim's cursor is the only caret there is, so
-    -- it has to come back. Restoring here rather than only on WinLeave is what
-    -- covers a caret that scrolled out of view.
-    preview.restore_cursor()
     return false
   end
   session.caret_tint = tint or session.caret_tint
@@ -2464,6 +2476,11 @@ local function reconcile_placement(session, force)
   -- without an occlusion check of their own.
   if not coordinates.window_is_displayed(session.preview_win) then return end
   local placement = preview.placement(session.preview_win, session.backend.name)
+  -- Whether the base actually moved, so the caret is redrawn only when its
+  -- rectangle has genuinely been invalidated. This runs on a 50 ms poll tick, and
+  -- a caret placement emitted on every one of those would be a steady drip of
+  -- writes down the link the resident work exists to keep quiet.
+  local rebased = false
   if force or not coordinates.same(session.last_placement, placement) then
     -- A composite cannot be re-placed by moving its head. `M.move` would draw
     -- the *upper* slice across the whole pane -- a picture of the wrong part of
@@ -2518,10 +2535,28 @@ local function reconcile_placement(session, force)
       -- repaints them against the new placement within one round trip.
       clear_selection_overlay(session)
     end
+    rebased = true
   end
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.
   session.last_placement = placement
+  -- And the caret, for the same reason the selection overlay was just dropped:
+  -- its rectangle was measured against the placement that has been superseded,
+  -- while the caret itself has not moved. Clearing alone would be wrong -- it is
+  -- still on screen and still on the same glyph -- so this is the clear-then-place
+  -- pair `apply_image` performs after a new frame lands, and where a caret already
+  -- exists it is local, with no round trip. Only the *selection* overlay used to
+  -- be handled here, which left a caret block sitting at its pre-re-crop cell
+  -- every time a notification opened over the preview, until some later motion or
+  -- frame happened to redraw it.
+  --
+  -- After `last_placement`, because that is what `display_caret_overlay` measures
+  -- the new rectangle against, and before the animation for the reason
+  -- `apply_image` gives: the animation is the lower of the two layers.
+  if rebased then
+    M.clear_caret_overlay(session)
+    M.place_caret(session)
+  end
   -- Animation frames are positioned against the placement, so a float opening
   -- over the preview would otherwise leave them painted across it and offset.
   animation.repaint(session)
