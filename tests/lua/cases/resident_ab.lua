@@ -81,7 +81,7 @@ return function(t)
       "slice uploads",
       "boundaries: drawn / missed",
       "slices held / in grid",
-      "decoded / ceiling",
+      "budgeted / ceiling",
       "evictions",
       "slice height scale",
       "link rate used",

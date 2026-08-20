@@ -93,17 +93,41 @@ All notable changes to this project will be documented here. The project uses
   `:help md-viewer-resident-pan` as "~32 MB"; measured, it is ~100 MB. Nothing
   about how much the plugin actually holds has changed — only what it told you
   it was holding, which was wrong by a factor of three in the reassuring
-  direction. `:MdViewerDebug`'s `decoded_mb_estimate` now reports the measured
-  figure. `scripts/resident/rss-calibrate.py` is the measurement: PNGs of known
-  pixel counts transmitted *and placed* (a terminal may decode lazily, so an
-  image never drawn reports nothing), iTerm2's RSS sampled, then freed and
-  sampled again. Three runs on iTerm2 3.6.11 / macOS 15 put it at 12–13 B/px,
-  and it also settled two open questions: 94% of a first pass's pages were
-  served to an identical second pass, so the memory does come back, and a slice
-  still answered a placement after ten more had arrived, so iTerm2 does not
-  self-evict. The sustained-memory question — does it plateau over half an hour
-  on a real link — is still unanswered; `scripts/resident/rss.sh` has never
-  been run.
+  direction. `:MdViewerDebug`'s decoded-megabyte figure now uses it.
+  `scripts/resident/rss-calibrate.py` is the measurement: PNGs of known pixel
+  counts transmitted *and placed* (a terminal may decode lazily, so an image
+  never drawn reports nothing), iTerm2's RSS sampled, then freed and sampled
+  again. Three runs on iTerm2 3.6.11 / macOS 15 put it at 12–13 B/px, and it also
+  settled two open questions: 94% of a first pass's pages were served to an
+  identical second pass, so the memory does come back, and a slice still answered
+  a placement after ten more had arrived, so iTerm2 does not self-evict.
+
+### Measured
+
+- **iTerm2 plateaus. The sustained-memory question is closed.** Open since
+  `0.3.0-remote.2` and deferred to by both `docs/terminal-support.md` and
+  `scripts/resident/rss.sh`, which had never been run: does a terminal holding a
+  whole document's slices creep over half an hour, or hold steady? A real session
+  over the 0.80 MB/s link says it holds steady. Resident size rose ~10 MB above
+  baseline across the run, with transient peaks on resize that relaxed
+  afterwards. No creep, no leak. `image.resident_memory_mb` is no longer waiting
+  on that measurement.
+
+- **The same run put the megabyte figure itself in doubt, and the diagnostics now
+  say so.** The session held twelve slices, which the plugin budgets at ~342 MB
+  at 13 bytes per resident pixel — against the ~10 MB the sampler actually saw
+  move. Those are 34× apart and cannot both be the terminal's memory. Either
+  `ps -o rss=` cannot see where iTerm2 keeps decoded slices, in which case
+  `rss.sh` can answer "does it creep" and never "what does it cost"; or 13 B/px
+  does not generalise, because `rss-calibrate.py` transmits synthetic gradients
+  chosen to be incompressible while a real slice is mostly flat background and
+  text. Nothing here picks between them, and nothing in the plugin's behaviour
+  changes — but `:MdViewerDebug`'s `decoded_mb_estimate` becomes
+  `decoded_mb_budgeted` with a `decoded_basis` line beside it, and
+  `scripts/resident/ab.lua` reports `budgeted / ceiling`, because a figure
+  contradicted by the only session ever measured should not be presented as
+  though it were corroborated. Re-running `rss-calibrate.py` against real
+  document slices is the cheap experiment that would separate the two readings.
 
 ## [0.3.0-remote.2] - 2026-08-19
 

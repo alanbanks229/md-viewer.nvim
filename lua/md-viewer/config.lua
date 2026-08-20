@@ -137,9 +137,24 @@ M.defaults = {
     -- that never evict anything at all, which is the property the whole rebuild
     -- exists to buy. The same calibration showed the memory is returned when a
     -- slice is freed and that iTerm2 does not self-evict, so this is a ceiling
-    -- on what is held rather than a guess at what is safe -- but the sustained
-    -- question, whether a real session plateaus over half an hour, is still open
-    -- (scripts/resident/rss.sh). Raise it on that measurement, not on a hunch.
+    -- on what is held rather than a guess at what is safe.
+    --
+    -- The sustained question is closed and the conversion is not.
+    -- scripts/resident/rss.sh has now been run against a real session on the
+    -- real link: iTerm2 plateaus. RSS rose ~10 MB above baseline over the run,
+    -- with transient peaks on resize that relaxed -- no creep and no leak, which
+    -- is what this ceiling was waiting on. But the same run had twelve slices
+    -- resident, which at 13 B/px is ~342 MB budgeted against ~10 MB observed.
+    -- Those are 34x apart and cannot both describe the same quantity, so the
+    -- number this key is denominated in is not corroborated by the only real
+    -- session that has ever been measured. Either the RSS sampler cannot see
+    -- decoded slices (GPU textures are outside `ps -o rss=`), or 13 B/px does
+    -- not generalise from rss-calibrate.py's deliberately incompressible
+    -- gradients to a document that is mostly flat background. Re-running that
+    -- calibration against realistic content is the cheap experiment that would
+    -- tell the two apart. Until it does, this bounds a budget rather than a
+    -- megabyte, and raising it on the plateau alone would be raising it on a
+    -- unit nobody has confirmed.
     resident_memory_mb = 512,
   },
   sync = {

@@ -27,12 +27,20 @@ end
 ---
 ---`hits` against `misses` is the whole question: a hit is a scroll that cost
 ---placement bytes instead of a frame. `slices_resident` against `grid_slices`
----says how much of the document the terminal is holding, `resident_px` beside
----`memory_px` says how close the ceiling is to binding, and `decoded_mb` is the
----quantity that ceiling exists to control -- still called an estimate, because
----it converts pixels to bytes at a rate measured on one terminal (iTerm2,
----12-13 B/px, see `resident.BYTES_PER_RESIDENT_PX`) rather than one any terminal
----documents.
+---says how much of the document the terminal is holding, and `resident_px`
+---beside `memory_px` says how close the ceiling is to binding.
+---
+---`decoded_mb_budgeted` is the same quantity in the unit the ceiling is stated
+---in, and it is named for what it is. It converts `resident_px` at
+---`resident.BYTES_PER_RESIDENT_PX`, which was measured on synthetic gradients
+---(`scripts/resident/rss-calibrate.py`) and is contradicted by the only real
+---session anyone has sampled: twelve slices reported ~342 MB here while
+---`scripts/resident/rss.sh` saw iTerm2's resident size move ~10 MB. Something is
+---34x wrong -- either the sampler cannot see decoded slices, or the conversion
+---does not generalise to a document that is mostly flat background -- so this
+---says what the plugin is *spending against its own ceiling*, not what the
+---terminal is holding, and `decoded_basis` says so on the line below rather than
+---leaving a reader to find this comment.
 ---
 ---`evictions` is the number the rebuild was for. Under the bounded region it
 ---climbed with every boundary crossing; under a grid a document inside the
@@ -67,7 +75,8 @@ local function resident_report(session)
     slices_resident = #slices,
     resident_px = live.resident_px,
     memory_px = live.memory_px,
-    decoded_mb_estimate = decoded > 0 and (decoded / 1048576) or 0,
+    decoded_mb_budgeted = decoded > 0 and (decoded / 1048576) or 0,
+    decoded_basis = ("%d B/px assumed, uncorroborated by a real session"):format(resident.BYTES_PER_RESIDENT_PX),
     hits = live.hits,
     misses = live.misses,
     pans = live.pans,

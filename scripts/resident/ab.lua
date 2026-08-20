@@ -35,12 +35,18 @@
 -- The protocol, run identically in both phases:
 --
 --   1. Wait for the first frame.
---   2. Walk forward through four or five screens, pausing at each so the settle
---      fires and the slice under you fills. In phase 2, `:MdViewerDebug`'s
---      `resident` block should show `slices_resident` climbing by one per stop
---      and `evictions` staying at 0.
---   3. In phase 2, run `:ResidentABMark` here. Everything before the mark is the
---      warm-up this feature charges for; everything after is what it buys.
+--   2. Walk forward, pausing at each screen so the settle fires and the slice
+--      under you fills. In phase 2, `:MdViewerDebug`'s `resident` block should
+--      show `slices_resident` climbing by one per stop and `evictions` staying
+--      at 0. Keep going until it **stops climbing** -- and note that it climbs
+--      while you are standing still, too, because the idle wire prefetches.
+--   3. In phase 2, run `:ResidentABMark` once `slices_resident` has stopped
+--      moving. That condition, not a number of screens: on a 12-slice document
+--      "four or five screens" lands the mark mid-warm-up, which is exactly what
+--      happened on the first real run -- 4,217,667 upload bytes after the mark,
+--      measuring the grid loading rather than the re-reading. Everything before
+--      the mark is the warm-up this feature charges for; everything after is
+--      what it buys, and the two only separate at that boundary.
 --   4. Walk back through exactly the same screens, then forward again.
 --   5. THE CLAIM: upload bytes since the mark are 0, fills since the mark are 0,
 --      and hits are however many times you scrolled.
@@ -312,8 +318,14 @@ local function report()
       ("%d / %s"):format(a.resident_slices, a.grid_slices and tostring(a.grid_slices) or "--"),
       ("%d / %s"):format(b.resident_slices, b.grid_slices and tostring(b.grid_slices) or "--")
     ),
+    -- "budgeted", not "decoded". Both sides are `resident_px` converted at an
+    -- assumed 13 B/px, so the pair says how close the ceiling is to binding and
+    -- nothing about the terminal: the one sustained run of a real session moved
+    -- iTerm2's resident size ~10 MB while this read 342. Naming it for the
+    -- accounting it really is, until rss-calibrate.py has been re-run against
+    -- real document slices rather than synthetic gradients.
     row(
-      "  decoded / ceiling",
+      "  budgeted / ceiling",
       ("%.0f / %.0f MB"):format(a.decoded_mb, a.ceiling_mb),
       ("%.0f / %.0f MB"):format(b.decoded_mb, b.ceiling_mb)
     ),
@@ -351,12 +363,10 @@ local function report()
       b.grid_refusal and (": " .. b.grid_refusal) or ""
     ) .. "`fallback_reason` (it gave up earlier in the session), " .. "then check whether a drag is still registered -- a click leaves state behind that a " .. "settle will not fill through. A slice already held is also never asked for again, so " .. "if `slices_resident` is above 0 this arm simply never left the ground it had."
   elseif not mark_base then
-    verdict = ("NO MARK TAKEN: walk forward a few screens until `slices_resident` reaches 3 or 4 "):format()
-      .. "(it is "
-      .. tostring(b.resident_slices)
-      .. " now), run :ResidentABMark, and only then walk back over "
-      .. "the same ground. Without the mark the report cannot separate the warm-up this feature "
-      .. "charges for from the re-reading it buys, and those are the two halves of the claim."
+    verdict = ("NO MARK TAKEN: walk forward until `slices_resident` stops climbing (it is %d of %s "):format(
+      b.resident_slices,
+      b.grid_slices and tostring(b.grid_slices) or "?"
+    ) .. "now), run :ResidentABMark, and only then walk back over the same ground. Not a fixed number of " .. "screens -- on a document of this length that lands the mark mid-warm-up and measures the grid " .. "loading. Without the mark the report cannot separate the warm-up this feature charges for from " .. "the re-reading it buys, and those are the two halves of the claim."
   else
     local since = {}
     for key, value in pairs(b) do
@@ -530,12 +540,18 @@ vim.api.nvim_create_user_command("ResidentABMark", function()
     local current = session()
     mark_base = snapshot(current)
     print(
-      ("md-viewer: marked at %d of %s slices (%.0f MB), %s upload bytes so far. Now walk back over the "):format(
+      ("md-viewer: marked at %d of %s slices (%.0f MB budgeted), %s upload bytes so far.%s Now walk back "):format(
         mark_base.resident_slices,
         mark_base.grid_slices and tostring(mark_base.grid_slices) or "?",
         mark_base.decoded_mb,
-        number(mark_base.upload_bytes)
-      ) .. "same ground, then :ResidentAB."
+        number(mark_base.upload_bytes),
+        -- Said at the moment it can still be acted on. A mark taken while the
+        -- grid is still filling measures the warm-up twice and reports it as the
+        -- thing the warm-up was supposed to buy.
+        (mark_base.grid_slices and mark_base.resident_slices < mark_base.grid_slices)
+            and " STILL WARMING UP -- wait until that stops climbing and mark again."
+          or ""
+      ) .. "over the same ground, then :ResidentAB."
     )
   end)
   if not ok then vim.notify(tostring(err), vim.log.levels.ERROR) end

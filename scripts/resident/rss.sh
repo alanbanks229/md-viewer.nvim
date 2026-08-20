@@ -17,6 +17,23 @@
 #   2. Does it come back when the region is evicted (`a=d,d=I`)?
 #   3. Does it plateau over half an hour, or creep?
 #
+# RESULT, 2026-08-19, iTerm2 on macOS, real session over the SSM tunnel:
+# **it plateaus.** RSS rose ~10 MB above baseline across the run, with transient
+# peaks on resize that relaxed afterwards. No creep, no leak. Question 3 is
+# answered and `image.resident_memory_mb` is no longer waiting on it.
+#
+# The same run disqualified question 1's answer, which is the more interesting
+# result. `:MdViewerDebug` reported twelve slices resident -- ~342 MB at the
+# 12-13 B/px this script's companion measured -- while this sampler saw ~10 MB
+# move. 34x apart, and they cannot both be describing the terminal's memory.
+# Either `ps -o rss=` cannot see where iTerm2 keeps decoded slices, in which
+# case this script answers "does it creep" and can never answer "what does it
+# cost"; or 13 B/px does not generalise, because rss-calibrate.py transmits
+# synthetic gradients chosen to be incompressible while a document slice is
+# mostly flat background and text. Re-running rss-calibrate.py against a real
+# document's slices would separate the two, and is the next thing worth doing
+# here.
+#
 # A run that only answers 1 is worthless: a terminal that grows 30 MB per region
 # and never gives any of it back is exactly the failure this exists to catch,
 # and it looks identical to a healthy one for the first sixty seconds.
@@ -116,9 +133,11 @@ final third   $((end_avg / 1024)) MB average
 csv           $out/rss.csv
 
 Read it against :MdViewerDebug's resident block from the same run --
-\`decoded_mb_estimate\` converts \`resident_px\` at the measured ~13 bytes per
-resident pixel, so these two numbers are directly comparable and a large gap
-between them is the thing this run exists to find. \`evictions\` says how many
+\`decoded_mb_budgeted\` converts \`resident_px\` at an assumed ~13 bytes per
+resident pixel. A large gap between the two is the thing this run exists to
+find, and the 2026-08-19 run found one it has not explained: 342 MB budgeted
+against ~10 MB sampled. Read them as two different quantities until
+rss-calibrate.py has been re-run against real document slices. \`evictions\` says how many
 times the terminal was asked to give memory back; on a document inside
 \`image.resident_memory_mb\` it should be zero, because a grid of slices is
 uploaded once and kept.

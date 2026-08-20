@@ -148,6 +148,18 @@ sustained-memory measurement — the question is no longer "does it hold two
 viewports" but "does it hold a document for half an hour and give the memory back
 afterwards". `scripts/resident/rss.sh` is that protocol.
 
+**iTerm2 has now been through it, and plateaus.** A real session over the 0.80
+MB/s link: resident size rose ~10 MB above baseline across the run, with
+transient peaks on resize that relaxed afterwards. No creep and no leak — which
+is what `image.resident_memory_mb` was waiting on, and it had been open since
+`0.3.0-remote.2`. The same run left a question it did not have before: the
+session held twelve slices, which the plugin budgets at ~342 MB, while the
+sampler saw ~10 MB move. Those cannot both be the terminal's memory, so either
+`ps -o rss=` cannot see where decoded slices live or the ~13 bytes per pixel
+those budgets use does not generalise from synthetic gradients to a real
+document. Read `decoded_mb_budgeted` in `:MdViewerDebug` as an accounting figure
+until that is settled, not as an observation.
+
 ## WezTerm
 
 Image rendering works and is `Supported`. The drag-highlight overlay is
