@@ -59,15 +59,24 @@ identical. Why the obvious alternative is wrong, and what it would take to stop
 sending pixels altogether, is in [local-render-design.md](local-render-design.md).
 
 <a id="resident-regions"></a>
-**Resident regions.** Over SSH the two-stage capture above still re-sends pixels the
-terminal already has: every scroll position is a new photograph of the same document. A
-*resident region* is one capture several viewport-heights tall, uploaded once, from which
-each scroll position is shown as a different **crop** of the same image — so scrolling
-inside it costs a placement command rather than a frame. Gated to sessions where the
-trade is real: raw Kitty backend, over SSH, no multiplexer, on a terminal profile
-qualified for it (`image.resident_pan`, default `auto` → iTerm2 only). Everywhere else
-`session.resident.enabled` is false and the scroll path is one boolean test longer than it
-was.
+**Resident slices.** Over SSH the two-stage capture above still re-sends pixels the
+terminal already has: every scroll position is a new photograph of the same document. So
+the document is covered by a **fixed grid of slices**, each about two viewports tall,
+each uploaded once and kept — and every scroll position is shown as a **crop** of pixels
+the terminal is already holding, which costs a placement command rather than a frame.
+Gated to sessions where the trade is real: raw Kitty backend, over SSH, no multiplexer, on
+a terminal profile qualified for it (`image.resident_pan`, default `auto` → iTerm2 only).
+Everywhere else `session.resident.enabled` is false and the scroll path is one boolean test
+longer than it was.
+
+**Why a grid rather than one region around the reader.** That is what shipped first, and
+the mechanism worked while the policy failed: a region planned around wherever the reader
+stopped has edges that move with them, so crossing one evicted and refilled it. A real
+session on the 0.80 MB/s link recorded 14 fills and 13 evictions in 141 seconds, ~971 KB
+each — **38% more traffic than sending a frame every time**. A grid's boundaries belong to
+the *document*, so they never move, and a slice is paid for once. **Invariant:** a slice is
+never asked for twice; the same scroll position asks for the same capture however the
+reader arrived at it.
 
 The coordinate model lives in `md-viewer/resident.lua` as pure functions with no `vim.api`
 in them, for the same reason `renderer/src/lanes.js` is pure: a wrong crop is a wrong
@@ -79,14 +88,36 @@ capture-scale independence stated above holds unchanged; a source window coverin
 image reduces the crop arithmetic to exactly what it was, which is why the golden Kitty
 stream in `tests/lua/cases/backend_kitty.lua` did not move.
 
-Two bounds make it safe. Memory: `image.resident_budget_px` is the invariant and the
-region's *height* is derived from it, checked against the PNG's real dimensions at upload —
-nominating "two viewports" and checking afterwards is how a budget gets exceeded by an
-amount nobody sees until the terminal is holding it. And the wire: a region and the moving
-frames it replaces share one `nvim_ui_send` queue and one pty, and bytes handed to that
-queue cannot be recalled, so **at most one image payload is outstanding per session** — a
-scroll that misses while a region is draining emits nothing at all and resumes once, at the
-newest position, when the wire is free.
+**The boundary is composited, not a miss.** Permanent boundaries can only work if a
+viewport that straddles one is drawn from both slices: otherwise the same handful of
+positions would fall back to a screenshot forever. The pane is split at a whole cell row —
+rows above it from the upper slice, rows below from the lower — and both placements go out
+in one write. Neighbouring slices overlap by two cell rows, which is what guarantees such a
+row exists; it costs ~1.6% of a slice against the 100% that overlapping by a whole viewport
+would. **Invariant:** both crops are derived from *one* snapped document position. Grid
+boundaries are quantised to whole image pixels and both slices share a capture scale, so
+the same document position rounds identically in both and the two bands meet exactly. Two
+independently snapped positions is a scanline drawn twice, or dropped, at the seam.
+
+Two bounds make it safe. **Memory:** `image.resident_memory_mb` (default 512) is the
+ceiling, converted to pixels at a *measured* ~13 bytes per resident pixel
+(`scripts/resident/rss-calibrate.py`; the 4 bytes this project assumed for three releases
+understated it threefold). Over the ceiling, a window of slice indices slides around the
+reader and the farthest is evicted — index arithmetic on a fixed grid rather than an LRU.
+Documents inside it never evict at all, which is the property the grid exists to buy.
+**The wire:** a slice and the moving frames it replaces share one `nvim_ui_send` queue and
+one pty, and bytes handed to that queue cannot be recalled, so **at most one image payload
+is outstanding per session** — a scroll that misses while a slice is draining emits nothing
+at all and resumes once, at the newest position, when the wire is free.
+
+**Idle wire fills the rest.** A slice only ever resident where someone had already scrolled
+means the second pass keeps paying a warm-up at every new screen, so when the reader is
+settled and the wire is free, the nearest unheld slice is captured. It is *transmitted and
+not placed* — the frame on screen is already correct — entering the same
+resident-but-unplaced state a hidden preview produces, and becoming visible as a placement
+if the reader ever scrolls to it. **Invariant:** a prefetch never evicts. A guess that
+drops a slice the reader may return to pays for both again, which is the churn the grid
+removed; a slice the reader actually needs always outranks it.
 
 **Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
 allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright

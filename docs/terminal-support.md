@@ -132,12 +132,21 @@ cells (`c`/`r`) and needs none. Binding the two would have disabled this on ever
 terminal that does not fill `ws_xpixel`, for a reason that does not apply to it.
 
 `image.resident_pan` (`"auto"` / `"on"` / `"off"`) overrides the table, and
-`image.resident_budget_px` bounds what a session may hold. `:MdViewerHealth`
+`image.resident_memory_mb` bounds what a session may hold. `:MdViewerHealth`
 reports the terminal's half of the answer on its `resident panning` line;
 `:MdViewerDebug`'s `resident` block reports the session's half — a session also has
-to be over SSH, outside a multiplexer, and have a budget. The distinction matters
+to be over SSH, outside a multiplexer, and have a ceiling. The distinction matters
 when nothing seems to be happening: a qualified terminal on a local session is
 working exactly as designed.
+
+What a terminal is being asked to hold is now the *whole document* rather than a
+couple of viewports around the reader: a fixed grid of slices, each uploaded once
+and kept, bounded by `image.resident_memory_mb` (default 512 MB, at a measured
+~13 bytes per resident pixel). That raises the bar for qualifying a terminal
+rather than lowering it, and it is why Kitty and Ghostty stay pending on the same
+sustained-memory measurement — the question is no longer "does it hold two
+viewports" but "does it hold a document for half an hour and give the memory back
+afterwards". `scripts/resident/rss.sh` is that protocol.
 
 ## WezTerm
 

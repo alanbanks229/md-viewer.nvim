@@ -300,7 +300,7 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame *larger*, and it collapses the moving and settle captures into one so the
 cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
-## Scrolling over SSH is not using resident regions
+## Scrolling over SSH is not using resident slices
 
 On an SSH session the preview can show scrolling by re-cropping pixels the
 terminal already holds, which costs a few hundred bytes instead of a frame. It is
@@ -310,25 +310,42 @@ narrowly gated, and `:MdViewerDebug`'s `resident` block says which gate refused:
   reason names the cause verbatim — a backend that cannot crop, a *local* session
   (there is no wire time to save, so this is working as designed), a multiplexer,
   a terminal profile that is not qualified ([terminal-support.md](terminal-support.md#resident-panning)),
-  or a zero `image.resident_budget_px`.
+  or a zero `image.resident_memory_mb`.
 - **`fallback_reason` set.** It qualified and then gave up, once, for the rest of
   the session. One-way on purpose: every reason to fall back is a reason to
   distrust the machinery rather than the moment, and a gate that re-armed itself
   would rediscover the same defect on every scroll. Reopen the preview to retry.
-- **`plan_refusal` set and `fills 0`.** No region worth having fits the budget.
-  The message says which bound is binding; raise `image.resident_budget_px` only
-  after reading what it costs in `:help md-viewer-resident-pan`.
-- **`hits 0` but `fills` climbing.** Regions are being captured and then not used.
-  A region holds only about *one viewport* of travel in total — the viewport
-  itself occupies the rest of it — so scrolling further than that in one gesture
-  misses every time. `blocked_by_find` and `blocked_by_selection` climbing instead
-  means an active search or selection, where panning is refused deliberately: the
-  highlights are painted into the frame and a clean region would erase them.
+- **`grid_refusal` set and `fills 0`.** No grid worth having fits this geometry.
+  There are only three reasons: a document that cannot scroll, a pane so short
+  that a slice cannot hold a viewport plus its overlap, and a ceiling smaller than
+  one slice. The message says which; raise `image.resident_memory_mb` only after
+  reading what it costs in `:help md-viewer-resident-pan`.
+- **`hits 0` but `fills` climbing.** Slices are being captured and not used.
+  `blocked_by_find` and `blocked_by_selection` climbing instead means an active
+  search or selection, where panning is refused deliberately: the highlights are
+  painted into the frame and a clean slice would erase them.
+- **`straddle_misses` climbing while `straddles` does not.** The reader is
+  parking on boundaries where only one of the two slices is held. That is warm-up
+  rather than a defect — the fill behind it is capturing the other one — and it
+  should stop once `slices_resident` stops climbing.
 
 `upload_bytes` staying flat while `hits` and `placement_bytes` climb is the whole
 feature working. `frames_suppressed_by_hold` climbing is the anti-backlog rule:
-a scroll that missed while a region was still crossing the wire sent nothing at
+a scroll that missed while a slice was still crossing the wire sent nothing at
 all rather than queueing behind it.
+
+**`evictions` above zero is the one number worth acting on.** A grid is built so
+that a slice is uploaded once and kept, and on a document that fits
+`image.resident_memory_mb` nothing is ever given up. A non-zero count means the
+document is larger than the ceiling, so the window of held slices is sliding
+around the reader and ground already paid for is being paid for again. Raise the
+ceiling or accept that this document is bigger than the memory allowed for it —
+`scripts/resident/ab.lua` reports the same number and says which.
+
+`prefetches` counts slices captured while nobody was waiting, on an idle link. It
+climbing while `upload_bytes` climbs with it is the document filling itself in,
+which is the intended behaviour; a prefetch never evicts, so it cannot be the
+cause of the paragraph above.
 
 To turn it off: `image.resident_pan = "off"`.
 

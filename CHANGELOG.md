@@ -5,6 +5,50 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+### Changed
+
+- **Resident panning now covers the whole document, as a grid of slices, instead
+  of one region that followed you around.** The mechanism shipped in
+  `0.3.0-remote.2` worked and the policy around it did not: the region was
+  planned around wherever you had stopped, so its edges moved with you and
+  crossing one threw it away and paid for it again. On the link this was built
+  for that measured **38% more traffic than sending a frame every time** — 14
+  fills and 13 evictions in 141 seconds, ~971 KB each. A small sharp window that
+  kept having to be repaid for.
+
+  The document is now cut into fixed slices of about two viewports, and a
+  boundary is a property of the *document* rather than of where you happened to
+  stop. A slice is captured once and kept, so going back over ground you have
+  already read costs a placement command and nothing else — and unlike before,
+  that stays true across boundaries, because a viewport spanning two slices is
+  drawn from both, split at a whole character row, in a single write. On a
+  document that fits the memory ceiling nothing is ever given up; `evictions` in
+  `:MdViewerDebug` staying at zero is the property, and it is asserted directly
+  rather than hoped for.
+
+  While you are reading rather than scrolling, the idle link fills in the slices
+  around you, nearest first, so the rest of the document is usually already
+  there when you reach it. That never delays anything you are waiting for: a
+  slice you actually need always goes first, only one payload is ever in flight,
+  and a prefetch is refused outright rather than evicting to make room for a
+  guess — evicting on a guess is the exact churn this release removes.
+
+- **`image.resident_budget_px` is now `image.resident_memory_mb`, default 512.**
+  Megabytes are what you are actually spending; pixels were only ever a proxy for
+  them through a conversion nobody had measured, and now that the conversion is
+  measured the proxy is not worth keeping. A configuration still setting the old
+  key keeps working: it is converted at the measured ~13 bytes per pixel and
+  warned about once, so `resident_budget_px = 8000000` becomes 99 MB — the bound
+  you had, not the "~32 MB" it was documented as. Refusing the configuration
+  outright would have cost you the preview over a rename, which on a slow remote
+  link is the worst possible way to find out about one.
+
+  `:MdViewerDebug`'s `resident` block changes with it: `slices_resident` against
+  `grid_slices` says how much of the document is held, `resident_px` against
+  `memory_px` how close the ceiling is, and `straddles` / `straddle_misses`
+  whether boundaries are being drawn or falling back. `plan_refusal` becomes
+  `grid_refusal`, which has only three causes and names which.
+
 ### Fixed
 
 - **A resident pixel costs about 13 bytes in the terminal, not 4, so

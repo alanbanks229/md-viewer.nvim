@@ -98,10 +98,18 @@ above never invalidated it.
 What was holding it back was the "whole document" part: tens of megabytes resident in the
 terminal, and terminal memory under placement churn is exactly where this project has been
 burned before ([`terminal-support.md`](terminal-support.md) on wezterm#7953). What shipped
-is **bounded** instead — one region of about two viewports, derived from an explicit pixel
-budget rather than from the document's length, so a 5-page README and a 500-page one cost
-the same. See [`architecture.md`](architecture.md#resident-regions) and
-`:help md-viewer-resident-pan`.
+first was **bounded** instead — one region of about two viewports, derived from an explicit
+pixel budget rather than from the document's length.
+
+**That bound was the wrong one, and the measurement said so.** A region planned around
+wherever the reader stopped has edges that move with them, so crossing one evicted and
+refilled it: 14 fills and 13 evictions in 141 seconds, ~971 KB each, for **38% more traffic
+than sending a frame every time**. Bounding the memory bought a caching policy that spent
+more wire than no cache at all. What replaced it is the "whole document" part after all —
+a fixed grid of slices whose boundaries belong to the document, so a slice is paid for once
+— with the memory question answered by *measuring* what a resident pixel costs (~13 bytes,
+not the 4 assumed here) and holding a stated ceiling rather than a small guess. See
+[`architecture.md`](architecture.md#resident-regions) and `:help md-viewer-resident-pan`.
 
 Two things measured during that work are worth carrying forward. A region's PNG scales
 close to **linearly** with pixel count rather than as `pixels^0.69` — two viewports came

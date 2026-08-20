@@ -789,17 +789,27 @@ settle captures into one, so the cheap scroll frame stops existing. Raising
 `render.debounce_ms` does help, by cutting how many refreshes an edit makes.
 
                                                        *md-viewer-resident-pan*
-Resident regions ~
+Resident slices ~
 
 Scaling a frame makes it smaller; it does not stop md-viewer sending one. On
-a session that supports it, the sharp capture taken when scrolling stops is
-replaced by a taller one -- a couple of viewports of the document rather than
-the one on screen -- which the terminal keeps. Scrolling inside that range
-then costs a few hundred bytes of placement commands instead of a frame, and
-the picture stays at full device scale while it moves, which no amount of
-scaling can buy.
+a session that supports it, the document is covered by a fixed grid of
+*slices*, each about two viewports tall, each captured once and kept by the
+terminal. Every scroll position is then a crop of pixels already sent -- a few
+hundred bytes of placement commands instead of a frame -- and the picture
+stays at full device scale while it moves, which no amount of scaling can buy.
 
-The cost is memory in the terminal, so it is bounded and conservative: >lua
+The boundaries belong to the document rather than to where you stopped, which
+is what makes them worth having: a slice is paid for once, and going back over
+ground you have already read costs nothing at all. A viewport that spans two
+slices is drawn from both, split at a whole character row, in one write.
+
+While you are reading rather than scrolling, the idle link fills in the slices
+around you, nearest first, so the rest of the document is usually already
+resident by the time you reach it. That never costs you anything you were
+waiting for: a slice you actually need always goes first, and a prefetch is
+refused outright rather than evicting something to make room for a guess.
+
+The cost is memory in the terminal, so it is bounded: >lua
 
     opts = {
       image = {
@@ -817,16 +827,22 @@ Everywhere else the ordinary capture path is unchanged. See
 |md-viewer-terminals| for why WezTerm and Warp are excluded.
 
 :MdViewerDebug reports the whole of it under `resident`: `hits` against
-`misses` is whether it is earning its keep, `used_px` against `budget_px` is
-how close the bound is to binding, and `fallback_reason` is non-nil if the
-session gave up -- with the reason why.
+`misses` is whether it is earning its keep, `slices_resident` against
+`grid_slices` is how much of the document the terminal is holding,
+`resident_px` against `memory_px` is how close the ceiling is to binding, and
+`fallback_reason` is non-nil if the session gave up -- with the reason why.
+
+`evictions` is the number worth acting on. A slice is uploaded once and kept,
+so on a document that fits `resident_memory_mb` this stays at zero; anything
+above it means the document is larger than the memory allowed for it and
+ground already paid for is being paid for again.
 
 Scrolling reverts to the ordinary path while a search or a selection is
 active, and says so as `blocked_by_find` and `blocked_by_selection`. That is
 not a defect: those highlights are painted into the document by the browser,
-and a resident region was captured without them, so panning to it would erase
+and a resident slice was captured without them, so panning to it would erase
 what the reader can see. Clearing the search restores panning at no cost --
-the region was never thrown away.
+the slice was never thrown away.
 
 =============================================================================
 REMOTE PROJECTS, LOCAL NEOVIM                    *md-viewer-remote-projects*
