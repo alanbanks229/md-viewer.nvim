@@ -56,7 +56,17 @@ return function(t)
   -- backend's own output, counted exactly as the session counts it.
   local real_ui_send = vim.api.nvim_ui_send
   local emitted = {}
-  vim.api.nvim_ui_send = function(value) emitted[#emitted + 1] = value end
+  -- A second, never-reset copy. `emitted` is cleared whenever a section wants
+  -- one operation's bytes in isolation, but which images the *terminal* is
+  -- holding placements for is cumulative -- a band placed twenty writes ago is
+  -- still on screen until something deletes it. Reconstructing that needs the
+  -- whole stream, so it is kept separately rather than by asking every section
+  -- to remember not to clear the other one.
+  local all_emitted = {}
+  vim.api.nvim_ui_send = function(value)
+    emitted[#emitted + 1] = value
+    all_emitted[#all_emitted + 1] = value
+  end
 
   -- The backend refuses without an attached TUI, which a headless Neovim never
   -- has. That check is about whether escape sequences would reach anything, and
@@ -459,6 +469,127 @@ return function(t)
       t.ok(placed[upper_id] ~= nil, "one of them is the slice above the boundary")
       t.ok(placed[lower_id] ~= nil, "and the other is the slice below it")
       t.near(boundary, session.applied_scroll_y, 1.0, "and the position recorded is the one asked for")
+
+      -- ----------------------------------------------------------------
+      -- And leaving the boundary takes the second band down with it.
+      --
+      -- This is the invariant nothing asserted, and the reported defect. Every
+      -- base slice is placed on the same z layer, and the Kitty protocol breaks
+      -- a z tie by image id -- the *higher* id draws on top. So a band left
+      -- behind by a composite does not merely linger somewhere harmless: if its
+      -- slice was uploaded after the one now being drawn, it draws **over** it,
+      -- and the reader sees a hard seam with an unrelated part of the document
+      -- below it. Reported as the top of the document with block 007 spliced
+      -- underneath.
+      --
+      -- Asserted from the bytes rather than from `screen_parts`, because
+      -- `screen_parts` is the thing under suspicion: what matters is what the
+      -- terminal was told, which is what these commands are.
+      -- ----------------------------------------------------------------
+      local function live_placements(stream)
+        local placements = {}
+        for command in stream:gmatch("\27_G([^\27]*)") do
+          local id = tonumber(command:match("i=(%d+)") or "")
+          if id then
+            if command:match("a=p") then
+              local pid = tonumber(command:match("p=(%d+)") or "")
+              placements[id] = placements[id] or {}
+              if pid then placements[id][pid] = true end
+            elseif command:match("a=d,d=I") then
+              placements[id] = nil
+            elseif command:match("a=d,d=i") then
+              local pid = tonumber(command:match("p=(%d+)") or "")
+              if pid and placements[id] then placements[id][pid] = nil end
+            end
+          end
+        end
+        local owners = {}
+        for id, pids in pairs(placements) do
+          if next(pids) then owners[#owners + 1] = id end
+        end
+        table.sort(owners)
+        return owners
+      end
+
+      -- The composite itself: exactly the two slices either side of the seam.
+      local seam_owners = live_placements(seam_stream)
+      t.eq(2, #seam_owners, "the composite leaves exactly two images holding placements")
+
+      -- Now step back inside slice 0, where `slices_for` returns one slice and
+      -- the pane is drawn edge to edge from it. Nothing else may still be on
+      -- screen.
+      local inside_slice_0 = math.floor(resident.slice(grid, 0).doc_h / 4)
+      t.eq(
+        0,
+        (select(2, resident.slices_for(grid, inside_slice_0, session.viewport_height_px))),
+        "sanity: that position is covered by slice 0 alone"
+      )
+      emitted = {}
+      controller.scroll_to(session, inside_slice_0)
+      local owners_after = live_placements(seam_stream .. table.concat(emitted))
+      t.eq(
+        1,
+        #owners_after,
+        ("leaving a boundary retires the other band: %d images still hold placements"):format(#owners_after)
+      )
+      t.eq(
+        resident.hold(live, 0).image_id,
+        owners_after[1],
+        "and the one left is the slice actually being drawn, not whichever was uploaded last"
+      )
+
+      -- ----------------------------------------------------------------
+      -- The reported sequence, which the tidy transition above does not
+      -- reach: scrolling hard across boundaries *while the document is still
+      -- warming*, so fills and prefetches land in among the composites.
+      --
+      -- Checked against the whole stream from the session's start, because
+      -- what is on screen is cumulative: a band placed twenty writes ago is
+      -- still there until something deletes it.
+      -- ----------------------------------------------------------------
+      local function owners_now() return live_placements(table.concat(all_emitted)) end
+      local function expected_owners()
+        local ids = {}
+        for _, part in ipairs(session.screen_parts or {}) do
+          if part.image_id then ids[#ids + 1] = part.image_id end
+        end
+        table.sort(ids)
+        return ids
+      end
+
+      local sweep = {}
+      for index = 0, math.min(grid.count - 2, 5) do
+        local slice = assert(resident.slice(grid, index))
+        -- Inside the slice, then hard onto the boundary it shares with the next.
+        sweep[#sweep + 1] = math.floor(slice.doc_y + slice.doc_h / 4)
+        sweep[#sweep + 1] = math.floor(slice.doc_y + slice.doc_h - session.viewport_height_px) + 1
+      end
+      -- And back, which is where a reader ends up when they scroll to the top.
+      for index = #sweep - 1, 1, -1 do
+        sweep[#sweep + 1] = sweep[index]
+      end
+      sweep[#sweep + 1] = 0
+
+      local worst = nil
+      for step, position in ipairs(sweep) do
+        controller.scroll_to(session, position)
+        local live_now, want = owners_now(), expected_owners()
+        if not worst and #live_now ~= #want then
+          worst = ("step %d at scroll %d: terminal holds placements for %d image(s) [%s], screen has %d [%s]"):format(
+            step,
+            position,
+            #live_now,
+            table.concat(vim.tbl_map(tostring, live_now), ","),
+            #want,
+            table.concat(vim.tbl_map(tostring, want), ",")
+          )
+        end
+      end
+      t.eq(
+        nil,
+        worst,
+        "scrolling across boundaries never leaves an image placed that is not on screen: " .. tostring(worst)
+      )
 
       -- ----------------------------------------------------------------
       -- Idle wire fills the rest of the document.
