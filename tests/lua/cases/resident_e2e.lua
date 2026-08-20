@@ -286,6 +286,32 @@ return function(t)
     end
 
     -- ------------------------------------------------------------------
+    -- A region is given back when the document changes, not when the reader
+    -- next happens to scroll.
+    --
+    -- The key check lived in `try_pan` alone, so a resize, a colorscheme change,
+    -- an edit or an explicit refresh freed nothing until the next scroll. A
+    -- reader who changed the document twice and sat still held three generations
+    -- of pixels. With one region that is a viewport of waste; with a grid
+    -- covering the document it is the whole document, per invalidation.
+    -- ------------------------------------------------------------------
+    if region then
+      local doomed = region.image_id
+      t.ok(doomed ~= nil, "sanity: the resident region has an image to give back")
+      emitted = {}
+      -- What an explicit refresh does, without depending on which window is
+      -- current: the epoch is in the content revision, which is in the key.
+      session.render_epoch = (session.render_epoch or 0) + 1
+      controller.refresh(session)
+      settled(function() return #live.regions == 0 end, "a changed document drops the regions it invalidated")
+      t.ok(
+        table.concat(emitted):find(("a=d,d=I,q=2,i=%d"):format(doomed), 1, true) ~= nil,
+        "and the terminal gets the pixels back, with no scroll to prompt it"
+      )
+      t.eq(0, live.used_px, "with the cache's accounting emptied to match")
+    end
+
+    -- ------------------------------------------------------------------
     -- Holding `j`.
     --
     -- A caret motion past the bottom of the viewport scrolls the page, which

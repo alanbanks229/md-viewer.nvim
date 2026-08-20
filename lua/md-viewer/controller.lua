@@ -810,10 +810,20 @@ local function resident_fallback(session, reason)
 end
 
 ---Drop every region and remember the key they were replaced by.
+---
+---A region of this generation that is on screen becomes, a line below, pixels
+---the terminal has been told to forget -- so the screen bookkeeping must stop
+---naming it. Left in place, the next `clear_image` tries to hide an image nobody
+---owns and `apply_image` asks to supersede one.
 local function resident_invalidate(session, key)
   local live = session.resident
+  local dropped = {}
+  for _, region in ipairs(live.regions or {}) do
+    if region.image_id then dropped[region.image_id] = true end
+  end
   free_resident(session)
   live.key = key
+  if session.image_id and dropped[session.image_id] then set_screen(session, {}) end
 end
 
 ---Show an already-resident region at the newest scroll position, if one covers
@@ -1199,6 +1209,33 @@ function M.refresh(session, render_options)
     -- cached clean base cannot be this frame. `apply_image` records the
     -- replacement whenever a selection-free frame does reach the screen.
     if session.selection_active then session.clean_image_bytes = nil end
+    -- Every region this session holds, against the document there now is.
+    --
+    -- This used to be asked only by `try_pan`, which is to say only when the
+    -- reader next scrolled. So everything that invalidates a region -- a resize,
+    -- a colorscheme change, `background` flipping, an edit, `:MdViewerRefresh` --
+    -- freed nothing until then, and a reader who resized twice without scrolling
+    -- held three generations of pixels at once. With one region that was a
+    -- viewport of waste. With a grid covering the document it is the whole
+    -- document, per invalidation.
+    --
+    -- Here because this is the earliest tick a new key can be observed: the
+    -- callback has just adopted the renderer's viewport and revision, which are
+    -- two of the things the key is made of. `try_pan` keeps its own check, now
+    -- belt and braces rather than the only guard.
+    --
+    -- Never on a fill's own callback. A fill carries `fill.key` -- the document
+    -- it was a capture *of* -- and compares it a few lines below, which is the
+    -- one guard that stops a resize mid-capture stamping the new document's
+    -- identity onto the old one's pixels. Invalidating here would drain the
+    -- cache, and draining resets the fill slot, so that comparison would find no
+    -- key to make and wave the mismatched capture through. It reached
+    -- `region_from_fill`, which refused it for disagreeing scales, and a refusal
+    -- there is a permanent fallback for the session.
+    if not filling and session.resident and session.resident.key then
+      local key_now = resident_key(session)
+      if session.resident.key ~= key_now then resident_invalidate(session, key_now) end
+    end
     if update_occlusion(session) then
       clear_image(session)
       finish()
