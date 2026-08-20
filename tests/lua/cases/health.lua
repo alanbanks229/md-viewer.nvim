@@ -245,15 +245,15 @@ return function(t)
     unobservable.resident_link_unobservable = { samples = 25, discarded = 147 }
     local diagnosis = health._diagnose(unobservable, auto_cfg)
     local texts = warning_texts(diagnosis)
-    t.ok(texts:match("cannot measure its link"), "an unmeasurable link raises a warning naming the problem")
-    t.ok(texts:match("147 of 172"), "quoting the counts, so the claim can be checked rather than taken on trust")
+    t.ok(texts:match("render%.ssh_link_bytes_per_sec is unset"), "an unmeasured link raises a warning naming the key")
     local detail = ""
     for _, warning in ipairs(diagnosis.warnings) do
       if warning.detail then detail = detail .. table.concat(warning.detail, "\n") end
     end
+    t.ok(detail:match("147 of 172"), "quoting the counts, so the claim can be checked rather than taken on trust")
     -- Both halves, because either alone is unusable: the key without the script
     -- invites a guess, and guessing high is precisely the failure being reported.
-    t.ok(detail:match("scripts/ssh%-link%-speed%.lua"), "and names the script that measures it")
+    t.ok(detail:match("scripts/ssh%-link%-speed%.sh"), "and names the script that measures it")
     t.ok(detail:match("render%.ssh_link_bytes_per_sec"), "and the key to put the answer in")
 
     t.eq(

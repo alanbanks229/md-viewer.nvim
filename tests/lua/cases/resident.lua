@@ -494,51 +494,32 @@ return function(t)
   t.ok(blocked.wire_bytes_per_ms > 0, "a write that blocked for 350 ms is still an observation")
   t.eq(0, blocked.wire_samples_discarded, "and is not thrown out")
 
-  -- Which of the two the hold is computed from, and it is not close: a stated
-  -- rate is a fact and an inferred one is a lower bound on a bad day. Both
-  -- present, the stated one wins outright rather than being averaged in.
-  local rate, source = resident.link_rate(800000, 139058)
-  t.eq(800, rate, "a configured bytes-per-second becomes bytes per millisecond and takes precedence")
+  -- There is exactly one source of a link rate, and it is the operator. The
+  -- estimate that used to be the fallback was never measuring a link:
+  -- `nvim_ui_send` queues into Neovim and returns, so a Lua caller sees no
+  -- back-pressure at all. Measured on a host shaped to 0.80 MB/s -- 24 MB
+  -- accepted from inside Neovim in 0.03s, against 8 MB in 11.0s from the shell.
+  -- So an unconfigured session reports that it cannot see its link rather than
+  -- reporting the speed of a queue insertion as though it were a wire.
+  local rate, source = resident.link_rate(800000)
+  t.eq(800, rate, "a configured bytes-per-second becomes bytes per millisecond")
   t.eq("configured", source, "and says so, because the number alone is not the fact")
-  rate, source = resident.link_rate(nil, 1345.7)
-  t.near(1345.7, rate, 0.001, "with nothing configured the estimate is the fallback")
-  t.eq("estimated", source, "labelled as inferred wherever it is shown")
-  rate, source = resident.link_rate(nil, nil)
-  t.eq(nil, rate, "and neither available is an honest third answer")
-  t.eq("unknown", source, "rather than a number nobody measured")
-  t.eq(
-    SETTLE_MS,
-    resident.wire_hold_ms(REGION_BYTES, resident.link_rate(nil, nil), 0, SETTLE_MS, SETTLE_MS * 2),
-    "which the hold turns into the settle delay, not into no hold at all"
-  )
-
-  -- The fourth answer, and the one a real tunnel gives. An estimate is only
-  -- worth anything while most of this session's samples were credible: a
-  -- discarded sample and a kept one are the same event -- a write returning once
-  -- a buffer took the bytes -- and differ only in whether the number they
-  -- produced landed under the ceiling. The session that reported these counts
-  -- put an SSM tunnel at 101,169 B/ms and computed a 2 ms hold from it, so the
-  -- one-payload invariant never fired once.
-  rate, source = resident.link_rate(nil, 101169, 25, 147)
-  t.eq(nil, rate, "an estimate whose session threw out most of its samples is not a rate")
-  t.eq("unobservable", source, "and says the link could not be seen, rather than printing what survived")
+  rate, source = resident.link_rate(nil)
+  t.eq(nil, rate, "with nothing configured there is no rate to be had")
+  t.eq("unobservable", source, "and the honest word for that is not 'estimated'")
   t.eq(
     SETTLE_MS,
     resident.wire_hold_ms(REGION_BYTES, rate, 0, SETTLE_MS, SETTLE_MS * 2, source),
-    "so the hold falls back to the settle delay instead of the 2 ms that disabled it"
+    "which the hold turns into the settle delay, not into no hold at all"
   )
-  rate, source = resident.link_rate(nil, 1345.7, 25, 3)
-  t.near(1345.7, rate, 0.001, "a minority of discards still leaves an estimate worth having")
-  t.eq("estimated", source, "and it is still labelled an inference")
-  rate, source = resident.link_rate(800000, 101169, 25, 147)
-  t.eq(800, rate, "a stated rate is unaffected by any of this -- it was never an inference")
-  t.eq("configured", source, "and keeps saying so")
+  t.eq(nil, (resident.link_rate(0)), "a zero rate is not a statement of anything")
+  t.eq(nil, (resident.link_rate(-1)), "and neither is a negative one")
 
   -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire. That is how long
   -- the wire is genuinely busy, so it is not clamped: `max_ms` bounds a number
   -- this module worked out for itself, and truncating a measurement does not
   -- make the bytes arrive sooner, it just resumes sending on top of them.
-  local stated, stated_source = resident.link_rate(800000, 139058)
+  local stated, stated_source = resident.link_rate(800000)
   t.eq(
     1012,
     resident.wire_hold_ms(REGION_BYTES, stated, 0, SETTLE_MS, SETTLE_MS * 2, stated_source),

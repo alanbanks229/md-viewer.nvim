@@ -75,16 +75,24 @@ M.defaults = {
     -- `scp` of a large file reports for anything else, since that is the same
     -- quantity.
     --
-    -- Asked rather than inferred, which is the whole reason this key exists. The
-    -- plugin can time its own write to `nvim_ui_send` and does, but a write
-    -- returning means the kernel took the bytes and not that the terminal
-    -- received them: on a link with buffer to spare it returns immediately, and
-    -- the rate that implies is the memory bus rather than the tunnel. A real
-    -- session estimated 139,058 B/ms for a link doing 800, and the hold that
-    -- number produced was zero. There is nothing better to measure -- a terminal
-    -- can be asked to acknowledge an upload, but its reply lands on Neovim's own
-    -- stdin, which a plugin cannot read (see md-viewer/cellpixels.lua). So the
-    -- operator knows this and the plugin does not.
+    -- `scripts/ssh-link-speed.sh` measures it. Run it from the shell in the SSH
+    -- session, not from inside Neovim, and paste what it prints.
+    --
+    -- Asked rather than inferred, which is the whole reason this key exists, and
+    -- the reason is stronger than it used to be stated. It was not that a write
+    -- to `nvim_ui_send` returns before the terminal has the bytes; it is that
+    -- **the write never touches the terminal at all**. `nvim_ui_send` appends to
+    -- Neovim's own UI queue and returns, and the TUI drains that queue onto the
+    -- pty on its own time -- so a Lua caller sees no back-pressure from the link
+    -- under any circumstances. Measured against a host shaped to 0.80 MB/s:
+    -- 24 MB accepted from inside Neovim in 0.03s, against 8 MB in 11.0s written
+    -- from the shell. A real session put an SSM tunnel at 101,169 B/ms on that
+    -- basis and computed a 2 ms pause from it.
+    --
+    -- Nor is there anything else to ask. A terminal can be told to acknowledge
+    -- an upload, but its reply lands on Neovim's own stdin, which a plugin
+    -- cannot read (see md-viewer/cellpixels.lua). So the operator knows this and
+    -- the plugin does not.
     ssh_link_bytes_per_sec = nil,
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.

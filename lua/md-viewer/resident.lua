@@ -1050,47 +1050,44 @@ end
 ---so a stated rate is the only figure here that is a fact rather than an
 ---inference, and it wins outright rather than being averaged with one.
 ---
----`"estimated"` is a fallback and must be labelled as one wherever it is shown.
----It comes from writes that blocked, which is a *part* of a transfer, so it runs
----fast; the value of keeping it is that a session with no rate configured still
----holds the wire for something better than a fixed delay.
+---## Why there is no second answer: the estimate is not a measurement of a link
 ---
----`nil, "unknown"` is the honest third answer, and `M.wire_hold_ms` turns it
----into the session's settle delay rather than into no hold at all.
+---There used to be an `"estimated"` source, inferred from how long a write to
+---`nvim_ui_send` took, kept on the reasoning that a write which blocked is at
+---least *part* of a transfer. It is not part of one. **`nvim_ui_send` does not
+---write to the pty at all** -- it hands the bytes to Neovim's own UI queue and
+---returns, and the TUI drains that queue onto the terminal later, on its own
+---time. So a Lua caller sees no back-pressure from the link under any
+---circumstances, and every sample this module has ever taken measured the speed
+---of a queue insertion.
 ---
----## Why the estimate is checked against the session's own discard count
+---That was measured rather than reasoned about, on a host shaped to 6400 kbit/s
+---(0.80 MB/s) with `scripts/rig/provision.sh --shape`:
 ---
----`"unobservable"` is a *fourth* answer and it is the one that matters on a real
----tunnel. `M.note_wire_sample`'s ceiling rejects samples implying a link faster
----than gigabit, and `new_state` already says what a rejection means: "this
----session's writes are being absorbed rather than transmitted, so the estimator
----has nothing to say". It said that and nothing acted on it, so the surviving
----samples were believed on their own.
+---    from inside Neovim   96 payloads, 24 MB, 0.03s, no write ever waited
+---    from the shell        8 MB in 11.0s -> 760,267 B/s against a real 800,000
 ---
----They must not be. Rejected and accepted samples are the same phenomenon --
----a write returning once a buffer took the bytes -- and differ only in whether
----the number they produced happened to land under the ceiling. A session that
----reported 147 discards against 25 kept samples put the link at 101,169 B/ms on
----an SSM tunnel, and the hold computed from it was 2 ms: the one-payload
----invariant never fired once, and ~46 MB went at a link that could not carry it.
+---Twenty-four megabytes accepted in thirty milliseconds on a link that carries
+---0.8 per second. That is the whole story of the 101,169 B/ms a real session
+---reported for an SSM tunnel, and of the 2 ms hold it computed: not a sampling
+---problem to be filtered, a quantity that was never being observed.
+---`MIN_WIRE_SAMPLE_BYTES` and `MAX_WIRE_SAMPLE_BYTES_PER_MS` were guards on a
+---measurement that does not exist.
 ---
----So the estimate is only worth anything while most of this session's samples
----were credible. The comparison is stateable rather than tuned: more of these
----writes measured a link than measured a buffer. Below that the honest report is
----that this session cannot see its link at all, and `M.wire_hold_ms` falls back
----to the settle delay -- staleness rather than a backlog, which is the direction
----the caller's own docstring already claims it takes.
+---So the only rate here is the one the operator states, and `scripts/ssh-link-
+---speed.sh` measures it from the shell, where a write to the terminal does meet
+---the link. Without one the honest answer is `nil, "unobservable"`, and
+---`M.wire_hold_ms` turns that into the session's settle delay rather than into
+---no hold at all -- staleness rather than a backlog.
 ---
----`samples`/`discarded` are optional so a caller with no session state (the
----tests that exercise the preference order) still gets the plain three answers.
+---The samples are still counted, and `:MdViewerDebug` still reports them. They
+---are evidence *for* this, not an input to it: a session discarding most of what
+---it samples is demonstrating that its writes are being absorbed.
 ---@return number|nil bytes_per_ms, string source
-function M.link_rate(configured_bytes_per_sec, estimated_bytes_per_ms, samples, discarded)
+function M.link_rate(configured_bytes_per_sec)
   local configured = positive(configured_bytes_per_sec)
   if configured then return configured / 1000, "configured" end
-  local estimated = positive(estimated_bytes_per_ms)
-  if not estimated then return nil, "unknown" end
-  if math.max(0, finite(discarded) or 0) > math.max(0, finite(samples) or 0) then return nil, "unobservable" end
-  return estimated, "estimated"
+  return nil, "unobservable"
 end
 
 ---How long to keep the wire to itself after handing `bytes` to the terminal.

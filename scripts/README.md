@@ -288,6 +288,33 @@ with the run itself — the second phase was not a remote buffer, or this
 Neovim is itself over SSH, which is the other feature (`:help
 md-viewer-ssh`).
 
+## `ssh-link-speed.sh` — how fast is this link, actually?
+
+The one script here that is for *users* rather than for developing the plugin,
+and the one `:MdViewerHealth` sends people to. Run it from the shell in the SSH
+session, with Neovim closed:
+
+```sh
+sh scripts/ssh-link-speed.sh
+```
+
+It fills the buffers between the host and your terminal, times 8 MB through
+them, and prints the `render.ssh_link_bytes_per_sec` line to paste. Against a
+host shaped to 6400 kbit/s it read 760,267 B/s — 95% of the real 800,000, and
+low rather than high, which is the safe direction.
+
+**Why it is a shell script.** md-viewer cannot take this measurement itself.
+`nvim_ui_send` appends to Neovim's own UI queue and returns; the TUI drains that
+queue onto the pty later. So a Lua caller sees no back-pressure from the link at
+all — on that same shaped host, 24 MB was accepted from inside Neovim in 0.03s.
+Every throughput sample md-viewer has ever taken measured a queue insertion,
+which is how a real session arrived at 101,169 B/ms for an SSM tunnel and sized
+its anti-backlog pause at 2 ms. A shell writing to its controlling terminal has
+no such queue in the way.
+
+It writes several megabytes of spaces and then clears the screen. Nothing is
+left behind, but the terminal is busy for as long as the measurement takes.
+
 ## `rig/provision.sh` — a host you can reproduce the SSH mode on
 
 Not a measurement. This is the one harness whose output is a *machine*: an SSH
@@ -304,7 +331,7 @@ live.
 scripts/rig/provision.sh              # the default host
 scripts/rig/provision.sh some-host
 scripts/rig/provision.sh --check      # report state, change nothing
-scripts/rig/provision.sh --shape      # throttle egress to 800kbit/40ms
+scripts/rig/provision.sh --shape      # throttle egress to 6400kbit/40ms
 scripts/rig/provision.sh --unshape
 ```
 
@@ -332,8 +359,11 @@ Confirm the host is really in the mode you wanted before trusting a run:
 
 `--shape` throttles everything leaving the host, this ssh session included. A
 LAN is not the link defects get reported over, and a timing-sensitive one will
-not reproduce at LAN speed; 800 kbit/s is the rate `resident.lua`'s wire
-constants were tuned against.
+not reproduce at LAN speed. 6400 kbit/s is 0.80 MB/s, the rate `resident.lua`'s
+wire constants were tuned against — it was 800 kbit until 2026-08-20, which is
+eight times too slow, from reading that "800" as kilobits when it is bytes per
+millisecond. A rig that models the wrong link is worse than none: it reproduces
+symptoms the real machine does not have and misses the ones it does.
 
 ## `remote-images/probe.lua` — does a blocked image still cost the whole preview?
 

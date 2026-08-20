@@ -905,12 +905,25 @@ the write looks instantaneous however slow the link is. >lua
       },
     }
 <
+Measure it, do not guess: >
+
+        sh ~/.local/share/nvim/lazy/md-viewer.nvim/scripts/ssh-link-speed.sh
+<
+Run that from the shell in your SSH session, with Neovim closed. It fills the
+buffers between you and your terminal, times 8 MB through them, and prints the
+line to paste. :MdViewerHealth names the path for your install.
+
+md-viewer cannot take this measurement itself, which is why the key exists.
+`nvim_ui_send` hands bytes to Neovim's own UI queue and returns; the TUI drains
+that queue onto the terminal later. So from inside Lua a slow link and a fast
+one are indistinguishable -- 24 MB was accepted in 0.03s on a link carrying
+0.8 MB/s, while the same host from the shell took 11s over 8 MB.
+
 Unset, md-viewer falls back to the settle delay, which is a safe guess rather
 than an answer. :MdViewerDebug reports which it is using as
-`link_rate_source`: `configured` is the number above, `estimated` is inferred
-from writes that did block, and `unknown` means neither is available.
-`upload_hold_ms` is the resulting pause and `frames_suppressed_by_hold` counts
-the frames it saved you.
+`link_rate_source`: `configured` is the number above, and `unobservable` means
+you have not set one. `upload_hold_ms` is the resulting pause and
+`frames_suppressed_by_hold` counts the frames it saved you.
 
 =============================================================================
 REMOTE PROJECTS, LOCAL NEOVIM                    *md-viewer-remote-projects*

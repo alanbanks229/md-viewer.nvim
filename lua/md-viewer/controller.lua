@@ -1757,12 +1757,10 @@ local function warn_link_unmeasurable(live)
   if warned_about_link_rate or live.link_rate_source ~= "unobservable" then return end
   warned_about_link_rate = true
   vim.notify(
-    ("md-viewer: this link cannot be measured from here (%d of %d throughput samples were impossible), so "):format(
-      live.wire_samples_discarded or 0,
-      (live.wire_samples_discarded or 0) + (live.wire_samples or 0)
-    )
-      .. "the preview will fall behind as you scroll.\n"
-      .. "Measure it once with  :runtime scripts/ssh-link-speed.lua  and set render.ssh_link_bytes_per_sec.",
+    "md-viewer: render.ssh_link_bytes_per_sec is unset, so the preview will fall behind as you scroll "
+      .. "over this link.\n"
+      .. "md-viewer cannot time the link itself -- measure it once from the shell with "
+      .. "scripts/ssh-link-speed.sh (see :MdViewerHealth for the full path).",
     vim.log.levels.WARN
   )
 end
@@ -1774,12 +1772,7 @@ function hold_wire(session, bytes, elapsed_ms)
   local settle = scroll_settle_delay(render)
   -- The sample counters go with the estimate, so a session whose writes are
   -- being absorbed rather than transmitted is told so rather than believed.
-  local rate, source = resident.link_rate(
-    render.ssh_link_bytes_per_sec,
-    live.wire_bytes_per_ms,
-    live.wire_samples,
-    live.wire_samples_discarded
-  )
+  local rate, source = resident.link_rate(render.ssh_link_bytes_per_sec)
   live.link_rate_source = source
   live.upload_hold_ms = resident.wire_hold_ms(bytes, rate, elapsed_ms, settle, settle * 2, source)
   live.upload_hold_until = vim.uv.now() + live.upload_hold_ms

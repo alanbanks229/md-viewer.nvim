@@ -136,31 +136,29 @@ local function resident_document_fit()
   return nil
 end
 
----Whether any live session can see how fast its link is, and why not.
+---Whether any live session is reusing sent pixels without knowing how fast its
+---link is.
 ---
----The hold that keeps a slice upload from collecting every moving frame behind
----it is a timer over a link rate, so a session with no credible rate has no
----working hold -- and that is invisible from the outside: nothing fails, the
----preview simply falls further behind the longer it is used. A real session
----reported 147 discarded samples against 25 kept, believed the survivors at
----101,169 B/ms on an SSM tunnel, and held the wire for 2 ms.
+---The pause that keeps a slice upload from collecting every moving frame behind
+---it is a timer over a link rate, and md-viewer cannot measure one: `nvim_ui_send`
+---queues into Neovim and returns, so from Lua a slow link and a fast one look
+---identical. See `resident.link_rate` for the measurement that settled it. So
+---this is not a subtle condition -- it is simply "reusing pixels over SSH with
+---nothing configured", which is every session that has not been told.
 ---
----Returns nil when there is nothing to say -- no session, not reusing sent
----pixels, or a rate the operator has stated, which is the answer this warning
----exists to ask for.
+---Invisible from the outside, which is why it is worth a warning: nothing fails,
+---the preview just falls further behind the longer it is open. The session that
+---produced this diagnosis ran for minutes at a 2 ms pause before anyone looked.
 local function resident_link_unobservable()
   local resident = require("md-viewer.resident")
   local render = config.get().render
   for _, session in pairs(state.all()) do
     local live = not session.closed and session.resident
     if live and live.enabled then
-      local _, source = resident.link_rate(
-        render.ssh_link_bytes_per_sec,
-        live.wire_bytes_per_ms,
-        live.wire_samples,
-        live.wire_samples_discarded
-      )
+      local _, source = resident.link_rate(render.ssh_link_bytes_per_sec)
       if source == "unobservable" then
+        -- The counts are carried so the warning can show its working. They are
+        -- evidence that the writes were absorbed, not the test for it.
         return { samples = live.wire_samples or 0, discarded = live.wire_samples_discarded or 0 }
       end
     end
@@ -828,16 +826,22 @@ local function build_warnings(report, status, status_reason)
   if report.resident_link_unobservable then
     local seen = report.resident_link_unobservable
     warnings[#warnings + 1] = {
-      text = ("this session cannot measure its link (%d of %d throughput samples were impossible), "):format(
-        seen.discarded,
-        seen.discarded + seen.samples
-      ) .. "so the pause that stops uploads burying the preview is running on a fallback",
+      text = "render.ssh_link_bytes_per_sec is unset, so the pause that stops uploads "
+        .. "burying the preview is running on a fallback",
       severity = "warn",
       detail = {
         "Scrolling will fall further behind the longer the preview is open, and what you see",
         "will be a frame of somewhere you have already left rather than where you are.",
-        "Measure the link once:  :runtime scripts/ssh-link-speed.lua",
-        "then set render.ssh_link_bytes_per_sec to what it reports.",
+        ("This session discarded %d of %d throughput samples as impossible, which is the"):format(
+          seen.discarded,
+          seen.discarded + seen.samples
+        ),
+        "shape of the problem: nvim_ui_send queues into Neovim and returns, so md-viewer",
+        "cannot time this link from the inside. Measure it once, from the shell:",
+        "",
+        ("    sh %s/scripts/ssh-link-speed.sh"):format(root()),
+        "",
+        "then set render.ssh_link_bytes_per_sec to what it prints.",
       },
     }
   end

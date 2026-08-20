@@ -1318,19 +1318,19 @@ return function(t)
       t.eq("configured", live.link_rate_source, "and records which of the three kinds of number it used")
       config.setup(restore_link)
 
-      -- With no rate stated, a session whose writes were absorbed rather than
-      -- transmitted has to be told once. Nothing is failing -- that is the whole
-      -- difficulty: the preview just falls further behind, so nobody thinks to
-      -- open a health report, and the counts that explain it sit in a diagnostic
-      -- as two numbers nobody would divide.
+      -- With no rate stated there is nothing to size a hold from, and the reader
+      -- has to be told once. Nothing is failing -- that is the whole difficulty:
+      -- the preview just falls further behind, so nobody thinks to open a health
+      -- report. md-viewer cannot fill the gap itself either; `nvim_ui_send`
+      -- queues into Neovim and returns, so from here a slow link and a fast one
+      -- are indistinguishable (see `resident.link_rate`).
       do
         local real_notify = vim.notify
         local notices = {}
         vim.notify = function(message, level) notices[#notices + 1] = { message = message, level = level } end
         controller._forget_link_rate_warning()
-        live.wire_bytes_per_ms, live.wire_samples, live.wire_samples_discarded = 101169, 25, 147
         controller._hold_wire(session, 810000, 0)
-        t.eq("unobservable", live.link_rate_source, "an estimate its own session discarded is not a rate")
+        t.eq("unobservable", live.link_rate_source, "an unconfigured link is reported as one nobody can see")
         t.eq(160, live.upload_hold_ms, "so the hold falls back to the settle delay rather than the 2 ms it computed")
         t.eq(1, #notices, "and the reader is told, once")
         -- Read through a default rather than indexed directly: `t.eq` records a
@@ -1338,7 +1338,7 @@ return function(t)
         -- whole run and hide the assertion above that actually diagnosed it.
         local notice = notices[1] or { message = "", level = nil }
         t.eq(vim.log.levels.WARN, notice.level, "as a warning, because it costs them something")
-        t.ok(notice.message:match("scripts/ssh%-link%-speed%.lua"), "naming the script that measures the link")
+        t.ok(notice.message:match("scripts/ssh%-link%-speed%.sh"), "naming the script that measures the link")
         t.ok(notice.message:match("render%.ssh_link_bytes_per_sec"), "and the key the answer goes in")
 
         -- Once per session, not once per payload: this fires from the upload
@@ -1346,7 +1346,6 @@ return function(t)
         controller._hold_wire(session, 810000, 0)
         t.eq(1, #notices, "and not again on the next upload over the same link")
         vim.notify = real_notify
-        live.wire_bytes_per_ms, live.wire_samples, live.wire_samples_discarded = nil, 0, 0
         live.upload_hold_until = 0
       end
 

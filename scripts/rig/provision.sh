@@ -55,7 +55,13 @@ VAULT_REMOTE="${MD_VIEWER_RIG_VAULT:-git@github.com:alanbanks229/obsidian-vault.
 # MAX_WIRE_SAMPLE_BYTES_PER_MS there, and the 0.80 MB/s figure its commentary
 # cites. A LAN is not the link defects get reported over, and a timing-sensitive
 # one will not reproduce at LAN speed.
-SHAPE_RATE="${MD_VIEWER_RIG_RATE:-800kbit}"
+#
+# 6400kbit, because 0.80 MB/s is 6.4 Mbit/s. This was 800kbit until 2026-08-20,
+# which is 0.1 MB/s -- eight times too slow, from reading the "800" in that
+# commentary as kilobits when it is bytes per millisecond. A rig that models the
+# wrong link is worse than no rig: it reproduces symptoms the real machine does
+# not have and misses the ones it does.
+SHAPE_RATE="${MD_VIEWER_RIG_RATE:-6400kbit}"
 SHAPE_DELAY="${MD_VIEWER_RIG_DELAY:-40ms}"
 
 MODE="provision"

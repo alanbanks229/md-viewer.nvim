@@ -58,12 +58,7 @@ local function resident_report(session)
   -- Asked here rather than read off the session, so the block answers about the
   -- configuration there is now rather than about the one the last hold happened
   -- to be computed under.
-  local link_rate, link_source = resident.link_rate(
-    config.get().render.ssh_link_bytes_per_sec,
-    live.wire_bytes_per_ms,
-    live.wire_samples,
-    live.wire_samples_discarded
-  )
+  local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec)
   local slices_that_fit, whole_document = resident.slices_that_fit(grid, live.memory_px)
   return {
     enabled = live.enabled,
