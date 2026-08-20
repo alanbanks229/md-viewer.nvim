@@ -118,11 +118,19 @@ back at 810 KB, about 1.7× the estimate, which is ~1.35 s of wire here. And Chr
 returns a correctly *sized* image whose beyond-the-fold band is only 95.5% right. The flag
 is asserted by test rather than assumed from the absence of an exception.
 
-**Two alternatives that cannot work.** Writing to the ssh pty slave from a second
+**Three alternatives that cannot work.** Writing to the ssh pty slave from a second
 process: two processes writing one terminal is not atomic, and a write landing inside an
 escape sequence wedges it. Returning data through `TermResponse`: replying to Neovim
 means injecting into ssh's *input*, which means owning stdin, which means allocating a
 pty, which means a native module that cannot be installed on a machine with no egress.
+And **asking the terminal how fast the link is**: a Kitty upload with `q=0` is answered
+`OK` once the terminal holds the pixels, which would time a transfer end to end — but that
+reply is a terminal *reply*, so it comes back the same way `TermResponse` does and is
+unreachable for the same reason. This is the third time the project has arrived here:
+`md-viewer/cellpixels.lua` goes through `TIOCGWINSZ` rather than `CSI 14 t` for it, and
+`resident.note_wire_sample` times its own write instead — which measures the pty buffer,
+not the link, and reported 139,058 B/ms for a tunnel doing 800. The link rate is asked for
+(`render.ssh_link_bytes_per_sec`) because it cannot be found out.
 
 ## References
 

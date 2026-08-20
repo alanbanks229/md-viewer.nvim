@@ -65,6 +65,27 @@ M.defaults = {
     -- them -- so the backlog, not the render, is the lag. See
     -- docs/local-render-design.md.
     ssh_scroll_scale = 0.5,
+    -- How fast this session's link actually is, in bytes per second, when you
+    -- know. nil means nobody has said.
+    --
+    -- Only resident panning reads it, and only to decide how long an uploaded
+    -- slice is still crossing the wire -- for that long, a scroll that misses is
+    -- coalesced rather than queued behind it. Set it to `800000` for the AWS SSM
+    -- tunnel this feature was built against (0.80 MB/s, measured); use whatever
+    -- `scp` of a large file reports for anything else, since that is the same
+    -- quantity.
+    --
+    -- Asked rather than inferred, which is the whole reason this key exists. The
+    -- plugin can time its own write to `nvim_ui_send` and does, but a write
+    -- returning means the kernel took the bytes and not that the terminal
+    -- received them: on a link with buffer to spare it returns immediately, and
+    -- the rate that implies is the memory bus rather than the tunnel. A real
+    -- session estimated 139,058 B/ms for a link doing 800, and the hold that
+    -- number produced was zero. There is nothing better to measure -- a terminal
+    -- can be asked to acknowledge an upload, but its reply lands on Neovim's own
+    -- stdin, which a plugin cannot read (see md-viewer/cellpixels.lua). So the
+    -- operator knows this and the plugin does not.
+    ssh_link_bytes_per_sec = nil,
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.
     -- Playback is expensive when sending constant PNG screenshots.
@@ -333,6 +354,14 @@ local function validate(cfg)
     cfg.render.ssh_scroll_settle_ms == nil
       or (type(cfg.render.ssh_scroll_settle_ms) == "number" and cfg.render.ssh_scroll_settle_ms >= 0),
     "md-viewer: render.ssh_scroll_settle_ms must be non-negative, or nil to use render.scroll_settle_ms over SSH"
+  )
+  -- Above zero rather than non-negative: zero is not a slow link, it is a link
+  -- nothing can cross, and it would divide into an infinite hold. "I do not
+  -- know" is spelled nil, which is the default.
+  assert(
+    cfg.render.ssh_link_bytes_per_sec == nil
+      or (type(cfg.render.ssh_link_bytes_per_sec) == "number" and cfg.render.ssh_link_bytes_per_sec > 0),
+    "md-viewer: render.ssh_link_bytes_per_sec must be a positive number of bytes per second, or nil if unknown"
   )
   assert(
     cfg.image.raw_zindex == nil

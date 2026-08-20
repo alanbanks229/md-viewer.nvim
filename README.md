@@ -147,6 +147,13 @@ fills in the slices around you, so the rest of the document is already there whe
 you get to it. Bounded by `image.resident_memory_mb` and off outside iTerm2 until
 other terminals are measured; `:help md-viewer-resident-pan`.
 
+One thing is worth telling it: `render.ssh_link_bytes_per_sec`, how fast your
+link really is. While a slice is still crossing, md-viewer holds back moving
+frames that would only queue behind it — but it cannot find out how long that
+takes, because writing to the terminal returns when the operating system accepts
+the bytes rather than when they arrive. `800000` is a 0.80 MB/s tunnel; `scp` of
+a large file reports the same quantity.
+
 Do **not** reach for `render.device_scale_factor = 1` here — it is a
 calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest

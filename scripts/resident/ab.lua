@@ -160,6 +160,7 @@ local function snapshot(current)
     decoded = decoded + resident.decoded_bytes(slice)
   end
   local grid = live.grid
+  local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
   return {
     -- The measure. Everything else on the report is a component of it or an
     -- explanation for it.
@@ -181,7 +182,14 @@ local function snapshot(current)
     blocked_find = live.blocked_by_find,
     blocked_selection = live.blocked_by_selection,
     hold_ms = live.upload_hold_ms,
-    wire_rate = live.wire_bytes_per_ms,
+    -- The rate the holds in this phase were computed from, and whether anybody
+    -- actually knows it. Reported as a pair because the number alone is not a
+    -- fact: an estimate comes from timing a write to `nvim_ui_send`, and on a
+    -- healthy tunnel that write returns before a byte crosses the link. This
+    -- report used to print such a number under "measured link" -- 139,058 B/ms
+    -- for a link doing 800.
+    link_rate = link_rate,
+    link_source = link_source,
     -- Below 1 means the renderer refused a slice at its full height and the
     -- whole grid was regenerated shorter.
     slice_scale = live.slice_scale,
@@ -230,6 +238,26 @@ local function saturation(phase)
 end
 
 local function row(label, a, b) return ("%-28s %14s %14s"):format(label, a, b) end
+
+---What a phase's holds were computed from, said in a way that cannot be read as
+---a measurement of the link.
+---
+---There is no measurement to report. `nvim_ui_send` hands bytes to a pty and
+---returns when the kernel accepts them, which on a link with buffer to spare is
+---before any of them have crossed it; a terminal can be asked to acknowledge an
+---upload, but its reply arrives on Neovim's own stdin and a plugin cannot read
+---it. So the only honest figures are the one the operator states in
+---`render.ssh_link_bytes_per_sec` and a lower bound inferred from writes that
+---did block -- and "none of the above", which is the common case and now says so
+---rather than printing whatever the memory bus managed.
+local function link_rate_cell(phase)
+  if phase.link_source == "configured" then
+    return ("%.0f B/ms stated"):format(phase.link_rate)
+  elseif phase.link_source == "estimated" then
+    return ("%.0f B/ms inferred"):format(phase.link_rate)
+  end
+  return "not measurable"
+end
 
 local function report()
   local a, b = results.baseline, results.treatment
@@ -296,11 +324,7 @@ local function report()
       a.hold_ms and ("%d ms"):format(a.hold_ms) or "--",
       b.hold_ms and ("%d ms"):format(b.hold_ms) or "--"
     ),
-    row(
-      "  measured link",
-      a.wire_rate and ("%.0f B/ms"):format(a.wire_rate) or "--",
-      b.wire_rate and ("%.0f B/ms"):format(b.wire_rate) or "--"
-    ),
+    row("  link rate used", link_rate_cell(a), link_rate_cell(b)),
     row("coalesced (never sent)", number(a.coalesced), number(b.coalesced)),
     row(
       "pans refused: find/sel",
@@ -423,6 +447,14 @@ local function report()
   if b.suppressed > 0 then
     lines[#lines + 1] = ("%d moving frames were held off the wire while a slice drained -- the "):format(b.suppressed)
       .. "anti-backlog rule. Compare `coalesced` between arms: both mean a scroll that sent nothing."
+  elseif b.link_source ~= "configured" then
+    -- The one reading this report cannot make on its own, and the one it got
+    -- wrong: zero frames held is either "nothing needed holding" or "the hold
+    -- never ran", and without a stated rate it is the second.
+    lines[#lines + 1] = "No moving frame was held off the wire, and this run cannot tell you whether that is "
+      .. "because none needed to be. The hold is computed from a link rate, nothing here can measure one, and "
+      .. "none was configured -- so it fell back to the settle delay. Set render.ssh_link_bytes_per_sec (800000 "
+      .. "for the SSM tunnel) and run again to measure the anti-backlog rule rather than its absence."
   end
   if b.grid_slices and b.resident_slices < b.grid_slices then
     lines[#lines + 1] = ("%d of %d slices are held (%.0f of %.0f MB). The rest of the document has not "):format(

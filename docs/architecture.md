@@ -106,9 +106,21 @@ understated it threefold). Over the ceiling, a window of slice indices slides ar
 reader and the farthest is evicted — index arithmetic on a fixed grid rather than an LRU.
 Documents inside it never evict at all, which is the property the grid exists to buy.
 **The wire:** a slice and the moving frames it replaces share one `nvim_ui_send` queue and
-one pty, and bytes handed to that queue cannot be recalled, so **at most one image payload
-is outstanding per session** — a scroll that misses while a slice is draining emits nothing
-at all and resumes once, at the newest position, when the wire is free.
+one pty, and bytes handed to that queue cannot be recalled. Two things enforce that a
+session does not queue behind itself, and it is worth being exact about which is which.
+**Structurally,** `fill.in_flight` is a single slot — one slice is ever captured at a time,
+and a prefetch declines to take it — and a scroll that misses while a slice is draining
+emits nothing at all, resuming once at the newest position rather than replaying the burst.
+**Best-effort on top of that,** the drain itself is a timer: `hold_wire` estimates how long
+the payload is still crossing, from `render.ssh_link_bytes_per_sec` if the operator has
+stated it and from timed writes otherwise. That timer is damage control and not a
+guarantee, because **the transit cannot be observed from inside Neovim** — `nvim_ui_send`
+returns when the kernel accepts the bytes, which on a link with buffer to spare is before
+any of them cross, and the terminal's own acknowledgement would arrive on Neovim's stdin
+where a plugin cannot read it ([local-render-design.md](local-render-design.md)). A rate
+inferred from a write that did not block runs orders of magnitude high, which is the
+direction that silently disables the hold, so implausible samples are discarded rather than
+averaged in and the diagnostics say `unknown` rather than printing one.
 
 **Idle wire fills the rest.** A slice only ever resident where someone had already scrolled
 means the second pass keeps paying a warm-up at every new screen, so when the reader is

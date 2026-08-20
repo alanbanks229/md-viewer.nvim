@@ -77,11 +77,34 @@ local WIRE_SAMPLE_WEIGHT = 0.3
 --- frame over SSH is ~80 KB and a settle frame ~305 KB, so this excludes only
 --- things that were never a transfer -- and a rate estimated from one of those
 --- would be enormous, which is the direction that silently disables the hold.
+--- Necessary and not sufficient: it bounds the payload, and the ceiling below
+--- bounds the rate, which is the quantity that actually goes wrong.
 local MIN_WIRE_SAMPLE_BYTES = 65536
+
+--- Above this a sample did not cross a link at all, whatever its size.
+---
+--- The floor above guards one direction of the same failure and named it
+--- correctly; it simply guards the wrong axis. A write to a pty with room in its
+--- buffer returns at memory speed, so a *large* payload whose write did not
+--- block produces exactly the enormous rate a tiny one does. The session this
+--- was found on recorded 209,046 B/ms and 139,058 B/ms against a link doing 800:
+--- SSH absorbed each payload, the write returned before a byte of it had left
+--- the machine, and the hold computed from those numbers was zero every time.
+---
+--- 125,000 B/ms is 1 Gbit/s of line rate, and it is a ceiling rather than a
+--- guess because this feature is gated to SSH sessions: a LAN is the fastest
+--- link an SSH session is ever carried over, so a payload appearing to move
+--- faster than one did not move over a link. Deliberately far above the 800 B/ms
+--- this exists for rather than close to it -- discarding a real sample costs a
+--- conservative default hold, while believing a fabricated one costs the backlog
+--- the whole feature was built to remove, so the bound only rejects what is
+--- impossible.
+local MAX_WIRE_SAMPLE_BYTES_PER_MS = 125000
 
 M.MAX_REGION_PIXELS = MAX_REGION_PIXELS
 M.MAX_REGION_HEIGHT_PX = MAX_REGION_HEIGHT_PX
 M.MIN_WIRE_SAMPLE_BYTES = MIN_WIRE_SAMPLE_BYTES
+M.MAX_WIRE_SAMPLE_BYTES_PER_MS = MAX_WIRE_SAMPLE_BYTES_PER_MS
 
 local function finite(value)
   value = tonumber(value)
@@ -627,6 +650,11 @@ function M.new_state(opts)
     upload_hold_ms = 0,
     wire_bytes_per_ms = nil,
     wire_samples = 0,
+    -- Samples that implied a link faster than one could be. Above zero means
+    -- this session's writes are being absorbed rather than transmitted, so the
+    -- estimator has nothing to say and `render.ssh_link_bytes_per_sec` is the
+    -- only way the hold gets a real number.
+    wire_samples_discarded = 0,
     -- Diagnostics. Counts and bytes are kept apart deliberately: the size says
     -- what an operation costs, the count says how many were actually paid for,
     -- and neither implies the other.
@@ -911,37 +939,86 @@ function M.decoded_bytes(region) return (region.image_w or 0) * (region.image_h 
 
 ---Fold one observed payload into the session's throughput estimate.
 ---
----`elapsed_ms` is how long the backend's write to `nvim_ui_send` actually
----blocked. On a saturated pty that is real back-pressure and most of the
----transfer: the reverted client-render measurements recorded a 471 KB frame
----taking ~350 ms of blocked write on the 0.80 MB/s link this exists for, where
----the same frame takes 0.78 ms locally. Small payloads are ignored -- they
----measure the scheduler, not the link, and an inflated rate is the direction
----that silently disables the hold.
+---**This is not a measurement of transit, and nothing in a Neovim plugin can
+---be.** `elapsed_ms` is how long the backend's write to `nvim_ui_send` blocked,
+---which is back-pressure and not arrival: the pty buffer takes the head of a
+---payload immediately, so a write returning says only that the kernel accepted
+---the bytes. When there is room for all of them it says nothing whatsoever.
+---
+---There is no second thing to ask. The terminal can be *told* to answer -- a
+---Kitty `q=0` upload replies `OK` when it has the pixels -- but that reply
+---arrives on Neovim's own stdin, and a plugin cannot read a terminal's reply at
+---all: Neovim owns terminal input, which is why `cellpixels.lua` goes through
+---`TIOCGWINSZ` rather than asking with `CSI 14 t`, and why
+---`docs/local-render-design.md`'s "alternatives that cannot work" already
+---includes returning data through `TermResponse`. So the honest sources for a
+---link rate are, in order: the operator stating it
+---(`render.ssh_link_bytes_per_sec`, which is what `M.link_rate` prefers), and
+---this, which is a lower bound on a bad day and meaningless on a good one.
+---
+---Both guards therefore reject rather than believe. Small payloads measure the
+---scheduler; enormous rates measure a write that did not block. The reverted
+---client-render measurements recorded a 471 KB frame taking ~350 ms of blocked
+---write on the 0.80 MB/s link this exists for -- a sample worth keeping -- where
+---the same frame takes 0.78 ms locally, which is not.
 function M.note_wire_sample(state, bytes, elapsed_ms)
   if not state then return end
   bytes = positive(bytes)
   elapsed_ms = positive(elapsed_ms)
   if not (bytes and elapsed_ms) or bytes < MIN_WIRE_SAMPLE_BYTES then return end
   local sample = bytes / elapsed_ms
+  -- Counted, unlike the floor's rejections. A payload below the floor is an
+  -- ordinary placement command and there are thousands of them; a sample over
+  -- the ceiling means this session cannot observe its link at all, which is the
+  -- one thing the operator would want to know before trusting a hold.
+  if sample > MAX_WIRE_SAMPLE_BYTES_PER_MS then
+    state.wire_samples_discarded = (state.wire_samples_discarded or 0) + 1
+    return
+  end
   local previous = positive(state.wire_bytes_per_ms)
   state.wire_bytes_per_ms = previous and (previous + (sample - previous) * WIRE_SAMPLE_WEIGHT) or sample
   state.wire_samples = (state.wire_samples or 0) + 1
 end
 
+---The link rate the hold must be computed from, in bytes per millisecond, and
+---where the number came from.
+---
+---Configured first. The operator knows their tunnel and the plugin cannot find
+---it out -- see `M.note_wire_sample` for why there is no observation to make --
+---so a stated rate is the only figure here that is a fact rather than an
+---inference, and it wins outright rather than being averaged with one.
+---
+---`"estimated"` is a fallback and must be labelled as one wherever it is shown.
+---It comes from writes that blocked, which is a *part* of a transfer, so it runs
+---fast; the value of keeping it is that a session with no rate configured still
+---holds the wire for something better than a fixed delay.
+---
+---`nil, "unknown"` is the honest third answer, and `M.wire_hold_ms` turns it
+---into the session's settle delay rather than into no hold at all.
+---@return number|nil bytes_per_ms, string source
+function M.link_rate(configured_bytes_per_sec, estimated_bytes_per_ms)
+  local configured = positive(configured_bytes_per_sec)
+  if configured then return configured / 1000, "configured" end
+  local estimated = positive(estimated_bytes_per_ms)
+  if estimated then return estimated, "estimated" end
+  return nil, "unknown"
+end
+
 ---How long to keep the wire to itself after handing `bytes` to the terminal.
 ---
----The blocked write is most of the transfer but not all of it: the pty buffer
----takes the head of the payload immediately, so a tail is still crossing the
----link after the call returns. The hold is the estimated whole-payload wire
----time *less the part already spent*, which is what makes it zero by arithmetic
----rather than by exception on a fast link -- there the estimate is smaller than
----the elapsed time and the subtraction lands below zero.
+---The blocked write is *some* of the transfer and can be none of it: the pty
+---buffer takes the head of the payload immediately, and where there is room for
+---the whole thing the write returns before a byte has left the machine. So the
+---hold is the whole-payload wire time at `bytes_per_ms` *less the part already
+---spent blocking*, which is what makes it zero by arithmetic rather than by
+---exception on a link fast enough not to need it -- there the rate is high
+---enough that the subtraction lands below zero.
 ---
----With no estimate yet the answer is `default_ms`, which the caller passes as
----the session's settle delay: a number already tuned for this link rather than
----a new constant nobody has measured. `max_ms` is the guarantee that a wrong
----estimate costs staleness and never a wedged preview.
+---`bytes_per_ms` comes from `M.link_rate`, which prefers the operator's stated
+---rate to anything inferred. With no rate at all the answer is `default_ms`,
+---which the caller passes as the session's settle delay: a number already tuned
+---for this link rather than a new constant nobody has measured. `max_ms` is the
+---guarantee that a wrong rate costs staleness and never a wedged preview.
 ---
 ---Whole milliseconds, and a sub-millisecond hold is no hold at all: the caller
 ---compares against `vim.uv.now()`, which counts in whole milliseconds, so a

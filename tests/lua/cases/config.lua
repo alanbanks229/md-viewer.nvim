@@ -81,6 +81,18 @@ return function(t)
   local no_ssh_settle = config.setup({ render = { ssh_scroll_settle_ms = nil } })
   t.eq(400, no_ssh_settle.render.ssh_scroll_settle_ms, "omitting the SSH settle delay keeps the default")
   config.reset()
+  -- The link rate is asked for because it cannot be measured, so nil is the
+  -- honest default and means "nobody has said" rather than "as fast as
+  -- possible". Zero is rejected rather than merely non-negative: it is not a
+  -- slow link but a link nothing crosses, and it divides into an endless hold.
+  t.eq(nil, cfg.render.ssh_link_bytes_per_sec, "no link rate is assumed by default")
+  local bad_link_ok, bad_link_err = pcall(config.setup, { render = { ssh_link_bytes_per_sec = 0 } })
+  t.eq(false, bad_link_ok, "a link rate of zero is rejected")
+  t.ok(tostring(bad_link_err):match("ssh_link_bytes_per_sec"), "and the error names the offending option")
+  config.reset()
+  local link_cfg = config.setup({ render = { ssh_link_bytes_per_sec = 800000 } })
+  t.eq(800000, link_cfg.render.ssh_link_bytes_per_sec, "the measured rate of a real tunnel is accepted")
+  config.reset()
   -- nil is a value here, not an omission: it is how "follow the session" is
   -- spelled, so it has to survive validation rather than being defaulted away.
   local unset_scroll_cfg = config.setup({ render = { scroll_scale = nil } })

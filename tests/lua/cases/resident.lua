@@ -443,16 +443,65 @@ return function(t)
     "an absurdly slow estimate is clamped rather than believed"
   )
 
-  -- Local. The same region on a link fast enough that the write blocked longer
-  -- than the transfer could possibly take is not held at all -- and it is zero
-  -- by arithmetic rather than by a special case, which is what makes the local
-  -- path byte-identical to the one that existed before any of this.
-  local fast = resident.new_state({ memory_px = CEILING })
-  resident.note_wire_sample(fast, SSH_BYTES, LOCAL_BLOCKED_MS)
+  -- A rate high enough not to need a hold produces none, by arithmetic rather
+  -- than by a special case: 810,000 bytes at 100,000 B/ms is 8.1 ms of wire and
+  -- the write blocked for 10, so the payload is already across and the
+  -- subtraction lands below zero.
   t.eq(
     0,
-    resident.wire_hold_ms(REGION_BYTES, fast.wire_bytes_per_ms, LOCAL_BLOCKED_MS, 160, 320),
-    "a local link produces no hold at all"
+    resident.wire_hold_ms(REGION_BYTES, 100000, 10, 160, 320),
+    "a link fast enough that the payload is already across is not held"
+  )
+
+  -- The ceiling, and the failure it is for. A write that did not block returns
+  -- at memory speed, so a *large* payload fabricates a rate exactly as enormous
+  -- as a tiny one does -- and enormous is the direction that silently disables
+  -- the hold. Measured on the real session: 139,058 B/ms and 209,046 B/ms
+  -- reported for a link doing 800.
+  local absorbed = resident.new_state({ memory_px = CEILING })
+  resident.note_wire_sample(absorbed, SSH_BYTES, LOCAL_BLOCKED_MS)
+  t.ok(
+    SSH_BYTES / LOCAL_BLOCKED_MS > resident.MAX_WIRE_SAMPLE_BYTES_PER_MS,
+    "sanity: a 471 KB frame written in 0.78 ms implies a rate no link can have"
+  )
+  t.eq(nil, absorbed.wire_bytes_per_ms, "so it is discarded rather than folded into the estimate")
+  t.eq(0, absorbed.wire_samples, "and never counted as an observation of the link")
+  t.eq(1, absorbed.wire_samples_discarded, "it is counted as a sample thrown out, which is the visible part")
+  resident.note_wire_sample(absorbed, SSH_BYTES, SSH_BYTES / 139058)
+  t.eq(nil, absorbed.wire_bytes_per_ms, "the rate the real session reported is above the ceiling too")
+
+  -- What the estimate is worth once it is guarded: a payload whose write
+  -- genuinely blocked still lands, so a session with no configured rate is not
+  -- left with nothing.
+  local blocked = resident.new_state({ memory_px = CEILING })
+  resident.note_wire_sample(blocked, SSH_BYTES, SSH_BLOCKED_MS)
+  t.ok(blocked.wire_bytes_per_ms > 0, "a write that blocked for 350 ms is still an observation")
+  t.eq(0, blocked.wire_samples_discarded, "and is not thrown out")
+
+  -- Which of the two the hold is computed from, and it is not close: a stated
+  -- rate is a fact and an inferred one is a lower bound on a bad day. Both
+  -- present, the stated one wins outright rather than being averaged in.
+  local rate, source = resident.link_rate(800000, 139058)
+  t.eq(800, rate, "a configured bytes-per-second becomes bytes per millisecond and takes precedence")
+  t.eq("configured", source, "and says so, because the number alone is not the fact")
+  rate, source = resident.link_rate(nil, 1345.7)
+  t.near(1345.7, rate, 0.001, "with nothing configured the estimate is the fallback")
+  t.eq("estimated", source, "labelled as inferred wherever it is shown")
+  rate, source = resident.link_rate(nil, nil)
+  t.eq(nil, rate, "and neither available is an honest third answer")
+  t.eq("unknown", source, "rather than a number nobody measured")
+  t.eq(
+    SETTLE_MS,
+    resident.wire_hold_ms(REGION_BYTES, resident.link_rate(nil, nil), 0, SETTLE_MS, SETTLE_MS * 2),
+    "which the hold turns into the settle delay, not into no hold at all"
+  )
+  -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire, clamped to the
+  -- ceiling the caller allows. The point is that it is non-zero: on this link
+  -- the hold the estimator computed was 0 ms and the mechanism never ran.
+  t.eq(
+    SETTLE_MS * 2,
+    resident.wire_hold_ms(REGION_BYTES, resident.link_rate(800000, 139058), 0, SETTLE_MS, SETTLE_MS * 2),
+    "and a stated rate makes the hold engage where the fabricated one disabled it"
   )
 
   -- Whole milliseconds, because that is the only resolution the clock it will be

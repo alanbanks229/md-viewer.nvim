@@ -1056,9 +1056,15 @@ return function(t)
     t.eq(305000, session.retina_png_bytes, "a fill is never counted as the cost of a sharp viewport frame")
 
     -- The hold, from the one number this link has already been tuned around.
-    t.eq(160, live.upload_hold_ms, "with no throughput estimate yet the hold is the session's settle delay")
+    t.eq(160, live.upload_hold_ms, "with no link rate known the hold is the session's settle delay")
     t.ok(live.upload_hold_until > vim.uv.now(), "and the wire is held while the region drains")
-    t.ok(live.wire_bytes_per_ms > 0, "the region's own transfer becomes the first throughput sample")
+    -- And the fill's own transfer is *not* an observation of a link. 810 KB
+    -- handed to a stub that returns immediately implies a rate no link can
+    -- have, which is exactly what the real session recorded -- SSH took the
+    -- payload into its buffer and the write returned before a byte crossed.
+    -- Believing it computes a hold of zero and the anti-backlog rule never runs.
+    t.eq(nil, live.wire_bytes_per_ms, "a write that did not block is not a throughput sample")
+    t.eq(1, live.wire_samples_discarded, "it is thrown out, and visibly")
     live.upload_hold_until = 0
 
     -- The one failure this cache must not be able to produce: pixels of one
@@ -1211,6 +1217,16 @@ return function(t)
       live.memory_px = 8000000 * 8
       local abandoned_at_prefetch = live.abandoned_fills
 
+      -- With the link rate stated, because it is the only way this number is
+      -- ever right: timing the write measures the pty buffer rather than the
+      -- tunnel -- the sample above was discarded for exactly that -- so without
+      -- a stated rate the hold falls back to the settle delay and the
+      -- anti-backlog rule is never really exercised at all.
+      local restore_link = vim.deepcopy(config.get())
+      config.setup(vim.tbl_deep_extend("force", vim.deepcopy(restore_link), {
+        render = { ssh_link_bytes_per_sec = 800000 },
+      }))
+
       local target = resident.next_prefetch(live, grid, 0)
       t.ok(target ~= nil, "sanity: some slice of this grid is still unfilled")
       t.eq(nil, resident.hold(live, target), "and it is one nothing has reached")
@@ -1241,6 +1257,15 @@ return function(t)
       t.eq(screen_before, session.image_id, "so the frame the reader is looking at is untouched")
       t.eq(applied_before, session.applied_scroll_y, "and the position it shows is not claimed to have moved")
       t.eq(0, live.abandoned_fills - abandoned_at_prefetch, "and it is not discarded as overtaken")
+
+      -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire, clamped to
+      -- twice the settle delay so a wrong figure costs staleness and never a
+      -- wedged preview. The point is that it is not the 160 ms default and not
+      -- the zero a fabricated rate produces: the payload is genuinely still
+      -- crossing, and this is the window in which nothing else may be sent.
+      t.eq(320, live.upload_hold_ms, "the hold is computed from the link rate the operator stated")
+      t.ok(live.upload_hold_until > vim.uv.now(), "and engages, where a rate inferred from a buffered write did not")
+      config.setup(restore_link)
 
       -- Now the refusals, each checked against a request count that must not move.
       live.upload_hold_until = 0

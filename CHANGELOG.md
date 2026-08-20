@@ -49,7 +49,43 @@ All notable changes to this project will be documented here. The project uses
   whether boundaries are being drawn or falling back. `plan_refusal` becomes
   `grid_refusal`, which has only three causes and names which.
 
+- **New `render.ssh_link_bytes_per_sec`: tell md-viewer how fast your link
+  actually is.** Default `nil`, and only resident panning reads it. While an
+  uploaded slice is still crossing a slow link, md-viewer declines to send moving
+  frames that would only queue behind it and arrive at positions you have already
+  left — and how long that lasts is arithmetic on a link speed. Set it to
+  `800000` for a 0.80 MB/s tunnel; `scp` of a large file reports the same
+  quantity. Unset, the pause falls back to the settle delay, which is a safe
+  guess rather than an answer.
+
+  Asked for rather than inferred, because it cannot be found out. Writing to the
+  terminal returns when the operating system accepts the bytes, not when they
+  arrive, so on a healthy connection the write looks instantaneous however slow
+  the link is — and the terminal *can* be asked to acknowledge an upload, but its
+  reply lands on Neovim's own stdin, which a plugin cannot read.
+
 ### Fixed
+
+- **The link speed `:MdViewerDebug` reported was wrong by about 170×, and the
+  anti-backlog pause it feeds had therefore never run.** A real session showed
+  `measured link: 139,058 B/ms` for a tunnel doing 800 — because the figure came
+  from timing md-viewer's own write to the terminal, and that write returned as
+  soon as SSH had buffered the payload rather than when it had carried it. The
+  pause computed from a link 170× too fast is no pause at all, so
+  `frames_suppressed_by_hold` sat at 0 while the documentation claimed at most
+  one image payload was outstanding per session.
+
+  Three changes, none of which invent a measurement that does not exist. A sample
+  implying a link faster than gigabit line rate is now discarded rather than
+  averaged in, and counted as `wire_samples_discarded`. The rate the pause is
+  computed from now prefers `render.ssh_link_bytes_per_sec` above anything
+  inferred. And the diagnostics stop presenting an inference as a measurement:
+  `:MdViewerDebug` reports `link_bytes_per_ms` beside `link_rate_source`
+  (`configured`, `estimated` or `unknown`), and `scripts/resident/ab.lua` prints
+  `link rate used` rather than `measured link` — saying `not measurable` where it
+  used to print a number. `docs/architecture.md` now states what actually holds a
+  session to one payload (a single fill slot, plus coalescing) and describes the
+  pause as the best-effort damage control it is.
 
 - **A resident pixel costs about 13 bytes in the terminal, not 4, so
   `image.resident_budget_px` has always been worth roughly three times what it

@@ -47,6 +47,10 @@ local function resident_report(session)
     decoded = decoded + resident.decoded_bytes(region)
   end
   local grid = live.grid
+  -- Asked here rather than read off the session, so the block answers about the
+  -- configuration there is now rather than about the one the last hold happened
+  -- to be computed under.
+  local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
   return {
     enabled = live.enabled,
     -- Non-nil means this session gave up and is on the ordinary capture path
@@ -89,10 +93,24 @@ local function resident_report(session)
     -- and one pty, so a hit ratio alone can look excellent while the link is
     -- still saturated. `frames_suppressed_by_hold` is the count of moving frames
     -- this session declined to queue behind a draining region -- the anti-
-    -- backlog measure -- and `wire_bytes_per_ms` is what the link was observed
-    -- to actually do, from the blocked writes rather than from configuration.
-    wire_bytes_per_ms = live.wire_bytes_per_ms,
+    -- backlog measure -- and `link_bytes_per_ms` is the rate the hold in front
+    -- of it was computed from.
+    --
+    -- `link_rate_source` is reported beside the number because the two readings
+    -- are not the same kind of fact. `configured` is
+    -- `render.ssh_link_bytes_per_sec`, which the operator stated. `estimated` is
+    -- inferred from writes that blocked, and a write blocking is back-pressure
+    -- rather than arrival -- it runs fast and it is a fallback. `unknown` means
+    -- the link is not observable from here at all, which is the *ordinary*
+    -- reading on a healthy tunnel: SSH takes each payload into its buffer and
+    -- the write returns before anything crosses. This used to print an estimate
+    -- of 139,058 B/ms for a link doing 800 and call it measured.
+    link_bytes_per_ms = link_rate,
+    link_rate_source = link_source,
     wire_samples = live.wire_samples,
+    -- Samples thrown out for implying a link faster than one can be. Every
+    -- sample being discarded is the reason `link_rate_source` is `unknown`.
+    wire_samples_discarded = live.wire_samples_discarded,
     upload_hold_ms = live.upload_hold_ms,
     frames_suppressed_by_hold = live.frames_suppressed_by_hold,
     superseded_by_pan = live.superseded_by_pan,

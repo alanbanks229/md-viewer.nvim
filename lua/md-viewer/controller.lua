@@ -1691,19 +1691,29 @@ end
 ---Keep the wire to this session's region upload for as long as it is likely to
 ---still be crossing it.
 ---
----The invariant this exists to hold: **at most one image payload outstanding per
----session**. Nothing else enforces it. `scroll_render_in_flight` clears when the
----*capture* completes, which on this link is an order of magnitude sooner than
----the bytes arrive, and `nvim_ui_send` cannot be taken back once it has them --
----so without a hold, a region draining for a second collects every moving frame
----produced during that second, behind it, at positions the reader has left. That
----is precisely the backlog this whole feature exists to remove, rebuilt by the
----feature itself.
+---What this is for: a region draining for a second would otherwise collect every
+---moving frame produced during that second, behind it, at positions the reader
+---has left -- precisely the backlog the whole feature exists to remove, rebuilt
+---by the feature itself. `scroll_render_in_flight` does not stop it, because it
+---clears when the *capture* completes, which on this link is an order of
+---magnitude sooner than the bytes arrive.
+---
+---**Best-effort, and it has to be.** The hold is a timer over a link rate, and
+---the honest sources for that rate are the operator saying so and an estimator
+---that cannot see transit (`resident.note_wire_sample`). What actually bounds
+---this session to one payload is structural and is elsewhere: `fill.in_flight`
+---is a single slot, so only one slice is ever captured at a time, and
+---`hold_scroll` coalesces a burst of misses into one resume rather than a queue.
+---This narrows the window between them; it does not guarantee it is shut. With
+---no rate at all it falls back to the settle delay, which is the conservative
+---direction -- staleness rather than a backlog.
 function hold_wire(session, bytes, elapsed_ms)
   local live = session.resident
   if not live then return end
-  local settle = scroll_settle_delay(config.get().render)
-  live.upload_hold_ms = resident.wire_hold_ms(bytes, live.wire_bytes_per_ms, elapsed_ms, settle, settle * 2)
+  local render = config.get().render
+  local settle = scroll_settle_delay(render)
+  local rate = resident.link_rate(render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
+  live.upload_hold_ms = resident.wire_hold_ms(bytes, rate, elapsed_ms, settle, settle * 2)
   live.upload_hold_until = vim.uv.now() + live.upload_hold_ms
 end
 

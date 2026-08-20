@@ -134,6 +134,9 @@ render ~
                                             and the row below over SSH
     ssh_scroll_scale             0.5        0.25..1; moving-frame scale over
                                             SSH (|md-viewer-ssh|)
+    ssh_link_bytes_per_sec       nil        > 0; this link's real bytes per
+                                            second, if known
+                                            (|md-viewer-resident-linkrate|)
     animate                      false      play animated GIF and WebP
     animate_fps                  5          1..30; `frames` strategy only
 
@@ -843,6 +846,33 @@ not a defect: those highlights are painted into the document by the browser,
 and a resident slice was captured without them, so panning to it would erase
 what the reader can see. Clearing the search restores panning at no cost --
 the slice was never thrown away.
+
+                                                 *md-viewer-resident-linkrate*
+Tell it how fast your link is ~
+
+A slice is several hundred kilobytes and takes real time to cross a slow
+link. While it does, md-viewer declines to send moving frames that would only
+queue up behind it and arrive at positions you have already left. How long
+"while it does" lasts is arithmetic on a link speed -- and md-viewer cannot
+find that speed out. Writing to the terminal returns when the operating
+system accepts the bytes, not when they arrive, so on a healthy connection
+the write looks instantaneous however slow the link is. >lua
+
+    opts = {
+      render = {
+        -- Bytes per second. 800000 is 0.80 MB/s, measured on the AWS SSM
+        -- tunnel this feature was built for. `scp` of a large file reports
+        -- the same quantity for any other link.
+        ssh_link_bytes_per_sec = 800000,
+      },
+    }
+<
+Unset, md-viewer falls back to the settle delay, which is a safe guess rather
+than an answer. :MdViewerDebug reports which it is using as
+`link_rate_source`: `configured` is the number above, `estimated` is inferred
+from writes that did block, and `unknown` means neither is available.
+`upload_hold_ms` is the resulting pause and `frames_suppressed_by_hold` counts
+the frames it saved you.
 
 =============================================================================
 REMOTE PROJECTS, LOCAL NEOVIM                    *md-viewer-remote-projects*

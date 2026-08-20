@@ -84,9 +84,16 @@ return function(t)
       "decoded / ceiling",
       "evictions",
       "slice height scale",
+      "link rate used",
     }) do
       t.ok(text:find(expected, 1, true) ~= nil, ("the report carries the %q row"):format(expected))
     end
+    -- The row that used to print an inference and call it a measurement: on the
+    -- real link it read 139,058 B/ms for a tunnel doing 800, because the write
+    -- it timed returned as soon as SSH had buffered the payload. Here nothing is
+    -- configured and nothing blocked, so the honest answer is that there is none.
+    t.eq(nil, text:match("measured link"), "and never presents an inference as a measurement of the link")
+    t.ok(text:find("not measurable", 1, true) ~= nil, "saying so plainly where there is nothing to report")
     -- The verdict for a run where nothing filled, which is the branch that used
     -- to name fields the rewrite removed. It must send the reader somewhere
     -- real rather than to a stack trace or a field that no longer exists.

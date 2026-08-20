@@ -65,6 +65,9 @@ prefetch-ignores-the-ceiling	lua/md-viewer/controller.lua	  if not resident.has_
 prefetch-outranks-the-reader	lua/md-viewer/controller.lua	  if not (resident.hold(live, first) and resident.hold(live, last)) then return end	
 prefetch-queues-behind-a-drain	lua/md-viewer/controller.lua	  if (live.upload_hold_until or 0) > vim.uv.now() then return end	
 prefetch-is-drawn-over-the-reader	lua/md-viewer/controller.lua	      local prefetching = live.fill.prefetch == true	      local prefetching = false
+wire-estimate-without-a-ceiling	lua/md-viewer/resident.lua	  if sample > MAX_WIRE_SAMPLE_BYTES_PER_MS then\n    state.wire_samples_discarded = (state.wire_samples_discarded or 0) + 1\n    return\n  end	
+inferred-link-rate-outranks-stated	lua/md-viewer/resident.lua	  local configured = positive(configured_bytes_per_sec)\n  if configured then return configured / 1000, "configured" end\n  local estimated = positive(estimated_bytes_per_ms)\n  if estimated then return estimated, "estimated" end	  local estimated = positive(estimated_bytes_per_ms)\n  if estimated then return estimated, "estimated" end\n  local configured = positive(configured_bytes_per_sec)\n  if configured then return configured / 1000, "configured" end
+stated-link-rate-never-consulted	lua/md-viewer/controller.lua	  local rate = resident.link_rate(render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)	  local rate = resident.link_rate(nil, live.wire_bytes_per_ms)
 MUTATIONS
 
 caught=0; missed=0; skipped=0
