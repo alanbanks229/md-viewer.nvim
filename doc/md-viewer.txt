@@ -493,18 +493,25 @@ COMMANDS                                                  *md-viewer-commands*
 
                                                              *:MdViewerHealth*
 :MdViewerHealth
-        Open a short health summary: overall status (healthy/degraded/
-        broken), the selected rendering backend, the renderer process, and
-        any actionable warnings. Takes no arguments. Round-trips to the
-        renderer subprocess. See |md-viewer-health|.
+        Open a short health summary in a new tab: overall status (healthy/
+        degraded/broken), the selected rendering backend, the renderer
+        process, and any actionable warnings. Takes no arguments.
+        Round-trips to the renderer subprocess. See |md-viewer-health|.
 
                                                               *:MdViewerDebug*
 :MdViewerDebug
-        Open the full diagnostic in one buffer: the environment and
-        capability detail (raw graphics geometry, cell calibration,
-        terminal-profile evidence, Chromium discovery and launch, security
-        roots) followed by per-preview session, timing and placement state
-        and the event log. This is what to attach to a bug report.
+        Open the full diagnostic in one buffer, in a new tab: the
+        environment and capability detail (raw graphics geometry, cell
+        calibration, terminal-profile evidence, Chromium discovery and
+        launch, security roots) followed by per-preview session, timing and
+        placement state and the event log. This is what to attach to a bug
+        report.
+
+        A tab rather than a split, so that reading it does not resize the
+        preview. Over SSH that is not cosmetic: the preview's height is part
+        of what resident slices are keyed on (|md-viewer-resident-pan|), so a
+        split would throw away every slice the terminal is holding and pay
+        for them again -- twice, once opening and once closing.
 
         Selection and search state is reported as lengths and counts only
         -- the selected text is never printed here.
@@ -839,6 +846,16 @@ Everywhere else the ordinary capture path is unchanged. See
 so on a document that fits `resident_memory_mb` this stays at zero; anything
 above it means the document is larger than the memory allowed for it and
 ground already paid for is being paid for again.
+
+`dropped_slices` is its quieter twin, and reads zero for a different reason.
+Resizing the preview, changing the colorscheme or `background`, editing the
+document or running |:MdViewerRefresh| makes every held slice stop describing
+the document -- it reflows -- so all of them are given back at once. That is
+correct and it is not an eviction; what it is, is the whole warm-up paid for
+again. `drains` counts the occasions, so one resize reads differently from
+twenty invalidations under the reader. These two plus `stale_fills`,
+`abandoned_fills` and `undisplayed_fills` account for `fills` exactly, and a
+report where they do not is a defect rather than a measurement.
 
 Scrolling reverts to the ordinary path while a search or a selection is
 active, and says so as `blocked_by_find` and `blocked_by_selection`. That is

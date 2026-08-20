@@ -266,9 +266,21 @@ return function(t)
   -- The renderer subprocess has to spin up and launch a real Chromium for
   -- this round-trip; a cold launch on a loaded CI runner can take well
   -- longer than it does on a warm local machine.
+  -- In a tab, not a `botright new` split, for the reason :MdViewerDebug's case
+  -- states at length: a full-width split takes rows from the preview, the
+  -- preview's height is part of the resident key, and every slice the terminal
+  -- is holding is thrown away and re-uploaded because someone opened a report.
+  local tab_before = vim.api.nvim_get_current_tabpage()
+  local windows_before = #vim.api.nvim_tabpage_list_wins(tab_before)
   health.show()
   vim.wait(30000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
   t.eq("md-viewer-health", vim.bo.filetype, "MdViewerHealth renders its report buffer")
+  t.ok(vim.api.nvim_get_current_tabpage() ~= tab_before, "in a tab of its own")
+  t.eq(
+    windows_before,
+    #vim.api.nvim_tabpage_list_wins(tab_before),
+    "without adding a window to the tab the preview is in, which would resize it"
+  )
   local concise_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   for _, line in ipairs(concise_lines) do
     t.ok(not line:find("\n", 1, true), "no concise report line contains an embedded newline")

@@ -391,6 +391,22 @@ return function(t)
   t.eq(0, refill.resident_px, "and its accounting")
   t.eq(nil, refill.grid, "the grid goes too, so the next fill re-derives it")
   t.eq(before_generation + 1, refill.generation, "and the generation moves, so a fill in flight knows it is orphaned")
+  -- What it cost. Every slice given back was captured, uploaded and paid for at
+  -- full wire price, and none of it is an eviction -- the ceiling did not bind.
+  -- A real session lost six slices and ~2.5 MB this way with `evictions`,
+  -- `stale_fills` and `abandoned_fills` all reading zero, and the only trace was
+  -- `fills` exceeding what was held.
+  t.eq(1, refill.dropped_slices, "the slices given back are counted, since nothing else can see them go")
+  t.eq(0, refill.evictions, "and not as evictions, which mean the ceiling bound and it did not")
+  t.eq(1, refill.drains, "the occasion is counted as well -- one resize reads unlike twenty invalidations")
+  -- A drain with nothing to give back is not an occasion. Every session has two
+  -- of those before its first slice exists -- the gate being evaluated at open,
+  -- and the first scroll finding no key to compare against -- and counting them
+  -- would put every healthy session at two invalidations before it started.
+  local empty_drain = resident.new_state({ memory_px = SLICE_PX * 4 })
+  resident.drain(empty_drain)
+  t.eq(0, empty_drain.dropped_slices, "draining an empty session drops nothing")
+  t.eq(0, empty_drain.drains, "and is not counted as an occasion at all")
 
   -- ---------------------------------------------------------------------------
   -- The wire.

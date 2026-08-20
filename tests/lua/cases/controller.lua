@@ -1160,6 +1160,53 @@ return function(t)
     t.eq(false, live.fill.in_flight, "and a failed capture gives the slot back rather than keeping it forever")
     session.render_failed = false
 
+    -- Every other way a fill can fail to become a slice, counted -- because six
+    -- of them on a real session were not, and the only sign was `fills` sitting
+    -- above what was held with `stale`, `abandoned` and `evictions` all at zero.
+    do
+      -- A newer request superseded this one before it came back. Counted apart
+      -- from `stale_fills`, which this used to increment: the two checks that
+      -- raise `stale_fills` run *after* `live.fills`, so everything they count
+      -- is a fill the total contains. This one never reaches that statement, and
+      -- folding it in made `stale_fills` a population `fills` does not include.
+      live.upload_hold_until, live.fill.in_flight = 0, false
+      session.scroll_y = inside(2)
+      controller.refresh(session, controller._settle_options(session))
+      t.eq(true, live.fill.in_flight, "sanity: a fill is in flight to supersede")
+      local fills_before, stale_before2, superseded_before = live.fills, live.stale_fills, live.superseded_fills
+      local superseded_callback = pending.callback
+      pending = nil
+      -- What a newer request of any kind does to an older one, through the same
+      -- serial `renderer.is_stale` compares -- rather than hand-calling the
+      -- controller's callback with a staleness flag it would never see, which
+      -- would be asserting about a signature instead of about the behaviour.
+      session.request_serial = session.request_serial + 1
+      superseded_callback(nil, nil)
+      t.eq(superseded_before + 1, live.superseded_fills, "a capture superseded before it landed is counted as that")
+      t.eq(stale_before2, live.stale_fills, "not as a stale fill, which would be a term outside its own total")
+      t.eq(fills_before, live.fills, "and never as a fill, since it never got as far as being one")
+      t.eq(false, live.fill.in_flight, "with the slot released")
+
+      -- And the expensive one: the pixels crossed the wire and the backend
+      -- would not put them on screen. It was the single path out of the fill
+      -- branch with no counter on it at all.
+      live.upload_hold_until, live.fill.in_flight = 0, false
+      session.scroll_y = inside(2)
+      controller.refresh(session, controller._settle_options(session))
+      local real_update = session.backend.update
+      session.backend.update = function() return nil, "the terminal refused it" end
+      local undisplayed_before, held_before = live.undisplayed_fills, #resident.slice_records(live)
+      local real_notify = vim.notify
+      vim.notify = function() end
+      complete_fill()
+      vim.notify = real_notify
+      session.backend.update = real_update
+      session.render_failed = false
+      t.eq(undisplayed_before + 1, live.undisplayed_fills, "a fill the backend would not display is counted")
+      t.eq(held_before, #resident.slice_records(live), "and does not become a slice")
+      t.eq(false, live.fill.in_flight, "with the slot released, as every route out of the callback must")
+    end
+
     -- The boundaries are the document's, not the reader's, and a fill does not
     -- move them. This is what the bounded region could not do and what the whole
     -- rebuild is for: there used to be an adaptive byte cap here that ratcheted

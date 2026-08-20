@@ -83,6 +83,8 @@ return function(t)
       "slices held / in grid",
       "budgeted / ceiling",
       "evictions",
+      "slices dropped (drains)",
+      "superseded / undisplayed",
       "slice height scale",
       "link rate used",
     }) do

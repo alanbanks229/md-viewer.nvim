@@ -150,6 +150,42 @@ return function(t)
     local resident = require("md-viewer.resident")
     local live = session.resident
     local function held() return resident.slice_records(live) end
+
+    -- Every fill is accounted for, at every point in the session's life.
+    --
+    -- An identity rather than a counter, because a counter only catches the drop
+    -- somebody thought to count. A real session reported 18 fills, 12 slices
+    -- held, and `stale 0 / abandoned 0 / evictions 0` -- six captures, ~2.5 MB
+    -- of wire, down a path with no counter on it, findable only by subtracting
+    -- two numbers on opposite ends of the report. They had been *drained*: a
+    -- viewport change invalidates the grid, which is correct, and nothing said
+    -- what it cost.
+    --
+    -- `superseded_fills` is deliberately not a term. Those captures never
+    -- reached the statement `fills` is counted at, and folding them in is
+    -- exactly what made `stale_fills` two populations at once.
+    local function reconcile(label)
+      local accounted = #held()
+        + live.stale_fills
+        + live.abandoned_fills
+        + live.undisplayed_fills
+        + live.evictions
+        + live.dropped_slices
+      t.eq(
+        live.fills,
+        accounted,
+        ("%s: %d fills == %d held + %d stale + %d abandoned + %d undisplayed + %d evicted + %d dropped"):format(
+          label,
+          live.fills,
+          #held(),
+          live.stale_fills,
+          live.abandoned_fills,
+          live.undisplayed_fills,
+          live.evictions,
+          live.dropped_slices
+        )
+      )
+    end
     controller.scroll_to(session, math.floor(session.viewport_height_px * 0.5))
     vim.wait(20000, function() return #held() > 0 or live.fallback_reason ~= nil end, 25)
     t.ok(
@@ -463,6 +499,7 @@ return function(t)
       t.eq(full_before, live.fills, "a full ceiling refuses the prefetch rather than evicting for it")
       t.eq(0, live.evictions, "so nothing is given up for a slice nobody asked for")
       live.memory_px = roomy_ceiling
+      reconcile("after a whole-document walk")
     end
 
     -- ------------------------------------------------------------------
@@ -502,6 +539,7 @@ return function(t)
         )
       end
       live.memory_px = one_slice * 64
+      reconcile("after the window slid")
     end
 
     -- ------------------------------------------------------------------
@@ -520,6 +558,7 @@ return function(t)
         doomed[#doomed + 1] = slice.image_id
       end
       t.ok(#doomed > 0, "sanity: the session is holding slices to give back")
+      local drops_before, drains_before, evictions_before = live.dropped_slices, live.drains, live.evictions
       emitted = {}
       -- What an explicit refresh does, without depending on which window is
       -- current: the epoch is in the content revision, which is in the key.
@@ -538,6 +577,19 @@ return function(t)
       end
       t.eq(0, live.resident_px, "with the accounting emptied to match")
       t.eq(nil, live.grid, "and the grid dropped, since its boundaries described the old document")
+
+      -- And what it cost, which is the number that used to be missing entirely.
+      -- Not an eviction: the ceiling never bound. Every one of these slices was
+      -- captured, uploaded and paid for at full price, and the only trace of
+      -- that on a real session's report was `fills` exceeding what was held.
+      t.eq(evictions_before, live.evictions, "none of it counted as an eviction, because the ceiling did not bind")
+      t.eq(
+        drops_before + #doomed,
+        live.dropped_slices,
+        "so each slice given back is counted where it is dropped instead"
+      )
+      t.eq(drains_before + 1, live.drains, "with the occasion counted too, so one resize reads unlike twenty")
+      reconcile("after a changed document dropped every slice")
     end
 
     -- ------------------------------------------------------------------

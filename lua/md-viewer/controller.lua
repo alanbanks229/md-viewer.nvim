@@ -1257,7 +1257,14 @@ function M.refresh(session, render_options)
       -- a whole region's capture thrown away. It costs no wire -- nothing was
       -- uploaded -- but it is worth seeing, because a session where every fill
       -- is superseded is a session that never gets a region at all.
-      if filling then filling.stale_fills = filling.stale_fills + 1 end
+      --
+      -- `superseded_fills` and not `stale_fills`, which this used to be. The
+      -- two checks that increment `stale_fills` run *after* `live.fills`, so
+      -- everything they count is a fill that was counted; this runs before it,
+      -- and folding it into the same counter made `stale_fills` a population
+      -- `fills` does not contain. The reconciliation identity cannot hold while
+      -- one of its terms is partly outside the total.
+      if filling then filling.superseded_fills = filling.superseded_fills + 1 end
       finish()
       return
     end
@@ -1551,6 +1558,13 @@ function M.refresh(session, render_options)
           { source = source, resident_fill = true }
         )
         if not region.image_id then
+          -- The most expensive way to lose a fill and, until this counter, the
+          -- only way to lose one silently: the pixels have already crossed the
+          -- wire, and the backend then declined to put them on screen.
+          -- `apply_image` notifies and sets `render_failed`, so it is not
+          -- invisible to a reader watching -- but it left `fills` and the slice
+          -- count disagreeing by one with nothing to say which had happened.
+          live.undisplayed_fills = live.undisplayed_fills + 1
           finish()
           return
         end

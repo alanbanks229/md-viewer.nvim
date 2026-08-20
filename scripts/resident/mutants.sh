@@ -68,6 +68,11 @@ prefetch-is-drawn-over-the-reader	lua/md-viewer/controller.lua	      local prefe
 wire-estimate-without-a-ceiling	lua/md-viewer/resident.lua	  if sample > MAX_WIRE_SAMPLE_BYTES_PER_MS then\n    state.wire_samples_discarded = (state.wire_samples_discarded or 0) + 1\n    return\n  end	
 inferred-link-rate-outranks-stated	lua/md-viewer/resident.lua	  local configured = positive(configured_bytes_per_sec)\n  if configured then return configured / 1000, "configured" end\n  local estimated = positive(estimated_bytes_per_ms)\n  if estimated then return estimated, "estimated" end	  local estimated = positive(estimated_bytes_per_ms)\n  if estimated then return estimated, "estimated" end\n  local configured = positive(configured_bytes_per_sec)\n  if configured then return configured / 1000, "configured" end
 stated-link-rate-never-consulted	lua/md-viewer/controller.lua	  local rate = resident.link_rate(render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)	  local rate = resident.link_rate(nil, live.wire_bytes_per_ms)
+dropped-slices-not-counted	lua/md-viewer/resident.lua	  state.dropped_slices = (state.dropped_slices or 0) + #slices	
+undisplayed-fill-not-counted	lua/md-viewer/controller.lua	          live.undisplayed_fills = live.undisplayed_fills + 1	
+debug-report-splits-the-preview	lua/md-viewer/debug.lua	    vim.cmd("tabnew")	    vim.cmd("botright new")
+health-report-splits-the-preview	lua/md-viewer/health.lua	    vim.cmd("tabnew")	    vim.cmd("botright new")
+superseded-fill-counted-as-stale	lua/md-viewer/controller.lua	if filling then filling.superseded_fills = filling.superseded_fills + 1 end	if filling then filling.stale_fills = filling.stale_fills + 1 end
 MUTATIONS
 
 caught=0; missed=0; skipped=0
@@ -78,12 +83,17 @@ declare -a missed_names=()
 # a field it reads can be removed from under it with every test still green.
 # That is exactly what the grid rewrite did -- scored below as
 # `ab-reads-the-region-cache`.
+#
+# `debug.lua` and `health.lua` are here because a diagnostic that resizes the
+# preview destroys what it is diagnosing: both used to open a full-width split,
+# which changes the viewport the resident grid is keyed on, so looking at the
+# numbers threw away every slice and reported `evictions: 0` while doing it.
 restore_all() {
-  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js scripts/resident/ab.lua 2>/dev/null || true
+  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua renderer/src/browser.js scripts/resident/ab.lua 2>/dev/null || true
 }
 trap 'restore_all; rm -f "$mutations"' EXIT
 
-if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua renderer/src/browser.js scripts/resident/ab.lua; then
+if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua renderer/src/browser.js scripts/resident/ab.lua; then
   echo "refusing to run: the files this mutates have uncommitted changes" >&2
   echo "commit or stash them first -- restoring would throw them away" >&2
   exit 2

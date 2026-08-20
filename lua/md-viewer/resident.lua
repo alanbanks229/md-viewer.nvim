@@ -671,7 +671,23 @@ function M.new_state(opts)
     -- worse. One climbing is a defect; the other is a fast reader.
     stale_fills = 0,
     abandoned_fills = 0,
+    -- A capture superseded before it came back, which is a *third* thing and is
+    -- deliberately not folded into `stale_fills`: it never reached the point
+    -- `fills` is counted at, so adding it there would make `stale_fills` a
+    -- population `fills` does not contain and quietly break the reconciliation
+    -- the drop counters exist to support.
+    superseded_fills = 0,
+    -- A fill the backend would not put on screen. It has crossed the wire by
+    -- then, so it is the most expensive way to lose one -- and it was the single
+    -- path out of the fill branch with no counter on it at all.
+    undisplayed_fills = 0,
     evictions = 0,
+    -- Slices given back wholesale by `M.drain` -- an invalidation, a fallback, a
+    -- retarget, a close -- and how many occasions did it. Not evictions: the
+    -- ceiling did not bind, the pixels simply stopped describing the document.
+    -- See `M.drain` for why this is counted rather than inferred.
+    dropped_slices = 0,
+    drains = 0,
     prefetches = 0,
     blocked_by_find = 0,
     blocked_by_selection = 0,
@@ -795,6 +811,14 @@ function M.register(state, index, region)
   -- Whatever was in this cell is superseded outright, before the ceiling is
   -- consulted -- so a refill of the same slice is never blocked by the copy it
   -- is replacing.
+  --
+  -- Deliberately counted by nothing. It cannot happen: one fill is in flight at
+  -- a time (`fill.in_flight`, which both the settle and the prefetch refuse to
+  -- take), and neither of them ever chooses a cell this session already holds.
+  -- So a displacement here means one of those two invariants has gone, and the
+  -- reconciliation identity in `tests/lua/cases/resident_e2e.lua` fails --
+  -- which is the point. Counting it would balance the books over a defect
+  -- instead of reporting one.
   local existing = state.slices[index]
   if existing then
     state.slices[index] = nil
@@ -868,11 +892,26 @@ end
 ---Give up every slice, returning them so the caller can free their pixels.
 ---Used by close, retarget, invalidation and fallback -- the paths that end a
 ---session's claim on the terminal's memory.
+---
+---**What this costs is counted here, because nothing else can see it.** Every
+---slice given back was captured, uploaded and paid for at full wire price, and
+---none of that is an *eviction*: `evictions` means the ceiling bound, and stays
+---at zero through a drain of the entire document. So a real session reported 18
+---fills, 12 slices held, and `stale 0 / abandoned 0 / evictions 0` -- the six
+---that went missing, ~2.5 MB of them, were visible only by subtracting two
+---numbers nobody subtracts. `dropped_slices` is that subtraction, performed
+---where the drop happens.
+---
+---`drains` counts the *occasions* rather than the slices, and only the ones that
+---cost something. One drain of twelve is a resize; twelve drains of one is
+---something invalidating under the reader, and the two want different answers.
 function M.drain(state)
   local slices = M.slice_records(state)
   state.slices = {}
   state.resident_px = 0
   state.key = nil
+  state.dropped_slices = (state.dropped_slices or 0) + #slices
+  if #slices > 0 then state.drains = (state.drains or 0) + 1 end
   -- The grid goes with them, and the generation moves. A fill in flight was
   -- planned against cell `n` of the grid that has just stopped existing, and
   -- nothing else could tell it so: the document key it also carries is unchanged

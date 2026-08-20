@@ -852,7 +852,11 @@ end
 ---an issue, rather than a third view splitting the same diagnosis in half.
 function M.show()
   process.request("health", { browser = config.get().browser }, function(result, err)
-    vim.cmd("botright new")
+    -- A tab rather than a split, for the reason `:MdViewerDebug` states at
+    -- length: a full-width split shrinks the preview, the preview's height is
+    -- part of the resident key, and every slice the terminal is holding is
+    -- thrown away and re-uploaded because someone opened a report.
+    vim.cmd("tabnew")
     local buf = vim.api.nvim_get_current_buf()
     vim.api.nvim_buf_set_name(buf, "md-viewer://health")
     vim.bo[buf].buftype = "nofile"

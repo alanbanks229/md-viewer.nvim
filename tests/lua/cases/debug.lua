@@ -37,9 +37,22 @@ return function(t)
   -- Round-trips to the renderer (a cold Chromium launch on a loaded CI runner
   -- is not fast) so the Chromium path and launch result are answered for by
   -- the subprocess rather than guessed at locally.
+  -- Reading the diagnostics must not change what they are diagnosing. This used
+  -- to open `botright new`, a full-width split that takes rows from every window
+  -- above it -- including the preview, whose height is part of the resident key,
+  -- because the document reflows at a different viewport. So checking the
+  -- numbers threw away every slice the terminal was holding and paid for them
+  -- again, twice per look: once opening, once closing. It cost a real session
+  -- six slices and ~2.5 MB, on a run whose own protocol says to check this
+  -- command while walking, and it reported `evictions: 0` throughout.
+  local preview_win = session.preview_win
+  local rows_before = vim.api.nvim_win_get_height(preview_win)
+  local tab_before = vim.api.nvim_get_current_tabpage()
   vim.cmd("MdViewerDebug")
   vim.wait(30000, function() return vim.bo.filetype == "md-viewer-debug" end, 20)
   t.eq("md-viewer-debug", vim.bo.filetype, "MdViewerDebug renders its snapshot buffer")
+  t.ok(vim.api.nvim_get_current_tabpage() ~= tab_before, "in a tab of its own")
+  t.eq(rows_before, vim.api.nvim_win_get_height(preview_win), "leaving the preview exactly the size it was")
 
   local buffer_lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   local buffer_text = table.concat(buffer_lines, "\n")

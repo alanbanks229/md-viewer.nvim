@@ -99,6 +99,21 @@ boundaries are quantised to whole image pixels and both slices share a capture s
 the same document position rounds identically in both and the two bands meet exactly. Two
 independently snapped positions is a scanline drawn twice, or dropped, at the seam.
 
+**Every fill is accounted for, as an identity rather than a counter.** A capture that
+lands is either a slice still held or one given back for a named reason:
+`fills == slices_resident + stale + abandoned + undisplayed + evictions + dropped_slices`,
+asserted across a whole-document walk in `tests/lua/cases/resident_e2e.lua`. The identity
+exists because a counter only catches the drop somebody thought to count: a real session
+reported 18 fills for 12 slices with `stale`, `abandoned` and `evictions` all at zero, and
+the six missing captures — a quarter of the run's traffic — were findable only by
+subtracting two numbers on opposite ends of the report. They had been **drained**, which is
+the one thing eviction is not: invalidating the grid gives every slice back at once, and it
+is *correct* — the viewport is part of the key because the document reflows at a different
+height — but it costs the whole warm-up again and now says so. One consequence is
+structural rather than diagnostic: `:MdViewerDebug` and `:MdViewerHealth` open in a tab,
+because a full-width split takes rows from the preview, which changes the key, which throws
+away the document the report is about.
+
 Two bounds make it safe. **Memory:** `image.resident_memory_mb` (default 512) is the
 ceiling, converted to pixels at a *measured* ~13 bytes per resident pixel
 (`scripts/resident/rss-calibrate.py`; the 4 bytes this project assumed for three releases

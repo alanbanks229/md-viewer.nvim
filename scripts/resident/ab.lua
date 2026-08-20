@@ -115,7 +115,11 @@ local function reset_counters(current)
     "prefetches",
     "stale_fills",
     "abandoned_fills",
+    "superseded_fills",
+    "undisplayed_fills",
     "evictions",
+    "dropped_slices",
+    "drains",
     "straddles",
     "straddle_misses",
     "blocked_by_find",
@@ -181,7 +185,15 @@ local function snapshot(current)
     prefetches = live.prefetches or 0,
     stale_fills = live.stale_fills,
     abandoned_fills = live.abandoned_fills,
+    superseded_fills = live.superseded_fills,
+    undisplayed_fills = live.undisplayed_fills,
     evictions = live.evictions,
+    -- Slices thrown away wholesale by an invalidation, and how many times. The
+    -- quarter of a real run's traffic that had no counter: 18 fills, 12 slices
+    -- held, `evictions 0`, and the six that went missing findable only by
+    -- subtracting two numbers on opposite ends of the report.
+    dropped_slices = live.dropped_slices,
+    drains = live.drains,
     straddles = live.straddles or 0,
     straddle_misses = live.straddle_misses or 0,
     suppressed = live.frames_suppressed_by_hold,
@@ -309,10 +321,26 @@ local function report()
       ("%d (%d/%d)"):format(b.fills, b.stale_fills, b.abandoned_fills)
     ),
     row("  of those, prefetched", number(a.prefetches), number(b.prefetches)),
+    row(
+      "  superseded / undisplayed",
+      ("%d / %d"):format(a.superseded_fills, a.undisplayed_fills),
+      ("%d / %d"):format(b.superseded_fills, b.undisplayed_fills)
+    ),
     -- The number the whole rebuild was for. Under the bounded region this
     -- climbed with every boundary crossing; under a grid, a document inside the
     -- ceiling should never evict at all.
     row("evictions", number(a.evictions), number(b.evictions)),
+    -- And the one that was missing entirely. An invalidation gives back every
+    -- slice at once without evicting anything: a resize, a colorscheme change,
+    -- an edit -- or, until this run's own protocol was corrected, opening
+    -- `:MdViewerDebug`, which used to take rows from the preview and so change
+    -- the viewport the whole grid is keyed on. The first real run spent ~2.5 MB
+    -- here and reported it nowhere.
+    row(
+      "slices dropped (drains)",
+      ("%d (%d)"):format(a.dropped_slices, a.drains),
+      ("%d (%d)"):format(b.dropped_slices, b.drains)
+    ),
     row(
       "slices held / in grid",
       ("%d / %s"):format(a.resident_slices, a.grid_slices and tostring(a.grid_slices) or "--"),
@@ -454,6 +482,41 @@ local function report()
       ) .. "again. That is the churn the grid exists to remove; raise the ceiling or test a shorter " .. "document."
     end
   end
+  -- The identity, stated rather than left to be subtracted. Every fill that
+  -- landed is either a slice still held or one given back for a reason that has
+  -- a counter; a run where this does not balance has lost captures down a path
+  -- nobody has named, which is exactly what the first real run did -- 18 fills
+  -- for 12 slices, with `stale`, `abandoned` and `evictions` all at zero.
+  local accounted = b.resident_slices
+    + b.stale_fills
+    + b.abandoned_fills
+    + b.undisplayed_fills
+    + b.evictions
+    + b.dropped_slices
+  if b.fills > 0 and accounted ~= b.fills then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = ("UNACCOUNTED: %d fills produced %d held + %d stale + %d abandoned + %d undisplayed + "):format(
+      b.fills,
+      b.resident_slices,
+      b.stale_fills,
+      b.abandoned_fills,
+      b.undisplayed_fills
+    ) .. ("%d evicted + %d dropped = %d. %d captures went somewhere with no counter on it. That is a "):format(
+      b.evictions,
+      b.dropped_slices,
+      accounted,
+      b.fills - accounted
+    ) .. "defect in this report or in the fill path, not a measurement -- do not read the rest of these " .. "numbers until it balances."
+  end
+
+  if b.dropped_slices > 0 then
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = ("%d slices were given back in %d invalidations, at roughly %s bytes each. Not "):format(
+      b.dropped_slices,
+      b.drains,
+      number(b.upload_bytes / math.max(b.fills, 1))
+    ) .. "evictions -- the ceiling did not bind. Something changed what the grid is keyed on: the preview " .. "was resized, the colorscheme or `background` changed, the document was edited, or :MdViewerRefresh " .. "ran. All of those are correct reasons to throw the pixels away, and all of them mean this phase " .. "paid for the warm-up more than once."
+  end
   if b.suppressed > 0 then
     lines[#lines + 1] = ("%d moving frames were held off the wire while a slice drained -- the "):format(b.suppressed)
       .. "anti-backlog rule. Compare `coalesced` between arms: both mean a scroll that sent nothing."
@@ -480,9 +543,12 @@ local function report()
   vim.bo[buf].modifiable = false
   vim.bo[buf].bufhidden = "wipe"
   vim.api.nvim_buf_set_name(buf, "md-viewer://resident-ab")
-  vim.cmd("botright split")
+  -- A tab, like `:MdViewerDebug`. This one comes after both snapshots so it
+  -- cannot corrupt the measurement, but a split would still take rows from the
+  -- preview and throw away every slice the run just paid for -- leaving the
+  -- operator reading a report about a document the report destroyed.
+  vim.cmd("tabnew")
   vim.api.nvim_win_set_buf(0, buf)
-  vim.api.nvim_win_set_height(0, math.min(#lines + 1, 30))
   print("md-viewer: resident A/B complete, configuration restored.")
 end
 

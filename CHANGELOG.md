@@ -66,6 +66,39 @@ All notable changes to this project will be documented here. The project uses
 
 ### Fixed
 
+- **Opening `:MdViewerDebug` or `:MdViewerHealth` threw away every resident
+  slice, and the report said `evictions: 0` while it did.** Both opened a
+  full-width split at the bottom of the screen, which takes rows from the
+  preview — and the preview's height is part of what resident slices are keyed
+  on, because the document reflows at a different viewport. So checking the
+  numbers invalidated the whole grid and paid for it again, twice per look: once
+  opening the split, once closing it. On a slow link that is the entire document
+  re-uploaded because you wanted to see how it was doing. Both commands now open
+  in a new tab, which leaves every window in the current tab exactly where it
+  was. `scripts/resident/ab.lua`'s report does the same.
+
+- **A quarter of a real session's traffic was spent on slices that were dropped,
+  and nothing reported it.** 18 fills, 12 slices held, `stale 0 / abandoned 0 /
+  evictions 0` — the six that went missing were ~2.5 MB, and the only way to
+  notice was to subtract two numbers on opposite ends of the report. They had
+  been *drained*: invalidating the grid gives every slice back at once, which is
+  correct — a resize, a colorscheme change, an edit or `:MdViewerRefresh` makes
+  the held pixels stop describing the document — but it is not an eviction, and
+  `evictions` was the only thing anyone was watching.
+
+  `:MdViewerDebug`'s `resident` block gains `dropped_slices` and `drains` (the
+  slices, and the occasions), plus `undisplayed_fills` for a fill the backend
+  refused to draw, which was the one path out of the fill code with no counter on
+  it at all. A capture superseded before it landed is now `superseded_fills`
+  rather than `stale_fills`: it never reached the point `fills` is counted at, so
+  folding it in made `stale_fills` a population `fills` did not contain. What
+  those add up to is now an identity —
+  `fills == slices_resident + stale + abandoned + undisplayed + evictions +
+  dropped_slices` — asserted across a whole-document walk, and printed as
+  `UNACCOUNTED` by `ab.lua` when it fails. An identity rather than a counter
+  because a counter only catches the drop somebody thought to count, which is
+  exactly how these six got out.
+
 - **The link speed `:MdViewerDebug` reported was wrong by about 170×, and the
   anti-backlog pause it feeds had therefore never run.** A real session showed
   `measured link: 139,058 B/ms` for a tunnel doing 800 — because the figure came

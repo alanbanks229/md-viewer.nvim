@@ -64,9 +64,16 @@ local function resident_report(session)
     -- Non-nil means this session gave up and is on the ordinary capture path
     -- for good; the string says why.
     fallback_reason = live.fallback_reason,
-    -- The grid, and which generation of it. A generation above 1 without a
-    -- document change means slices were regenerated shorter because the
-    -- renderer refused to capture one.
+    -- The grid, and which generation of it. Two is the resting value on a
+    -- healthy session before a single slice exists -- one bump when the preview
+    -- opens and the gate is evaluated, one when the first scroll finds no key
+    -- to compare against -- so this is a *change* counter, not a fault counter.
+    -- It used to be documented as meaning the renderer had refused a slice,
+    -- which it reads as from generation 2 onwards on every session ever opened.
+    -- `slice_shrinks` is the field that actually answers that.
+    --
+    -- What it does say: every bump past those two threw away whatever was held,
+    -- and `dropped_slices` says how much.
     grid_generation = live.generation,
     grid_slices = grid and grid.count,
     grid_slice_h = grid and grid.slice_h,
@@ -82,13 +89,34 @@ local function resident_report(session)
     pans = live.pans,
     unplaced_places = live.unplaced_places,
     fills = live.fills,
-    -- A fill thrown away because it could no longer be trusted, against one
-    -- thrown away because the reader had moved past it. The first climbing means
-    -- something is invalidating regions faster than they can be captured; the
-    -- second just means a fast reader, and costs nothing but a capture.
+    -- Every way a fill can fail to become a resident slice, kept apart because
+    -- they mean different things and cost different amounts. `superseded` and
+    -- `abandoned` cost nothing at all -- the capture never left the renderer --
+    -- while `undisplayed` has already crossed the wire. `stale` is the one that
+    -- means something is invalidating the grid faster than it can be filled.
+    --
+    -- Together with `slices_resident`, `evictions` and `dropped_slices` these
+    -- account for `fills` exactly:
+    --
+    --   fills == slices_resident + stale + abandoned + undisplayed
+    --                            + evictions + dropped_slices
+    --
+    -- asserted in `tests/lua/cases/resident_e2e.lua` across a whole-document
+    -- walk. `superseded_fills` is outside the identity on purpose: it counts
+    -- captures that never reached the point `fills` is incremented at.
     stale_fills = live.stale_fills,
     abandoned_fills = live.abandoned_fills,
+    superseded_fills = live.superseded_fills,
+    undisplayed_fills = live.undisplayed_fills,
     evictions = live.evictions,
+    -- Slices given back all at once, and how many times. **Not evictions.** A
+    -- resize, a colorscheme change, an edit or `:MdViewerRefresh` invalidates
+    -- the grid, which is correct -- the document reflows, so the held pixels
+    -- stop describing it -- but every slice dropped that way was captured and
+    -- paid for at full price. This was the missing quarter of a real session's
+    -- traffic, and the only trace of it was `fills` exceeding `slices_resident`.
+    dropped_slices = live.dropped_slices,
+    drains = live.drains,
     prefetches = live.prefetches,
     -- Pans declined so a browser-painted highlight would not be erased. Not a
     -- failure: it is the feature correctly getting out of the way.
@@ -389,7 +417,17 @@ function M.show()
     lines[#lines + 1] = "-- Sessions & Events --"
     vim.list_extend(lines, vim.split(vim.inspect(M.snapshot()), "\n", { plain = true }))
 
-    vim.cmd("botright new")
+    -- A tab, not the `botright new` this used to be, because a full-width split
+    -- takes rows from the preview and that is not a free thing to do. The
+    -- viewport is part of the resident key -- the document reflows at a
+    -- different height -- so shrinking the pane invalidates every slice the
+    -- terminal is holding, and closing the split again invalidates them a
+    -- second time. On a slow link that is the whole document, re-uploaded,
+    -- because someone looked at the numbers. It cost a real session six slices
+    -- and ~2.5 MB, reported as `evictions: 0`, in a run whose own protocol says
+    -- to check this command while walking. A new tab leaves every window in the
+    -- current tab exactly where it was.
+    vim.cmd("tabnew")
     local buf = vim.api.nvim_get_current_buf()
     vim.api.nvim_buf_set_name(buf, "md-viewer://debug")
     vim.bo[buf].buftype = "nofile"
