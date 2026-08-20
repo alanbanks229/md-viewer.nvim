@@ -96,6 +96,35 @@ local function document_buf()
   return current
 end
 
+---Whether an open preview's document fits the memory allowed for its pixels.
+---
+---nil when nothing is holding any -- a local session, an unqualified terminal,
+---or a preview that has not rendered -- because "no answer" and "it fits" are
+---different facts and this report is the one place that distinction has to
+---survive. The first live grid answers; there is normally exactly one preview,
+---and reporting a per-buffer table here would be a second view of what
+---`:MdViewerDebug` already dumps in full.
+---
+---A document that does not fit is not a fault. The window slides and crossing it
+---costs an upload, which is the honest thing to tell someone whose long file
+---feels slower at one end than the other -- and is otherwise only visible as
+---`evictions` climbing in a diagnostic they would have to know to open.
+local function resident_document_fit()
+  local resident = require("md-viewer.resident")
+  for _, session in pairs(state.all()) do
+    local live = not session.closed and session.resident
+    if live and live.enabled and live.grid then
+      local slices, whole = resident.slices_that_fit(live.grid, live.memory_px)
+      if whole then return ("whole document held (%d slices)"):format(live.grid.count) end
+      return ("%d of %d slices fit -- image.resident_memory_mb holds part of this document, so crossing "):format(
+        slices,
+        live.grid.count
+      ) .. "the rest costs an upload each time"
+    end
+  end
+  return nil
+end
+
 ---Non-empty environment variable, or nil. `vim.env` yields nil when unset, but
 ---an exported-and-emptied variable is just as absent for these purposes.
 local function env_value(name)
@@ -224,6 +253,13 @@ function M.collect(renderer_result, renderer_error)
     -- any particular preview is doing. `:MdViewerDebug` reports the other half.
     raw_graphics_resident_pan = backend.kitty_raw.resident_pan,
     raw_graphics_resident_pan_reason = backend.kitty_raw.resident_pan_reason,
+    -- And the one thing about it that is a property of the *document* rather
+    -- than of the terminal or the session: whether it fits the memory allowed
+    -- for it. A document that does not is an ordinary situation -- the window
+    -- slides and crossing it costs an upload -- but a reader should be able to
+    -- see it rather than deduce it from a preview that is slower than they
+    -- expected on one part of a long file.
+    resident_document_fit = resident_document_fit(),
     raw_graphics_owned_images = backend.kitty_raw.owned_images,
     raw_graphics_owned_placements = backend.kitty_raw.owned_placements,
     node_version = command({ "node", "--version" }) or "unavailable",
@@ -412,10 +448,15 @@ local function verbose_raw_graphics(report)
   local resident = report.raw_graphics_resident_pan
       and "qualified (per-session: needs SSH, no multiplexer, and a budget)"
     or ("off -- %s"):format(report.raw_graphics_resident_pan_reason or "reason not reported")
+  -- Appended rather than given a row of its own: it is the same subject, and
+  -- the fit only means anything on a terminal that qualified in the first place.
+  if report.raw_graphics_resident_pan and report.resident_document_fit then
+    resident = resident .. "; " .. report.resident_document_fit
+  end
   return {
     { "overlay", overlay },
     { "animation", animation },
-    { "resident panning", resident },
+    { "reuse sent pixels", resident },
     { "cell pixels", cell_pixels },
     { "base layer", ("%s (%s)"):format(report.raw_graphics_zindex, report.raw_graphics_zindex_source) },
     -- Printed as one ascending run rather than three separate numbers, because

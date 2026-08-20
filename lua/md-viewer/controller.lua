@@ -759,7 +759,7 @@ local function resident_gate(session)
   local capability = terminal.detect()
   if not capability.ssh then return false, "local session (no wire time to save)" end
   if capability.multiplexer ~= "none" then
-    return false, ("multiplexer %s is not validated for resident panning"):format(capability.multiplexer)
+    return false, ("multiplexer %s is not validated for reusing sent pixels"):format(capability.multiplexer)
   end
   if (cfg.image.resident_memory_mb or 0) <= 0 then return false, "image.resident_memory_mb is zero" end
   return true, reason
@@ -768,7 +768,7 @@ end
 ---Apply the gate's answer to a session, giving back any pixels it was holding.
 ---
 ---`M.open` needs this once. The A/B harness needs it again, because it toggles
----`image.resident_pan` between arms and a gate evaluated only at open would
+---`image.reuse_sent_pixels` between arms and a gate evaluated only at open would
 ---leave both arms running whatever the session started as -- the shape of A/B
 ---that reports a difference of zero and looks like a null result.
 ---

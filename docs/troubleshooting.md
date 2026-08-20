@@ -319,7 +319,7 @@ narrowly gated, and `:MdViewerDebug`'s `resident` block says which gate refused:
   There are only three reasons: a document that cannot scroll, a pane so short
   that a slice cannot hold a viewport plus its overlap, and a ceiling smaller than
   one slice. The message says which; raise `image.resident_memory_mb` only after
-  reading what it costs in `:help md-viewer-resident-pan`.
+  reading what it costs in `:help md-viewer-reuse-sent-pixels`.
 - **`hits 0` but `fills` climbing.** Slices are being captured and not used.
   `blocked_by_find` and `blocked_by_selection` climbing instead means an active
   search or selection, where panning is refused deliberately: the highlights are
@@ -342,12 +342,29 @@ around the reader and ground already paid for is being paid for again. Raise the
 ceiling or accept that this document is bigger than the memory allowed for it —
 `scripts/resident/ab.lua` reports the same number and says which.
 
+You do not have to wait for that to happen to find out. `:MdViewerHealth`'s
+`reuse sent pixels` line says whether the open document fits, and
+`:MdViewerDebug` reports `document_fits` with `slices_that_fit` beside
+`grid_slices`. A document that does not fit is not an error and is not refused —
+the window slides, and crossing it costs an upload each time — but it is
+something to be told rather than to deduce.
+
+**`dropped_slices` above zero is a different thing entirely, and is usually
+fine.** It counts slices given back all at once because the grid was invalidated:
+the preview was resized, the colorscheme or `background` changed, the document
+was edited, or `:MdViewerRefresh` ran. All of those genuinely stop the held
+pixels describing the document, so throwing them away is correct — but each one
+pays for the warm-up again, and `drains` says how many occasions did it. One
+drain after a resize is expected. Twenty while you were only scrolling means
+something is invalidating the grid under you, and `grid_generation` climbing in
+step confirms it.
+
 `prefetches` counts slices captured while nobody was waiting, on an idle link. It
 climbing while `upload_bytes` climbs with it is the document filling itself in,
 which is the intended behaviour; a prefetch never evicts, so it cannot be the
 cause of the paragraph above.
 
-To turn it off: `image.resident_pan = "off"`.
+To turn it off: `image.reuse_sent_pixels = "off"`.
 
 ## A notification over the preview shows Markdown through its background
 

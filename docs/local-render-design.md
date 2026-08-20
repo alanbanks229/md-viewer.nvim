@@ -109,7 +109,8 @@ more wire than no cache at all. What replaced it is the "whole document" part af
 a fixed grid of slices whose boundaries belong to the document, so a slice is paid for once
 — with the memory question answered by *measuring* what a resident pixel costs (~13 bytes,
 not the 4 assumed here) and holding a stated ceiling rather than a small guess. See
-[`architecture.md`](architecture.md#resident-regions) and `:help md-viewer-resident-pan`.
+[`architecture.md`](architecture.md#resident-regions) and
+`:help md-viewer-reuse-sent-pixels`.
 
 Two things measured during that work are worth carrying forward. A region's PNG scales
 close to **linearly** with pixel count rather than as `pixels^0.69` — two viewports came

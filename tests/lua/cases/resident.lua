@@ -589,6 +589,27 @@ return function(t)
   t.ok(grid.overlap < grid.slice_h * 0.05, ("and by little: %.1f of %.1f CSS px"):format(grid.overlap, grid.slice_h))
   t.near(grid.slice_h - grid.overlap, grid.stride, 1e-9, "the stride is what a slice adds beyond its predecessor")
 
+  -- How much of this document the ceiling can hold, which the diagnostics report
+  -- rather than enforce. A document larger than the memory allowed for it is an
+  -- ordinary situation -- the window slides and crossing it costs an upload --
+  -- and the alternative to saying so is leaving a reader to deduce it from
+  -- `evictions` climbing in a diagnostic they would have to know to open.
+  local slice_px = resident.slice_cost_px(grid)
+  local all, whole = resident.slices_that_fit(grid, slice_px * grid.count)
+  t.eq(grid.count, all, "a ceiling with room for every slice fits every slice")
+  t.eq(true, whole, "and says the whole document is held")
+  local some, partial = resident.slices_that_fit(grid, slice_px * 3)
+  t.eq(3, some, "a smaller ceiling fits what it fits")
+  t.eq(false, partial, "and does not claim the document")
+  -- Never more of the document than there is: this is the answer to "how much of
+  -- *this* document", not "how many slices could the ceiling hold in general",
+  -- and reporting `12 of 8 slices fit` would be worse than reporting nothing.
+  local roomy = resident.slices_that_fit(grid, slice_px * (grid.count + 40))
+  t.eq(grid.count, roomy, "and never more slices than the document has")
+  t.eq(0, (resident.slices_that_fit(grid, 0)), "no ceiling at all fits nothing")
+  t.eq(false, (select(2, resident.slices_that_fit(grid, 0))), "and does not report a document that is held")
+  t.eq(nil, resident.slices_that_fit(nil, slice_px), "and with no grid there is no answer rather than a zero")
+
   -- Boundaries are whole image pixels, so the same document position is an
   -- integer in every slice's own image space and the two halves of a composite
   -- cannot disagree by half a pixel across the seam.

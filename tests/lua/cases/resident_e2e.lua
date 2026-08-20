@@ -81,7 +81,7 @@ return function(t)
     require("md-viewer").setup({
       image = {
         backend = "kitty_raw",
-        resident_pan = "on",
+        reuse_sent_pixels = "on",
         -- Stated rather than defaulted, so what this case holds is a property of
         -- the case: how many slices fit before the window starts sliding is the
         -- difference between "nothing is ever re-uploaded" and "everything is",
@@ -517,6 +517,12 @@ return function(t)
       for _, gone in ipairs(resident.retain_window(live, records[#records].index)) do
         dropped[#dropped + 1] = gone.image_id
       end
+      -- Said, not deduced. A document that does not fit is ordinary -- crossing
+      -- the window costs an upload each time -- and until now the only sign was
+      -- `evictions` climbing in a diagnostic a reader would have to know to open.
+      local fitting, whole = resident.slices_that_fit(live.grid, live.memory_px)
+      t.eq(false, whole, "a ceiling below the document does not claim to hold it")
+      t.ok(fitting < live.grid.count, ("saying how much does: %d of %d"):format(fitting, live.grid.count))
       t.ok(#dropped > 0, "a ceiling below what is held slides the window")
       t.eq(evictions_before + #dropped, live.evictions, "counting each slice it dropped")
       t.ok(

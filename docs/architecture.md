@@ -65,7 +65,7 @@ the document is covered by a **fixed grid of slices**, each about two viewports 
 each uploaded once and kept — and every scroll position is shown as a **crop** of pixels
 the terminal is already holding, which costs a placement command rather than a frame.
 Gated to sessions where the trade is real: raw Kitty backend, over SSH, no multiplexer, on
-a terminal profile qualified for it (`image.resident_pan`, default `auto` → iTerm2 only).
+a terminal profile qualified for it (`image.reuse_sent_pixels`, default `auto` → iTerm2 only).
 Everywhere else `session.resident.enabled` is false and the scroll path is one boolean test
 longer than it was.
 

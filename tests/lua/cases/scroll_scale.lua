@@ -107,7 +107,7 @@ return function(t)
     t.ok(local_reason:match("local session"), "and is answered as a local session, not as a remote document")
 
     stub_ssh(true)
-    config.setup({ image = { resident_pan = "on" } })
+    config.setup({ image = { reuse_sent_pixels = "on" } })
     t.eq(
       true,
       (controller._resident_gate(session)),
@@ -133,9 +133,9 @@ return function(t)
     t.eq(nil, session.resident.fallback_reason, "and leaving no fallback reason behind when it was allowed")
     t.ok(session.resident.gate_reason ~= nil, "while still reporting why it was allowed")
 
-    config.setup({ image = { resident_pan = "off" } })
+    config.setup({ image = { reuse_sent_pixels = "off" } })
     local off_ok, off_reason = controller._resident_gate(session)
-    t.eq(false, off_ok, "and image.resident_pan = off refuses regardless of transport")
+    t.eq(false, off_ok, "and image.reuse_sent_pixels = off refuses regardless of transport")
     t.ok(off_reason:match("off"), "naming the option that refused")
 
     -- The other direction: a refusal must leave a reason, or a session that
@@ -144,7 +144,7 @@ return function(t)
     t.eq(false, session.resident.enabled, "re-applying a refusal disables it")
     t.ok(session.resident.fallback_reason ~= nil, "and says why, on the session")
 
-    config.setup({ image = { resident_pan = "on", resident_memory_mb = 0 } })
+    config.setup({ image = { reuse_sent_pixels = "on", resident_memory_mb = 0 } })
     local broke_ok, broke_reason = controller._resident_gate(session)
     t.eq(false, broke_ok, "a zero memory ceiling cannot hold a slice")
     t.ok(broke_reason:match("memory"), "and says so")
@@ -159,7 +159,7 @@ return function(t)
     local real_notify = vim.notify
     vim.notify = function(message) warnings[#warnings + 1] = message end
     config._forget_budget_px_warning()
-    local kept = pcall(config.setup, { image = { resident_pan = "on", resident_budget_px = 8000000 } })
+    local kept = pcall(config.setup, { image = { reuse_sent_pixels = "on", resident_budget_px = 8000000 } })
     vim.notify = real_notify
     t.eq(true, kept, "a configuration naming the replaced key still loads")
     t.eq(nil, config.get().image.resident_budget_px, "with the old key gone")
@@ -174,10 +174,37 @@ return function(t)
     -- resident panning off comes back on.
     config._forget_budget_px_warning()
     vim.notify = function() end
-    config.setup({ image = { resident_pan = "on", resident_budget_px = 0 } })
+    config.setup({ image = { reuse_sent_pixels = "on", resident_budget_px = 0 } })
     vim.notify = real_notify
     t.eq(0, config.get().image.resident_memory_mb, "a zero budget converts to a zero ceiling, which still disables")
     t.eq(false, (controller._resident_gate(session)), "so the feature stays off rather than switching itself on")
+    config.reset()
+
+    -- And the same shape again for the option's own rename, because the reader
+    -- is the same one: a preview refused over a renamed key, on the slow remote
+    -- link this exists for, is the worst way there is to learn about a rename.
+    -- A pure rename, so the conversion is exact rather than a change of units.
+    warnings = {}
+    vim.notify = function(message) warnings[#warnings + 1] = message end
+    config._forget_resident_pan_warning()
+    local renamed = pcall(config.setup, { image = { resident_pan = "off" } })
+    vim.notify = real_notify
+    t.eq(true, renamed, "a configuration naming image.resident_pan still loads")
+    t.eq(nil, config.get().image.resident_pan, "with the old key gone")
+    t.eq("off", config.get().image.reuse_sent_pixels, "and the value carried across exactly")
+    t.eq(1, #warnings, "said exactly once, not once per setup()")
+    t.ok(tostring(warnings[1]):match("reuse_sent_pixels"), "naming what replaced it: " .. tostring(warnings[1]))
+    t.eq(false, (controller._resident_gate(session)), "so a configuration that had it off keeps it off")
+    config.reset()
+
+    -- A value that was never legal stays illegal under the new name, rather
+    -- than being quietly replaced by the default: a typo that starts working
+    -- and does something else is worse than one that says so.
+    config._forget_resident_pan_warning()
+    vim.notify = function() end
+    local bad_rename = pcall(config.setup, { image = { resident_pan = "yes" } })
+    vim.notify = real_notify
+    t.eq(false, bad_rename, "an illegal value is still refused after conversion")
     config.reset()
 
     state.remove(buf)

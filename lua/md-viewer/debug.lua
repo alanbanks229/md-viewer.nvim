@@ -59,6 +59,7 @@ local function resident_report(session)
   -- configuration there is now rather than about the one the last hold happened
   -- to be computed under.
   local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
+  local slices_that_fit, whole_document = resident.slices_that_fit(grid, live.memory_px)
   return {
     enabled = live.enabled,
     -- Non-nil means this session gave up and is on the ordinary capture path
@@ -82,6 +83,14 @@ local function resident_report(session)
     slices_resident = #slices,
     resident_px = live.resident_px,
     memory_px = live.memory_px,
+    -- Whether this document fits `image.resident_memory_mb`, and how much of it
+    -- does. Reported rather than enforced: a document larger than the memory
+    -- allowed for it is an ordinary situation, not an error and not a refusal.
+    -- What is not ordinary is having to infer it from `evictions` climbing, so
+    -- it is said here directly -- along with what it costs, which is an upload
+    -- every time the reader crosses the window.
+    slices_that_fit = slices_that_fit,
+    document_fits = whole_document,
     decoded_mb_budgeted = decoded > 0 and (decoded / 1048576) or 0,
     decoded_basis = ("%d B/px assumed, uncorroborated by a real session"):format(resident.BYTES_PER_RESIDENT_PX),
     hits = live.hits,

@@ -402,6 +402,29 @@ end
 ---knew.
 function M.slice_cost_px(grid) return grid and grid.image_w * grid.slice_img or 0 end
 
+---How many of this grid's slices the ceiling can hold at once, and whether that
+---is all of them.
+---
+---Reported rather than enforced. A document larger than the memory allowed for
+---it is an ordinary situation, not an error and not a refusal: the window slides
+---and the reader pays an upload each time they cross it. What is *not* ordinary
+---is having to infer that from `evictions` climbing, so both diagnostics say it
+---directly.
+---
+---Deliberately not a promise that the whole document is held. No fixed ceiling
+---can make that promise -- there is always a longer document -- so what the
+---feature claims instead is the thing that is true at every size: a slice is
+---uploaded once and never uploaded again while it stays in the window.
+---@return number|nil slices, boolean|nil whole_document
+function M.slices_that_fit(grid, memory_px)
+  if not grid then return nil end
+  local ceiling = positive(memory_px)
+  local cost = M.slice_cost_px(grid)
+  if not (ceiling and cost > 0) then return 0, false end
+  local fit = math.floor(ceiling / cost)
+  return math.min(fit, grid.count), fit >= grid.count
+end
+
 ---Where slice `index` (0-based) starts and how tall it is, in document CSS px.
 ---@return table|nil slice
 function M.slice(grid, index)

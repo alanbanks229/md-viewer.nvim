@@ -149,7 +149,7 @@ end
 ---with itself. A harness must not reimplement the decision it is measuring.
 local function apply_pan(current, value)
   local next_config = vim.deepcopy(config.get())
-  next_config.image.resident_pan = value
+  next_config.image.reuse_sent_pixels = value
   config.setup(next_config)
   return controller.reevaluate_resident(current)
 end

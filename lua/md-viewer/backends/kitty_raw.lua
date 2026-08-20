@@ -1336,13 +1336,21 @@ end
 ---afterwards.
 function M.png_dimensions(bytes) return png_dimensions(bytes) end
 
+---Whether this terminal may be asked to hold pixels and re-crop them.
+---
+---The function keeps the mechanism's name while the option no longer does. That
+---is the right split: internally this *is* resident panning -- pixels held
+---resident, a crop panned across them -- and every module here talks in those
+---terms. What a reader configures is the effect, `image.reuse_sent_pixels`, and
+---the reasons this returns are read by them in `:MdViewerHealth`, so those name
+---the option rather than the mechanism.
 function M.resident_pan_supported()
-  local configured = config.get().image.resident_pan
-  if configured == "off" then return false, "image.resident_pan = off" end
-  if configured == "on" then return true, "image.resident_pan = on (explicit override)" end
+  local configured = config.get().image.reuse_sent_pixels
+  if configured == "off" then return false, "image.reuse_sent_pixels = off" end
+  if configured == "on" then return true, "image.reuse_sent_pixels = on (explicit override)" end
   local profile, profile_id = active_profile()
   if profile.resident_pan ~= true then
-    return false, ("profile %s is not validated for resident panning"):format(profile_id)
+    return false, ("profile %s is not validated for reusing sent pixels"):format(profile_id)
   end
   return true, ("profile default (%s)"):format(profile_id)
 end

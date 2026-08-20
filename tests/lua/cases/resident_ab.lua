@@ -107,11 +107,11 @@ return function(t)
   end
 
   -- Whatever happened, the operator's configuration comes back. A harness that
-  -- leaves `image.resident_pan` where it last set it would silently change every
+  -- leaves `image.reuse_sent_pixels` where it last set it would silently change every
   -- session opened afterwards.
   pcall(vim.cmd, "ResidentABCancel")
   vim.notify = real_notify
-  t.eq(config.defaults.image.resident_pan, config.get().image.resident_pan, "the configuration is restored")
+  t.eq(config.defaults.image.reuse_sent_pixels, config.get().image.reuse_sent_pixels, "the configuration is restored")
 
   for _, name in ipairs({ "ResidentAB", "ResidentABMark", "ResidentABCancel" }) do
     pcall(vim.api.nvim_del_user_command, name)

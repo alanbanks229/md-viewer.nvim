@@ -108,18 +108,40 @@ M.defaults = {
     raw_overlay_bleed_cells = 1,
     raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
-    -- Whether an image taller than the viewport may be kept in the terminal and
-    -- scrolled by re-cropping it, instead of capturing and sending a fresh frame
-    -- for every position. "auto" follows the terminal profile; "on" and "off"
-    -- override it, the same three-valued shape `interaction.selection_overlay`
-    -- uses and for the same two reasons -- someone has to be able to turn it on
-    -- to qualify a new terminal, and off to escape a defect in one.
+    -- Whether scrolling may be shown by re-cropping pixels the terminal already
+    -- has, instead of capturing and sending a fresh frame for every position.
+    -- "auto" follows the terminal profile; "on" and "off" override it, the same
+    -- three-valued shape `interaction.selection_overlay` uses and for the same
+    -- two reasons -- someone has to be able to turn it on to qualify a new
+    -- terminal, and off to escape a defect in one.
     --
     -- Only ever active over SSH, where the pixels are the cost. A local terminal
     -- receives a frame for free, so this would trade terminal memory for nothing.
-    resident_pan = "auto",
+    --
+    -- Named for what it does rather than for how. This was `resident_pan`, which
+    -- is not wrong -- pixels are held resident in the terminal and the crop pans
+    -- across them -- but it is the mechanism's name, and a reader setting an
+    -- option wants to know what they get. What they get is: **a slice is
+    -- uploaded once and never uploaded again while it stays in the window.**
+    --
+    -- That sentence is the whole promise, and it is deliberately not "the
+    -- document is held". No fixed ceiling can promise the document -- there is
+    -- always a longer one -- so a name implying completeness ("keep_document",
+    -- "hold_whole_document") would be unenforceable by construction. This one
+    -- stays true at every size: past `resident_memory_mb` the window slides and
+    -- crossing it costs an upload, and the pixels that are still there are still
+    -- reused. `:MdViewerDebug` and `:MdViewerHealth` say when a document does not
+    -- fit rather than leaving it to be inferred from `evictions` climbing.
+    reuse_sent_pixels = "auto",
     -- How much decoded image the terminal may hold for one preview, in
-    -- megabytes. 0 disables resident panning outright.
+    -- megabytes. 0 disables the reuse outright.
+    --
+    -- Keeps its name through `resident_pan`'s rename, on purpose. It was renamed
+    -- itself one release ago and a second migration for one option in
+    -- consecutive prereleases is a cost the reader pays for our tidiness; and
+    -- "resident" is accurate here in a way it was not as a feature name -- this
+    -- bounds the pixels the terminal holds resident, which is exactly what it
+    -- says.
     --
     -- Megabytes rather than the pixels this used to be stated in, because
     -- megabytes are what a reader is actually spending and pixels only became a
@@ -411,9 +433,10 @@ local function validate(cfg)
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
   )
+  local reuse = cfg.image.reuse_sent_pixels
   assert(
-    cfg.image.resident_pan == "auto" or cfg.image.resident_pan == "on" or cfg.image.resident_pan == "off",
-    'md-viewer: image.resident_pan must be "auto", "on", or "off"'
+    reuse == "auto" or reuse == "on" or reuse == "off",
+    'md-viewer: image.reuse_sent_pixels must be "auto", "on", or "off"'
   )
   assert(
     type(cfg.image.resident_memory_mb) == "number" and cfg.image.resident_memory_mb >= 0,
@@ -547,7 +570,7 @@ local warned_about_budget_px = false
 ---bound they *had*, not the bound they thought they had -- silently changing how
 ---much a working configuration holds is the thing a rename must not do.
 ---
----`0` converts to `0`, which is what disables resident panning, so a
+---`0` converts to `0`, which is what disables the feature, so a
 ---configuration that had turned it off stays off.
 local function migrate_resident_budget(opts)
   local image = opts.image
@@ -585,10 +608,58 @@ local function migrate_resident_budget(opts)
   end
 end
 
+local warned_about_resident_pan = false
+
+---Accept `image.resident_pan`, the key `image.reuse_sent_pixels` replaced.
+---
+---Converted rather than refused, for the reason written out above
+---`migrate_resident_budget` and worth restating because it is the same reader:
+---refusing a configuration over a renamed key costs them the preview, and on the
+---slow remote link this feature exists for that is the worst available way to
+---find out about a rename. This is a pure rename with the same three values, so
+---the conversion is exact -- unlike the budget's, which had to change units --
+---and a configuration that had turned the feature off stays off.
+local function migrate_resident_pan(opts)
+  local image = opts.image
+  local legacy = image and image.resident_pan
+  if legacy == nil then return end
+  image.resident_pan = nil
+
+  local note
+  if image.reuse_sent_pixels ~= nil then
+    note = (
+      "image.resident_pan is now image.reuse_sent_pixels, which you have already set to %s -- the old "
+      .. "key is being ignored."
+    ):format(vim.inspect(image.reuse_sent_pixels))
+  elseif legacy ~= "auto" and legacy ~= "on" and legacy ~= "off" then
+    -- Passed through untouched rather than defaulted away, so `validate` refuses
+    -- it by its new name and the reader is told about the rename *and* about the
+    -- value in one go. Silently substituting the default here would turn a typo
+    -- into a working configuration that does something else.
+    image.reuse_sent_pixels = legacy
+    note = ('image.resident_pan is now image.reuse_sent_pixels, and %s is not one of "auto", "on" or "off".'):format(
+      vim.inspect(legacy)
+    )
+  else
+    image.reuse_sent_pixels = legacy
+    note = (
+      "image.resident_pan is now image.reuse_sent_pixels -- named for what it does (a slice is sent once "
+      .. "and never sent again while it stays in the window) rather than for how. Your %s is in force; set "
+      .. "image.reuse_sent_pixels = %q to silence this."
+    ):format(vim.inspect(legacy), legacy)
+  end
+
+  if not warned_about_resident_pan then
+    warned_about_resident_pan = true
+    vim.notify("md-viewer: " .. note, vim.log.levels.WARN)
+  end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
   migrate_resident_budget(opts)
+  migrate_resident_pan(opts)
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_terminal()
@@ -598,6 +669,7 @@ end
 ---Exposed for the one test that has to observe the warning without a second
 ---`setup()` having already consumed it.
 function M._forget_budget_px_warning() warned_about_budget_px = false end
+function M._forget_resident_pan_warning() warned_about_resident_pan = false end
 
 function M.get() return current end
 

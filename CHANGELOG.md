@@ -33,6 +33,34 @@ All notable changes to this project will be documented here. The project uses
   and a prefetch is refused outright rather than evicting to make room for a
   guess — evicting on a guess is the exact churn this release removes.
 
+- **`image.resident_pan` is now `image.reuse_sent_pixels`.** Same three values,
+  same behaviour; only the name changes. The old one was the mechanism's name —
+  pixels held resident in the terminal, a crop panned across them — and a reader
+  setting an option wants to know what they get. What they get is: **a slice is
+  sent once and never sent again while it stays in the window.**
+
+  Deliberately not named "keep the document": no memory ceiling can promise that,
+  because there is always a longer document, and this project does not ship
+  claims it cannot enforce. The promise above holds at every size — past
+  `image.resident_memory_mb` the window slides and crossing it costs an upload,
+  while pixels still in the window are still reused.
+
+  A configuration still setting `image.resident_pan` keeps working: it is
+  converted and warned about once per session, never refused. Refusing over a
+  renamed key costs you the preview, which on a slow remote link is the worst
+  available way to find out about a rename. `image.resident_memory_mb` keeps its
+  name — it was renamed itself one release ago, and a second migration for one
+  option in consecutive prereleases is a cost you would be paying for our
+  tidiness.
+
+- **Both diagnostics now say when a document does not fit the memory allowed for
+  it.** `:MdViewerHealth`'s `reuse sent pixels` line reports either "whole
+  document held (N slices)" or "N of M slices fit — crossing the rest costs an
+  upload each time"; `:MdViewerDebug` reports `document_fits` and
+  `slices_that_fit`. Not an error and not a refusal: a document larger than its
+  memory bound is an ordinary situation. It was simply only visible as
+  `evictions` climbing, which you had to know to look for.
+
 - **`image.resident_budget_px` is now `image.resident_memory_mb`, default 512.**
   Megabytes are what you are actually spending; pixels were only ever a proxy for
   them through a conversion nobody had measured, and now that the conversion is

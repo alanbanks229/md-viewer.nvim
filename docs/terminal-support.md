@@ -110,14 +110,16 @@ One precondition no setting overrides: the terminal must report its pixel cell
 size. Overlay rectangles are sized in pixels, and without that there is no way to
 know what a pixel is worth on screen.
 
-## Resident panning
+## Reusing pixels already sent
+
+<a id="resident-panning"></a>
 
 Over SSH, scrolling can be shown by re-cropping pixels the terminal is already
 holding instead of sending new ones. It asks a different thing of a terminal than
 the overlay does, so it is qualified separately and **not** inferred from the
 overlay list:
 
-| Terminal | `resident_pan` | Why |
+| Terminal | `reuse_sent_pixels` | Why |
 | --- | --- | --- |
 | iTerm2 | **on** | The first real-hardware target; already operator-validated for crop placements with sub-cell offsets, 2026-08-07. |
 | Kitty | off, pending | Implements the crop keys and is overlay-validated, but has not been measured for *sustained resident memory*. Re-qualify with the RSS protocol in [development.md](development.md#qualifying-a-terminal). |
@@ -131,9 +133,10 @@ is placed at natural pixel size and so needs one; a resident crop is scaled by
 cells (`c`/`r`) and needs none. Binding the two would have disabled this on every
 terminal that does not fill `ws_xpixel`, for a reason that does not apply to it.
 
-`image.resident_pan` (`"auto"` / `"on"` / `"off"`) overrides the table, and
+`image.reuse_sent_pixels` (`"auto"` / `"on"` / `"off"`) overrides the table, and
 `image.resident_memory_mb` bounds what a session may hold. `:MdViewerHealth`
-reports the terminal's half of the answer on its `resident panning` line;
+reports the terminal's half of the answer on its `reuse sent pixels` line, and
+whether the open document fits that bound;
 `:MdViewerDebug`'s `resident` block reports the session's half — a session also has
 to be over SSH, outside a multiplexer, and have a ceiling. The distinction matters
 when nothing seems to be happening: a qualified terminal on a local session is
@@ -173,7 +176,7 @@ open and unmerged as of 2026-08-09.
 You need do nothing to be safe — WezTerm already gets the full-frame capture path
 by default, which is correct. **Do not set `interaction.selection_overlay = "on"`
 there**: it will draw correctly and exhaust your memory. The same applies to
-`image.resident_pan = "on"`, and more so: resident panning replaces a placement on
+`image.reuse_sent_pixels = "on"`, and more so: reusing sent pixels replaces a placement on
 every scroll event, which is the exact operation #7953 leaks on.
 
 Re-enabling is not automatic and is not a version check. It requires a *released*

@@ -136,16 +136,23 @@ scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
 restores full sharpness the moment scrolling stops, and it waits longer before
 spending that sharp capture (`render.ssh_scroll_settle_ms`).
 
-On iTerm2 it also does a third thing, which is the only one that removes the
-bytes rather than shrinking them: it keeps the rendered document **resident in
-the terminal**, as a grid of slices each uploaded once, and shows every scroll
-position as a crop of pixels already sent. Scrolling back through content you
-have just read then costs a placement command instead of a photograph — and,
-unlike the half-size moving frame, it shows you sharp pixels while you scroll
-rather than soft ones. While you are reading rather than scrolling, the idle link
-fills in the slices around you, so the rest of the document is already there when
-you get to it. Bounded by `image.resident_memory_mb` and off outside iTerm2 until
-other terminals are measured; `:help md-viewer-resident-pan`.
+On iTerm2 it also does a third thing, and it is the only one of the three that
+**removes** the bytes rather than shrinking them: it stops sending pixels it has
+already sent. The document is cut into slices of about two viewports, each
+captured once, and every scroll position is shown as a crop of pixels the
+terminal is already holding. Scrolling back through something you have just read
+costs a placement command instead of a photograph — and, unlike the half-size
+moving frame, it shows you sharp pixels while you scroll rather than soft ones.
+While you are reading rather than scrolling, the idle link fills in the slices
+around you, so the rest of the document is already there when you get to it.
+
+The promise, stated exactly: **a slice is sent once and never sent again while it
+stays in the window.** Not "the whole document is held" — no memory ceiling can
+promise that, since there is always a longer document. Past
+`image.resident_memory_mb` the window slides and crossing it costs an upload,
+which `:MdViewerHealth` tells you rather than leaving you to notice. Off outside
+iTerm2 until other terminals are measured; `image.reuse_sent_pixels` and
+`:help md-viewer-reuse-sent-pixels`.
 
 One thing is worth telling it: `render.ssh_link_bytes_per_sec`, how fast your
 link really is. While a slice is still crossing, md-viewer holds back moving

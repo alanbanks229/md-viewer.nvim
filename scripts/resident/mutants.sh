@@ -73,6 +73,8 @@ undisplayed-fill-not-counted	lua/md-viewer/controller.lua	          live.undispl
 debug-report-splits-the-preview	lua/md-viewer/debug.lua	    vim.cmd("tabnew")	    vim.cmd("botright new")
 health-report-splits-the-preview	lua/md-viewer/health.lua	    vim.cmd("tabnew")	    vim.cmd("botright new")
 superseded-fill-counted-as-stale	lua/md-viewer/controller.lua	if filling then filling.superseded_fills = filling.superseded_fills + 1 end	if filling then filling.stale_fills = filling.stale_fills + 1 end
+renamed-option-refused-not-converted	lua/md-viewer/config.lua	  local legacy = image and image.resident_pan\n  if legacy == nil then return end	  local legacy = image and image.resident_pan\n  if true then return end
+ceiling-claims-the-whole-document	lua/md-viewer/resident.lua	  return math.min(fit, grid.count), fit >= grid.count	  return grid.count, true
 MUTATIONS
 
 caught=0; missed=0; skipped=0
@@ -89,11 +91,11 @@ declare -a missed_names=()
 # which changes the viewport the resident grid is keyed on, so looking at the
 # numbers threw away every slice and reported `evictions: 0` while doing it.
 restore_all() {
-  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua renderer/src/browser.js scripts/resident/ab.lua 2>/dev/null || true
+  git checkout -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua lua/md-viewer/config.lua renderer/src/browser.js scripts/resident/ab.lua 2>/dev/null || true
 }
 trap 'restore_all; rm -f "$mutations"' EXIT
 
-if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua renderer/src/browser.js scripts/resident/ab.lua; then
+if ! git diff --quiet -- lua/md-viewer/controller.lua lua/md-viewer/backends/kitty_raw.lua lua/md-viewer/resident.lua lua/md-viewer/debug.lua lua/md-viewer/health.lua lua/md-viewer/config.lua renderer/src/browser.js scripts/resident/ab.lua; then
   echo "refusing to run: the files this mutates have uncommitted changes" >&2
   echo "commit or stash them first -- restoring would throw them away" >&2
   exit 2

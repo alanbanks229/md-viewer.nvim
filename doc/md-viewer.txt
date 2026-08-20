@@ -154,8 +154,8 @@ image ~
     raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
-    resident_pan                 "auto"     |md-viewer-resident-pan|
-    resident_memory_mb           512        |md-viewer-resident-pan|
+    reuse_sent_pixels            "auto"     |md-viewer-reuse-sent-pixels|
+    resident_memory_mb           512        |md-viewer-reuse-sent-pixels|
 
 sync ~
     source_to_preview            true       the preview follows the source
@@ -509,9 +509,9 @@ COMMANDS                                                  *md-viewer-commands*
 
         A tab rather than a split, so that reading it does not resize the
         preview. Over SSH that is not cosmetic: the preview's height is part
-        of what resident slices are keyed on (|md-viewer-resident-pan|), so a
-        split would throw away every slice the terminal is holding and pay
-        for them again -- twice, once opening and once closing.
+        of what reused pixels are keyed on (|md-viewer-reuse-sent-pixels|),
+        so a split would throw away every slice the terminal is holding and
+        pay for them again -- twice, once opening and once closing.
 
         Selection and search state is reported as lengths and counts only
         -- the selected text is never printed here.
@@ -798,15 +798,32 @@ frame larger (measured 80 KB -> 224 KB), and it collapses the moving and
 settle captures into one, so the cheap scroll frame stops existing. Raising
 `render.debounce_ms` does help, by cutting how many refreshes an edit makes.
 
+                                                  *md-viewer-reuse-sent-pixels*
                                                        *md-viewer-resident-pan*
-Resident slices ~
+Reusing pixels already sent ~
 
-Scaling a frame makes it smaller; it does not stop md-viewer sending one. On
-a session that supports it, the document is covered by a fixed grid of
-*slices*, each about two viewports tall, each captured once and kept by the
-terminal. Every scroll position is then a crop of pixels already sent -- a few
-hundred bytes of placement commands instead of a frame -- and the picture
-stays at full device scale while it moves, which no amount of scaling can buy.
+Scaling a frame makes it smaller; it does not stop md-viewer sending one. Over
+a constrained link this is the only one of the three SSH measures that removes
+bytes rather than shrinking them, and it is why a preview on the far end of a
+slow tunnel stops feeling like a slideshow when you scroll back over something
+you have already read.
+
+The document is cut into *slices* of about two viewports, each captured once.
+Every scroll position is then shown as a crop of pixels the terminal already
+has -- a few hundred bytes of placement commands instead of a frame -- and the
+picture stays at full device scale while it moves, which no amount of scaling
+can buy.
+
+THE PROMISE, stated exactly, because it is what the option is named for:
+
+    A slice is sent once and never sent again while it stays in the window.
+
+Not "the whole document is held". No memory ceiling can promise that -- there
+is always a longer document -- so md-viewer does not claim it. What it claims
+above holds at every size: past `resident_memory_mb` the window slides, and
+crossing it costs an upload, but pixels still in the window are still reused.
+|:MdViewerHealth| says which situation you are in rather than leaving you to
+deduce it.
 
 The boundaries belong to the document rather than to where you stopped, which
 is what makes them worth having: a slice is paid for once, and going back over
@@ -825,12 +842,16 @@ The cost is memory in the terminal, so it is bounded: >lua
       image = {
         -- "auto" follows the terminal profile, "on" forces it (to qualify a
         -- new terminal), "off" disables it.
-        resident_pan = "auto",
+        reuse_sent_pixels = "auto",
         -- How much decoded image the terminal may hold for one preview,
-        -- in megabytes. 0 disables resident panning outright.
+        -- in megabytes. 0 disables the reuse outright.
         resident_memory_mb = 512,
       },
     }
+<
+`image.resident_pan` was this option's name up to 0.3.0-remote.2. A
+configuration still setting it keeps working -- it is converted, and warned
+about once per session, never refused.
 <
 Only over SSH, and only on a terminal validated for it -- currently iTerm2.
 Everywhere else the ordinary capture path is unchanged. See
