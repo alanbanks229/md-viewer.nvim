@@ -170,7 +170,12 @@ local function snapshot(current)
     decoded = decoded + resident.decoded_bytes(slice)
   end
   local grid = live.grid
-  local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
+  local link_rate, link_source = resident.link_rate(
+    config.get().render.ssh_link_bytes_per_sec,
+    live.wire_bytes_per_ms,
+    live.wire_samples,
+    live.wire_samples_discarded
+  )
   return {
     -- The measure. Everything else on the report is a component of it or an
     -- explanation for it.
@@ -273,6 +278,12 @@ local function link_rate_cell(phase)
     return ("%.0f B/ms stated"):format(phase.link_rate)
   elseif phase.link_source == "estimated" then
     return ("%.0f B/ms inferred"):format(phase.link_rate)
+  elseif phase.link_source == "unobservable" then
+    -- Distinct from having had nothing to work from: this phase *had* samples
+    -- and threw most of them out, which is a stronger statement than silence.
+    -- It means the wire hold ran on the settle delay for the whole arm, so the
+    -- byte totals below were not shaped by a rate anybody measured.
+    return "absorbed, not measured"
   end
   return "not measurable"
 end

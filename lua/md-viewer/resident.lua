@@ -1057,13 +1057,40 @@ end
 ---
 ---`nil, "unknown"` is the honest third answer, and `M.wire_hold_ms` turns it
 ---into the session's settle delay rather than into no hold at all.
+---
+---## Why the estimate is checked against the session's own discard count
+---
+---`"unobservable"` is a *fourth* answer and it is the one that matters on a real
+---tunnel. `M.note_wire_sample`'s ceiling rejects samples implying a link faster
+---than gigabit, and `new_state` already says what a rejection means: "this
+---session's writes are being absorbed rather than transmitted, so the estimator
+---has nothing to say". It said that and nothing acted on it, so the surviving
+---samples were believed on their own.
+---
+---They must not be. Rejected and accepted samples are the same phenomenon --
+---a write returning once a buffer took the bytes -- and differ only in whether
+---the number they produced happened to land under the ceiling. A session that
+---reported 147 discards against 25 kept samples put the link at 101,169 B/ms on
+---an SSM tunnel, and the hold computed from it was 2 ms: the one-payload
+---invariant never fired once, and ~46 MB went at a link that could not carry it.
+---
+---So the estimate is only worth anything while most of this session's samples
+---were credible. The comparison is stateable rather than tuned: more of these
+---writes measured a link than measured a buffer. Below that the honest report is
+---that this session cannot see its link at all, and `M.wire_hold_ms` falls back
+---to the settle delay -- staleness rather than a backlog, which is the direction
+---the caller's own docstring already claims it takes.
+---
+---`samples`/`discarded` are optional so a caller with no session state (the
+---tests that exercise the preference order) still gets the plain three answers.
 ---@return number|nil bytes_per_ms, string source
-function M.link_rate(configured_bytes_per_sec, estimated_bytes_per_ms)
+function M.link_rate(configured_bytes_per_sec, estimated_bytes_per_ms, samples, discarded)
   local configured = positive(configured_bytes_per_sec)
   if configured then return configured / 1000, "configured" end
   local estimated = positive(estimated_bytes_per_ms)
-  if estimated then return estimated, "estimated" end
-  return nil, "unknown"
+  if not estimated then return nil, "unknown" end
+  if math.max(0, finite(discarded) or 0) > math.max(0, finite(samples) or 0) then return nil, "unobservable" end
+  return estimated, "estimated"
 end
 
 ---How long to keep the wire to itself after handing `bytes` to the terminal.
@@ -1079,22 +1106,46 @@ end
 ---`bytes_per_ms` comes from `M.link_rate`, which prefers the operator's stated
 ---rate to anything inferred. With no rate at all the answer is `default_ms`,
 ---which the caller passes as the session's settle delay: a number already tuned
----for this link rather than a new constant nobody has measured. `max_ms` is the
----guarantee that a wrong rate costs staleness and never a wedged preview.
+---for this link rather than a new constant nobody has measured.
+---
+---## `max_ms` bounds an inference, and must not bound a measurement
+---
+---It is the guarantee that a *wrong* rate costs staleness rather than a wedged
+---preview, and callers pass a multiple of the settle delay for it. That is the
+---right bound for a number this module inferred and the wrong one for a number
+---the operator stated: a rate that came from `render.ssh_link_bytes_per_sec` is
+---a fact about the link, so the transfer time computed from it is how long the
+---wire is genuinely busy, and truncating it does not make the bytes arrive
+---sooner -- it just resumes sending on top of them. At 800 B/ms a 1.1 MB slice
+---needs ~1,400 ms and the cap was 800, so every slice hold on the link this
+---exists for was cut roughly in half even once the rate was right.
+---
+---So a stated rate is uncapped. Nothing is wedged by it: the hold suppresses
+---*captures*, never placements -- `try_pan` runs ahead of `hold_scroll`, so
+---scrolling within pixels the terminal already holds still draws throughout a
+---drain, and `hold_scroll` resumes at wherever the reader actually ended up
+---rather than replaying the burst.
 ---
 ---Whole milliseconds, and a sub-millisecond hold is no hold at all: the caller
 ---compares against `vim.uv.now()`, which counts in whole milliseconds, so a
 ---fractional hold would suppress a frame for a duration the clock cannot even
 ---represent.
-function M.wire_hold_ms(bytes, bytes_per_ms, elapsed_ms, default_ms, max_ms)
+---`source` is `M.link_rate`'s second return. Only `"configured"` lifts the cap;
+---anything else -- including a caller that passes none -- keeps it, which is the
+---safe direction for every rate this module worked out for itself.
+function M.wire_hold_ms(bytes, bytes_per_ms, elapsed_ms, default_ms, max_ms, source)
   bytes = positive(bytes)
   elapsed_ms = math.max(0, finite(elapsed_ms) or 0)
   default_ms = math.max(0, finite(default_ms) or 0)
   max_ms = math.max(0, finite(max_ms) or default_ms)
   if not bytes then return 0 end
   local rate = positive(bytes_per_ms)
+  -- No rate is the one case the cap still binds a `default_ms`: that default is
+  -- itself a stand-in, so it is bounded like every other guess here.
   if not rate then return math.floor(clamp(default_ms, 0, max_ms)) end
-  return math.floor(clamp(bytes / rate - elapsed_ms, 0, max_ms))
+  local wire = bytes / rate - elapsed_ms
+  if source == "configured" then return math.floor(math.max(0, wire)) end
+  return math.floor(clamp(wire, 0, max_ms))
 end
 
 return M

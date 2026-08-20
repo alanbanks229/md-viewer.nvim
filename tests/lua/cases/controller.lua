@@ -1305,14 +1305,50 @@ return function(t)
       t.eq(applied_before, session.applied_scroll_y, "and the position it shows is not claimed to have moved")
       t.eq(0, live.abandoned_fills - abandoned_at_prefetch, "and it is not discarded as overtaken")
 
-      -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire, clamped to
-      -- twice the settle delay so a wrong figure costs staleness and never a
-      -- wedged preview. The point is that it is not the 160 ms default and not
-      -- the zero a fabricated rate produces: the payload is genuinely still
+      -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire, and it is held
+      -- for all of it. The cap of twice the settle delay bounds a rate this
+      -- module inferred; a stated one is a fact about the link, so the transfer
+      -- time computed from it is how long the wire is actually busy and cutting
+      -- it short does not make the bytes arrive sooner -- it resumes sending on
+      -- top of them. The point is that it is not the 160 ms default and not the
+      -- zero a fabricated rate produces: the payload is genuinely still
       -- crossing, and this is the window in which nothing else may be sent.
-      t.eq(320, live.upload_hold_ms, "the hold is computed from the link rate the operator stated")
+      t.eq(1012, live.upload_hold_ms, "the hold is the whole transfer at the rate the operator stated")
       t.ok(live.upload_hold_until > vim.uv.now(), "and engages, where a rate inferred from a buffered write did not")
+      t.eq("configured", live.link_rate_source, "and records which of the three kinds of number it used")
       config.setup(restore_link)
+
+      -- With no rate stated, a session whose writes were absorbed rather than
+      -- transmitted has to be told once. Nothing is failing -- that is the whole
+      -- difficulty: the preview just falls further behind, so nobody thinks to
+      -- open a health report, and the counts that explain it sit in a diagnostic
+      -- as two numbers nobody would divide.
+      do
+        local real_notify = vim.notify
+        local notices = {}
+        vim.notify = function(message, level) notices[#notices + 1] = { message = message, level = level } end
+        controller._forget_link_rate_warning()
+        live.wire_bytes_per_ms, live.wire_samples, live.wire_samples_discarded = 101169, 25, 147
+        controller._hold_wire(session, 810000, 0)
+        t.eq("unobservable", live.link_rate_source, "an estimate its own session discarded is not a rate")
+        t.eq(160, live.upload_hold_ms, "so the hold falls back to the settle delay rather than the 2 ms it computed")
+        t.eq(1, #notices, "and the reader is told, once")
+        -- Read through a default rather than indexed directly: `t.eq` records a
+        -- failure and carries on, so indexing an empty list here would crash the
+        -- whole run and hide the assertion above that actually diagnosed it.
+        local notice = notices[1] or { message = "", level = nil }
+        t.eq(vim.log.levels.WARN, notice.level, "as a warning, because it costs them something")
+        t.ok(notice.message:match("scripts/ssh%-link%-speed%.lua"), "naming the script that measures the link")
+        t.ok(notice.message:match("render%.ssh_link_bytes_per_sec"), "and the key the answer goes in")
+
+        -- Once per session, not once per payload: this fires from the upload
+        -- path, and a document being warmed sends one of these per slice.
+        controller._hold_wire(session, 810000, 0)
+        t.eq(1, #notices, "and not again on the next upload over the same link")
+        vim.notify = real_notify
+        live.wire_bytes_per_ms, live.wire_samples, live.wire_samples_discarded = nil, 0, 0
+        live.upload_hold_until = 0
+      end
 
       -- Now the refusals, each checked against a request count that must not move.
       live.upload_hold_until = 0

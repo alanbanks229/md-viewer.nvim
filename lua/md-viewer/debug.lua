@@ -58,7 +58,12 @@ local function resident_report(session)
   -- Asked here rather than read off the session, so the block answers about the
   -- configuration there is now rather than about the one the last hold happened
   -- to be computed under.
-  local link_rate, link_source = resident.link_rate(config.get().render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
+  local link_rate, link_source = resident.link_rate(
+    config.get().render.ssh_link_bytes_per_sec,
+    live.wire_bytes_per_ms,
+    live.wire_samples,
+    live.wire_samples_discarded
+  )
   local slices_that_fit, whole_document = resident.slices_that_fit(grid, live.memory_px)
   return {
     enabled = live.enabled,
@@ -147,15 +152,24 @@ local function resident_report(session)
     -- `render.ssh_link_bytes_per_sec`, which the operator stated. `estimated` is
     -- inferred from writes that blocked, and a write blocking is back-pressure
     -- rather than arrival -- it runs fast and it is a fallback. `unknown` means
-    -- the link is not observable from here at all, which is the *ordinary*
-    -- reading on a healthy tunnel: SSH takes each payload into its buffer and
-    -- the write returns before anything crosses. This used to print an estimate
-    -- of 139,058 B/ms for a link doing 800 and call it measured.
+    -- there was no sample to work from at all.
+    --
+    -- `unobservable` is the reading that matters on a real tunnel, and it means
+    -- this session had samples and threw most of them out: SSH took each payload
+    -- into its buffer and the write returned before anything crossed, so what
+    -- survived measures buffer room rather than a link. A session reporting it
+    -- has no inference worth holding the wire on, and
+    -- `render.ssh_link_bytes_per_sec` is the only thing that will give the hold a
+    -- real number -- `scripts/ssh-link-speed.lua` measures one. This used to
+    -- print an estimate of 101,169 B/ms for a link doing 800 and call it
+    -- measured, and the hold computed from it was 2 ms.
     link_bytes_per_ms = link_rate,
     link_rate_source = link_source,
     wire_samples = live.wire_samples,
-    -- Samples thrown out for implying a link faster than one can be. Every
-    -- sample being discarded is the reason `link_rate_source` is `unknown`.
+    -- Samples thrown out for implying a link faster than one can be. Outnumbering
+    -- `wire_samples` is what makes `link_rate_source` `unobservable`: the two
+    -- populations are the same phenomenon, and differ only in whether the number
+    -- they produced happened to land under the ceiling.
     wire_samples_discarded = live.wire_samples_discarded,
     upload_hold_ms = live.upload_hold_ms,
     frames_suppressed_by_hold = live.frames_suppressed_by_hold,

@@ -235,6 +235,34 @@ return function(t)
     )
   end
 
+  -- A session that cannot measure its link has no working anti-backlog pause,
+  -- and that is the one fault here a reader can neither see nor guess the fix
+  -- for. Nothing errors; the preview just falls further behind the longer it is
+  -- open, showing a frame of somewhere they already left. The session this came
+  -- from ran for minutes at 101,169 B/ms on an SSM tunnel with a 2 ms hold.
+  do
+    local unobservable = base_report()
+    unobservable.resident_link_unobservable = { samples = 25, discarded = 147 }
+    local diagnosis = health._diagnose(unobservable, auto_cfg)
+    local texts = warning_texts(diagnosis)
+    t.ok(texts:match("cannot measure its link"), "an unmeasurable link raises a warning naming the problem")
+    t.ok(texts:match("147 of 172"), "quoting the counts, so the claim can be checked rather than taken on trust")
+    local detail = ""
+    for _, warning in ipairs(diagnosis.warnings) do
+      if warning.detail then detail = detail .. table.concat(warning.detail, "\n") end
+    end
+    -- Both halves, because either alone is unusable: the key without the script
+    -- invites a guess, and guessing high is precisely the failure being reported.
+    t.ok(detail:match("scripts/ssh%-link%-speed%.lua"), "and names the script that measures it")
+    t.ok(detail:match("render%.ssh_link_bytes_per_sec"), "and the key to put the answer in")
+
+    t.eq(
+      0,
+      #health._diagnose(base_report(), auto_cfg).warnings,
+      "a session with a rate it can trust says nothing -- this is not a standing notice"
+    )
+  end
+
   -- Forcing the drag overlay onto a profile that is not validated for it is
   -- supported -- it is how a terminal gets qualified -- but it is not silent.
   -- Warp was qualified this way on 2026-08-11 and failed: overlay rectangles

@@ -1733,14 +1733,57 @@ end
 ---This narrows the window between them; it does not guarantee it is shut. With
 ---no rate at all it falls back to the settle delay, which is the conservative
 ---direction -- staleness rather than a backlog.
+--- Whether this Neovim has already told the reader their link cannot be
+--- measured. Once per session rather than once per preview: the fault is a
+--- property of the *link*, so a second preview over the same tunnel would repeat
+--- a message about the same tunnel. Module-local and reset only by the test hook
+--- below, which is the pattern `config.lua` uses for its rename warnings.
+local warned_about_link_rate = false
+
+function M._forget_link_rate_warning() warned_about_link_rate = false end
+
+--- Say once that the anti-backlog pause is running on a fallback.
+---
+--- Here rather than only in `:MdViewerHealth` because nobody opens a health
+--- report to explain a preview that is merely *slow*, and slow is the entire
+--- symptom: nothing errors, the picture is simply of somewhere the reader has
+--- already left, further behind the longer they read. The session that produced
+--- this diagnosis ran for minutes before anyone thought to look.
+---
+--- Only once the link has actually been used for something worth holding -- this
+--- is called from `hold_wire`, so a session that never uploads a slice never
+--- says anything.
+local function warn_link_unmeasurable(live)
+  if warned_about_link_rate or live.link_rate_source ~= "unobservable" then return end
+  warned_about_link_rate = true
+  vim.notify(
+    ("md-viewer: this link cannot be measured from here (%d of %d throughput samples were impossible), so "):format(
+      live.wire_samples_discarded or 0,
+      (live.wire_samples_discarded or 0) + (live.wire_samples or 0)
+    )
+      .. "the preview will fall behind as you scroll.\n"
+      .. "Measure it once with  :runtime scripts/ssh-link-speed.lua  and set render.ssh_link_bytes_per_sec.",
+    vim.log.levels.WARN
+  )
+end
+
 function hold_wire(session, bytes, elapsed_ms)
   local live = session.resident
   if not live then return end
   local render = config.get().render
   local settle = scroll_settle_delay(render)
-  local rate = resident.link_rate(render.ssh_link_bytes_per_sec, live.wire_bytes_per_ms)
-  live.upload_hold_ms = resident.wire_hold_ms(bytes, rate, elapsed_ms, settle, settle * 2)
+  -- The sample counters go with the estimate, so a session whose writes are
+  -- being absorbed rather than transmitted is told so rather than believed.
+  local rate, source = resident.link_rate(
+    render.ssh_link_bytes_per_sec,
+    live.wire_bytes_per_ms,
+    live.wire_samples,
+    live.wire_samples_discarded
+  )
+  live.link_rate_source = source
+  live.upload_hold_ms = resident.wire_hold_ms(bytes, rate, elapsed_ms, settle, settle * 2, source)
   live.upload_hold_until = vim.uv.now() + live.upload_hold_ms
+  warn_link_unmeasurable(live)
 end
 
 ---The request that captures slice `index` of `grid`, or nil if there is no such
@@ -3064,6 +3107,11 @@ M._settle_options = settle_options
 -- The prefetch, driven directly. It is reached only from a debounced timer, so a
 -- test that went through one would be asserting about milliseconds.
 M._prefetch_slice = prefetch_slice
+-- The wire hold, driven directly. Reaching it through a real fill would mean
+-- staging a capture just to assert about the rate it was charged at, and the
+-- interesting inputs -- which of the three kinds of number the rate was -- are
+-- session state rather than anything a capture carries.
+M._hold_wire = hold_wire
 M._resident_key = resident_key
 M._resident_grid = resident_grid
 -- Exported so the interaction gates can be asserted directly rather than

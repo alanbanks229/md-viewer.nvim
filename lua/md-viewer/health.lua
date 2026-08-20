@@ -109,6 +109,17 @@ end
 ---costs an upload, which is the honest thing to tell someone whose long file
 ---feels slower at one end than the other -- and is otherwise only visible as
 ---`evictions` climbing in a diagnostic they would have to know to open.
+---A diagnosis with no action in it is only half a report, so this names the
+---figure that would hold the whole document rather than leaving the reader to
+---derive it from a slice count and a per-pixel constant they have never seen.
+---Rounded up to the next 64 MB: the exact number is a floor the next document
+---would cross anyway, and a value someone is going to paste into a config file
+---should look like a setting rather than like a measurement.
+local function memory_mb_for_whole_document(resident, grid)
+  local needed = resident.slice_cost_px(grid) * grid.count * resident.BYTES_PER_RESIDENT_PX / 1048576
+  return math.ceil(needed / 64) * 64
+end
+
 local function resident_document_fit()
   local resident = require("md-viewer.resident")
   for _, session in pairs(state.all()) do
@@ -116,10 +127,42 @@ local function resident_document_fit()
     if live and live.enabled and live.grid then
       local slices, whole = resident.slices_that_fit(live.grid, live.memory_px)
       if whole then return ("whole document held (%d slices)"):format(live.grid.count) end
-      return ("%d of %d slices fit -- image.resident_memory_mb holds part of this document, so crossing "):format(
-        slices,
-        live.grid.count
-      ) .. "the rest costs an upload each time"
+      return ("%d of %d slices fit -- crossing the rest costs an upload each time; "):format(slices, live.grid.count)
+        .. ("image.resident_memory_mb = %d would hold this document whole"):format(
+          memory_mb_for_whole_document(resident, live.grid)
+        )
+    end
+  end
+  return nil
+end
+
+---Whether any live session can see how fast its link is, and why not.
+---
+---The hold that keeps a slice upload from collecting every moving frame behind
+---it is a timer over a link rate, so a session with no credible rate has no
+---working hold -- and that is invisible from the outside: nothing fails, the
+---preview simply falls further behind the longer it is used. A real session
+---reported 147 discarded samples against 25 kept, believed the survivors at
+---101,169 B/ms on an SSM tunnel, and held the wire for 2 ms.
+---
+---Returns nil when there is nothing to say -- no session, not reusing sent
+---pixels, or a rate the operator has stated, which is the answer this warning
+---exists to ask for.
+local function resident_link_unobservable()
+  local resident = require("md-viewer.resident")
+  local render = config.get().render
+  for _, session in pairs(state.all()) do
+    local live = not session.closed and session.resident
+    if live and live.enabled then
+      local _, source = resident.link_rate(
+        render.ssh_link_bytes_per_sec,
+        live.wire_bytes_per_ms,
+        live.wire_samples,
+        live.wire_samples_discarded
+      )
+      if source == "unobservable" then
+        return { samples = live.wire_samples or 0, discarded = live.wire_samples_discarded or 0 }
+      end
     end
   end
   return nil
@@ -260,6 +303,10 @@ function M.collect(renderer_result, renderer_error)
     -- see it rather than deduce it from a preview that is slower than they
     -- expected on one part of a long file.
     resident_document_fit = resident_document_fit(),
+    -- And whether the mechanism that keeps those uploads from burying the
+    -- preview has a rate to work from at all. Reported rather than inferred from
+    -- two counters in `:MdViewerDebug` that nobody would think to divide.
+    resident_link_unobservable = resident_link_unobservable(),
     raw_graphics_owned_images = backend.kitty_raw.owned_images,
     raw_graphics_owned_placements = backend.kitty_raw.owned_placements,
     node_version = command({ "node", "--version" }) or "unavailable",
@@ -768,6 +815,29 @@ local function build_warnings(report, status, status_reason)
         "A terminal that mishandles overlay placements degrades badly rather than gracefully:",
         "oversized or misplaced highlight and caret rectangles, or unbounded terminal memory.",
         "Remove the override to fall back to full-frame captures, which are always correct.",
+      },
+    }
+  end
+  -- The one fault in this list that a reader cannot see for themselves and
+  -- cannot fix without being told the key. Everything still works; it just gets
+  -- steadily further behind, because the pause that stops a slice upload
+  -- collecting every moving frame behind it is a timer over a link rate, and
+  -- this session has no rate worth running one on. Naming the script matters as
+  -- much as naming the key: the value is a measurement, and guessing it high is
+  -- exactly the failure being reported.
+  if report.resident_link_unobservable then
+    local seen = report.resident_link_unobservable
+    warnings[#warnings + 1] = {
+      text = ("this session cannot measure its link (%d of %d throughput samples were impossible), "):format(
+        seen.discarded,
+        seen.discarded + seen.samples
+      ) .. "so the pause that stops uploads burying the preview is running on a fallback",
+      severity = "warn",
+      detail = {
+        "Scrolling will fall further behind the longer the preview is open, and what you see",
+        "will be a frame of somewhere you have already left rather than where you are.",
+        "Measure the link once:  :runtime scripts/ssh-link-speed.lua",
+        "then set render.ssh_link_bytes_per_sec to what it reports.",
       },
     }
   end

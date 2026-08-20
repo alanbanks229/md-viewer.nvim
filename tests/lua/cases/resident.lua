@@ -511,13 +511,48 @@ return function(t)
     resident.wire_hold_ms(REGION_BYTES, resident.link_rate(nil, nil), 0, SETTLE_MS, SETTLE_MS * 2),
     "which the hold turns into the settle delay, not into no hold at all"
   )
-  -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire, clamped to the
-  -- ceiling the caller allows. The point is that it is non-zero: on this link
-  -- the hold the estimator computed was 0 ms and the mechanism never ran.
+
+  -- The fourth answer, and the one a real tunnel gives. An estimate is only
+  -- worth anything while most of this session's samples were credible: a
+  -- discarded sample and a kept one are the same event -- a write returning once
+  -- a buffer took the bytes -- and differ only in whether the number they
+  -- produced landed under the ceiling. The session that reported these counts
+  -- put an SSM tunnel at 101,169 B/ms and computed a 2 ms hold from it, so the
+  -- one-payload invariant never fired once.
+  rate, source = resident.link_rate(nil, 101169, 25, 147)
+  t.eq(nil, rate, "an estimate whose session threw out most of its samples is not a rate")
+  t.eq("unobservable", source, "and says the link could not be seen, rather than printing what survived")
+  t.eq(
+    SETTLE_MS,
+    resident.wire_hold_ms(REGION_BYTES, rate, 0, SETTLE_MS, SETTLE_MS * 2, source),
+    "so the hold falls back to the settle delay instead of the 2 ms that disabled it"
+  )
+  rate, source = resident.link_rate(nil, 1345.7, 25, 3)
+  t.near(1345.7, rate, 0.001, "a minority of discards still leaves an estimate worth having")
+  t.eq("estimated", source, "and it is still labelled an inference")
+  rate, source = resident.link_rate(800000, 101169, 25, 147)
+  t.eq(800, rate, "a stated rate is unaffected by any of this -- it was never an inference")
+  t.eq("configured", source, "and keeps saying so")
+
+  -- 810,000 bytes at the stated 800 B/ms is 1,012 ms of wire. That is how long
+  -- the wire is genuinely busy, so it is not clamped: `max_ms` bounds a number
+  -- this module worked out for itself, and truncating a measurement does not
+  -- make the bytes arrive sooner, it just resumes sending on top of them.
+  local stated, stated_source = resident.link_rate(800000, 139058)
+  t.eq(
+    1012,
+    resident.wire_hold_ms(REGION_BYTES, stated, 0, SETTLE_MS, SETTLE_MS * 2, stated_source),
+    "a stated rate holds for the whole transfer rather than for twice the settle delay"
+  )
   t.eq(
     SETTLE_MS * 2,
-    resident.wire_hold_ms(REGION_BYTES, resident.link_rate(800000, 139058), 0, SETTLE_MS, SETTLE_MS * 2),
-    "and a stated rate makes the hold engage where the fabricated one disabled it"
+    resident.wire_hold_ms(REGION_BYTES, stated, 0, SETTLE_MS, SETTLE_MS * 2, "estimated"),
+    "while the same number inferred is still capped, because then it is a guess"
+  )
+  t.eq(
+    SETTLE_MS * 2,
+    resident.wire_hold_ms(REGION_BYTES, stated, 0, SETTLE_MS, SETTLE_MS * 2),
+    "and a caller that names no source gets the cap, which is the safe direction"
   )
 
   -- Whole milliseconds, because that is the only resolution the clock it will be
