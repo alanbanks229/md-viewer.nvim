@@ -3,6 +3,43 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc2] - 2026-08-20
+
+A cursor left standing on a cell the caret had already left.
+
+Everything in `0.3.0-rc1` still applies, including that it is a validation
+prerelease and that stable `0.3.0` stays reserved until the throughput A/B has
+been re-run on the 0.80 MB/s link.
+
+### Fixed
+
+- **Scrolling no longer leaves a second cursor behind.** Once the caret scrolled
+  out of the viewport, Neovim's own block cursor came back on screen — on the
+  reasoning that with no highlight drawn the real cursor is the only caret there
+  is. It is not one: it cannot move while the caret is off screen, so what
+  appeared was a block parked on the cell the caret occupied *before* it scrolled
+  away, pointing at whatever text had since moved under it and then sitting
+  perfectly still for the rest of the scroll. A caret scrolled out of view is
+  simply not drawn, which is what the code said everywhere except here. Focus
+  leaving the preview still gives your cursor back, from out of view as well.
+- **A notification opening over the preview no longer strands the caret.** When
+  the image is re-cropped around a float, the highlight rectangles measured
+  against the old geometry are dropped — the drag selection's always were, the
+  caret's were not, so it stayed drawn at its pre-float position until some later
+  motion or frame happened to redraw it. It now comes down and goes straight back
+  where it belongs, and only when the image actually moved: the same
+  reconciliation runs on a 50 ms tick, and redrawing on each one would be a
+  steady drip of writes down the link this release exists to keep quiet.
+
+### Added
+
+- **`scripts/rig/provision.sh`** turns an SSH host into a machine you can
+  reproduce the remote-Neovim mode on — Neovim, Node, Chrome, your config and a
+  fixed scroll fixture — so a report from that mode no longer needs a second
+  computer to chase down. `--shape` puts it behind an 800 kbit/s link, because a
+  LAN is not where these get reported. See `scripts/README.md`; nothing in the
+  plugin itself changes.
+
 ## [0.3.0-rc1] - 2026-08-20
 
 Two remote topologies, opposite ways round.
