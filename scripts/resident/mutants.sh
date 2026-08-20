@@ -44,6 +44,8 @@ fill-claims-applied-scroll	lua/md-viewer/controller.lua	    if not filling then 
 region-freed-as-side-effect	lua/md-viewer/controller.lua	        retain_superseded = resident_holds(session.resident, session.image_id),	        retain_superseded = false,
 occlusion-frees-instead-of-hides	lua/md-viewer/controller.lua	    local hide = resident_holds(session.resident, session.image_id) and session.backend.hide	    local hide = nil
 dead-page-never-rebuilt	renderer/src/browser.js	    if (this.context && this.page && !this.page.isClosed() && this.deviceScaleFactor === scale) return;	    if (this.context && this.deviceScaleFactor === scale) return;
+compose-ignores-refused-band	lua/md-viewer/backends/kitty_raw.lua	    if refused > 0 or #ids == 0 then	    if false then
+compose-splits-the-write	lua/md-viewer/backends/kitty_raw.lua	  if payload ~= "" then send(payload) end\n\n  local placed = 0	  if addition ~= "" then send(addition) end\n  if removal ~= "" then send(removal) end\n\n  local placed = 0
 sheet-sized-by-base-image	lua/md-viewer/backends/kitty_raw.lua	  local width, height = 0, 0\n  if cell and placement and placement.width and placement.height then\n    width = math.ceil(placement.width * cell.width)\n    height = math.ceil(placement.height * cell.height)	  local width, height = item.width_px, item.height_px\n  if cell and placement and placement.width and placement.height then\n    width = math.max(width, math.ceil(placement.width * cell.width))\n    height = math.max(height, math.ceil(placement.height * cell.height))
 MUTATIONS
 
