@@ -793,6 +793,50 @@ function M.register(state, index, region)
   return region, evicted
 end
 
+---Would one more slice of `cost` pixels fit without evicting anything?
+---
+---The question a *prefetch* has to ask and a fill does not. A fill is for a
+---slice the reader is looking at, so it is worth evicting something for; a
+---prefetch is a guess, and a guess that evicts is worse than no guess at all --
+---it uploads a slice, drops one the reader may come back to, and pays for both
+---again. That is precisely the upload-evict-reupload churn this whole rebuild
+---removed, and reintroducing it speculatively would be the least defensible way
+---to bring it back.
+function M.has_room(state, cost)
+  local ceiling = positive(state and state.memory_px)
+  if not ceiling then return false end
+  return (state.resident_px or 0) + math.max(0, finite(cost) or 0) <= ceiling
+end
+
+---The nearest slice to `center` this session does not hold, or nil.
+---
+---Nearest by index, so the document fills outward from the reader and the
+---slices most likely to be wanted next arrive first. At equal distance the one
+---*ahead* wins, for the reason `retain_window` breaks its tie the other way:
+---reading is forward-biased, so the slice ahead is the better guess and the
+---slice behind is the better thing to give up.
+---
+---nil means every slice of this grid is already held, which on a document
+---inside the ceiling is the state this feature is trying to reach.
+function M.next_prefetch(state, grid, center)
+  if not (state and state.slices and grid) then return nil end
+  center = finite(center)
+  if center == nil then return nil end
+  -- Clamped so `center - distance >= 0` is the only bound the loop needs; a
+  -- centre outside the grid would otherwise walk backwards into cells that do
+  -- not exist and hand one of them back as a slice to capture.
+  center = clamp(center, 0, grid.count - 1)
+  -- From one, never zero: the slice the reader is *in* belongs to the settle,
+  -- and a prefetch taking the shared fill slot for it would be exactly
+  -- backwards.
+  for distance = 1, grid.count do
+    local ahead, behind = center + distance, center - distance
+    if ahead <= grid.count - 1 and state.slices[ahead] == nil then return ahead end
+    if behind >= 0 and state.slices[behind] == nil then return behind end
+  end
+  return nil
+end
+
 ---Give up every slice, returning them so the caller can free their pixels.
 ---Used by close, retarget, invalidation and fallback -- the paths that end a
 ---session's claim on the terminal's memory.

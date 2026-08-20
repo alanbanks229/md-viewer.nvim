@@ -61,6 +61,10 @@ seam-without-row-quantisation	lua/md-viewer/resident.lua	  local split = math.ce
 bands-snapped-independently	lua/md-viewer/resident.lua	  local lower_top = round((seam - lower.doc_y) * lower.scale_y)	  local lower_top = round(seam * lower.scale_y) - round(lower.doc_y * lower.scale_y) + 1
 reconcile-moves-one-band	lua/md-viewer/controller.lua	    if #screen_parts(session) > 1 then	    if false then
 ab-reads-the-region-cache	scripts/resident/ab.lua	  local slices = resident.slice_records(live)	  local slices = live.regions
+prefetch-ignores-the-ceiling	lua/md-viewer/controller.lua	  if not resident.has_room(live, resident.slice_cost_px(grid)) then return end	
+prefetch-outranks-the-reader	lua/md-viewer/controller.lua	  if not (resident.hold(live, first) and resident.hold(live, last)) then return end	
+prefetch-queues-behind-a-drain	lua/md-viewer/controller.lua	  if (live.upload_hold_until or 0) > vim.uv.now() then return end	
+prefetch-is-drawn-over-the-reader	lua/md-viewer/controller.lua	      local prefetching = live.fill.prefetch == true	      local prefetching = false
 MUTATIONS
 
 caught=0; missed=0; skipped=0

@@ -1191,6 +1191,112 @@ return function(t)
       "while the next slice along is the same height as every other one"
     )
 
+    -- ------------------------------------------------------------------
+    -- The idle-time prefetch: everything it is not allowed to do.
+    --
+    -- It shares the one fill slot with the settle, and it spends wire on a
+    -- guess. Both of those make the list of reasons to decline the interesting
+    -- part -- each entry below is a way this could quietly become the thing the
+    -- grid was built to remove.
+    -- ------------------------------------------------------------------
+    do
+      require("md-viewer.debounce").close(session, "scroll_settle_timer")
+      require("md-viewer.debounce").close(session, "resident_prefetch_timer")
+      live.upload_hold_until, live.fill.in_flight = 0, false
+      session.scroll_render_in_flight, session.scroll_render_pending = false, false
+      session.selection_active, session.find_active, session.pointer = false, false, nil
+      -- The reader is on slice 0, which is held; slice 1 is held from the
+      -- composite above. So the nearest thing to guess at is slice 2.
+      session.scroll_y = inside(0)
+      live.memory_px = 8000000 * 8
+      local abandoned_at_prefetch = live.abandoned_fills
+
+      local target = resident.next_prefetch(live, grid, 0)
+      t.ok(target ~= nil, "sanity: some slice of this grid is still unfilled")
+      t.eq(nil, resident.hold(live, target), "and it is one nothing has reached")
+
+      local before = requests
+      controller._prefetch_slice(session)
+      t.eq(before + 1, requests, "with the wire idle and the reader settled, a prefetch is issued")
+      t.eq(target, live.fill.slice_index, "for the nearest slice nobody has reached")
+      t.eq(slice_at(target).doc_y, pending.params.captureRegion.yPx, "at that slice's own fixed rectangle")
+      t.eq(true, live.fill.prefetch, "recorded as a guess rather than as something someone waited on")
+
+      -- The reader has not moved, so this capture is of somewhere they are not
+      -- looking. That is the whole point, and it is why a prefetch is
+      -- transmitted rather than displayed: the coverage test an ordinary fill
+      -- runs would discard every prefetch ever taken as overtaken.
+      local prefetched_before, uploaded_ids = live.prefetches, {}
+      session.backend.upload = function(_)
+        uploaded_ids[#uploaded_ids + 1] = 5252
+        return 5252, { bytes = 810000, width_px = 1980, height_px = 4080 }
+      end
+      local screen_before, applied_before = session.image_id, session.applied_scroll_y
+      session.scroll_y = inside(0)
+      complete_fill()
+      t.eq(prefetched_before + 1, live.prefetches, "and counted as one once it lands")
+      t.eq(1, #uploaded_ids, "transmitted through the upload path rather than shown")
+      t.ok(resident.hold(live, target) ~= nil, "leaving the slice held like any other")
+      t.eq(false, resident.hold(live, target).placed, "but not on screen")
+      t.eq(screen_before, session.image_id, "so the frame the reader is looking at is untouched")
+      t.eq(applied_before, session.applied_scroll_y, "and the position it shows is not claimed to have moved")
+      t.eq(0, live.abandoned_fills - abandoned_at_prefetch, "and it is not discarded as overtaken")
+
+      -- Now the refusals, each checked against a request count that must not move.
+      live.upload_hold_until = 0
+      local function refuses(label)
+        local requests_at = requests
+        controller._prefetch_slice(session)
+        t.eq(requests_at, requests, label)
+      end
+
+      -- The wire. A guess queued behind a draining slice rebuilds the very
+      -- backlog the one-payload invariant exists to prevent.
+      live.upload_hold_until = vim.uv.now() + 5000
+      refuses("a prefetch waits for the wire rather than queueing behind a draining slice")
+      live.upload_hold_until = 0
+
+      -- The slot. It is shared with the settle, and the settle is filling
+      -- something somebody is looking at.
+      live.fill.in_flight = true
+      refuses("and waits for the fill slot rather than competing for it")
+      live.fill.in_flight = false
+
+      -- The reader. A slice missing under them is the settle's to fill, and
+      -- taking the slot from it would be exactly backwards.
+      local reader_slice = resident.hold(live, 0)
+      live.slices[0], live.resident_px = nil, live.resident_px - reader_slice.image_w * reader_slice.image_h
+      refuses("and never runs while the slice under the reader is missing")
+      assert(resident.register(live, 0, reader_slice))
+
+      -- The ceiling. This is the one that matters most: a prefetch that evicts
+      -- uploads a slice, drops one the reader may return to, and pays for both
+      -- again -- which is the churn the grid removed, brought back on a guess.
+      local evictions_at = live.evictions
+      live.memory_px = live.resident_px
+      refuses("and never prefetches into a full ceiling")
+      t.eq(evictions_at, live.evictions, "so it evicts nothing to make room for a slice nobody asked for")
+      live.memory_px = 8000000 * 8
+
+      -- Browser-painted state, for the reason a settle refuses a fill: a slice
+      -- captured with a highlight in it keeps that highlight for as long as the
+      -- terminal holds it.
+      session.find_active = true
+      refuses("nor while a search is painted into the document")
+      session.find_active = false
+      session.selection_active = true
+      refuses("nor while a selection is")
+      session.selection_active = false
+      session.pointer = { pressed = true }
+      refuses("nor mid-drag")
+      session.pointer = nil
+
+      live.fallback_reason = "test"
+      refuses("and not at all once the session has fallen back")
+      live.fallback_reason = nil
+      require("md-viewer.debounce").close(session, "scroll_settle_timer")
+    end
+
     -- A drag's clean base and an interact frame both replace whatever is on
     -- screen, and what is on screen may be a resident region. Freeing it there
     -- would leave the cache holding an id the terminal has been told to forget,

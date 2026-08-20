@@ -335,6 +335,52 @@ return function(t)
   t.eq(1, #resident.slice_records(refill), "rather than holding both")
   t.eq(SLICE_PX, refill.resident_px, "and the accounting is the one slice, not two")
 
+  -- ---------------------------------------------------------------------
+  -- What the idle-time prefetch is allowed to do.
+  --
+  -- A fill is for a slice the reader is looking at, so it is worth evicting
+  -- something for. A prefetch is a guess, and a guess that evicts is worse than
+  -- no guess: it uploads a slice, drops one the reader may come back to, and
+  -- pays for both again -- the upload-evict-reupload churn this whole rebuild
+  -- removed, brought back speculatively.
+  -- ---------------------------------------------------------------------
+  local room = resident.new_state({ memory_px = SLICE_PX * 3 })
+  t.eq(true, resident.has_room(room, SLICE_PX), "an empty session has room for a slice")
+  resident.register(room, 0, make(0, 2020, "k1", 601))
+  resident.register(room, 1, make(2020, 2020, "k1", 602))
+  t.eq(true, resident.has_room(room, SLICE_PX), "and still does with one left")
+  resident.register(room, 2, make(4040, 2020, "k1", 603))
+  t.eq(false, resident.has_room(room, SLICE_PX), "but not once the ceiling is reached")
+  t.eq(0, room.evictions, "asking never evicts anything -- it is a question, not a reservation")
+  t.eq(false, resident.has_room(resident.new_state({ memory_px = 0 }), 1), "and a session with no ceiling has no room")
+
+  -- Nearest first, so the document fills outward from the reader.
+  local order = resident.new_state({ memory_px = SLICE_PX * 100 })
+  local grid_of_ten = { count = 10 }
+  resident.register(order, 5, make(0, 2020, "k1", 700))
+  -- Ahead before behind at *equal* distance: reading is forward-biased, which is
+  -- also why `retain_window` breaks its own tie the other way. Distance still
+  -- wins over direction, though -- a slice one screen back is a better guess
+  -- than one three screens on.
+  t.eq(6, resident.next_prefetch(order, grid_of_ten, 5), "at equal distance the slice ahead goes first")
+  resident.register(order, 6, make(0, 2020, "k1", 701))
+  t.eq(4, resident.next_prefetch(order, grid_of_ten, 5), "but a nearer slice behind beats a further one ahead")
+  resident.register(order, 4, make(0, 2020, "k1", 702))
+  t.eq(7, resident.next_prefetch(order, grid_of_ten, 5), "and then outward again, ahead first")
+  t.eq(9, resident.next_prefetch(order, grid_of_ten, 8), "from wherever the reader actually is")
+  -- The reader's own cell is never a prefetch target -- it belongs to the
+  -- settle, and taking the shared fill slot for it would be backwards. So a
+  -- one-slice grid has nothing to prefetch whether or not that slice is held,
+  -- and a centre outside the grid is clamped rather than walked off the end.
+  t.eq(nil, resident.next_prefetch(resident.new_state({ memory_px = 1 }), { count = 1 }, 5), "clamped to the grid")
+
+  local complete = resident.new_state({ memory_px = SLICE_PX * 100 })
+  for index = 0, 3 do
+    resident.register(complete, index, make(index * 2020, 2020, "k1", 800 + index))
+  end
+  t.eq(nil, resident.next_prefetch(complete, { count = 4 }, 0), "a fully held grid has nothing left to prefetch")
+  t.eq(nil, resident.next_prefetch(complete, { count = 4 }, 3), "from either end of it")
+
   -- Draining is what close, retarget, invalidation and fallback use: everything
   -- back at once, and the grid goes with it.
   refill.grid = { count = 4 }

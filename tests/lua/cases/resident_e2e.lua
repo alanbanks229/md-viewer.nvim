@@ -228,9 +228,13 @@ return function(t)
       local target = math.abs(last - at_now) > math.abs(first - at_now) and math.floor(last) or math.floor(first)
       t.ok(math.abs(target - at_now) > 1, "sanity: that is a scroll rather than a no-op")
       controller.scroll_to(session, target)
-      vim.wait(200, function() return false end, 25)
 
-      t.eq(requests_before, session.request_serial, "a scroll inside the region asks the renderer for nothing")
+      -- Measured with no wait at all, deliberately. A pan is synchronous inside
+      -- `scroll_to`, so these are exactly the bytes the scroll itself cost --
+      -- with neither the settle behind it nor the idle-time prefetch folded into
+      -- the number. Both of those are real traffic and both are meant to happen;
+      -- neither is what this claim is about.
+      t.eq(requests_before, session.request_serial, "a scroll inside the slice asks the renderer for nothing")
       t.eq(uploads_before, live.upload_bytes, "and uploads no pixels")
       t.ok(live.hits > 0, "it is counted as a hit")
 
@@ -340,21 +344,39 @@ return function(t)
 
       walk()
       local filled_after_first = live.fills
-      t.eq(WALK_SLICES, #held(), ("each of the %d slices walked is resident"):format(WALK_SLICES))
+      -- At least, not exactly: the idle-time prefetch fills outward from the
+      -- reader whenever the wire has nothing they are waiting for, so a walk
+      -- that pauses at each stop may well have picked up neighbours too.
+      t.ok(#held() >= WALK_SLICES, ("each of the %d slices walked is resident"):format(WALK_SLICES))
       t.eq(0, live.evictions, "and nothing was evicted to make room, at this ceiling")
       for index = 0, WALK_SLICES - 1 do
         t.ok(resident.hold(live, index) ~= nil, ("slice %d is held, in its own cell"):format(index))
       end
 
       -- And back over exactly the same ground.
+      --
+      -- The prefetch is deliberately left running. It is idle-wire traffic for
+      -- slices the reader has *not* reached, so holding it still to make the
+      -- number smaller would measure a configuration nobody runs. What must be
+      -- zero is any transmission for a slice this session already holds -- which
+      -- is the claim, stated exactly, and survives whatever else the wire is
+      -- doing.
+      local held_before = {}
+      for _, slice in ipairs(held()) do
+        held_before[slice.image_id] = slice.index
+      end
       emitted = {}
-      local uploads_before, requests_before = live.upload_bytes, session.request_serial
       walk()
-      local stream = table.concat(emitted)
-      t.eq(nil, stream:match("\27_Ga=t"), "a second pass over the same slices transmits no image at all")
-      t.eq(uploads_before, live.upload_bytes, "so it spends no upload bytes")
-      t.eq(requests_before, session.request_serial, "and asks the renderer for nothing")
-      t.eq(filled_after_first, live.fills, "with no slice filled twice")
+
+      local transmitted = {}
+      for control in table.concat(emitted):gmatch("\27_G([^;]*);") do
+        local id = control:match("a=t") and control:match("i=(%d+)")
+        if id then transmitted[tonumber(id)] = true end
+      end
+      for image_id, index in pairs(held_before) do
+        t.eq(nil, transmitted[image_id], ("slice %d, already held, is never transmitted again"):format(index))
+      end
+      t.ok(live.fills >= filled_after_first, "sanity: the walk did not lose slices")
       t.eq(0, live.evictions, "and still nothing evicted")
 
       -- ----------------------------------------------------------------
@@ -372,8 +394,10 @@ return function(t)
 
       local straddles_before = live.straddles
       emitted = {}
+      -- Measured synchronously, like the pan above: `scroll_to` composites
+      -- before it returns, so this is the composite's own bytes with neither the
+      -- settle nor the idle-time prefetch folded in.
       controller.scroll_to(session, boundary)
-      vim.wait(300, function() return false end, 25)
       local seam_stream = table.concat(emitted)
 
       t.eq(straddles_before + 1, live.straddles, "a viewport spanning two slices is composited")
@@ -399,6 +423,46 @@ return function(t)
       t.ok(placed[upper_id] ~= nil, "one of them is the slice above the boundary")
       t.ok(placed[lower_id] ~= nil, "and the other is the slice below it")
       t.near(boundary, session.applied_scroll_y, 1.0, "and the position recorded is the one asked for")
+
+      -- ----------------------------------------------------------------
+      -- Idle wire fills the rest of the document.
+      --
+      -- A reader who stops reading is a reader whose link is doing nothing, and
+      -- the slices around them are the ones they are most likely to want next.
+      -- Without this the document is only ever resident where somebody has
+      -- already scrolled, so the second pass this feature exists for keeps
+      -- paying a warm-up at every new screen.
+      -- ----------------------------------------------------------------
+      -- By now the walk has paused often enough for the prefetch to have run
+      -- many times over, so what is asserted is the state it reached rather than
+      -- a fresh one it is asked to reach: how much of the document is held, and
+      -- that none of it was bought by giving something else up.
+      controller.scroll_to(session, stops[1])
+      vim.wait(20000, function() return resident.next_prefetch(live, grid, 0) == nil end, 50)
+
+      t.ok(live.prefetches > 0, "sitting still fills slices nobody scrolled to")
+      t.ok(
+        #held() > WALK_SLICES,
+        ("so more of the document is held than was walked (%d slices of %d)"):format(#held(), grid.count)
+      )
+      t.eq(0, live.evictions, "without evicting anything to do it, which would be churn rather than warm-up")
+      t.ok(
+        live.resident_px <= live.memory_px,
+        ("and never past the ceiling (%d of %d px)"):format(live.resident_px, live.memory_px)
+      )
+
+      -- The reader always outranks it. With the ceiling full there is no room
+      -- for a guess, and a prefetch that evicted to make some would drop a slice
+      -- the reader may come back to and pay for both again.
+      local full_before = live.fills
+      local roomy_ceiling = live.memory_px
+      live.memory_px = live.resident_px
+      require("md-viewer.debounce").close(session, "resident_prefetch_timer")
+      controller._prefetch_slice(session)
+      vim.wait(500, function() return false end, 25)
+      t.eq(full_before, live.fills, "a full ceiling refuses the prefetch rather than evicting for it")
+      t.eq(0, live.evictions, "so nothing is given up for a slice nobody asked for")
+      live.memory_px = roomy_ceiling
     end
 
     -- ------------------------------------------------------------------

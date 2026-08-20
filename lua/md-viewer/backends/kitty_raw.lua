@@ -1391,6 +1391,31 @@ function M.show(image_bytes, placement, source)
   return id, { bytes = #sequence, width_px = item.width_px, height_px = item.height_px }
 end
 
+---Put an image in the terminal without drawing any of it.
+---
+---Transmission and placement are separate actions in the Kitty protocol, and
+---this is the one caller that wants the first without the second: a *prefetched*
+---slice is pixels for somewhere the reader is not looking. The frame on screen
+---is already correct, so placing this one would be a flash of the wrong part of
+---the document followed by a correction -- and a placement is what
+---`resident.hold` will emit anyway, later, if the reader ever scrolls to it.
+---
+---The image is `owned` from here exactly like any other, so `M.compose`,
+---`M.hide`, `M.retire` and `M.clear` all work on it unchanged; it simply starts
+---with no placements. `M.clear` remains the only thing that gives its pixels
+---back.
+---@return integer|nil image_id, table|string stats_or_reason
+function M.upload(image_bytes)
+  local width_px, height_px = png_dimensions(image_bytes)
+  if not width_px then return nil, "raw Kitty backend received an invalid PNG" end
+  next_id = next_id + 1
+  local id = next_id
+  owned[id] = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
+  local sequence = chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+  send(sequence)
+  return id, { bytes = #sequence, width_px = width_px, height_px = height_px }
+end
+
 ---Replace the image on screen, in **one** `nvim_ui_send` write.
 ---
 ---The write boundary is the point of this function. `M.move`, `overlay_apply`

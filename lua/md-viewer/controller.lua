@@ -736,7 +736,7 @@ end
 -- Defined further down, beside `scroll_settle_delay`, which they need and which
 -- belongs with the capture-scale rule it is the twin of. Declared here because
 -- `M.refresh` -- which sits between the two -- is what calls them.
-local hold_wire, settle_options
+local hold_wire, settle_options, schedule_prefetch
 
 ---Whether this session may keep resident regions at all, and why not when it
 ---may not. Evaluated once, when the preview opens.
@@ -1143,6 +1143,10 @@ function try_pan(session)
   -- Anything derived from `applied_scroll_y` has to follow when it changes.
   caret.shadow_cursor(session)
   animation.repaint(session)
+  -- A hit means the reader is on ground this session already holds, which is
+  -- the moment the wire has nothing they are waiting for. Debounced, so a burst
+  -- of pans arms one prefetch when it stops rather than one per notch.
+  schedule_prefetch(session)
   return true
 end
 
@@ -1227,6 +1231,10 @@ function M.refresh(session, render_options)
     -- different parts of the document. The generation is what tells them apart.
     filling.fill.slice_index = render_options.resident_slice
     filling.fill.generation = filling.generation
+    -- Whether anyone was waiting on it. Diagnostics only: a prefetch and a
+    -- settle fill are the same capture, and the difference matters to a reader
+    -- of the report rather than to the machinery.
+    filling.fill.prefetch = render_options.resident_prefetch == true
     filling.fill.doc_y = render_options.capture_region and render_options.capture_region.yPx
     filling.fill.doc_h = render_options.capture_region and render_options.capture_region.heightPx
     filling.desired_scroll_y = session.scroll_y or 0
@@ -1487,39 +1495,68 @@ function M.refresh(session, render_options)
         return
       end
       local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_px }
-      local source, applied = resident.source_window(region, session.scroll_y or 0, viewport)
-      if not source then
-        -- The reader left the range while this captured. Discarded rather than
-        -- uploaded-and-kept: a region the viewport is not inside is several
-        -- hundred kilobytes of wire spent on pixels nobody is looking at, and on
-        -- the link this exists for that is the most expensive thing it could
-        -- possibly do. Dropping it here costs nothing at all -- the capture
-        -- never left the VM. Counted apart from `stale_fills` because it means
-        -- something different: this fill was never wrong, only overtaken.
-        live.abandoned_fills = live.abandoned_fills + 1
-        finish()
-        return
+      local prefetching = live.fill.prefetch == true
+      local source, applied
+      if prefetching then
+        -- A prefetch is pixels for somewhere the reader is *not* looking, by
+        -- definition, so the coverage test below would discard every one of them
+        -- as overtaken. It is transmitted and not placed: the frame on screen is
+        -- already correct, and drawing this one would be a flash of the wrong
+        -- part of the document followed by a correction. It becomes visible the
+        -- ordinary way, as a placement, if the reader ever scrolls to it -- the
+        -- resident-but-unplaced state `try_pan` already handles.
+        local uploaded, upload_stats = nil, nil
+        if session.backend.upload then
+          local ok_upload, id, stats = pcall(session.backend.upload, result.image)
+          uploaded, upload_stats = ok_upload and id or nil, stats
+        end
+        if not uploaded then
+          -- Nothing is on screen to be wrong, so this is a wasted capture and
+          -- nothing worse. Counted where a wasted capture is counted.
+          live.abandoned_fills = live.abandoned_fills + 1
+          finish()
+          return
+        end
+        region.image_id = uploaded
+        region.placed = false
+        record_ui_bytes(session, upload_stats)
+        session.last_image_update_ms = 0
+      else
+        source, applied = resident.source_window(region, session.scroll_y or 0, viewport)
+        if not source then
+          -- The reader left the range while this captured. Discarded rather than
+          -- uploaded-and-kept: a region the viewport is not inside is several
+          -- hundred kilobytes of wire spent on pixels nobody is looking at, and
+          -- on the link this exists for that is the most expensive thing it
+          -- could possibly do. Dropping it here costs nothing at all -- the
+          -- capture never left the VM. Counted apart from `stale_fills` because
+          -- it means something different: this fill was never wrong, only
+          -- overtaken.
+          live.abandoned_fills = live.abandoned_fills + 1
+          finish()
+          return
+        end
+        -- The id the backend hands back, recorded against the slice in the same
+        -- statement that receives it. Reading it off `session.image_id`
+        -- afterwards is a second source of truth for "which image did that put
+        -- up", and the two come apart the moment something else can write the
+        -- head of the screen between the two lines.
+        region.image_id = apply_image(
+          session,
+          result.image,
+          meta.captureScale,
+          session.last_png_bytes,
+          session.last_capture_ms,
+          meta.captureEncoder,
+          { source = source, resident_fill = true }
+        )
+        if not region.image_id then
+          finish()
+          return
+        end
+        region.placed = true
+        session.applied_scroll_y = applied
       end
-      -- The id the backend hands back, recorded against the slice in the same
-      -- statement that receives it. Reading it off `session.image_id` afterwards
-      -- is a second source of truth for "which image did that put up", and the
-      -- two come apart the moment something else can write the head of the
-      -- screen between the two lines.
-      region.image_id = apply_image(
-        session,
-        result.image,
-        meta.captureScale,
-        session.last_png_bytes,
-        session.last_capture_ms,
-        meta.captureEncoder,
-        { source = source, resident_fill = true }
-      )
-      if not region.image_id then
-        finish()
-        return
-      end
-      region.placed = true
-      session.applied_scroll_y = applied
       local emitted = session.last_ui_bytes or 0
       live.upload_bytes = live.upload_bytes + emitted
       hold_wire(session, emitted, session.last_image_update_ms)
@@ -1543,9 +1580,18 @@ function M.refresh(session, render_options)
         return
       end
       live.key = region.key
-      for _, other in ipairs(resident.slice_records(live)) do
-        other.placed = other == region
+      if prefetching then
+        live.prefetches = (live.prefetches or 0) + 1
+      else
+        for _, other in ipairs(resident.slice_records(live)) do
+          other.placed = other == region
+        end
       end
+      -- And the next one, once this payload has finished crossing. The document
+      -- fills outward from the reader one slice at a time with the wire idle
+      -- between them, rather than in a burst -- which would be exactly the
+      -- backlog the one-payload invariant exists to prevent.
+      schedule_prefetch(session)
       finish()
       return
     end
@@ -1661,6 +1707,38 @@ function hold_wire(session, bytes, elapsed_ms)
   live.upload_hold_until = vim.uv.now() + live.upload_hold_ms
 end
 
+---The request that captures slice `index` of `grid`, or nil if there is no such
+---slice.
+---
+---One home for the rectangle, shared by the settle and the prefetch, because
+---they differ in *when* they are issued and in nothing else: the same slice, at
+---the same fixed position, captured the same way. Two copies would be two places
+---for "anchored on the slice, not on the reader" to quietly stop being true --
+---and that property is the whole change, because it is what lets the same
+---position ask for the same capture however the reader arrived at it, and what
+---makes a slice already held never asked for again.
+local function slice_fill_options(grid, index, prefetch)
+  local slice = resident.slice(grid, index)
+  if not slice then return nil end
+  return {
+    capture_scale = "device",
+    capture_only = true,
+    capture_region = { yPx = slice.doc_y, heightPx = slice.doc_h },
+    resident_slice = index,
+    -- The renderer has had a `settle` lane since the interaction work and has
+    -- never been sent one: `capture` has been carrying both the moving frames
+    -- and the settle frame, which invalidate each other. A fill is expensive
+    -- enough that losing it to the next wheel notch would be the whole cost of
+    -- the feature paid for nothing.
+    lane = "settle",
+    resident_fill = true,
+    -- Only so the report can tell a slice nobody asked for from one somebody
+    -- waited on, and so the callback knows not to draw it. Everything else about
+    -- the capture is identical.
+    resident_prefetch = prefetch or nil,
+  }
+end
+
 ---Which slice of the grid this settle should fill, or nil when there is nothing
 ---to fill.
 ---
@@ -1728,26 +1806,76 @@ function settle_options(session)
   if not grid then return plain end
   local index = slice_to_fill(session, grid)
   if not index then return plain end
-  local slice = resident.slice(grid, index)
-  if not slice then return plain end
+  return slice_fill_options(grid, index) or plain
+end
 
-  return {
-    capture_scale = "device",
-    capture_only = true,
-    -- The slice's own fixed rectangle, not one anchored on the reader. That is
-    -- the whole change: a boundary is a property of the document, so the same
-    -- position asks for the same capture however the reader arrived at it, and
-    -- a slice already held is never asked for again.
-    capture_region = { yPx = slice.doc_y, heightPx = slice.doc_h },
-    resident_slice = index,
-    -- The renderer has had a `settle` lane since the interaction work and has
-    -- never been sent one: `capture` has been carrying both the moving frames
-    -- and the settle frame, which invalidate each other. A fill is expensive
-    -- enough that losing it to the next wheel notch would be the whole cost of
-    -- the feature paid for nothing.
-    lane = "settle",
-    resident_fill = true,
-  }
+---Fill one slice the reader has not reached, if the wire has nothing better to
+---do and the grid has room for it without giving anything up.
+---
+---The whole document ends up resident this way rather than only the parts
+---someone happened to scroll through, so the second pass this feature exists for
+---starts free instead of warming up again. Everything below is a reason not to,
+---and each one has a specific failure behind it.
+---
+---**Never past the ceiling.** A prefetch that evicts is worse than no prefetch:
+---it uploads a slice, drops one the reader may return to, and pays for both
+---again. That is the upload-evict-reupload churn the grid removed, and bringing
+---it back speculatively would be the least defensible way to lose it.
+---
+---**Never ahead of the reader's own slices.** They share one fill slot, so a
+---prefetch holding it is a reader waiting for pixels of somewhere they are not
+---looking. Checked before starting rather than cancelled after: bytes handed to
+---`nvim_ui_send` cannot be recalled, which is why one prefetch is one slice
+---(~810 KB, ~1.35 s on the link this exists for) and never a document.
+---
+---**Never onto a busy wire.** `upload_hold_until` is the one-payload invariant,
+---and a prefetch queued behind a draining slice rebuilds the backlog this whole
+---feature was built to remove.
+local function prefetch_slice(session)
+  if not valid(session) then return end
+  local live = session.resident
+  if not (live and live.enabled) or live.fallback_reason then return end
+  if session.backend.name ~= "kitty_raw" then return end
+  if live.fill.in_flight or session.scroll_render_in_flight then return end
+  if (live.upload_hold_until or 0) > vim.uv.now() then return end
+  -- The same three the settle refuses a fill for: a slice captured with a
+  -- search, a selection or a drag painted into it would keep that highlight for
+  -- as long as the terminal held it.
+  if session.selection_active or session.find_active or (session.pointer and session.pointer.pressed) then return end
+  if not (session.viewport_width_px and session.viewport_height_px and session.document_height_px) then return end
+  if update_occlusion(session) then return end
+
+  local grid = resident_grid(session)
+  if not grid then return end
+  local first, last = resident.slices_for(grid, session.scroll_y or 0, session.viewport_height_px)
+  if not first then return end
+  -- The reader, first and always. A missing slice under them is the settle's to
+  -- fill, and taking the slot from it would be exactly backwards.
+  if not (resident.hold(live, first) and resident.hold(live, last)) then return end
+  if not resident.has_room(live, resident.slice_cost_px(grid)) then return end
+
+  local index = resident.next_prefetch(live, grid, first)
+  if not index then return end
+  local options = slice_fill_options(grid, index, true)
+  if options then M.refresh(session, options) end
+end
+
+---Arm one prefetch for the moment the wire is next free.
+---
+---Debounced by name, so a reader scrolling steadily keeps pushing it out and it
+---fires when they stop -- which is the same "they have finished moving" signal
+---the settle already waits for, reusing a delay this link has been tuned around
+---rather than inventing a second one nobody has measured. Re-armed after each
+---prefetch lands, so the document fills outward one slice at a time with the
+---wire idle between them.
+function schedule_prefetch(session)
+  local live = session and session.resident
+  if not (live and live.enabled) or live.fallback_reason then return end
+  local settle = scroll_settle_delay(config.get().render)
+  local draining = math.max(0, (live.upload_hold_until or 0) - vim.uv.now())
+  debounce.call(session, "resident_prefetch_timer", math.max(settle, draining), function()
+    if valid(session) then prefetch_slice(session) end
+  end)
 end
 
 ---Is the wire still carrying this session's last region upload?
@@ -1851,6 +1979,7 @@ local function close_session(session, stop_opts)
     "resize_timer",
     "scroll_settle_timer",
     "resident_hold_timer",
+    "resident_prefetch_timer",
     "cursor_scroll_timer",
     "animation_geometry_timer",
     "remote_image_timer",
@@ -2873,6 +3002,9 @@ M._scroll_settle_delay = scroll_settle_delay
 -- `tests/lua/cases/scroll_scale.lua` beside the identical rule for scroll scale.
 M._resident_gate = resident_gate
 M._settle_options = settle_options
+-- The prefetch, driven directly. It is reached only from a debounced timer, so a
+-- test that went through one would be asserting about milliseconds.
+M._prefetch_slice = prefetch_slice
 M._resident_key = resident_key
 M._resident_grid = resident_grid
 -- Exported so the interaction gates can be asserted directly rather than
