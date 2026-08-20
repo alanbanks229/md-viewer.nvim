@@ -144,18 +144,18 @@ Open a file on the VM — the double-slash form means "absolute path on the
 remote machine":
 
 ```vim
-:RemoteOpen rsync://dev-vm//home/alan/project/README.md
+:RemoteOpen rsync://dev-vm//home/you/project/README.md
 ```
 
 Or browse the project tree and open files from it:
 
 ```vim
-:RemoteTreeBrowser rsync://dev-vm//home/alan/project
+:RemoteTreeBrowser rsync://dev-vm//home/you/project
 ```
 
 (`j`/`k` to move, `Enter` to open, `q` to quit.) Plain `:e
-rsync://dev-vm//home/alan/project/README.md` works too, and so does
-`scp://…`. `:RemoteGrep rsync://dev-vm//home/alan/project` searches the
+rsync://dev-vm//home/you/project/README.md` works too, and so does
+`scp://…`. `:RemoteGrep rsync://dev-vm//home/you/project` searches the
 project on the VM.
 
 The buffer you get is a normal Neovim buffer whose *name* is that URL. Your
@@ -239,7 +239,7 @@ this, and nothing ever forwards Chrome's debugging protocol anywhere.
   unsaved buffer, so `:w` first.
 - **Reconnect tomorrow:** `nvim`, then the same `:RemoteOpen`/
   `:RemoteTreeBrowser` command (`:RemoteHistory` lists what you had open;
-  `:RemoteSession dev-vm//home/alan/project` manages named sessions —
+  `:RemoteSession dev-vm//home/you/project` manages named sessions —
   upstream's README covers those).
 - **Which kind of buffer am I in?** `:echo @%` — a remote buffer's name
   starts with `rsync://` or `scp://`. md-viewer's `:MdViewerDebug` prints a

@@ -112,7 +112,7 @@ know what a pixel is worth on screen.
 
 ## Reusing pixels already sent
 
-<a id="resident-panning"></a>
+<a id="reuse-sent-pixels"></a>
 
 Over SSH, scrolling can be shown by re-cropping pixels the terminal is already
 holding instead of sending new ones. It asks a different thing of a terminal than

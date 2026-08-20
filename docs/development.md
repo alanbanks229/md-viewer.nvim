@@ -14,8 +14,9 @@
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`, `tests/node/`: headless suites
 - `tests/fixtures/`: Markdown documents both suites and the manual checklist use
-- `scripts/overlay/`: harnesses needing a real browser or a real terminal window
-  — see [../scripts/README.md](../scripts/README.md)
+- `scripts/`: harnesses needing something CI does not have — a real browser, a
+  real terminal window, a slow link, or a reachable host. None of it runs in CI;
+  see [../scripts/README.md](../scripts/README.md)
 - `doc/md-viewer.txt`: `:help md-viewer`
 - `docs/`: architecture, terminal support, troubleshooting, development, and
   one rejected-design record
@@ -181,6 +182,24 @@ scripts/overlay/stress/run.sh   /path/to/Terminal.app
 This is also the gate for re-enabling WezTerm's overlay once its upstream fix
 ships in a *released* build. It is not a version check.
 
+**Before enabling `reuse_sent_pixels` for a profile**, a separate and stricter
+gate. The overlay list does not carry over: the overlay asks a terminal to
+composite small rectangles for the length of a drag, while reusing sent pixels
+asks it to hold a whole document's slices for the length of a reading session and
+give the memory back afterwards. Two measurements, in this order:
+
+```sh
+python3 scripts/resident/rss-calibrate.py   # what a resident megapixel costs there
+./scripts/resident/rss.sh                   # 30 minutes: does it plateau or creep?
+```
+
+Enable it only if the terminal honours the crop `x`/`y`/`w`/`h` placement keys
+(Warp does not), holds the slices without creeping, and returns the memory when
+they are deleted. Record what you measured in
+[terminal-support.md](terminal-support.md#reuse-sent-pixels); a terminal that has
+not been through this stays `off, pending` rather than inheriting the overlay's
+qualification.
+
 ### Sub-cell calibration
 
 iTerm2 applies its window margin to text but not to graphics placements, landing
@@ -228,26 +247,38 @@ at `1.0.0`.
 1. Run all three automated suites from a clean checkout.
 2. Work through [Manual verification](#manual-verification) on at least one
    `Supported` terminal.
-3. Bump the version in `lua/md-viewer/init.lua` (`M.version`) and
+3. For a change touching what crosses a slow link, re-run
+   `scripts/resident/ab.lua` on the real link — not the last run, this build. A
+   harness measures the code it was run against, and two of the four commits
+   before `0.3.0-rc1` changed what it counts. A prerelease may ship with that
+   measurement outstanding if it says so; a stable tag may not.
+4. Bump the version in `lua/md-viewer/init.lua` (`M.version`) and
    `renderer/package.json`, then regenerate the lockfile — never hand-edit it:
 
    ```sh
    npm install --package-lock-only --prefix renderer
    ```
 
-4. Add the `CHANGELOG.md` section and its link reference at the bottom of the
+5. Add the `CHANGELOG.md` section and its link reference at the bottom of the
    file. Keep it release notes, not a postmortem: one bullet per user-visible
    change, at most one sentence of cause where that is what makes the fix
    legible. Benchmarks, root-cause analysis and terminal internals belong in
    [architecture.md](architecture.md) if they are durable invariants, in
    [terminal-support.md](terminal-support.md) if they are current limitations,
    and in Git history otherwise.
-5. Confirm no browser binary, `node_modules`, log, screenshot, generated PNG, or
+
+   On a prerelease channel, keep one section per tag and fold them into the
+   stable section at cut time. A section describing corrections to an earlier
+   prerelease is addressed to nobody: the reader upgrading from the last stable
+   never saw the thing being corrected, so that material belongs in a short
+   closing note rather than as headline entries.
+6. Confirm no browser binary, `node_modules`, log, screenshot, generated PNG, or
    local profile is tracked. Run `git diff --check`. Review dependency licenses
-   and advisories.
-6. Confirm the README's install snippets pin the version being tagged — both
-   the lazy.nvim `version` and the `vim.pack` `version`.
-7. Tag the tested commit with an **annotated** tag, then publish the release
+   and advisories (`npm audit --prefix renderer`).
+7. Confirm the README's install snippets pin the version being tagged — both
+   the lazy.nvim `version` and the `vim.pack` `version`. A pin naming a tag that
+   does not exist is an install failure, not a stale document.
+8. Tag the tested commit with an **annotated** tag, then publish the release
    from the matching changelog section. The section is extracted verbatim, so a
    malformed heading or a missing link reference breaks the release notes:
 

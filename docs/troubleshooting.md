@@ -309,7 +309,7 @@ narrowly gated, and `:MdViewerDebug`'s `resident` block says which gate refused:
 - **`enabled false` with a `gate_reason`.** The session did not qualify. The
   reason names the cause verbatim — a backend that cannot crop, a *local* session
   (there is no wire time to save, so this is working as designed), a multiplexer,
-  a terminal profile that is not qualified ([terminal-support.md](terminal-support.md#resident-panning)),
+  a terminal profile that is not qualified ([terminal-support.md](terminal-support.md#reuse-sent-pixels)),
   or a zero `image.resident_memory_mb`.
 - **`fallback_reason` set.** It qualified and then gave up, once, for the rest of
   the session. One-way on purpose: every reason to fall back is a reason to

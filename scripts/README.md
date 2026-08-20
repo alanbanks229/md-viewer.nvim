@@ -5,13 +5,14 @@ have: a real browser, or a real terminal window with a real display behind it.
 The headless suites (`tests/lua/`, `tests/node/`) cover everything that can be
 covered without one — run those first.
 
-Two features live here, and they are the two parts of md-viewer that think in
-device pixels rather than terminal cells -- the parts a headless test cannot
-fully prove: the **drag-highlight overlay** (`overlay/`) and **animated
-images** (`animation/`). Three others need neither a display nor a browser:
-`scroll-scale/` needs a *slow link*, `remote-images/` needs a *network with
-no direct route out*, and `remote-projects/` needs a *reachable ssh host* --
-the pieces of hardware no test machine has.
+Two features live here because they think in device pixels rather than terminal
+cells, which is what a headless test cannot fully prove: the **drag-highlight
+overlay** (`overlay/`) and **animated images** (`animation/`). The rest need
+neither a display nor a browser, but need a piece of hardware no test machine
+has: `scroll-scale/` and `resident/` need a *slow link*, `remote-images/` needs
+a *network with no direct route out*, and `remote-projects/` needs a *reachable
+ssh host*. `resident/` additionally needs a *real terminal holding real
+pixels*, since what it measures is that terminal's memory.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -129,6 +130,130 @@ The verdict worth watching for is **INERT**: `capture_encoder` is
 `playwright_png` rather than `cdp_fast_png`. Playwright's own `scale` is a
 two-value enum, so the numeric factor cannot reach the capture on that path and
 `render.scroll_scale` does nothing on that host, whatever it is set to.
+
+## `resident/` — is reusing sent pixels earning its keep, and what does it cost?
+
+Five files behind one feature: over SSH the document is cut into a grid of
+slices, each uploaded once and kept, and every scroll position is drawn as a crop
+of pixels the terminal already holds (`:help md-viewer-reuse-sent-pixels`). It
+trades terminal memory for wire time, so it needs a harness on each side of that
+trade — and neither quantity is visible from a developer machine.
+
+### `ab.lua` — is a second pass over the same ground free?
+
+Run inside a real Neovim on the far end of the link, on iTerm2, outside a
+multiplexer, with a preview open on a document several viewports long:
+
+```vim
+:runtime scripts/resident/ab.lua   " arms phase 1, every scroll is a frame
+"  ...walk the document, pausing at each screen...
+:ResidentAB                        " arms phase 2, slices
+"  ...walk it the same way...
+:ResidentABMark                    " once slices_resident stops climbing
+"  ...now walk back over the same ground...
+:ResidentAB                        " prints the comparison
+```
+
+Measured in total `nvim_ui_send` bytes rather than PNG bytes, which is the whole
+reason this is not a column in `scroll-scale/ab.lua`: "the payload fell to zero"
+and "the traffic fell to zero" are different claims, and
+`docs/local-render-design.md` records this project being wrong about exactly that
+difference once already.
+
+The mark matters. Phase 2's first pass is the grid warming up and is *expected*
+to cost more than phase 1; the claim is about the second pass, which is why
+`:ResidentABMark` exists and why it warns when it is set while `slices_resident`
+is still climbing. `:ResidentABCancel` abandons a run partway; the configuration
+in force is saved before phase 1 and restored after phase 2, including on the
+error path.
+
+Two verdicts are worth knowing before you read the numbers. **UNACCOUNTED** means
+the fill identity failed —
+`fills == slices_resident + stale + abandoned + undisplayed + evictions +
+dropped_slices` — and the report is describing captures it cannot place, so treat
+the byte counts as unsafe rather than merely disappointing. **`evictions` above
+zero** means the document is larger than `image.resident_memory_mb` and the window
+is sliding, so the run is measuring a ceiling rather than the feature.
+
+The report opens in a tab, not a split. A split takes rows from the preview, which
+is part of what slices are keyed on, so a report that opened in one would destroy
+the grid it was reporting.
+
+### `rss.sh` — does the terminal give the memory back over half an hour?
+
+```sh
+./scripts/resident/rss.sh [label] [seconds] [pid]
+```
+
+Attaches to the terminal you are already working in — it never launches or kills
+it — and samples its resident size while you scroll a real preview on the far end
+of a real link. Defaults to 30 minutes against the frontmost iTerm2. Over
+`MD_VIEWER_RESIDENT_RSS_CEILING_KB` it says so and stops; closing the preview is
+yours to do.
+
+**This is the gate for qualifying a new terminal.** A terminal that grows tens of
+megabytes per slice and never gives any of it back is exactly the failure this
+exists to catch, and for the first sixty seconds it looks identical to a healthy
+one — which is the defect WezTerm's overlay is disabled for. iTerm2 has been
+through it and plateaus; Kitty and Ghostty have not, which is why they are `off,
+pending` in [../docs/terminal-support.md](../docs/terminal-support.md).
+
+### `rss-calibrate.py` — what does one resident megapixel cost?
+
+```sh
+python3 scripts/resident/rss-calibrate.py
+python3 scripts/resident/rss-calibrate.py --spawn   # a fresh iTerm2 window
+```
+
+The prior question `rss.sh` cannot answer in under half an hour, answered in about
+a minute with no SSH, no Neovim and no Chromium in the picture: transmit PNGs of
+known pixel counts, place each one (a terminal may decode lazily, so an image
+never drawn reports nothing), sample RSS, free them, sample again. This is where
+`image.resident_memory_mb`'s ~13 bytes per pixel comes from, against the 4 the
+project assumed for its first three releases.
+
+**Its result is not corroborated, and the docstring says so.** The only real
+session ever sampled held twelve slices — ~342 MB by this conversion — while
+`rss.sh` saw ~10 MB move. Re-running this against real document slices rather than
+the synthetic incompressible gradients it uses today is the cheap experiment that
+would separate "the sampler cannot see it" from "gradients do not generalise".
+
+### `mutants.sh` — does the suite actually catch the defects this feature shipped?
+
+```sh
+./scripts/resident/mutants.sh [name-filter]
+```
+
+Reintroduces each of a list of real defects — every one of which reached a real
+session — one at a time, and runs the Lua suite against each. `CAUGHT` is the
+result wanted. `MISSED` means the defect can be put back with every test still
+green.
+
+Read a `MISSED` before acting on it: the mutation may be inert rather than
+uncovered, because each pattern must be a unique substring of its file and a
+mutation that does not change behaviour reports the same way as one nothing
+tests. Commit before running it; it edits tracked files in place and restores
+them afterwards.
+
+### `probe.mjs` — the go/no-go this whole feature rests on
+
+```sh
+node scripts/resident/probe.mjs
+```
+
+Asserts that `Page.captureScreenshot` with `captureBeyondViewport: true` and a
+document-space clip several viewports tall returns the right pixels *without*
+resizing the layout viewport. md-viewer's bottom spacer makes `scrollHeight` a
+function of viewport height, so a capture path that grew the viewport to reach
+beyond the fold would silently change the document's own scroll extent — and every
+block rect, scroll clamp and slice coordinate is derived from it.
+
+Its question is answered, and it is kept because the answer is an assumption
+`docs/architecture.md` and `docs/local-render-design.md` both still rely on:
+`captureBeyondViewport: false` does *not* fail loudly on a too-tall clip, it
+returns a correctly sized image whose beyond-the-fold band is only 95.5% right.
+Drives the real `BrowserRenderer`, writes only PNGs under `tmp/resident/probe/`,
+exits non-zero on any failed check.
 
 ## `remote-projects/ab.lua` — does scrolling a remote document really cost zero remote I/O?
 

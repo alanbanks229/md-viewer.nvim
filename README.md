@@ -75,7 +75,7 @@ host beyond `sshd` and a POSIX shell; no Node or Chromium there, ever.
 nvim                                              # locally, as always
 ```
 ```vim
-:RemoteOpen rsync://dev-vm//home/alan/project/README.md
+:RemoteOpen rsync://dev-vm//home/you/project/README.md
 :MdViewerToggle
 ```
 
@@ -139,27 +139,20 @@ spending that sharp capture (`render.ssh_scroll_settle_ms`).
 On iTerm2 it also does a third thing, and it is the only one of the three that
 **removes** the bytes rather than shrinking them: it stops sending pixels it has
 already sent. The document is cut into slices of about two viewports, each
-captured once, and every scroll position is shown as a crop of pixels the
-terminal is already holding. Scrolling back through something you have just read
-costs a placement command instead of a photograph — and, unlike the half-size
-moving frame, it shows you sharp pixels while you scroll rather than soft ones.
-While you are reading rather than scrolling, the idle link fills in the slices
-around you, so the rest of the document is already there when you get to it.
-
-The promise, stated exactly: **a slice is sent once and never sent again while it
-stays in the window.** Not "the whole document is held" — no memory ceiling can
-promise that, since there is always a longer document. Past
-`image.resident_memory_mb` the window slides and crossing it costs an upload,
-which `:MdViewerHealth` tells you rather than leaving you to notice. Off outside
-iTerm2 until other terminals are measured; `image.reuse_sent_pixels` and
-`:help md-viewer-reuse-sent-pixels`.
+captured once, and every scroll position is drawn as a crop of pixels the
+terminal is already holding — sharp ones, while you scroll. The promise, stated
+exactly: **a slice is sent once and never sent again while it stays in the
+window.** Not "the whole document is held", since there is always a longer
+document; past `image.resident_memory_mb` the window slides, which
+`:MdViewerHealth` tells you rather than leaving you to notice. Off outside iTerm2
+until other terminals are measured — `image.reuse_sent_pixels` and
+`:help md-viewer-reuse-sent-pixels` have the rest.
 
 One thing is worth telling it: `render.ssh_link_bytes_per_sec`, how fast your
-link really is. While a slice is still crossing, md-viewer holds back moving
-frames that would only queue behind it — but it cannot find out how long that
-takes, because writing to the terminal returns when the operating system accepts
-the bytes rather than when they arrive. `800000` is a 0.80 MB/s tunnel; `scp` of
-a large file reports the same quantity.
+link really is. `800000` is a 0.80 MB/s tunnel, and `scp` of a large file reports
+the same quantity. md-viewer cannot find it out for itself, because writing to
+the terminal returns when the operating system accepts the bytes rather than when
+they arrive.
 
 Do **not** reach for `render.device_scale_factor = 1` here — it is a
 calibration divisor rather than a size knob, and lowering it makes the frame
