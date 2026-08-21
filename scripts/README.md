@@ -183,6 +183,41 @@ The report opens in a tab, not a split. A split takes rows from the preview, whi
 is part of what slices are keyed on, so a report that opened in one would destroy
 the grid it was reporting.
 
+### `placement-trace.lua` — what is actually on the terminal's screen
+
+```vim
+:runtime scripts/resident/placement-trace.lua   " start recording
+"  ...reproduce the fault...
+:PlacementTrace                                 " stop, and report
+```
+
+Every other instrument here reports what md-viewer *believes*. `:MdViewerDebug`
+prints the session's own bookkeeping and `resident_e2e` asserts the retire list
+names the right images — and both said the screen was fine while a reader was
+looking at the top of a document with block 007 spliced across the bottom of the
+same pane. Between "the right deletion was emitted" and "the pixel came off the
+screen" there is a terminal, and nothing had ever looked at it.
+
+So this decodes the graphics stream and keeps the set of placements the terminal
+has been told to hold — `a=t` creates an image, `a=p` adds a placement, `a=d,d=i`
+removes one, `a=d,d=I` removes an image and all of its placements. What that set
+contains after each write is, as far as anything here can know, what is on
+screen.
+
+The fault it names is **two base images claiming the same rows**. Not merely two
+placed: a composite legitimately places two, in disjoint bands, in one write.
+Two wanting the same row is never legitimate, because then which one the reader
+sees is decided by image id — the Kitty protocol breaks a z tie that way, and
+every base slice shares one z layer, so a band that should have come down draws
+*over* the one that should be there if its slice was uploaded later.
+
+Run it from the terminal that is showing the fault. A pty with no pixel
+dimensions — which is what `ssh -tt` from a script gives you — makes
+`cellpixels` fall back to the estimated tier, and at that geometry the slice grid
+is different and the resident path may not engage at all.
+
+Costs a string match per write and nothing on the wire.
+
 ### `rss.sh` — does the terminal give the memory back over half an hour?
 
 ```sh
