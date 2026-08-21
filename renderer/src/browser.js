@@ -171,6 +171,10 @@ export class BrowserRenderer {
     // the fast PNG encoder for ordinary frames too would charge every scroll for
     // a defect in a feature it does not use. Regions degrade; viewports do not.
     this.cdpRegionCaptureUnavailable = null;
+    // Whether this page has completed a region capture before. The first one is
+    // ~60x slower than the rest (see `regionCaptureTimeoutMs`), so it is the one
+    // that needs the generous budget and every later one does not.
+    this.sawRegionCapture = false;
     this.fastPngEncode = true;
     // A field rather than a constant so a test can prove the stall path without
     // waiting out the real budget.
@@ -223,6 +227,9 @@ export class BrowserRenderer {
     this.cdp = await this.context.newCDPSession(this.page).catch(() => null);
     this.cdpCaptureUnavailable = this.cdp ? null : "newCDPSession failed";
     this.cdpRegionCaptureUnavailable = this.cdp ? null : "newCDPSession failed";
+    // A rebuilt page is cold again, so the next region capture gets the first
+    // capture's budget rather than the warm one's.
+    this.sawRegionCapture = false;
     // A brand-new page holds no document, so nothing may claim to be active.
     this.layout = this.viewport = this.active = null;
   }
@@ -339,6 +346,28 @@ export class BrowserRenderer {
   /// instead: the document's bottom padding is `calc(100vh - Npx)`, so growing
   /// the viewport to reach past the fold would change `scrollHeight` and move the
   /// coordinate space out from under every block rect and every resident region.
+  /// How long one region capture may take, from how much of it there is.
+  ///
+  /// A fixed 10s was applied to a capture whose cost scales with its pixel
+  /// count, and on a modest host the *first* one does not fit. Measured on
+  /// Ubuntu 22.04 / Chromium 151 against a 2432x4934 region (12.0 Mpx):
+  ///
+  ///     attempt 1   OK in 15687ms
+  ///     attempt 2   OK in   274ms
+  ///     attempt 3   OK in   267ms
+  ///
+  /// Sixty times slower cold than warm -- the first beyond-the-viewport capture
+  /// pays for compositor and raster warm-up that every later one reuses. So the
+  /// budget is per-megapixel with a floor, and the first capture on a page gets
+  /// a much larger multiple than the rest. Getting this wrong is not a slow
+  /// preview: it used to permanently disable the correct capture path (see
+  /// below), which is far worse than waiting.
+  regionCaptureTimeoutMs(region) {
+    const megapixels = (region.heightPx * this.viewport.width * this.deviceScaleFactor ** 2) / 1e6;
+    const perMegapixel = this.sawRegionCapture ? 1000 : 4000;
+    return Math.max(this.cdpCaptureTimeoutMs, Math.ceil(megapixels * perMegapixel));
+  }
+
   async captureRegionPng(pngPath, region) {
     const clip = {
       x: 0,
@@ -355,10 +384,11 @@ export class BrowserRenderer {
             captureBeyondViewport: true,
             clip: { ...clip, scale: this.deviceScaleFactor },
           }),
-          this.cdpCaptureTimeoutMs,
+          this.regionCaptureTimeoutMs(region),
           "Page.captureScreenshot (region)",
         );
         fs.writeFileSync(pngPath, Buffer.from(data, "base64"));
+        this.sawRegionCapture = true;
         return "cdp_fast_png";
       } catch (error) {
         this.cdpRegionCaptureUnavailable = String(error?.message ?? error);
@@ -376,14 +406,35 @@ export class BrowserRenderer {
         }
       }
     }
-    // Playwright's own Chromium screenshotter sends `captureBeyondViewport` when
-    // the clip does not fit the viewport, so this is the supported route to the
-    // same capability rather than a second guess at the same trick. It cannot
-    // express `optimizeForSpeed`, so the PNG is smaller and slower to encode --
-    // which for a region, transmitted once and panned within many times, is the
-    // better half of that trade anyway.
-    await this.page.screenshot({ path: pngPath, type: "png", animations: "disabled", scale: "device", clip });
-    return "playwright_png";
+    // No second path. **`page.screenshot({clip})` is not document-absolute**,
+    // and a region captured with it is pixels of wherever the page happens to be
+    // scrolled rather than of the range that was asked for.
+    //
+    // Measured on Ubuntu 22.04 / Chromium 151, the same `{y: 0, height: 2467}`
+    // clip taken at three scroll positions returned three different images --
+    // and asking for the document's *top* while the reader sat at 4800 returned
+    // a picture that starts at "BLOCK 014". The CDP path above, given the same
+    // clip at the same positions, returns one identical image every time.
+    //
+    // This used to fall through to it, which is how a ten-second timeout on one
+    // cold capture turned into a preview showing the wrong part of the document
+    // for the rest of the session: the fallback is silent, permanent, and its
+    // output is accepted by everything downstream. `regionYPx` is echoed back as
+    // the value that was *requested*, and `resident.region` only checks that the
+    // two axes agree about scale -- neither can see a wrong origin. So the
+    // coordinate model, the placements and the retirement all stay provably
+    // correct while the pixels inside every slice come from somewhere else.
+    //
+    // Refusing is the house rule here, stated in `crop_within` and meant just as
+    // literally on this side: "a subtly wrong rectangle that nobody is told
+    // about is the exact shape of every defect this area has produced so far."
+    // The caller turns this into ordinary viewport frames, which are always
+    // right.
+    const unsupported = new Error(
+      `region capture is unavailable on this browser: ${this.cdpRegionCaptureUnavailable ?? "no CDP session"}`,
+    );
+    unsupported.code = "REGION_CAPTURE_UNSUPPORTED";
+    throw unsupported;
   }
 
   async captureViewportPng(pngPath, scale, scaleFactor) {

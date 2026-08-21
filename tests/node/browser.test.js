@@ -424,6 +424,78 @@ test("a capture that never answers degrades to the Playwright path instead of ha
   }
 });
 
+test("a region capture refuses rather than falling back to a clip that is not document-absolute", async (t) => {
+  // The defect this pins cost three releases to find, and every instrument said
+  // the preview was fine while it was happening.
+  //
+  // `page.screenshot({clip})` is not document-absolute on at least one shipping
+  // Chromium. Measured on Ubuntu 22.04 / Chromium 151: the same
+  // `{y: 0, height: 2467}` clip taken at three different scroll positions
+  // returned three different images, and asking for the document's *top* while
+  // the page sat at 4800 returned a picture beginning at "BLOCK 014". The CDP
+  // path, same clip, same positions, returns one identical image every time.
+  //
+  // captureRegionPng used to fall through to it whenever the CDP attempt failed,
+  // and the failure was a fixed 10s timeout on a capture whose cost scales with
+  // its pixel count -- so on a modest host the *first* 12 Mpx region overran it
+  // (15,687ms measured, against 274ms warm) and every later region for the life
+  // of that page came from the wrong part of the document. Nothing downstream
+  // could notice: `regionYPx` is echoed back as the value that was requested,
+  // and `resident.region` only checks the two axes agree about scale, which a
+  // wrong origin leaves untouched.
+  const forever = () => new Promise(() => {});
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+  renderer.cdpCaptureTimeoutMs = 50;
+  renderer.viewport = { width: 640, height: 480 };
+  renderer.deviceScaleFactor = 2;
+  renderer.cdp = { send: forever };
+  let playwrightScreenshots = 0;
+  // A live page and a connected browser: the point is that a *stall* refuses,
+  // not that a dead tab does. The dead-tab case is REGION_TOO_LARGE, and is the
+  // branch just above this one in captureRegionPng.
+  renderer.page = { isClosed: () => false, screenshot: async () => { playwrightScreenshots += 1; } };
+  renderer.browser = { isConnected: () => true };
+
+  const pngPath = path.join(renderer.tempDir, "region.png");
+  await assert.rejects(
+    () => renderer.captureRegionPng(pngPath, { yPx: 0, heightPx: 100 }),
+    (error) => error.code === "REGION_CAPTURE_UNSUPPORTED",
+    "a region the fast path cannot take is refused, with a code the Lua side acts on",
+  );
+  assert.equal(playwrightScreenshots, 0, "and page.screenshot is never asked for a region");
+
+  // Latched, like the viewport path: one failure costs one round trip.
+  await assert.rejects(() => renderer.captureRegionPng(pngPath, { yPx: 0, heightPx: 100 }));
+  assert.equal(playwrightScreenshots, 0, "still never, on the second attempt");
+});
+
+test("the region capture budget scales with the region, and the first one gets more", (t) => {
+  // A fixed budget applied to a capture whose cost is its pixel count is what
+  // demoted the correct path on the machine this was reported from. Cold is
+  // ~60x slower than warm -- 15,687ms against 274ms for the same 12.0 Mpx
+  // region -- because the first beyond-the-viewport capture pays for compositor
+  // warm-up that every later one reuses.
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+  renderer.cdpCaptureTimeoutMs = 10000;
+  renderer.viewport = { width: 1216 };
+  renderer.deviceScaleFactor = 2;
+
+  const region = { heightPx: 2467 };
+  const cold = renderer.regionCaptureTimeoutMs(region);
+  assert.ok(cold > 15687, `the cold budget (${cold}ms) must cover the 15,687ms this really took`);
+  renderer.sawRegionCapture = true;
+  const warm = renderer.regionCaptureTimeoutMs(region);
+  assert.ok(warm < cold, "a warm page needs less");
+  assert.ok(warm >= renderer.cdpCaptureTimeoutMs, "but never less than the floor");
+  assert.equal(
+    renderer.regionCaptureTimeoutMs({ heightPx: 1 }),
+    renderer.cdpCaptureTimeoutMs,
+    "and a tiny region is bounded by the floor rather than by arithmetic",
+  );
+});
+
 test("animated image geometry is reported in document coordinates, and forged ids are not", async (t) => {
   const executable = findRealChromium();
   if (!executable) {

@@ -1302,6 +1302,28 @@ function M.refresh(session, render_options)
     -- be told. Ask once for half as much, and only give up if that is refused
     -- too -- at which point the geometry is beyond what this Chromium will take
     -- at all, and no smaller region is going to change that.
+    -- This browser cannot capture a document region correctly at all, so there
+    -- is nothing to shrink and retry: a smaller region would be captured by the
+    -- same path and be wrong in the same way. The renderer refuses rather than
+    -- substituting a capture it cannot vouch for, and the answer is to stop
+    -- asking -- ordinary viewport frames are always right, and this session
+    -- simply pays for them.
+    --
+    -- Silent substitution is what this replaces, and it was expensive: one cold
+    -- capture overrunning a fixed timeout demoted every later region to a path
+    -- whose clip is not document-absolute, so each slice held pixels of wherever
+    -- the reader happened to be when it was filled. Nothing downstream could see
+    -- it -- the renderer echoes back the region it was *asked* for, and
+    -- `resident.region` only checks that the two axes agree about scale, which a
+    -- wrong origin does not disturb.
+    if filling and info and info.code == "REGION_CAPTURE_UNSUPPORTED" then
+      finish()
+      resident_fallback(session, tostring(err))
+      -- The reader is looking at whatever the last frame was, and the settle
+      -- that would have refreshed it has just been spent on a refusal.
+      M.schedule(session, 0)
+      return
+    end
     if filling and info and info.code == "REGION_TOO_LARGE" then
       -- First, because planning the replacement asks whether a fill is already
       -- in flight -- and this one is, until it is finished with.
