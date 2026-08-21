@@ -152,6 +152,37 @@ local function log(line)
   end
 end
 
+---Where the reader is, and which slice each placed image actually is.
+---
+---Added after the first real capture came back clean. That log proved the
+---placements were correct *relative to each other* -- every composite put the
+---lower slice index on top, every seam was continuous, nothing was left behind
+---— and could not answer the question that was actually being asked, which is
+---whether the pixels being drawn are the ones the reader's scroll position calls
+---for. "Image 460 cropped at y=0" is the top of the document if 460 is slice 0
+---and is somewhere else entirely if it is not, and the stream alone cannot say
+---which.
+local function session_context()
+  local ok, state = pcall(require, "md-viewer.state")
+  if not ok then return "", {} end
+  for _, session in pairs(state.all()) do
+    local live = not session.closed and session.resident
+    if live then
+      local by_image = {}
+      local resident = require("md-viewer.resident")
+      for _, region in ipairs(resident.slice_records(live)) do
+        if region.image_id then by_image[region.image_id] = region end
+      end
+      return ("scroll %s applied %s"):format(
+        tostring(math.floor((session.scroll_y or 0) + 0.5)),
+        tostring(math.floor((session.applied_scroll_y or 0) + 0.5))
+      ),
+        by_image
+    end
+  end
+  return "", {}
+end
+
 local function record(value)
   writes = writes + 1
   -- A write may frame several placements, each with its own cursor escape.
@@ -164,15 +195,23 @@ local function record(value)
   end
   local owners = occupancy()
   local clash = collision(owners)
+  local context, by_image = session_context()
   local parts = {}
   for _, owner in ipairs(owners) do
     local spans = {}
     for _, p in ipairs(owner.rows) do
       spans[#spans + 1] = ("rows %d..%d (%s)"):format(p.row, p.row + p.rows - 1, p.crop)
     end
-    parts[#parts + 1] = ("image %d: %s"):format(owner.id, table.concat(spans, " + "))
+    -- The slice this image *is*, so a crop can be turned back into a document
+    -- position. Absent means the image is not a resident slice at all -- an
+    -- ordinary captured frame, or one this session has already given up.
+    local region = by_image[owner.id]
+    local named = region
+        and ("image %d [slice %s doc_y %d]"):format(owner.id, tostring(region.index), math.floor(region.doc_y + 0.5))
+      or ("image %d [frame]"):format(owner.id)
+    parts[#parts + 1] = ("%s: %s"):format(named, table.concat(spans, " + "))
   end
-  local line = ("[%05d] %d byte(s) | %s"):format(writes, #value, table.concat(parts, " | "))
+  local line = ("[%05d] %s | %d byte(s) | %s"):format(writes, context, #value, table.concat(parts, " | "))
   if clash then
     faults[#faults + 1] = ("write %d: %s"):format(writes, clash)
     line = line .. "  <<< COLLISION: " .. clash
