@@ -5,9 +5,11 @@ marked **Invariant** are load-bearing: each has a plausible-looking simplificati
 that reintroduces a real defect.
 
 The preview is a browser-rendered PNG surface. Mouse and keyboard interactions
-are forwarded to a persistent Chromium DOM, which performs hit-testing,
-selection, search, and link resolution before the viewport is recaptured. That
-gives browser-like behavior; it is not native terminal text selection and not an
+are forwarded to a persistent Chromium DOM, which performs hit-testing, search,
+and link resolution before the viewport is recaptured. Text highlighting goes
+through the same DOM, but only ever from a keyboard-driven vim-motion
+selection (`v`/`V`) — there is no click-and-drag selection. That gives
+browser-like behavior; it is not native terminal text selection and not an
 embedded webview.
 
 ## Data flow
@@ -126,7 +128,7 @@ The caret is a position in the rendered document, owned by the renderer
 renderer measured. Two properties follow, and both are the point: the caret only
 ever sits on a real character — never in the page margin or beside a short
 heading — and it is drawn the size of that character, through the same
-`overlay_apply` path as the drag highlight, in its own rect set with its own tint
+`overlay_apply` path as the selection highlight, in its own rect set with its own tint
 (`CARET_TINT`). Neovim's cursor is hidden while a preview with a drawable caret
 is focused (`preview.hide_cursor`, a global `guicursor` swap) and shadows the
 caret underneath via `coordinates.css_to_cell`.
@@ -169,8 +171,8 @@ must never share a z-layer — `-3`, `-2` and `-1` on every Kitty-graphics
 profile, derived together in `resolve_layers` so they cannot drift apart. The
 protocol breaks a z-index tie by image id (lower draws underneath) and md-viewer
 re-uploads the base on every full frame, so a base sharing an upper layer climbs
-above it and stays there. The symptom is one correct drag per session and then a
-highlight drawn silently *underneath* the preview, with every placement still
+above it and stays there. The symptom is one correct selection gesture per
+session and then a highlight drawn silently *underneath* the preview, with every placement still
 reporting success. The animation layer is reserved whether or not anything is
 animating and whether or not `render.animate` is on: it costs nothing, and a
 stack that changes shape depending on whether a document happens to contain a
@@ -303,8 +305,8 @@ admission serial (`content`, `capture`, `interact`, `settle`) plus a content-epo
 counter. A newer request in the same lane supersedes an older one; a new `content`
 render bumps the epoch and invalidates every downstream lane. **Invariant:** an
 `interact` admission can never invalidate `content` or `capture` — there is no
-code path from it to `contentEpoch` — so a burst of drag updates cannot starve a
-legitimate render. A superseded request fails its own staleness check, at
+code path from it to `contentEpoch` — so a burst of selection-preview updates
+cannot starve a legitimate render. A superseded request fails its own staleness check, at
 admission and again after the expensive work, and returns without touching the
 page.
 
@@ -342,9 +344,11 @@ full cell height can take rather than sampling one. Within that cell a link wins
 over prose — the cell is the resolution limit of the input device, so there is no
 finer answer — but bounded by the same cell: two cells away is still prose.
 
-**Selection, search and copy.** Drag-to-select, double/triple-click and search all
-produce a real `Selection`/`Range` (`setBaseAndExtent`, `Text.splitText`) or
-`window.find`-equivalent matching. **Invariant:** never `innerHTML`, so a query or
+**Selection, search and copy.** Highlighting text is a keyboard-only gesture —
+`v`/`V` extending a real DOM selection from the caret, never a click-and-drag —
+and, alongside it, search. Both produce a real `Selection`/`Range`
+(`setBaseAndExtent`, `Text.splitText`) or `window.find`-equivalent matching.
+**Invariant:** never `innerHTML`, so a query or
 selection containing literal HTML is matched or copied character-for-character
 rather than interpreted as markup. Every mutating interaction captures its own
 screenshot in the same queued operation that performed the mutation, so Lua never
@@ -360,13 +364,11 @@ selection to new content would be silent corruption in a copy.
 (`anchorPinned` on the `interact` envelope), not to viewport coordinates. Viewport
 coordinates move under a scrolling page: the anchor drifts onto whatever text
 scrolls into those pixels, and once it scrolls out of view the point is refused
-and the frame dropped. Relatedly, while the page is moving the highlight uses the
-full captured-frame path rather than the overlay, because overlay rectangles
-composite over the frame already on screen — the pre-scroll one.
-
-Edge auto-scroll is timer-driven rather than event-driven, and has to be:
-`<LeftDrag>` fires only while the mouse moves, so a reader who drags to the edge
-and holds still generates no further events.
+and the frame dropped. A keyboard motion that scrolls the page mid-selection
+(`j` past the viewport edge under `v`/`V`) is exactly this case: the scroll
+frame and the selection-preview frame that follows it are two separate
+`interact` round trips, so the selection frame always resolves against the
+page's post-scroll position.
 
 **Preview history.** Following a local link retargets the preview
 (`controller.retarget`), and `preview.pinned` stops the preview following an
@@ -399,13 +401,17 @@ old document fail their staleness check rather than being applied to the new one
 
 **Lua-side dispatch.** `mouse.lua` installs its mappings only once a graphical
 (non-`cells`) session exists, saving and restoring whatever was mapped there
-before (`vim.fn.mapset`) across normal, insert and visual mode. **Invariant:**
-mouse capture is button-scoped, not window-scoped (`interaction.lua`'s
-module-local `captured` session) — once a press lands on preview content, the
-matching drag and release belong to that session even if the pointer leaves the
-window first. A plain click clears an active selection and never moves the source
-cursor: moving it fought drag-to-select, since dismissing a highlight by clicking
-elsewhere also relocated the editor cursor.
+before (`vim.fn.mapset`) across normal, insert and visual mode. It maps a plain
+click, its release, and Ctrl/Cmd-click link activation — there is no drag
+mapping, for any modifier, and no multi-click word/paragraph-select mapping:
+highlighting is exclusively a keyboard gesture (`interaction.visual_start`,
+triggered by `v`/`V` in `navigation.lua`). **Invariant:** mouse capture is
+still button-scoped, not window-scoped (`interaction.lua`'s module-local
+`captured` session) — once a press lands on preview content, its release
+belongs to that session even if the pointer leaves the window first, which
+matters because a release with no matching capture would otherwise leave
+`session.pointer` stuck "pressed". A plain click places the caret and clears
+an active selection, but never moves the source cursor.
 
 ## Lifecycle
 

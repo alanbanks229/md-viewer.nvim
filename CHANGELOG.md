@@ -3,6 +3,44 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc1] - 2026-08-21
+
+**Prerelease.** Highlighting is now exclusively a keyboard gesture. Mouse
+click-drag selection, double-click word-select, and triple-click
+paragraph-select are gone; `v`/`V` and the usual motion keys are the only way
+to highlight text in the preview. The mouse still places the caret on a plain
+click, still opens a link on Ctrl/Cmd-click, and still scrolls the preview
+with the wheel — none of that changed.
+
+The underlying request/overlay machinery is shared and unaffected: `v`/`V`
+selections still get the instant translucent overlay highlight where the
+terminal supports it (iTerm2, Kitty, Ghostty), the same settle frame, and the
+same copy behavior a drag used to produce.
+
+This removes and renames `interaction.*` config keys (below), which is a
+breaking change for anyone setting them explicitly — the reason this ships as
+a MINOR prerelease rather than a patch, per this project's own versioning
+policy while pre-1.0.
+
+### Removed
+
+- **Click-drag, double-click, and triple-click selection.** Dragging the mouse
+  over the preview no longer highlights anything; an ordinary drag now falls
+  through to Neovim's own (harmless, self-recovering) default instead, the
+  same way an unmapped gesture always has. `interaction.drag_threshold_cells`,
+  `interaction.double_click`, `interaction.autoscroll`,
+  `interaction.autoscroll_interval_ms`, `interaction.autoscroll_max_lines`,
+  `interaction.word_select`, and `interaction.paragraph_select` are gone —
+  setting any of them is now a configuration error rather than a silent
+  no-op.
+
+### Changed
+
+- **`interaction.fast_drag` renamed to `interaction.fast_preview`, and
+  `interaction.drag_debounce_ms` renamed to `interaction.preview_debounce_ms`.**
+  Both still control the same moving-frame pacing for a `v`/`V` selection; the
+  names no longer reference a mouse drag that no longer exists.
+
 ## [0.2.1] - 2026-08-13
 
 Renderers that outlived the Neovim which started them, and burned a full CPU
@@ -183,6 +221,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.1.1

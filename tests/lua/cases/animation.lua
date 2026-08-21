@@ -210,7 +210,7 @@ return function(t)
   -- Gating: every reason to leave the still frame alone, each with its name.
   -- -------------------------------------------------------------------------
   local cases = {
-    { field = "pointer", value = { pressed = true }, expect = "drag" },
+    { field = "pointer", value = { pressed = true }, expect = "click" },
     { field = "visual_active", value = true, expect = "visual" },
     { field = "occluded", value = true, expect = "occluded" },
     { field = "ui_suppressed", value = true, expect = "suppressed" },
@@ -228,7 +228,7 @@ return function(t)
   -- The pointer table outlives the press: release leaves it behind with
   -- pressed=false, and only interaction.forget removes it. The gate is the
   -- press -- a session that was ever clicked must keep animating.
-  session.pointer = { pressed = false, drag_started = true }
+  session.pointer = { pressed = false }
   t.eq(true, (animation._internal.permitted(session)), "a released pointer does not suppress animation")
   session.pointer = nil
 
@@ -253,12 +253,12 @@ return function(t)
   t.ok(#applied > painted_before, "visibility resumes with a repaint")
   t.eq(fetches_before, #requests, "not a refetch")
 
-  -- adopt applies the same gate: mid-drag interact frames must not churn the
-  -- stream the drag is fighting for.
+  -- adopt applies the same gate: mid-click interact frames must not churn the
+  -- stream a caret placement is fighting for.
   painted_before = #applied
   session.pointer = { pressed = true }
   animation.adopt(session)
-  t.eq(painted_before, #applied, "adopt paints nothing while a drag is in progress")
+  t.eq(painted_before, #applied, "adopt paints nothing while a click is in progress")
   t.ok(session.animation_suppressed_reason ~= nil, "and records why")
   session.pointer = nil
 

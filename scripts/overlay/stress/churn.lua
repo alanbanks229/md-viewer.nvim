@@ -1,6 +1,6 @@
 -- Overlay stress measurement. Runs under nvim inside a real terminal and drives
--- the production overlay path at drag rates, so the number that comes out is
--- the terminal's cost, not the renderer's. Run this alongside the geometry
+-- the production overlay path at selection-update rates, so the number that
+-- comes out is the terminal's cost, not the renderer's. Run this alongside the geometry
 -- harness before enabling `selection_overlay` for a profile: drawing correctly
 -- and drawing affordably are separate questions, and WezTerm answered them
 -- differently.
@@ -14,11 +14,12 @@
 -- is a question for a stopwatch -- and on WezTerm the answer is currently no,
 -- because of upstream wezterm/wezterm#7953 (fix proposed in #8035).
 --
--- Two workloads, because they bracket what a real drag does:
+-- Two workloads, because they bracket what a real vim-motion selection extension does:
 --
 --   * "diff"  -- 70 rectangles, two of which move each frame. This is what
---     dragging actually looks like: the selection grows at one end, so
---     `overlay_apply`'s rect-set diffing leaves almost everything untouched.
+--     extending a selection actually looks like: the selection grows at one
+--     end, so `overlay_apply`'s rect-set diffing leaves almost everything
+--     untouched.
 --   * "churn" -- 70 rectangles, all of which move each frame. The diff never
 --     hits. This is the worst case the encoding can produce and is not a shape
 --     any gesture makes, but it is the one that would fall over first.
@@ -181,7 +182,7 @@ local function run_workload(label, moving)
       )
       vim.fn.writefile(trace, out .. "/trace.txt")
     end
-    -- ~40fps, the rate a drag produces.
+    -- ~40fps, the rate a selection extension produces.
     vim.wait(25, function() return false end, 5)
   end
   raw.overlay_clear(set_id)
@@ -204,7 +205,7 @@ vim.fn.writefile({ "ready" }, out .. "/churn.ready")
 vim.wait(1500, function() return false end, 100)
 
 local only = vim.env.MD_VIEWER_OVERLAY_WORKLOAD
-if only ~= "churn" then run_workload("diff (2 of 70 rects move -- what a drag does)", 2) end
+if only ~= "churn" then run_workload("diff (2 of 70 rects move -- what a selection extension does)", 2) end
 if only ~= "diff" then run_workload("churn (70 of 70 rects move -- worst case)", RECTS) end
 
 vim.fn.writefile({

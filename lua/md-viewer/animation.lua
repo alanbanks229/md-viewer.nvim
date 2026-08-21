@@ -116,14 +116,17 @@ local function permitted(session)
   if session.loading or session.render_failed then return false, "the preview is not showing a frame" end
   if session.ui_suppressed then return false, "the UI is suppressed" end
   if session.occluded then return false, "the preview is occluded" end
-  -- A drag re-uploads the base and repaints tint rectangles at up to 40fps.
-  -- Interleaving animation writes fights it for the same stream and composites
-  -- over a base that is one frame stale. The gate is the *press*, not the
-  -- pointer table: releasing leaves the table alive (only interaction.forget
-  -- nils it), and a visual-mode synthetic pointer exists with pressed=false --
-  -- gating on the table's existence killed animation for the rest of the
-  -- session after one click.
-  if session.pointer and session.pointer.pressed then return false, "a drag is in progress" end
+  -- Covers the brief window between a mouse press and its release, during
+  -- which `M.caret_from_click`'s round trip is landing a new base frame. The
+  -- gate is the *press*, not the pointer table: releasing leaves the table
+  -- alive (only interaction.forget nils it), and a visual-mode synthetic
+  -- pointer exists with pressed=false -- gating on the table's existence
+  -- killed animation for the rest of the session after one click.
+  if session.pointer and session.pointer.pressed then return false, "a click is in progress" end
+  -- The one gate that actually matters for a sustained gesture: a keyboard
+  -- selection extension re-uploads the base and repaints tint rectangles at
+  -- up to 40fps, and interleaving animation writes fights it for the same
+  -- stream and composites over a base that is one frame stale.
   if session.visual_active then return false, "a visual selection is active" end
   return true
 end
@@ -560,7 +563,7 @@ tick = function()
   for session in pairs(sessions) do
     local ok, reason = permitted(session)
     -- Edges only. This runs every tick, so logging the state rather than the
-    -- change would fill the ring with one repeated line while a drag is held.
+    -- change would fill the ring with one repeated line while a selection is held.
     if reason ~= session.animation_suppressed_reason then
       debug_log.log("animation.suppression", { reason = reason or "resumed" })
     end
@@ -638,8 +641,8 @@ function M.adopt(session)
   reconcile(session)
   session.animation_strategy = next(session.animation_assets or {}) and strategy_for(session) or nil
   -- The same gate the tick applies. apply_image also lands interact frames --
-  -- mid-drag settle captures among them -- and painting those places a frame
-  -- the very next tick tears down, churning the exact stream the drag is
+  -- settle captures among them -- and painting those places a frame the very
+  -- next tick tears down, churning the exact stream a selection extension is
   -- fighting for.
   local ok, reason = permitted(session)
   session.animation_suppressed_reason = ok and nil or reason

@@ -71,8 +71,8 @@ local function resolve_double_buffer() return terminal.double_buffer() end
 ---the image with the lower id is considered to have the lower z-index". A base
 ---and an overlay sharing a layer are therefore ordered by which image was
 ---uploaded most recently -- and md-viewer re-uploads the base on every full
----frame, so the first settle capture after a drag puts the base permanently on
----top of the tint sheet. That is the 2026-08-08 Ghostty defect: exactly one
+---frame, so the first settle capture after a gesture puts the base permanently
+---on top of the tint sheet. That is the 2026-08-08 Ghostty defect: exactly one
 ---instant highlight per session, then the overlay drawn underneath every later
 ---one, with nothing reporting an error because every placement was accepted.
 ---Ghostty sorts placements by (z, image id) and rebuilds the list from an
@@ -348,7 +348,7 @@ local function build_show(image_bytes, placement)
 end
 
 -- ---------------------------------------------------------------------------
--- Selection overlay: the drag highlight as translucent rectangles
+-- Selection overlay: the selection highlight as translucent rectangles
 -- composited over the base image, so a moving selection frame ships a few
 -- hundred bytes of placement commands instead of a full re-captured PNG.
 --
@@ -840,8 +840,8 @@ end
 ---writes it back through a merging `set_cell`, so every repeat placement over
 ---a covered cell duplicates that cell's attachment list (wezterm/wezterm#7953).
 ---That is per placement, not per second -- a slower tick does not make it
----safe, only slower, and unlike a drag that lasts seconds a preview stays
----open for as long as the file does.
+---safe, only slower, and unlike a held selection extension that lasts seconds
+---a preview stays open for as long as the file does.
 function M.animation_supported()
   if config.get().render.animate ~= true then return false, "render.animate=false" end
   local ok, reason = placement_precondition()
@@ -1236,7 +1236,8 @@ end
 ---The write boundary is the point of this function. `M.move`, `overlay_apply`
 ---and `animation_apply` all pack their additions and deletions into a single
 ---write for the same documented reason, and this path -- the one that runs on
----every captured frame, so every frame of a drag -- was the one that did not:
+---every captured frame, so every frame of a selection gesture -- was the one
+---that did not:
 ---it sent the upload, the placements and the superseded image's deletion as
 ---three separate writes. The terminal is free to composite between them, and
 ---the state it composites in the middle has the old image already deleted and

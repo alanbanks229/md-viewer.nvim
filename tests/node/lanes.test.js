@@ -32,7 +32,8 @@ test("an interaction never cancels a render, a capture, or a settled frame", () 
   const captureSerial = lanes.laneSerial(DOC, "capture");
   const settleSerial = lanes.laneSerial(DOC, "settle");
 
-  // A drag: many interactions, arriving faster than anything can drain them.
+  // A burst: many interactions arriving at keyboard-repeat frequency, faster
+  // than anything can drain them.
   let newest;
   for (let index = 0; index < 200; index += 1) {
     newest = lanes.admit({ documentId: DOC, lane: "interact", requestId: 100 + index, contentRevision: "1:0" });
@@ -49,7 +50,7 @@ test("an interaction never cancels a render, a capture, or a settled frame", () 
   assert.equal(lanes.isStale(newest), null);
 });
 
-test("a newer drag point supersedes an older drag point", () => {
+test("a newer interaction point supersedes an older one", () => {
   const lanes = createLaneRegistry();
   render(lanes, 1, "1:0");
   const older = lanes.admit({ documentId: DOC, lane: "interact", requestId: 2, contentRevision: "1:0" });

@@ -11,8 +11,8 @@ protocol, used without a multiplexer. Kitty.app and the `kitty`/`kitten`
 executables are not required — any terminal speaking the protocol works.
 
 `:MdViewerHealth` reports what was detected and why. `:MdViewerDebug` adds the
-per-terminal capability detail, including whether the drag-highlight overlay is in
-use and the reason.
+per-terminal capability detail, including whether the selection-highlight overlay
+is in use and the reason.
 
 ## Status labels
 
@@ -50,11 +50,11 @@ the SSH section of [troubleshooting.md](troubleshooting.md).
 
 | Terminal | Status | Evidence |
 |---|---|---|
-| iTerm2 3.5+ | `Supported` for image rendering and the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-07. The rest of the feature set is `Protocol-compatible but unvalidated`. |
-| Kitty | `Supported` for the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
-| Ghostty 1.3.1 | `Supported` for the drag-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
+| iTerm2 3.5+ | `Supported` for image rendering and the selection-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-07. The rest of the feature set is `Protocol-compatible but unvalidated`. |
+| Kitty | `Supported` for the selection-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
+| Ghostty 1.3.1 | `Supported` for the selection-highlight overlay; client-driven animation rides the same machinery | Operator-driven, 2026-08-08, across repeated drags. |
 | WezTerm | `Supported` for image rendering; the overlay **and animation** are deliberately off | See below. |
-| Warp | `Experimental` for image rendering; the drag-highlight overlay and animation are off | Operator-driven, 2026-08-11, macOS. Launched, looked at, and two defects found — see below. |
+| Warp | `Experimental` for image rendering; the selection-highlight overlay and animation are off | Operator-driven, 2026-08-11, macOS. Launched, looked at, and two defects found — see below. |
 
 ## Animated images
 
@@ -77,7 +77,7 @@ alone: implementing placements says nothing about implementing the player.
 WezTerm's exclusion is the overlay's, and firmer: wezterm/wezterm#7953
 duplicates a covered cell's attachment list on every repeat placement — per
 placement, not per second, so a slower swap rate does not make it safe. A
-preview stays open far longer than a drag. Re-qualify with
+preview stays open far longer than a held selection extension. Re-qualify with
 `scripts/animation/` once a fixed build ships.
 
 Most of md-viewer's placement and occlusion behavior — the notification cut-out,
@@ -87,13 +87,14 @@ macOS Terminal.app does not implement the Kitty graphics protocol, has no profil
 and `image.backend = "auto"` correctly degrades to the `cells` text-only fallback
 there.
 
-## The drag-highlight overlay
+## The selection-highlight overlay
 
-While the mouse is down, a selection can be painted as translucent rectangles
-composited over the image already on screen, instead of re-photographing the
-headless page every frame. It is enabled only where a human confirmed it in a live
-terminal — today **iTerm2, Kitty, and Ghostty**. Everywhere else a drag keeps the
-full-frame capture path, which stays correct and is merely slower.
+While a `v`/`V` selection is being extended, it can be painted as translucent
+rectangles composited over the image already on screen, instead of
+re-photographing the headless page every frame. It is enabled only where a
+human confirmed it in a live terminal — today **iTerm2, Kitty, and Ghostty**.
+Everywhere else extending a selection keeps the full-frame capture path,
+which stays correct and is merely slower.
 
 `interaction.selection_overlay` (`"auto"` / `"on"` / `"off"`) overrides that.
 `"on"` is how you would qualify your own terminal; read the option's notes in
@@ -112,7 +113,7 @@ know what a pixel is worth on screen.
 
 ## WezTerm
 
-Image rendering works and is `Supported`. The drag-highlight overlay is
+Image rendering works and is `Supported`. The selection-highlight overlay is
 deliberately disabled, on cost rather than correctness: its geometry there is
 solved and was photographed correct on two builds, but sustained Kitty placement
 replacement grows WezTerm's resident memory without bound. That is an upstream
@@ -151,19 +152,25 @@ unit`. Nothing about this is Warp-specific — a 1x display left on the default
 **A Neovim Visual selection over the preview blanked the image.** Half ours. The
 way *into* Visual mode was ours: Warp reports a modified left-drag that
 md-viewer had not mapped, so it fell through to Vim's default, which is a
-blockwise Visual selection. That is fixed by mapping every modifier combination
-of every mouse gesture. But the blanking itself is Warp: this backend places at
-`z = -3`, and the Kitty specification puts only `z < INT32_MIN/2` beneath a
-non-default cell background, so a Visual highlight should composite *over* the
-image rather than replace it. md-viewer no longer depends on that being right —
-it keeps Neovim out of Visual mode over the surface, and paints the highlight
-with `blend = 100` for the frame before the guard fires.
+blockwise Visual selection. Mapping every modifier combination of every mouse
+gesture closed that specific gap at the time. Since then, click-and-drag
+highlighting was removed from the plugin outright, so an ordinary drag now
+falls through to Vim's default the same way an unusual modifier combination
+once did — there is no drag mapping left to catch it. `controller.lua`'s
+`ModeChanged` guard is what recovers from that today: one `<Esc>` per tick,
+automatically, regardless of terminal. But the blanking itself is Warp: this
+backend places at `z = -3`, and the Kitty specification puts only
+`z < INT32_MIN/2` beneath a non-default cell background, so a Visual highlight
+should composite *over* the image rather than replace it. md-viewer no longer
+depends on that being right — it keeps Neovim out of Visual mode over the
+surface, and paints the highlight with `blend = 100` for the frame before the
+guard fires.
 
-**The drag-highlight overlay was qualified here and failed.** Forced on with
-`interaction.selection_overlay = "on"`, every overlay rectangle drew far larger
-than the crop asked for: a one-glyph caret block covered most of the preview,
-anchored at its own placement cell and running to the edge of the split.
-Photographed twice on 2026-08-11.
+**The selection-highlight overlay was qualified here and failed.** Forced on
+with `interaction.selection_overlay = "on"`, every overlay rectangle drew far
+larger than the crop asked for: a one-glyph caret block covered most of the
+preview, anchored at its own placement cell and running to the edge of the
+split. Photographed twice on 2026-08-11.
 
 An overlay rectangle is a crop taken out of a viewport-sized tint sheet, placed
 with no `c`/`r` keys so it draws at natural pixel size and positioned with the
@@ -173,15 +180,16 @@ instead of cropping one shared sheet — would mean an upload per rectangle per
 frame, which is the entire cost the overlay exists to avoid, so this is off
 rather than re-encoded the way WezTerm's sub-cell offset was.
 
-If you have set `interaction.selection_overlay = "on"` and the caret or the drag
-highlight appears as a large grey block, that is this. Remove the override.
+If you have set `interaction.selection_overlay = "on"` and the caret or the
+selection highlight appears as a large grey block, that is this. Remove the
+override.
 
 Three upstream issues bound what is possible here, all open as of 2026-08-11:
 
 - [warp#7789](https://github.com/warpdotdev/Warp/issues/7789) — Warp ignores
   Kitty placement ids, so re-placing the same image id and placement id does not
-  replace the previous placement. This is why the drag-highlight overlay stays
-  off: overlay rectangles are replaced in place on every frame, and without
+  replace the previous placement. This is why the selection-highlight overlay
+  stays off: overlay rectangles are replaced in place on every frame, and without
   placement-id semantics each replacement needs an explicit delete first, which
   is exactly the blank frame the overlay exists to avoid.
 - [warp#12058](https://github.com/warpdotdev/Warp/issues/12058) — Kitty graphics

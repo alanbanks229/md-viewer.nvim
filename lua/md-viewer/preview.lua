@@ -290,8 +290,9 @@ end
 ---Re-asserted before every frame, because a frame is also the moment the
 ---geometry may have changed -- but it preserves the caret while doing so.
 ---`nvim_buf_set_lines` clamps the cursor to line 1 when it shrinks the buffer,
----and this runs on every render, scroll, drag frame, find step and cached
----restore; a caret that jumped home on each of those would not be a caret.
+---and this runs on every render, scroll, selection-preview frame, find step
+---and cached restore; a caret that jumped home on each of those would not be
+---a caret.
 function M.reset_surface(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
   if session.backend and session.backend.name == "cells" then return end

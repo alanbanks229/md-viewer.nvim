@@ -52,9 +52,9 @@ whether a real click lands on the thing under the pointer, or how a terminal
 behaves when the plugin exits.
 
 Three harnesses under `scripts/overlay/` cover part of that gap — an end-to-end
-drag regression against a real browser, a pixel-asserting geometry rig, and an
-overlay stress rig. [../scripts/README.md](../scripts/README.md) says what each
-proves and when to run it. The drag regression needs no display:
+vim-motion selection regression against a real browser, a pixel-asserting
+geometry rig, and an overlay stress rig. [../scripts/README.md](../scripts/README.md)
+says what each proves and when to run it. The selection regression needs no display:
 
 ```sh
 nvim --headless -u NONE -i NONE -l scripts/overlay/live/drive.lua
@@ -115,18 +115,16 @@ not tell you.
 
 | Check | How | Expect |
 |---|---|---|
-| Drag-to-select | Drag across a paragraph, both directions | Text highlights as you move |
-| Multi-paragraph | Drag across a block boundary | The selection spans both |
-| Word / paragraph | Double-click; triple-click | The word, then the enclosing block |
+| No drag mapping | Click and drag across a paragraph | Nothing highlights. Neovim may briefly show `V-BLOCK`/`-- VISUAL --` (its own unmapped-drag fallback) and recover on its own within a tick — see docs/troubleshooting.md |
 | Click-to-deselect | Click once with a selection active | The highlight clears. The **source cursor does not move** — under any gesture |
+| Click places the caret | Click on a word | The caret snaps to the nearest real character there |
 | Copy | `y` or `:MdViewerCopy` | Unnamed register, and the system clipboard where available. Nothing is copied automatically |
 | Search | `/` or `:MdViewerFind`, then `n`/`N`, then `/` dismissed with Escape | Matches highlight, stepping wraps, dismissing the empty prompt removes them |
-| Drag past an edge | Start a drag mid-document, move below the preview, and **hold still** | Keeps scrolling and extending, stopping at the end of the document. Holding still is the point: `<LeftDrag>` fires only while the mouse moves, so this is what proves the scroll is timer-driven. Repeat upward |
-| Release after a long auto-scroll | Let go a page or more from where the drag began, then `y` | The copied text starts where the drag started, not where the anchor's original screen position now points |
 | Visual mode | `v`, `3j`, `y`; then `V`, `j`; then `v`, `3j`, `o`, `k` | The highlight follows; the winbar shows `-- VISUAL --` / `-- VISUAL LINE --`; `o` swaps ends; `y` copies and leaves |
+| Multi-paragraph | `v`, motions across a block boundary | The selection spans both |
+| Word / block | `v`/`V` plus `w`/`b`/`e`, `{`/`}` | Extends by word, then by block, matching the motion's own semantics |
 | Past the viewport | `v`, then `G` | Scrolls and keeps extending to the end of the document |
 | Escape precedence | `v`, motion, `<Esc>`, `<Esc>` | First leaves visual mode keeping the highlight; second clears it |
-| Matches the mouse | Select the same span by drag and by `v` + motions, copy each | Identical text in the register |
 | Multibyte columns | Ctrl/Cmd-click `café`, `日本語`, an emoji in `provenance-comprehensive.md` | `:MdViewerDebug` reports an exact byte column landing inside the line it names |
 | External link | Ctrl/Cmd-click an `http(s)` link | Opens in the system browser, or says why it did not |
 | Local Markdown link | Ctrl/Cmd-click a relative `.md` link | Opens in Neovim in the source window; the preview follows |
@@ -135,7 +133,7 @@ not tell you.
 | Small target | Ctrl/Cmd-click a one-word link at the start of a line, at the default font size | Activates. This is the case that used to be unreachable at some cell alignments |
 | History | `H`/`:MdViewerBack`, `L`/`:MdViewerForward`, then `<C-o>` | Preview and source move together; `<C-o>` brings the preview back on its own |
 
-### Drag-highlight overlay
+### Selection-highlight overlay
 
 Only where `selection_overlay` resolves on — confirm with `:MdViewerDebug`'s
 `overlay` row under `-- Raw Graphics (kitty_raw) --`, which reads `on, layer …`
@@ -143,10 +141,10 @@ or `off -- <reason>`.
 
 | Check | How | Expect |
 |---|---|---|
-| Instant highlight | Drag a selection | Appears as you move, without the page visibly re-rendering |
-| Drag three times | Release, drag elsewhere, release, drag again | Every drag behaves like the first. A terminal can draw the overlay correctly once and then silently draw it *underneath* the preview, with every placement still reporting success — one correct drag proves nothing |
-| No stale highlight | Select, release, drag a new selection elsewhere | The first highlight is gone for the whole second drag |
-| Settled frame | Release the mouse | The highlight becomes the browser's own paint, without visibly shifting or changing colour |
+| Instant highlight | `v`, then extend with a motion | Appears as you move, without the page visibly re-rendering |
+| Three gestures in a row | `v`, extend, `y`; repeat twice more, each starting elsewhere | Every gesture behaves like the first. A terminal can draw the overlay correctly once and then silently draw it *underneath* the preview, with every placement still reporting success — one correct gesture proves nothing |
+| No stale highlight | Select, `y`, start a new selection elsewhere | The first highlight is gone for the whole second gesture |
+| Settled frame | `y`, or `<Esc>` to leave visual mode | The highlight becomes the browser's own paint, without visibly shifting or changing colour |
 
 ### Placement, occlusion, and lifecycle
 

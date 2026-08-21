@@ -159,8 +159,9 @@ return function(t)
     local displayed = 0
     require("md-viewer.controller").display_interact_result = function() displayed = displayed + 1 end
 
-    interaction.on_press(session, { screenrow = 1, screencol = 1, winid = session.preview_win }, { x = 5, y = 5 }, 1)
-    interaction.on_drag(session, { screenrow = 1, screencol = 5, winid = session.preview_win })
+    session.caret_rect = { x = 5, y = 5, width = 10, height = 20 }
+    session.caret_scroll_y = session.applied_scroll_y or 0
+    interaction.visual_start(session, false)
     vim.wait(500, function() return pending_callback ~= nil end, 10)
     t.ok(pending_callback ~= nil, "sanity: a selection_preview request is in flight")
 

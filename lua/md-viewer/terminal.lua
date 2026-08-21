@@ -23,7 +23,7 @@ local function default_env() return vim.fn.environ() end
 -- verified reason to differ has somewhere to say so. `image.double_buffer`
 -- in user config always overrides it.
 
--- `selection_overlay` is the per-profile gate for the drag-highlight
+-- `selection_overlay` is the per-profile gate for the selection-highlight
 -- overlay (translucent natural-size Kitty placements composited over the base
 -- image): alpha compositing image-over-image, crop placements without c/r,
 -- sub-cell X/Y offsets, z ordering between images, 40fps placement churn, and
@@ -34,9 +34,9 @@ local function default_env() return vim.fn.environ() end
 -- The flag says whether md-viewer sends that workload. `validation` says how
 -- much is actually known, and the two grades are not the same thing:
 --   * iTerm2, Ghostty and Kitty were each driven by hand in a real terminal
---     and watched across repeated drags -- the case that matters, since the
---     defect these were enabled after gave one correct highlight and then
---     none.
+--     and watched across repeated selection extensions -- the case that
+--     matters, since the defect these were enabled after gave one correct
+--     highlight and then none.
 --   * Kitty was enabled a few hours ahead of that confirmation, on the
 --     strength of being the protocol's own reference implementation. That was
 --     a decision about what to send, and the `validation` string said
@@ -180,7 +180,8 @@ M.profiles = {
     -- at 40fps, on both builds, while md-viewer's own live-placement count
     -- stays flat at four. A control that places the base image and then sends
     -- nothing holds steady at 173 MB for the same duration, so it is the
-    -- placement churn and not the environment. A drag would exhaust a laptop's
+    -- placement churn and not the environment. Holding a selection extension
+    -- (repeated `j`/`l` under `v`/`V`) at speed would exhaust a laptop's
     -- memory in seconds; this measurement cost one, twice.
     --
     -- The cause is upstream and now identified: WezTerm's `assign_image_to_cells`
@@ -200,8 +201,9 @@ M.profiles = {
     -- Off for the same upstream defect, and more firmly. #7953 duplicates a
     -- cell's attachment list on every repeat placement over it -- that is per
     -- placement, not per second, so a slower tick does not make it safe, only
-    -- slower. A drag ends; a preview stays open. Re-qualify with
-    -- scripts/overlay/geometry and scripts/overlay/stress before flipping it.
+    -- slower. A held selection extension ends; a preview stays open. Re-qualify
+    -- with scripts/overlay/geometry and scripts/overlay/stress before flipping
+    -- it.
     animation = {
       mode = "off",
       evidence = "not validated for animation: wezterm/wezterm#7953 grows the terminal's memory on "
@@ -320,7 +322,7 @@ M.profiles = {
         kind = "note",
         text = "Warp ignores Kitty placement ids (warpdotdev/Warp#7789): re-placing the same image id "
           .. "and placement id does not replace the previous placement, so an image can only be "
-          .. "replaced by deleting it first. The drag-highlight overlay is off there for that reason.",
+          .. "replaced by deleting it first. The selection-highlight overlay is off there for that reason.",
       },
       {
         kind = "warn",

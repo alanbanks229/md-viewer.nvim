@@ -105,8 +105,8 @@ end
 ---different route. A terminal font-size change does the same thing more slowly.
 ---
 ---The ioctl costs 0.16 us. The overlay path calls this a handful of times per
----drag frame, so the cache was saving microseconds and risking the one number
----in this plugin that has to be right.
+---selection frame, so the cache was saving microseconds and risking the one
+---number in this plugin that has to be right.
 function M.measure()
   if unavailable then return nil, M.reason end
 

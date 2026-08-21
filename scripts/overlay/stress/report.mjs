@@ -48,13 +48,14 @@ if (cpu.length) {
   );
 }
 
-// The number that decides it: a drag frame has to fit inside the ~25 ms a 40fps
-// drag allows, and has to beat the full-frame path it replaces.
-const drag = run.samples.find((s) => s.workload.startsWith("diff"));
-if (drag) {
+// The number that decides it: a selection-update frame has to fit inside the
+// ~25 ms a 40fps selection extension allows, and has to beat the full-frame
+// path it replaces.
+const selectionUpdate = run.samples.find((s) => s.workload.startsWith("diff"));
+if (selectionUpdate) {
   console.log(
-    `\n  a real drag frame: ${Math.round(drag.bytes_per_frame)} B and ${drag.ms_mean.toFixed(2)} ms ` +
-      `(budget is ~25 ms per frame at 40fps)`
+    `\n  a real selection-update frame: ${Math.round(selectionUpdate.bytes_per_frame)} B and ` +
+      `${selectionUpdate.ms_mean.toFixed(2)} ms (budget is ~25 ms per frame at 40fps)`
   );
 }
 console.log("");

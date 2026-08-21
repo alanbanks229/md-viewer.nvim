@@ -32,7 +32,7 @@ return function(t)
   session.find_active_index = 1
   session.interaction_request_count = 6
   session.interaction_stale_count = 2
-  session.coalesced_drag_events = 3
+  session.coalesced_preview_events = 3
 
   -- Round-trips to the renderer (a cold Chromium launch on a loaded CI runner
   -- is not fast) so the Chromium path and launch result are answered for by
@@ -95,7 +95,7 @@ return function(t)
   t.ok(buffer_text:match("find_match_count = 4"), "snapshot reports the active search's match count")
   t.ok(buffer_text:match("interaction_request_count = 6"), "snapshot reports the interaction request count")
   t.ok(buffer_text:match("interaction_stale_count = 2"), "snapshot reports the stale-interaction count")
-  t.ok(buffer_text:match("coalesced_drag_events = 3"), "snapshot reports the coalesced-drag-event count")
+  t.ok(buffer_text:match("coalesced_preview_events = 3"), "snapshot reports the coalesced-preview-event count")
 
   vim.cmd("bwipeout!")
   controller.close(source)

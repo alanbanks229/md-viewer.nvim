@@ -2,8 +2,9 @@
 //
 // This module replaces the single `latestByDocument` map that both `render` and
 // `capture` used to write, which meant any newer request for a document
-// cancelled any older one. Once interactions arrive at drag frequency that is
-// fatal: a stream of pointer updates would starve legitimate renders.
+// cancelled any older one. Once interactions arrive at keyboard-repeat
+// frequency that is fatal: a stream of selection-preview updates would starve
+// legitimate renders.
 //
 // The rule set, in one place:
 //

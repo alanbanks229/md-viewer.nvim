@@ -27,12 +27,10 @@ import {
   hitTestInPage,
   moveCaretInPage,
   normalizeHit,
-  paragraphSelectInPage,
   readSelectionTextInPage,
   resolveSelectionInPage,
   setFindInPage,
   stepFindInPage,
-  wordSelectInPage,
 } from "./interact.js";
 
 const MAX_DOCUMENT_FRAMES = 64;
@@ -594,7 +592,7 @@ export class BrowserRenderer {
   /// Evaluate the in-page function for `action`. One dispatch point so the
   /// document-isolation guard, the ensureDocumentActive() call, and the
   /// same-queued-operation capture below apply uniformly to every action --
-  /// hit-testing and all nine interaction actions alike -- rather than each
+  /// hit-testing and all seven interaction actions alike -- rather than each
   /// action reimplementing that plumbing.
   async evaluateAction(action, envelope, cached) {
     const token = this.active.token;
@@ -614,18 +612,6 @@ export class BrowserRenderer {
         cellWidthPx: envelope.cellWidthPx,
         granularity: envelope.granularity, direction: envelope.direction, count: envelope.motionCount,
         desiredX: envelope.desiredX, caretIndex: envelope.caretIndex,
-      });
-    }
-    if (action === "word_select") {
-      return this.page.evaluate(wordSelectInPage, {
-        token, x: envelope.coordinates.x, y: envelope.coordinates.y,
-        cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
-      });
-    }
-    if (action === "paragraph_select") {
-      return this.page.evaluate(paragraphSelectInPage, {
-        token, x: envelope.coordinates.x, y: envelope.coordinates.y,
-        cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
       });
     }
     if (action === "find_set") {
@@ -656,12 +642,7 @@ export class BrowserRenderer {
       const hit = normalizeHit(raw, cached?.sourceMap);
       return { result: buildActionResult(action, hit), hit };
     }
-    if (
-      action === "selection_preview"
-      || action === "selection_commit"
-      || action === "word_select"
-      || action === "paragraph_select"
-    ) {
+    if (action === "selection_preview" || action === "selection_commit") {
       return { result: buildSelectionResult(raw, cached?.sourceMap), hit: null };
     }
     if (action === "selection_text") return { result: buildSelectionTextResult(raw), hit: null };
@@ -710,7 +691,7 @@ export class BrowserRenderer {
     // rectangle measured the same way, so it needs the same tint constant and
     // the same tint sheet.
     if (result.kind === "selection" || result.kind === "caret") {
-      // The one constant the Lua drag overlay may paint with. Sourced from the
+      // The one constant the Lua selection overlay may paint with. Sourced from the
       // rendered document's own theme so Lua never hardcodes a color that the
       // settle frame's ::selection rule could drift away from. The caret is
       // drawn through the same path from its own, heavier constant.

@@ -114,13 +114,8 @@ M.defaults = {
   interaction = {
     enabled = true,
     links = true,
-    drag_threshold_cells = 1,
-    -- Gates installing the <2-LeftMouse> mapping at all. Word-select hangs
-    -- off that same binding; this lets it be turned off without inventing new
-    -- plumbing.
-    double_click = true,
     selection = true,
-    -- 0 fires each drag-preview frame immediately, using only the
+    -- 0 fires each selection-preview frame immediately, using only the
     -- one-in-flight flag for backpressure -- the same shape
     -- controller.schedule_scroll uses for its own moving frame. A trailing
     -- debounce ahead of a pipeline that already has backpressure only adds
@@ -128,40 +123,23 @@ M.defaults = {
     -- starve dispatch outright (it resets on every call rather than firing on
     -- a schedule). Kept as a knob rather than removed: set above 0 to
     -- deliberately throttle preview requests.
-    drag_debounce_ms = 0,
+    preview_debounce_ms = 0,
     -- `v`/`V` in the preview: extend a real DOM selection from the caret with
     -- ordinary motions, instead of Neovim's own visual mode, which over a
     -- surface of blank cells would only ever select spaces.
     visual = true,
-    -- Keep scrolling the document while a drag holds past the top or bottom
-    -- edge of the preview, so a selection can run past what is on screen the
-    -- way it does on a web page. Off, a drag that leaves the window freezes at
-    -- the edge -- `locate_for_drag` clamps the point to the placement, and the
-    -- placement is the visible document.
-    autoscroll = true,
-    -- How often an edge-scrolling drag takes a step. Each step is one interact
-    -- round trip that scrolls, extends the selection and captures the frame
-    -- together, so this is a floor on latency, not a fixed frame rate: a step
-    -- slower than the interval simply paces the next one.
-    autoscroll_interval_ms = 60,
-    -- Ceiling on lines scrolled per step. Speed otherwise scales with how far
-    -- past the edge the pointer is; without a cap, flinging the pointer to the
-    -- far corner of the screen would skip whole pages between frames.
-    autoscroll_max_lines = 6,
-    fast_drag = false,
+    fast_preview = false,
     -- **Do not set "on" for WezTerm.** It draws correctly there and exhausts
-    -- your memory within seconds of a drag -- an upstream defect.
-    -- The measurements and the issue numbers are in terminal.lua's
-    -- wezterm profile and docs/terminal-support.md.
+    -- your memory within seconds of a held-down selection extension -- an
+    -- upstream defect. The measurements and the issue numbers are in
+    -- terminal.lua's wezterm profile and docs/terminal-support.md.
     selection_overlay = "auto",
     settle_ms = 120,
     copy = true,
     -- Disabled by default: neither VS Code nor a browser copies on every
-    -- drag, and silently overwriting the user's clipboard on each selection
-    -- would be hostile.
+    -- selection change, and silently overwriting the user's clipboard on each
+    -- extension would be hostile.
     copy_on_select = false,
-    word_select = true,
-    paragraph_select = true,
     find = true,
     -- How many "markdown preview documents" this plugin remembers.
     -- Bounded rather than unbounded: each entry pins a buffer number and a
@@ -341,27 +319,13 @@ local function validate(cfg)
   end
   assert(type(cfg.interaction.enabled) == "boolean", "md-viewer: interaction.enabled must be boolean")
   assert(type(cfg.interaction.links) == "boolean", "md-viewer: interaction.links must be boolean")
-  assert(type(cfg.interaction.double_click) == "boolean", "md-viewer: interaction.double_click must be boolean")
-  assert(
-    type(cfg.interaction.drag_threshold_cells) == "number" and cfg.interaction.drag_threshold_cells >= 0,
-    "md-viewer: interaction.drag_threshold_cells must be non-negative"
-  )
   assert(type(cfg.interaction.selection) == "boolean", "md-viewer: interaction.selection must be boolean")
   assert(
-    type(cfg.interaction.drag_debounce_ms) == "number" and cfg.interaction.drag_debounce_ms >= 0,
-    "md-viewer: interaction.drag_debounce_ms must be non-negative"
+    type(cfg.interaction.preview_debounce_ms) == "number" and cfg.interaction.preview_debounce_ms >= 0,
+    "md-viewer: interaction.preview_debounce_ms must be non-negative"
   )
-  assert(type(cfg.interaction.fast_drag) == "boolean", "md-viewer: interaction.fast_drag must be boolean")
+  assert(type(cfg.interaction.fast_preview) == "boolean", "md-viewer: interaction.fast_preview must be boolean")
   assert(type(cfg.interaction.visual) == "boolean", "md-viewer: interaction.visual must be boolean")
-  assert(type(cfg.interaction.autoscroll) == "boolean", "md-viewer: interaction.autoscroll must be boolean")
-  assert(
-    type(cfg.interaction.autoscroll_interval_ms) == "number" and cfg.interaction.autoscroll_interval_ms >= 0,
-    "md-viewer: interaction.autoscroll_interval_ms must be non-negative"
-  )
-  assert(
-    type(cfg.interaction.autoscroll_max_lines) == "number" and cfg.interaction.autoscroll_max_lines > 0,
-    "md-viewer: interaction.autoscroll_max_lines must be positive"
-  )
   assert(
     cfg.interaction.selection_overlay == "auto"
       or cfg.interaction.selection_overlay == "on"
@@ -374,8 +338,6 @@ local function validate(cfg)
   )
   assert(type(cfg.interaction.copy) == "boolean", "md-viewer: interaction.copy must be boolean")
   assert(type(cfg.interaction.copy_on_select) == "boolean", "md-viewer: interaction.copy_on_select must be boolean")
-  assert(type(cfg.interaction.word_select) == "boolean", "md-viewer: interaction.word_select must be boolean")
-  assert(type(cfg.interaction.paragraph_select) == "boolean", "md-viewer: interaction.paragraph_select must be boolean")
   assert(type(cfg.interaction.find) == "boolean", "md-viewer: interaction.find must be boolean")
   assert(
     type(cfg.interaction.history_limit) == "number"

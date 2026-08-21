@@ -32,32 +32,23 @@ return function(t)
   }
 
   local modes = { "n", "i", "v" }
-  -- Every modifier combination of every left-button gesture is mapped, not just
-  -- the bare ones. An unmapped combination does not fall through harmlessly:
-  -- Vim's default for <M-LeftDrag> is a *blockwise Visual selection*, and a
+  -- Every modifier combination of press and release is mapped, not just the
+  -- bare ones. An unmapped combination does not fall through harmlessly:
+  -- Vim's default for an unmapped mouse chord can be Visual-mode entry, and a
   -- terminal whose modifier encoding differs from the ones this plugin was
-  -- developed against emits one for an ordinary drag. That was reported from
+  -- developed against emits one for an ordinary click. That was reported from
   -- Warp as the preview blinking to a blank pane with a blue rectangle -- the
   -- rectangle being Neovim's own V-BLOCK highlight over the surface cells.
   local gesture_lhs = {
     "<LeftMouse>",
-    "<LeftDrag>",
     "<LeftRelease>",
     "<C-LeftMouse>",
     "<D-LeftMouse>",
-    "<2-LeftMouse>",
-    "<M-LeftDrag>",
     "<M-LeftMouse>",
     "<M-LeftRelease>",
     "<S-LeftMouse>",
-    "<S-LeftDrag>",
-    "<C-LeftDrag>",
     "<C-LeftRelease>",
-    "<D-LeftDrag>",
-    "<C-M-S-LeftDrag>",
-    "<2-LeftDrag>",
-    "<3-LeftRelease>",
-    "<4-LeftMouse>",
+    "<D-LeftRelease>",
     -- Buttons with no preview meaning are swallowed rather than left to Vim:
     -- right-drag is its other route into Visual mode and middle click pastes.
     "<RightMouse>",
@@ -78,6 +69,30 @@ return function(t)
     end
   end
 
+  -- Highlighting is only ever done through vim-like motions now: there is no
+  -- drag mapping left to install, for any modifier, and no multi-click
+  -- word/paragraph-select mapping either. An unmapped <LeftDrag> falls
+  -- through to Vim's own default (Visual-mode entry over blank cells), which
+  -- `controller.lua`'s ModeChanged guard recovers from -- but md-viewer
+  -- itself must never install one.
+  for _, mode in ipairs(modes) do
+    for _, lhs in ipairs({
+      "<LeftDrag>",
+      "<M-LeftDrag>",
+      "<S-LeftDrag>",
+      "<C-LeftDrag>",
+      "<D-LeftDrag>",
+      "<2-LeftMouse>",
+      "<3-LeftMouse>",
+      "<4-LeftMouse>",
+      "<2-LeftDrag>",
+      "<2-LeftRelease>",
+      "<3-LeftRelease>",
+    }) do
+      t.ok(vim.tbl_isempty(vim.fn.maparg(lhs, mode, false, true)), ("%s is never mapped in mode %s"):format(lhs, mode))
+    end
+  end
+
   -- Falls through unmodified when there is no session under the pointer at
   -- all (e.g. a click over some other window). `maparg(..., true)` exposes
   -- the Lua callback directly for a mapping installed via vim.keymap.set, so
@@ -89,7 +104,7 @@ return function(t)
   -- The fall-through contract covers the added combinations too: outside a
   -- preview, <S-LeftMouse> still means Vim's `*`-search and <RightMouse> still
   -- opens the popup menu. Only over the surface do they change meaning.
-  for _, lhs in ipairs({ "<S-LeftMouse>", "<M-LeftDrag>", "<RightMouse>", "<MiddleMouse>" }) do
+  for _, lhs in ipairs({ "<S-LeftMouse>", "<M-LeftMouse>", "<RightMouse>", "<MiddleMouse>" }) do
     local mapping = vim.fn.maparg(lhs, "n", false, true)
     t.eq(lhs, mapping.callback(), ("%s outside a preview falls through to the original key"):format(lhs))
   end
@@ -99,8 +114,8 @@ return function(t)
   -- overwrite the first and leave `saved` holding a restore entry for a mapping
   -- that no longer exists, so only the <M-...> spelling is ever installed.
   t.eq(
-    vim.api.nvim_replace_termcodes("<A-LeftDrag>", true, true, true),
-    vim.api.nvim_replace_termcodes("<M-LeftDrag>", true, true, true),
+    vim.api.nvim_replace_termcodes("<A-LeftMouse>", true, true, true),
+    vim.api.nvim_replace_termcodes("<M-LeftMouse>", true, true, true),
     "<A-...> and <M-...> are the same key, which is why only one spelling is installed"
   )
 

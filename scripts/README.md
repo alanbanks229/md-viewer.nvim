@@ -7,7 +7,7 @@ covered without one — run those first.
 
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
-fully prove: the **drag-highlight overlay** (`overlay/`) and **animated
+fully prove: the **selection-highlight overlay** (`overlay/`) and **animated
 images** (`animation/`). Two others need neither a display nor a browser:
 `scroll-scale/` needs a *slow link*, and `remote-images/` needs a *network with
 no direct route out* -- the two pieces of hardware no test machine has.
@@ -21,12 +21,14 @@ nvim --headless -u NONE -i NONE -l scripts/overlay/live/drive.lua
 ```
 
 Spawns a second Neovim over RPC, opens `tests/fixtures/kitchen-sink.md`, and
-drives a real drag through `nvim_input_mouse` against the real renderer and real
-Chromium. 16 assertions covering the whole lifecycle: moving frames opt out of
-capture and cost hundreds of bytes rather than a megabyte, the tint sheet is
-uploaded once and not per frame, the release settles with a true device-scale
-capture, and every overlay placement is deleted afterwards. Exits non-zero on
-failure.
+drives a real `v`/motions preview visual selection through `nvim_input`
+against the real renderer and real Chromium -- the keyboard equivalent of
+what used to be a real mouse drag, since highlighting only happens through
+vim-like motions now. 16 assertions covering the whole lifecycle: moving
+frames opt out of capture and cost hundreds of bytes rather than a megabyte,
+the tint sheet is uploaded once and not per frame, `y` settles with a true
+device-scale capture, and every overlay placement is deleted afterwards.
+Exits non-zero on failure.
 
 Needs `npm ci --prefix renderer` and a Chrome/Chromium install. No display
 required. **Run this after touching `interaction.lua`, `controller.lua`, or
@@ -68,8 +70,8 @@ scripts/overlay/stress/run.sh /Applications/WezTerm.app [label] [seconds]
 ```
 
 Drives `overlay_apply` at ~40 fps under two workloads — `diff` (70 rectangles,
-2 moving, what a real drag looks like) and `churn` (all 70 moving, the worst
-case the encoding can produce) — while sampling the terminal process's own CPU
+2 moving, what a real selection extension looks like) and `churn` (all 70
+moving, the worst case the encoding can produce) — while sampling the terminal process's own CPU
 and resident size once a second. Aborts if resident size crosses
 `MD_VIEWER_OVERLAY_RSS_CEILING_KB` (default 2 GB).
 
@@ -197,7 +199,7 @@ nvim -u scripts/animation/manual.lua tmp/animation/fixtures/fixture.md
 4. **Resize**: resize the split while everything plays. Frames re-materialize
    at the new size (a brief still is fine, a wrongly-scaled animation is not),
    and `:MdViewerDebug`'s asset list settles back to `playing`/frame counts.
-5. **Suppression**: drag a selection, open the cmdline, trigger completion --
+5. **Suppression**: extend a selection with `v`/`V`, open the cmdline, trigger completion --
    animation pauses (still frame stays) and resumes afterwards.
 6. **The large recording**: expect thinning (choppier, same total duration)
    and a few seconds to first motion; the still frame shows throughout.

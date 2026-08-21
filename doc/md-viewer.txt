@@ -35,10 +35,11 @@ raster image over a read-only Neovim preview split.
 The preview is a browser-rendered PNG surface, not native terminal text and
 not an embedded webview. Mouse and keyboard interaction over it
 (|md-viewer-interaction|) is forwarded to the persistent Chromium DOM, which
-performs hit-testing, selection, search, and link resolution before the
-viewport is recaptured. That gives browser-like behavior on a raster surface.
-Source text remains a normal, separately editable and selectable Neovim buffer
-throughout.
+performs hit-testing, search, and link resolution before the viewport is
+recaptured. Text highlighting works the same way, but only through vim-like
+motions (|md-viewer-visual|) -- there is no click-and-drag selection. That
+gives browser-like behavior on a raster surface. Source text remains a normal,
+separately editable and selectable Neovim buffer throughout.
 
 The renderer opens no external browser window, starts no HTTP server, and
 listens on no port.
@@ -175,24 +176,16 @@ security ~
 interaction ~
     enabled                      true       the whole gesture surface
     links                        true       CTRL/CMD-click activates one
-    drag_threshold_cells         1          below this a drag is a click
-    double_click                 true       gates the <2-LeftMouse> mapping
-    selection                    true       drag-to-select
-    drag_debounce_ms             0          0 dispatches every frame
+    selection                    true       v/V selection (|md-viewer-visual|)
+    preview_debounce_ms          0          0 dispatches every frame
     visual                       true       v, V and o (|md-viewer-visual|)
-    autoscroll                   true       a drag held past the edge keeps
-                                            scrolling
-    autoscroll_interval_ms       60         one step of that scroll
-    autoscroll_max_lines         6          > 0; ceiling on lines per step
-    fast_drag                    false      soften the frame mid-drag
+    fast_preview                 false      soften the frame mid-selection
     selection_overlay            "auto"     auto, on, off
                                             (|md-viewer-terminals|)
     settle_ms                    120        idle before the settled frame
     copy                         true       y and :MdViewerCopy
     copy_on_select               false      off: nothing reaches the
                                             clipboard unasked
-    word_select                  true       double-click
-    paragraph_select             true       triple-click
     find                         true       / and :MdViewerFind
     history_limit                32         documents kept per preview
                                             (|md-viewer-history|)
@@ -403,7 +396,7 @@ Very long or large recordings are thinned to a fixed pixel budget -- duration
 preserved, motion choppier -- rather than allowed to grow the terminal's
 memory without bound, and a source past the hard caps stays a still image.
 
-Animation is suspended while a drag or visual selection is in progress, while
+Animation is suspended while a click or a visual selection is in progress, while
 a floating window occludes the preview, and while the completion popup is up.
 :MdViewerDebug reports the strategy, the layer stack, per-animation state
 and, when nothing is moving, `animation_suppressed_reason`.
@@ -444,7 +437,7 @@ COMMANDS                                                  *md-viewer-commands*
 
         Copying is always manual unless `interaction.copy_on_select` is set,
         which is off by default: silently overwriting the clipboard on every
-        drag would be hostile.
+        selection change would be hostile.
 
                                                                *:MdViewerFind*
 :MdViewerFind [query]
@@ -569,6 +562,8 @@ blank cells, so a real visual selection over it would select spaces. Neovim
 stays in Normal mode -- which is what keeps every motion mapping and every
 mouse gesture working unchanged -- and the winbar shows "-- VISUAL --" since
 Neovim's own indicator has nothing to report. `interaction.visual` gates it.
+This is the only way to highlight text in the preview -- there is no
+click-and-drag selection.
 
     v      Start a selection anchored at the caret; any motion extends it
     V      The same, line-wise
@@ -576,48 +571,32 @@ Neovim's own indicator has nothing to report. `interaction.visual` gates it.
     y      Copy the selection and leave visual mode
     <Esc>  Leave visual mode, keeping the highlight. A second <Esc> clears it
 
-It drives the same selection the mouse drives -- one anchor point and one
-caret point resolved to one real browser selection -- so it inherits the
-instant overlay highlight, the settle frame, copy, and exact source-position
-reporting. Extending past the bottom of the window scrolls, as dragging past
-it does, so `vG` selects to the end of the document.
+Each motion resolves an anchor point and a caret point to one real browser
+selection, so it gets an instant overlay highlight where the terminal
+supports one, a sharp settle frame, copy, and exact source-position
+reporting. Extending past the bottom of the window scrolls, so `vG` selects
+to the end of the document.
 
 =============================================================================
 MOUSE INTERACTION                                      *md-viewer-interaction*
 
-Every gesture below is resolved against the live Chromium DOM -- see
-|md-viewer|. Each is gated by its own `interaction.*` flag, so one can be
-disabled without touching the others.
+The mouse never highlights text -- only |md-viewer-visual| does that. Every
+gesture below is resolved against the live Chromium DOM -- see |md-viewer|.
+Each is gated by its own `interaction.*` flag, so one can be disabled without
+touching the others.
 
-    Click and drag          Selects the dragged text (a real DOM selection),
-                            matching browser and VS Code drag-select
-                            (`interaction.selection`)
-    Drag past an edge       Keeps scrolling the document and keeps
-                            extending the selection, so a selection can
-                            run past what is on screen. Hold still past
-                            the edge and it keeps going, stopping at the
-                            start or end of the document. Speed grows
-                            with distance past the edge, capped by
-                            `interaction.autoscroll_max_lines`. Set
-                            `interaction.autoscroll` to false to keep the
-                            old behaviour of freezing at the edge.
-    Plain click             Clears an active selection; never moves the
-                            source cursor, whether or not anything was
-                            selected
-    Double-click            Selects the word under the pointer
-                            (`interaction.word_select`)
-    Triple-click            Selects the enclosing paragraph/block
-                            (`interaction.paragraph_select`)
+    Plain click             Places the caret, snapped to the nearest real
+                            character; clears an active selection; never
+                            moves the source cursor, whether or not
+                            anything was selected
     CTRL-click / CMD-click  Activates a link under the pointer: opens
                             http(s)/mailto externally, opens an in-root
                             local file, or scrolls to a same-document
                             fragment. Refuses an unsafe scheme or a
                             document-root escape, with a notification. Does
                             nothing over non-link text. (`interaction.links`)
-
-While a drag is moving the highlight is painted as translucent overlay
-rectangles where that is enabled and as a full captured frame everywhere else
-(|md-viewer-terminals|). Releasing always lands a real browser-rendered frame.
+    Scroll wheel            Scrolls the preview when the pointer is over
+                            its split (`sync.mouse_scroll`)
 
 A local Markdown link opens in Neovim, in the source window, and the preview
 follows it; CTRL-O returns. Files Neovim has no filetype for, and PDFs, still
@@ -666,20 +645,21 @@ reopens its file.
 TERMINAL SUPPORT                                         *md-viewer-terminals*
 
 md-viewer.nvim recognizes iTerm2, Kitty, WezTerm, Ghostty, and Warp by
-Kitty-graphics-protocol compatibility. The instant drag highlight -- the
+Kitty-graphics-protocol compatibility. The instant selection highlight -- the
 selection drawn as translucent overlay rectangles rather than re-photographing
 the page each frame -- is enabled only on terminals where an operator drove it
 by hand and watched it: iTerm2, Ghostty and Kitty, with
-docs/terminal-support.md holding the current list. Everywhere else the drag
+docs/terminal-support.md holding the current list. Everywhere else a selection
 falls back to full captured frames, which is always correct and merely slower.
 
 It is off on WezTerm for cost rather than correctness, pending an upstream
 fix. Do not force it on there; docs/terminal-support.md has the measurement
 and the upstream issue.
 
-Warp is Experimental. Image rendering works. The drag highlight is off because
-Warp ignores Kitty placement ids and so cannot replace an overlay rectangle in
-place; animation is off on the profile's own conservative default. A stray
+Warp is Experimental. Image rendering works. The selection highlight is off
+because Warp ignores Kitty placement ids and so cannot replace an overlay
+rectangle in place; animation is off on the profile's own conservative
+default. A stray
 Neovim Visual selection over the preview can blank the image there, which
 md-viewer works around by keeping Neovim out of its own visual mode over the
 surface. See docs/terminal-support.md.
@@ -783,7 +763,7 @@ npm ci installation may contact the configured npm registry.
 
 Mouse and keyboard interaction adds no new attack surface: every gesture
 resolves against the same already-sanitized document (nothing re-parses
-Markdown or re-touches the filesystem on a click or a drag), local-file link
+Markdown or re-touches the filesystem on a click or a selection), local-file link
 activation re-checks the document root the same way image loading does
 (symlinks included), and search and selection text is always handled as plain
 text, never interpreted as markup.

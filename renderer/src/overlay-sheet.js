@@ -1,6 +1,6 @@
 // Solid-color RGBA PNG generation for the selection overlay.
 //
-// The Lua side draws the drag highlight by placing crops of one translucent
+// The Lua side draws the selection highlight by placing crops of one translucent
 // "tint sheet" through the Kitty graphics protocol -- a moving frame then
 // transmits placement commands only, no pixels. Lua cannot practically
 // produce a compressed viewport-sized PNG itself (a raw stored stream would

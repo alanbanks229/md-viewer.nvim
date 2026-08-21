@@ -30,7 +30,7 @@ function M.update(image_id, image_bytes, placement)
   -- the terminal profile", and `not nil` is `true` -- so reading it directly
   -- took the delete-then-create branch for every unconfigured user, which is a
   -- blank frame on every render. It showed up as the preview blinking during a
-  -- drag, where a frame arrives every few milliseconds.
+  -- fast selection extension, where a frame arrives every few milliseconds.
   if image_id and not terminal.double_buffer() then
     M.clear(image_id)
     return M.show(image_bytes, placement)

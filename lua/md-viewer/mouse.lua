@@ -43,10 +43,10 @@ end
 
 ---Mouse capture is button-scoped (see interaction.lua): a press/activate
 ---gesture resolves its session from whatever preview is under the pointer,
----but a drag/release belongs to whichever session captured the press, even
+---but a release belongs to whichever session captured the press, even
 ---if the pointer has since left that window entirely.
 local function gesture_session(mouse, gesture)
-  if gesture.kind == "drag" or gesture.kind == "release" then return interaction.captured_session() end
+  if gesture.kind == "release" then return interaction.captured_session() end
   if not (mouse and mouse.winid and mouse.winid ~= 0) then return nil end
   return state.from_preview_win(mouse.winid)
 end
@@ -79,9 +79,9 @@ local function install_gesture(mode, gesture)
     -- Press/activate require a resolvable point up front, matching the
     -- excluded/occluded-rectangle rule in policy: nothing is dispatched
     -- there, and the keystroke falls through to normal Neovim behaviour.
-    -- Drag/release for an already-captured session always dispatch, even
+    -- Release for an already-captured session always dispatches, even
     -- with no point, so pointer state cannot get stuck "pressed".
-    local dispatchable = point ~= nil or gesture.kind == "drag" or gesture.kind == "release"
+    local dispatchable = point ~= nil or gesture.kind == "release"
     if not dispatchable then return gesture.lhs end
     vim.schedule(function() interaction.dispatch(session, gesture, mouse, point) end)
     return "<Ignore>"
@@ -106,19 +106,20 @@ local MODIFIERS = { "", "S-", "C-", "M-", "C-S-", "M-S-", "C-M-", "C-M-S-", "D-"
 ---Left-button gestures, for every modifier combination.
 ---
 ---Unmapped modifier combinations do not fall through harmlessly: Vim's default
----for `<M-LeftDrag>` is a *blockwise Visual selection*, and a terminal whose
+---for `<M-LeftMouse>` (and friends) is Visual-mode entry, and a terminal whose
 ---modifier encoding differs from the ones this plugin was developed against
----will emit one for an ordinary drag. That was reported from Warp as the
+---will emit one for an ordinary click. That was reported from Warp as the
 ---preview blinking to a blank pane with a blue rectangle over it -- the
 ---rectangle being Neovim's own V-BLOCK highlight, painted over the surface
----cells the image is composited through.
+---cells the image is composited through. Mapping every combination explicitly
+---is what keeps that fallback from ever triggering.
 ---
----Drag and release route to the ordinary drag/release dispatch rather than to
----`<Ignore>`, because the modifier state can change *during* a gesture: press
----the Alt key mid-drag and the terminal starts reporting `<M-LeftDrag>` for the
----same unbroken physical drag. Ignoring those would freeze the selection where
----it stood. `gesture_session` already resolves drag and release from the
----captured session, so they need no point and no window under the pointer.
+---Release routes to the ordinary release dispatch rather than to `<Ignore>`,
+---because the modifier state can change *during* a gesture: press the Alt key
+---mid-click and the terminal starts reporting `<M-LeftRelease>` for the same
+---unbroken physical click. Ignoring that would strand the pointer state
+---"pressed" forever. `gesture_session` already resolves release from the
+---captured session, so it needs no point and no window under the pointer.
 local function left_gestures(list)
   for _, mod in ipairs(MODIFIERS) do
     -- Ctrl and Cmd click keep their established meaning: follow the link under
@@ -128,36 +129,19 @@ local function left_gestures(list)
     elseif mod == "D-" then
       list[#list + 1] = { lhs = "<D-LeftMouse>", kind = "activate", modifiers = { meta = true } }
     else
-      list[#list + 1] = { lhs = ("<%sLeftMouse>"):format(mod), kind = "press", click_count = 1 }
+      list[#list + 1] = { lhs = ("<%sLeftMouse>"):format(mod), kind = "press" }
     end
-    list[#list + 1] = { lhs = ("<%sLeftDrag>"):format(mod), kind = "drag" }
     list[#list + 1] = { lhs = ("<%sLeftRelease>"):format(mod), kind = "release" }
   end
 end
 
 local function gestures()
-  local cfg = config.get().interaction
   local list = {}
   left_gestures(list)
   -- Buttons with no preview meaning, swallowed over the preview only.
   for _, button in ipairs({ "Right", "Middle" }) do
     for _, suffix in ipairs({ "Mouse", "Drag", "Release" }) do
       list[#list + 1] = { lhs = ("<%s%s>"):format(button, suffix), kind = "suppress" }
-    end
-  end
-  if cfg.double_click then
-    list[#list + 1] = { lhs = "<2-LeftMouse>", kind = "press", click_count = 2 }
-    -- Vim's click-count escalation requires <2-LeftMouse> to already be
-    -- mapped for <3-LeftMouse> to ever fire, so triple click rides the same
-    -- install gate rather than inventing a second one.
-    list[#list + 1] = { lhs = "<3-LeftMouse>", kind = "press", click_count = 3 }
-    -- A fourth click restarts the cycle, matching what a browser does with the
-    -- same gesture, and a drag begun from any multi-click reports its own
-    -- click count -- `<2-LeftDrag>` and friends were falling through to Vim.
-    list[#list + 1] = { lhs = "<4-LeftMouse>", kind = "press", click_count = 1 }
-    for count = 2, 4 do
-      list[#list + 1] = { lhs = ("<%d-LeftDrag>"):format(count), kind = "drag" }
-      list[#list + 1] = { lhs = ("<%d-LeftRelease>"):format(count), kind = "release" }
     end
   end
   return vim.tbl_filter(function(gesture) return parseable(gesture.lhs) end, list)

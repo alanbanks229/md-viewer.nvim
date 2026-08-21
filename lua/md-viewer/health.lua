@@ -152,8 +152,8 @@ function M.collect(renderer_result, renderer_error)
     backend_decision = backend.decision,
     raw_graphics_zindex = backend.kitty_raw.zindex,
     raw_graphics_zindex_source = backend.kitty_raw.zindex_source,
-    -- Whether a drag paints its highlight as overlay rectangles (a few hundred
-    -- bytes per frame) or by re-photographing the page, and why.
+    -- Whether a selection paints its highlight as overlay rectangles (a few
+    -- hundred bytes per frame) or by re-photographing the page, and why.
     raw_graphics_overlay_supported = backend.kitty_raw.overlay_supported,
     raw_graphics_overlay_reason = backend.kitty_raw.overlay_reason,
     -- The overlay is on *against* the active profile's own judgement. That is a
@@ -644,7 +644,7 @@ local function build_warnings(report, status, status_reason)
   -- an override they turned on.
   if report.raw_graphics_overlay_forced then
     warnings[#warnings + 1] = {
-      text = ("interaction.selection_overlay=on is forcing the drag overlay onto %s, which is not validated for it"):format(
+      text = ("interaction.selection_overlay=on is forcing the selection overlay onto %s, which is not validated for it"):format(
         report.terminal_profile or "this terminal"
       ),
       severity = "warn",

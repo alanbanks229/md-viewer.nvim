@@ -70,9 +70,6 @@ function M.create(source_buf, source_win)
     selection_render_pending = false,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
-    -- Re-arms itself for as long as a drag holds past the preview's top or
-    -- bottom edge; see md-viewer.interaction's update_drag_autoscroll.
-    drag_autoscroll_timer = nil,
     -- Documents this preview has followed links through, oldest first, and
     -- where in that list it currently sits. Entry 1 is the document the
     -- preview was opened on; `M.retarget` appends, and md-viewer.controller's
@@ -85,11 +82,11 @@ function M.create(source_buf, source_win)
     find_active_index = nil,
     -- Diagnostics-only counters (:MdViewerDebug): every `interact` request sent
     -- for this session, how many of those came back STALE_INTERACTION (lost a
-    -- race against a newer request), and how many in-flight drag updates were
-    -- superseded by a newer pointer position before they were ever sent.
+    -- race against a newer request), and how many in-flight selection-preview
+    -- updates were superseded by a newer point before they were ever sent.
     interaction_request_count = 0,
     interaction_stale_count = 0,
-    coalesced_drag_events = 0,
+    coalesced_preview_events = 0,
   }
   sessions[source_buf] = session
   return session

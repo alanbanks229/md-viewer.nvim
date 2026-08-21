@@ -13,7 +13,7 @@ export const CARET_STRATEGIES = Object.freeze(["auto", "caret-position", "caret-
 // `mutatesVisibleState` is the one-round-trip rule: an action that changes what
 // the user sees must produce its screenshot inside the same queued operation, so
 // Lua never has to issue a follow-up capture. `requiresAnchor` marks the two selection
-// actions that need a second point (the drag's fixed start) alongside
+// actions that need a second point (the anchor's fixed start) alongside
 // `coordinates`, which is the focus/moving point for those two. `requiresQuery`
 // marks the one action that needs literal search text.
 export const INTERACT_ACTIONS = Object.freeze({
@@ -30,8 +30,6 @@ export const INTERACT_ACTIONS = Object.freeze({
   // selection -- which rules out `Selection.modify`, the obvious primitive,
   // since it can only move a caret by moving the selection's own focus.
   caret_move: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: true }),
-  word_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
-  paragraph_select: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: true }),
   find_set: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true }),
   find_next: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
   find_previous: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
@@ -48,7 +46,7 @@ export const TEXT_PREVIEW_LIMIT = 120;
 
 // The selection background each theme's ::selection rule paints, as one
 // straight-alpha src-over constant. This is the single value the browser's
-// settle frame and the Lua-drawn drag overlay must share: if they disagree,
+// settle frame and the Lua-drawn selection overlay must share: if they disagree,
 // the highlight visibly changes color the instant the mouse is released.
 // Must stay equal to --selection-bg in renderer/assets/preview-dark.css /
 // preview-light.css; tests/node/selection-tint.test.js measures the captured
@@ -218,7 +216,7 @@ export function validateEnvelope(params) {
     };
   }
 
-  // The drag's fixed start point, alongside `coordinates` as the moving/focus
+  // The anchor's fixed start point, alongside `coordinates` as the moving/focus
   // point. Sent explicitly on every request rather than remembered server-side,
   // so a selection request is fully self-describing and replayable on its own.
   let anchorCoordinates = null;
@@ -342,7 +340,7 @@ export function validateEnvelope(params) {
 
   // Ask for the solid tint-sheet PNG the Lua overlay places crops of. Sent
   // only until kitty_raw's upload cache is warm, so the ~KB payload is not on
-  // every drag frame. Dimensions are device pixels (the base image's own).
+  // every selection frame. Dimensions are device pixels (the base image's own).
   let overlaySheet = null;
   if (envelope.overlaySheet !== undefined && envelope.overlaySheet !== null) {
     const sheet = envelope.overlaySheet;
@@ -404,7 +402,7 @@ export function validateEnvelope(params) {
     // An action that mutates visible state always captures. Anything else may
     // opt in, which is how the same-queued-operation capture path is exercised
     // for actions that mutate visible state. `capture: false` is the
-    // Overlay opt-out: a moving drag-preview frame displays the selection as a
+    // Overlay opt-out: a moving selection-preview frame displays the selection as a
     // Lua-drawn overlay built from this same operation's rect geometry, so no
     // screenshot exists to take. The one-round-trip rule -- Lua never issues a
     // follow-up capture for a frame it displays -- still holds: the one queued
@@ -710,11 +708,10 @@ export function buildActionResult(action, hit) {
 /// applies a real Chromium Selection; the browser paints the highlight itself.
 ///
 /// `resolveSelectionPoint`/`applySelectionRange` are declared *inside* this
-/// function (and duplicated again inside `wordSelectInPage` below) rather than
-/// as siblings: `page.evaluate(fn, arg)` serializes only `fn.toString()` and
-/// runs it standalone in the page, with no access to sibling module-scope
-/// functions -- a top-level helper here would be a ReferenceError at
-/// evaluation time, not a lint warning.
+/// function rather than as siblings: `page.evaluate(fn, arg)` serializes only
+/// `fn.toString()` and runs it standalone in the page, with no access to
+/// sibling module-scope functions -- a top-level helper here would be a
+/// ReferenceError at evaluation time, not a lint warning.
 export function resolveSelectionInPage(input) {
   const token = input.token;
   const root = document.documentElement;
@@ -756,23 +753,23 @@ export function resolveSelectionInPage(input) {
     // Slide a point that landed on no block at all onto the edge of the block
     // nearest it, and report where on that block it now sits.
     //
-    // This is what makes a drag that runs past the edge of the content behave
-    // the way it does in a browser or any native text editor: the selection
-    // keeps extending toward the nearest text instead of freezing. It matters
-    // far more than "the odd click in the margin" suggests, because
-    // `interaction.locate_for_drag` clamps an off-window drag to the *edge
-    // column* of the placement -- and the edge column is page padding. The
-    // page carries 26px of side padding (renderer/assets/preview.css) while a
-    // terminal cell is ~10-20 CSS px, so the leftmost one or two columns of
-    // the preview hold no block, `probe` above found nothing, and every
-    // request from a drag that left the window came back `focus_miss` and was
-    // silently dropped by interaction.lua's `result.ok ~= false` check. That
-    // is measured against a real Chromium, not reasoned: focus x=10.26 on an
-    // 800px viewport returned focus_miss while x=20 did not.
+    // This is what makes an endpoint that lands with no block under it resolve
+    // to real content instead of the request being dropped. The one production
+    // caller today is `V` (linewise visual selection): `interaction.visual_start`
+    // anchors it at x=0, the page's own left edge, and sends that raw margin
+    // point with no clamping of its own -- this function is the only thing that
+    // turns it into an addressable position. It matters far more than "the odd
+    // point in the margin" suggests: the page carries 26px of side padding
+    // (renderer/assets/preview.css) while a terminal cell is ~10-20 CSS px, so
+    // the leftmost one or two columns of the preview hold no block, `probe`
+    // above found nothing, and a raw margin point would come back `focus_miss`
+    // and be silently dropped by interaction.lua's `result.ok ~= false` check.
+    // That is measured against a real Chromium, not reasoned: focus x=10.26 on
+    // an 800px viewport returned focus_miss while x=20 did not.
     //
-    // Vertical distance dominates the ranking, and heavily: a drag level with
-    // the third paragraph but out in the left margin must stay on the third
-    // paragraph, not jump to whichever block happens to be nearer in raw
+    // Vertical distance dominates the ranking, and heavily: an anchor level
+    // with the third paragraph but out in the left margin must stay on the
+    // third paragraph, not jump to whichever block happens to be nearer in raw
     // Euclidean terms. Blocks scrolled out of view are considered only when
     // nothing is visible at all -- scroll-past-end padding can leave a
     // viewport holding no block, and freezing there would be the same bug.
@@ -927,9 +924,10 @@ export function resolveSelectionInPage(input) {
   // focusOffset]`, preferring the direction-aware primitive.
   //
   // `setBaseAndExtent` tracks anchor/focus direction natively -- Chromium
-  // paints a reverse (right-to-left or bottom-to-top) drag correctly
-  // regardless of which endpoint is passed first, which is what makes reverse
-  // dragging work without any extra logic here. The Range fallback is
+  // paints a reverse (right-to-left or bottom-to-top) selection correctly
+  // regardless of which endpoint is passed first, which is what makes
+  // extending a selection backward work without any extra logic here. The
+  // Range fallback is
   // realistically unreachable against the bundled Chromium (setBaseAndExtent
   // has shipped since Chrome 27); it exists only so a future engine swap
   // fails safely instead of throwing.
@@ -1014,7 +1012,7 @@ export function resolveSelectionInPage(input) {
   // refuses it outright (its first line bounds-checks against innerHeight), so
   // the whole frame returns anchor_miss and interaction.lua's `result.ok ~=
   // false` check silently drops it -- the highlight freezes at the edge. That
-  // is the drag auto-scroll case and the keyboard selection case alike.
+  // is what happens when a keyboard motion scrolls the page mid-extension.
   //
   // Reuse the live DOM anchor instead: it is precisely the endpoint
   // setBaseAndExtent recorded on the previous frame, expressed as a node rather
@@ -1033,7 +1031,7 @@ export function resolveSelectionInPage(input) {
 
   applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
 
-  // Selection geometry for the drag overlay: viewport-relative CSS
+  // Selection geometry for the selection overlay: viewport-relative CSS
   // rectangles matching the shape the browser itself paints. Read here, from
   // the same applied Range in the same evaluate that produces `text`, so the
   // picture on screen and the string a copy would produce can never come from
@@ -1491,7 +1489,7 @@ export function moveCaretInPage(input) {
       }
       return { wordStarts, wordEnds };
     }
-    // Same fallback shape wordSelectInPage uses when Intl.Segmenter is absent.
+    // Fallback for engines without Intl.Segmenter.
     const isWordChar = (ch) => typeof ch === "string" && /[\p{L}\p{N}_]/u.test(ch);
     let index = 0;
     while (index < text.length) {
@@ -1721,368 +1719,6 @@ export function moveCaretInPage(input) {
   };
 }
 
-/// `word_select`. Resolves one caret point, then expands to word boundaries via
-/// `Intl.Segmenter` (word granularity) over the containing text node, falling
-/// back to a Unicode word-character scan if `Intl.Segmenter` is unavailable in
-/// the bundled Chromium.
-export function wordSelectInPage(input) {
-  const token = input.token;
-  const root = document.documentElement;
-  if (root.getAttribute("data-md-viewer-doc") !== token) {
-    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
-  }
-
-  // Duplicated from resolveSelectionInPage's own nested copy -- see that
-  // function's comment for why this cannot be a shared top-level helper.
-  function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
-    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
-    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
-    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
-
-    let element = null;
-    let block = null;
-    let pointX = x;
-    for (const dx of offsets) {
-      const px = x + dx;
-      if (!(px >= 0 && px < window.innerWidth)) continue;
-      const candidate = document.elementFromPoint(px, y);
-      if (!candidate) continue;
-      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
-      if (!candidateBlock) continue;
-      element = candidate;
-      block = candidateBlock;
-      pointX = px;
-      break;
-    }
-    if (!block) return null;
-
-    let caretNode = null;
-    let caretOffset = null;
-    const wantPosition = strategy === "auto" || strategy === "caret-position";
-    const wantRange = strategy === "auto" || strategy === "caret-range";
-    if (wantPosition && typeof document.caretPositionFromPoint === "function") {
-      const position = document.caretPositionFromPoint(pointX, y);
-      if (position && position.offsetNode) {
-        caretNode = position.offsetNode;
-        caretOffset = position.offset;
-      }
-    }
-    if (caretNode === null && wantRange && typeof document.caretRangeFromPoint === "function") {
-      const range = document.caretRangeFromPoint(pointX, y);
-      if (range && range.startContainer) {
-        caretNode = range.startContainer;
-        caretOffset = range.startOffset;
-      }
-    }
-    if (caretNode !== null && !block.contains(caretNode)) {
-      caretNode = null;
-      caretOffset = null;
-    }
-
-    if (caretNode === null) {
-      const rect = element.getBoundingClientRect();
-      const preferEnd = pointX >= rect.left + rect.width / 2;
-      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
-      let first = null;
-      let last = null;
-      let node = walker.nextNode();
-      while (node !== null) {
-        if (node.nodeValue.length > 0) {
-          if (first === null) first = node;
-          last = node;
-        }
-        node = walker.nextNode();
-      }
-      if (preferEnd && last !== null) {
-        caretNode = last;
-        caretOffset = last.nodeValue.length;
-      } else if (first !== null) {
-        caretNode = first;
-        caretOffset = 0;
-      } else {
-        caretNode = block;
-        caretOffset = 0;
-      }
-    }
-
-    let runElement = null;
-    const caretElement = caretNode.nodeType === 3 ? caretNode.parentElement : caretNode;
-    runElement = caretElement === null ? null : caretElement.closest("[data-md-source-id]");
-    const elementRun = element.closest("[data-md-source-id]");
-    if (elementRun !== null && (runElement === null || runElement.contains(elementRun))) runElement = elementRun;
-    if (runElement !== null && !block.contains(runElement)) runElement = null;
-
-    let runOffset = null;
-    let runLength = null;
-    if (runElement !== null) {
-      runLength = (runElement.textContent || "").length;
-      if (caretNode.nodeType === 3 && runElement.contains(caretNode)) {
-        const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
-        let consumed = 0;
-        let node = walker.nextNode();
-        while (node !== null) {
-          if (node === caretNode) {
-            runOffset = consumed + caretOffset;
-            break;
-          }
-          consumed += node.nodeValue.length;
-          node = walker.nextNode();
-        }
-      }
-    }
-
-    return {
-      node: caretNode,
-      offset: caretOffset,
-      block: {
-        sourceStart: Number(block.getAttribute("data-source-start")),
-        sourceEnd: Number(block.getAttribute("data-source-end")),
-        sourceId: block.getAttribute("data-md-source-id"),
-        tagName: block.tagName,
-      },
-      inline: runElement === null ? null : {
-        sourceId: runElement.getAttribute("data-md-source-id"),
-        offset: runOffset,
-        textLength: runLength,
-      },
-    };
-  }
-
-  // Duplicated from resolveSelectionInPage's own nested copy.
-  function applySelectionRange(selection, anchorNode, anchorOffset, focusNode, focusOffset) {
-    if (typeof selection.setBaseAndExtent === "function") {
-      selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
-      return;
-    }
-    let focusFirst = false;
-    if (anchorNode === focusNode) {
-      focusFirst = focusOffset < anchorOffset;
-    } else {
-      const relation = anchorNode.compareDocumentPosition(focusNode);
-      focusFirst = (relation & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
-    }
-    const range = document.createRange();
-    if (focusFirst) {
-      range.setStart(focusNode, focusOffset);
-      range.setEnd(anchorNode, anchorOffset);
-    } else {
-      range.setStart(anchorNode, anchorOffset);
-      range.setEnd(focusNode, focusOffset);
-    }
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  const point = resolveSelectionPoint(input.x, input.y, input.cellWidthPx, input.strategy);
-  if (!point || point.node.nodeType !== 3) return { ok: false, reason: "no_word" };
-
-  const caretNode = point.node;
-  const text = caretNode.nodeValue;
-  const caretOffset = Math.max(0, Math.min(point.offset, text.length));
-  let start = caretOffset;
-  let end = caretOffset;
-
-  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
-    const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
-    for (const segment of segmenter.segment(text)) {
-      const segStart = segment.index;
-      const segEnd = segStart + segment.segment.length;
-      const inside = caretOffset >= segStart && caretOffset < segEnd;
-      const atEnd = caretOffset === segEnd && segEnd === text.length;
-      if ((inside || atEnd) && segment.isWordLike) {
-        start = segStart;
-        end = segEnd;
-        break;
-      }
-      if (inside || atEnd) break; // landed on non-word text (whitespace, punctuation): no word here
-    }
-  } else {
-    const isWordChar = (ch) => typeof ch === "string" && /[\p{L}\p{N}_]/u.test(ch);
-    if (isWordChar(text[caretOffset])) {
-      start = caretOffset;
-      while (start > 0 && isWordChar(text[start - 1])) start -= 1;
-      end = caretOffset;
-      while (end < text.length && isWordChar(text[end])) end += 1;
-    } else if (caretOffset > 0 && isWordChar(text[caretOffset - 1])) {
-      end = caretOffset;
-      start = end;
-      while (start > 0 && isWordChar(text[start - 1])) start -= 1;
-    }
-  }
-  if (start === end) return { ok: false, reason: "no_word" };
-
-  const selection = window.getSelection();
-  applySelectionRange(selection, caretNode, start, caretNode, end);
-
-  let inline = null;
-  // caretNode was already validated as inside the resolved block by
-  // resolveSelectionPoint, so any data-md-source-id ancestor between it and the
-  // block boundary is inside the block too -- no further containment check
-  // needed here.
-  const runElement = caretNode.parentElement === null ? null : caretNode.parentElement.closest("[data-md-source-id]");
-  if (runElement !== null) {
-    const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
-    let consumed = 0;
-    let base = null;
-    let node = walker.nextNode();
-    while (node !== null) {
-      if (node === caretNode) {
-        base = consumed;
-        break;
-      }
-      consumed += node.nodeValue.length;
-      node = walker.nextNode();
-    }
-    if (base !== null) {
-      inline = {
-        sourceId: runElement.getAttribute("data-md-source-id"),
-        anchorOffset: base + start,
-        focusOffset: base + end,
-        textLength: (runElement.textContent || "").length,
-      };
-    }
-  }
-
-  return {
-    ok: true,
-    text: selection.toString(),
-    collapsed: selection.isCollapsed,
-    anchor: {
-      block: point.block,
-      inline: inline ? { sourceId: inline.sourceId, offset: inline.anchorOffset, textLength: inline.textLength } : null,
-    },
-    focus: {
-      block: point.block,
-      inline: inline ? { sourceId: inline.sourceId, offset: inline.focusOffset, textLength: inline.textLength } : null,
-    },
-  };
-}
-
-/// `paragraph_select` (triple click). Resolves one caret point the same way
-/// `wordSelectInPage` does, then selects the *entire* enclosing block's text
-/// (its first through last non-empty text node) instead of expanding to word
-/// boundaries -- the browser/VS-Code "triple click selects the paragraph"
-/// behaviour.
-export function paragraphSelectInPage(input) {
-  const token = input.token;
-  const root = document.documentElement;
-  if (root.getAttribute("data-md-viewer-doc") !== token) {
-    return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
-  }
-
-  // Duplicated from resolveSelectionInPage's own nested copy -- see that
-  // function's comment for why this cannot be a shared top-level helper.
-  function resolveSelectionPoint(x, y, cellWidthPx, strategy) {
-    if (!(x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight)) return null;
-    const cellWidth = cellWidthPx > 0 ? cellWidthPx : 0;
-    const offsets = cellWidth > 0 ? [0, 0.25, -0.25, 0.45, -0.45].map((f) => f * cellWidth) : [0];
-
-    let element = null;
-    let block = null;
-    let pointX = x;
-    for (const dx of offsets) {
-      const px = x + dx;
-      if (!(px >= 0 && px < window.innerWidth)) continue;
-      const candidate = document.elementFromPoint(px, y);
-      if (!candidate) continue;
-      const candidateBlock = candidate.closest("[data-source-start][data-source-end]");
-      if (!candidateBlock) continue;
-      element = candidate;
-      block = candidateBlock;
-      pointX = px;
-      break;
-    }
-    if (!block) return null;
-    return { block, element, pointX };
-  }
-
-  // Duplicated from resolveSelectionInPage's own nested copy.
-  function applySelectionRange(selection, anchorNode, anchorOffset, focusNode, focusOffset) {
-    if (typeof selection.setBaseAndExtent === "function") {
-      selection.setBaseAndExtent(anchorNode, anchorOffset, focusNode, focusOffset);
-      return;
-    }
-    let focusFirst = false;
-    if (anchorNode === focusNode) {
-      focusFirst = focusOffset < anchorOffset;
-    } else {
-      const relation = anchorNode.compareDocumentPosition(focusNode);
-      focusFirst = (relation & Node.DOCUMENT_POSITION_PRECEDING) !== 0;
-    }
-    const range = document.createRange();
-    if (focusFirst) {
-      range.setStart(focusNode, focusOffset);
-      range.setEnd(anchorNode, anchorOffset);
-    } else {
-      range.setStart(anchorNode, anchorOffset);
-      range.setEnd(focusNode, focusOffset);
-    }
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  // Locates the nearest `[data-md-source-id]` run ancestor for `node` and the
-  // text offset of `node`/`offset` within that run's own text content -- the
-  // same provenance lookup wordSelectInPage does for its single caret node,
-  // generalized here for both the paragraph's first and last text node.
-  function resolveInline(node, offset) {
-    const runElement = node.parentElement === null ? null : node.parentElement.closest("[data-md-source-id]");
-    if (runElement === null) return null;
-    const walker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
-    let consumed = 0;
-    let found = false;
-    let current = walker.nextNode();
-    while (current !== null) {
-      if (current === node) {
-        found = true;
-        break;
-      }
-      consumed += current.nodeValue.length;
-      current = walker.nextNode();
-    }
-    if (!found) return null;
-    return {
-      sourceId: runElement.getAttribute("data-md-source-id"),
-      offset: consumed + offset,
-      textLength: (runElement.textContent || "").length,
-    };
-  }
-
-  const point = resolveSelectionPoint(input.x, input.y, input.cellWidthPx, input.strategy);
-  if (!point) return { ok: false, reason: "no_paragraph" };
-
-  const walker = document.createTreeWalker(point.block, NodeFilter.SHOW_TEXT);
-  let first = null;
-  let last = null;
-  let node = walker.nextNode();
-  while (node !== null) {
-    if (node.nodeValue.length > 0) {
-      if (first === null) first = node;
-      last = node;
-    }
-    node = walker.nextNode();
-  }
-  if (first === null || last === null) return { ok: false, reason: "no_paragraph" };
-
-  const selection = window.getSelection();
-  applySelectionRange(selection, first, 0, last, last.nodeValue.length);
-
-  const blockInfo = {
-    sourceStart: Number(point.block.getAttribute("data-source-start")),
-    sourceEnd: Number(point.block.getAttribute("data-source-end")),
-    sourceId: point.block.getAttribute("data-md-source-id"),
-    tagName: point.block.tagName,
-  };
-
-  return {
-    ok: true,
-    text: selection.toString(),
-    collapsed: selection.isCollapsed,
-    anchor: { block: blockInfo, inline: resolveInline(first, 0) },
-    focus: { block: blockInfo, inline: resolveInline(last, last.nodeValue.length) },
-  };
-}
-
 /// `find_set`. Matches `input.query` literally (never as a regular expression,
 /// so HTML and regex metacharacters are inert by construction) and wraps each
 /// match in a programmatically created `<span data-md-viewer-find-mark>` via
@@ -2254,7 +1890,7 @@ function resolveEndpoint(endpoint, sourceMap) {
   return resolveSourcePosition(endpoint.block, endpoint.inline, sourceMap);
 }
 
-/// `selection_preview` / `selection_commit` / `word_select`.
+/// `selection_preview` / `selection_commit`.
 export function buildSelectionResult(raw, sourceMap) {
   if (raw.ok === false) {
     return { kind: "selection", ok: false, reason: raw.reason, text: "", collapsed: true };
@@ -2264,7 +1900,7 @@ export function buildSelectionResult(raw, sourceMap) {
     ok: true,
     text: raw.text,
     collapsed: raw.collapsed,
-    // Selection geometry (CSS px, viewport-relative) for the drag overlay.
+    // Selection geometry (CSS px, viewport-relative) for the selection overlay.
     // Present only from selection_preview/selection_commit; word/paragraph
     // select go through the captured-frame path and report an empty list.
     rects: Array.isArray(raw.rects) ? raw.rects : [],

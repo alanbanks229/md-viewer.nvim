@@ -7,7 +7,7 @@ return function(t)
   local debug = require("md-viewer.debug")
 
   config.reset()
-  config.setup({ interaction = { drag_threshold_cells = 2 } })
+  config.setup({})
 
   local PREVIEW_WIN = 4242
 
@@ -32,39 +32,28 @@ return function(t)
   local function point(row, col, winid) return { screenrow = row, screencol = col, winid = winid or PREVIEW_WIN } end
 
   -- ---------------------------------------------------------------------
-  -- Press / drag / release classification.
+  -- Press / release classification. There is no drag path anymore: a press
+  -- only ever leads to a plain click's release.
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
-    interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
+    interaction.on_press(session, point(10, 10), { x = 1, y = 1 })
     t.eq(true, session.pointer.pressed, "press starts pointer tracking")
     t.eq(session, interaction.captured_session(), "a press captures its session")
-
-    interaction.on_drag(session, point(10, 11))
-    t.eq(false, session.pointer.drag_started, "movement below the threshold is not yet a drag")
-
-    interaction.on_drag(session, point(10, 13))
-    t.eq(true, session.pointer.drag_started, "movement at/above the threshold becomes a drag")
 
     interaction.on_release(session, point(10, 13))
     t.eq(false, session.pointer.pressed, "release always clears the pressed flag")
     t.eq(nil, interaction.captured_session(), "release frees the captured session")
-
-    -- Reverse-direction drag: the threshold check must use unsigned
-    -- distance, not a directional delta.
-    interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
-    interaction.on_drag(session, point(10, 5))
-    t.eq(true, session.pointer.drag_started, "a leftward/upward drag is classified the same as a rightward one")
-    interaction.on_release(session, point(10, 5))
   end
 
   -- ---------------------------------------------------------------------
   -- A plain click no longer navigates to source (removed per operator
-  -- decision: it fought the drag-to-select gesture, since clicking to
-  -- dismiss a highlight also relocated the cursor). With nothing selected it
-  -- does nothing at all -- no interact request, no cursor movement. With an
-  -- active selection, it clears it, matching VS Code's own Markdown
-  -- preview: drag to select, click anywhere to deselect.
+  -- decision: it fought the vim-motion-driven selection gesture, since
+  -- clicking to dismiss a highlight also relocated the cursor). With nothing
+  -- selected it does nothing at all -- no interact request, no cursor
+  -- movement. With an active selection, it clears it, matching VS Code's own
+  -- Markdown preview: extend a selection with the keyboard, click anywhere
+  -- to deselect.
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
@@ -72,22 +61,20 @@ return function(t)
     local original_request = process.request
     process.request = function(method, params, callback) requests[#requests + 1] = { method = method, params = params } end
 
-    interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
-    interaction.on_drag(session, point(10, 10))
+    interaction.on_press(session, point(10, 10), { x = 1, y = 1 })
     interaction.on_release(session, point(10, 10))
     process.request = original_request
     t.eq(0, #requests, "a plain click with nothing selected issues no interact request at all")
 
-    -- With an active selection, the same below-threshold press/release
-    -- clears it via a real selection_clear interact request.
+    -- With an active selection, a plain press/release clears it via a real
+    -- selection_clear interact request.
     session.selection_active = true
     local clear_requests = {}
     process.request = function(method, params, callback)
       clear_requests[#clear_requests + 1] = { method = method, params = params }
       callback({ kind = "selection", cleared = true }, nil)
     end
-    interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
-    interaction.on_drag(session, point(10, 10))
+    interaction.on_press(session, point(10, 10), { x = 1, y = 1 })
     interaction.on_release(session, point(10, 10))
     process.request = original_request
 
@@ -96,14 +83,13 @@ return function(t)
     t.eq("selection_clear", clear_requests[1].params.action)
     t.eq(false, session.selection_active, "the selection is marked inactive once cleared")
 
-    -- A press captured while the pointer is over the content, then dragged
-    -- until a different, occluding window claims the same screen area (a
-    -- winid change with no matching release under our window), must not
-    -- leave the button stuck "pressed" -- release still reaches it because
-    -- capture is button-scoped, not window-scoped (see mouse.lua).
-    interaction.on_press(session, point(10, 10), { x = 1, y = 1 }, 1)
-    interaction.on_drag(session, point(10, 10, 9999))
-    t.eq(true, session.pointer.pressed, "a drag reported under a different window still updates the captured session")
+    -- A press captured while the pointer is over the content, released under
+    -- a different, occluding window (no matching release under our window),
+    -- must not leave the button stuck "pressed" -- release still reaches it
+    -- because capture is button-scoped, not window-scoped (see mouse.lua).
+    interaction.on_press(session, point(10, 10), { x = 1, y = 1 })
+    t.eq(true, session.pointer.pressed, "press starts pointer tracking")
+    t.eq(session, interaction.captured_session(), "a press captures its session")
     interaction.on_release(session, point(10, 10, 9999))
     t.eq(false, session.pointer.pressed, "release under a different window still reaches the captured session")
     t.eq(nil, interaction.captured_session(), "capture is released even when the pointer ended up elsewhere")
@@ -407,18 +393,15 @@ return function(t)
     for _, case in ipairs({
       { interaction = { enabled = "yes" } },
       { interaction = { links = 0 } },
-      { interaction = { double_click = "true" } },
-      { interaction = { drag_threshold_cells = -1 } },
-      { interaction = { drag_threshold_cells = "1" } },
       { interaction = { selection = "yes" } },
-      { interaction = { drag_debounce_ms = -1 } },
-      { interaction = { drag_debounce_ms = "40" } },
+      { interaction = { preview_debounce_ms = -1 } },
+      { interaction = { preview_debounce_ms = "40" } },
+      { interaction = { fast_preview = "yes" } },
+      { interaction = { visual = 0 } },
       { interaction = { settle_ms = -1 } },
       { interaction = { settle_ms = "120" } },
       { interaction = { copy = 1 } },
       { interaction = { copy_on_select = "no" } },
-      { interaction = { word_select = 0 } },
-      { interaction = { paragraph_select = "no" } },
       { interaction = { find = "true" } },
     }) do
       local ok, err = pcall(config.setup, case)
@@ -474,7 +457,7 @@ return function(t)
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
-    interaction.on_press(session, { screenrow = 1, screencol = 1 }, { x = 1, y = 1 }, 1)
+    interaction.on_press(session, { screenrow = 1, screencol = 1 }, { x = 1, y = 1 })
     t.eq(session, interaction.captured_session(), "sanity: the session is captured before forget()")
     interaction.forget(session)
     t.eq(nil, interaction.captured_session(), "forget() releases a captured session")
@@ -724,7 +707,7 @@ return function(t)
 
     vim.api.nvim_buf_delete(buf, { force = true })
     config.reset()
-    config.setup({ interaction = { drag_threshold_cells = 2 } })
+    config.setup({})
   end
 
   -- ---------------------------------------------------------------------

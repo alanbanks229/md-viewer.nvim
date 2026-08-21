@@ -11,13 +11,11 @@ local M = {}
 
 -- The session currently "owning" an in-progress left-button press. Mouse
 -- capture is button-scoped, not window-scoped: once a press lands on preview
--- content, every subsequent <LeftDrag>/<LeftRelease> belongs to that session
--- even if the pointer later leaves the window (or the window's placement
--- rectangle) before the button comes up. Routing drag/release through the
--- window under the pointer instead would both strand `pressed = true`
--- forever when the drag leaves the window, and swallow unrelated drags (e.g.
--- a source-buffer text selection that crosses into the preview) that this
--- session never captured.
+-- content, its <LeftRelease> belongs to that session even if the pointer
+-- later leaves the window (or the window's placement rectangle) before the
+-- button comes up. Routing release through the window under the pointer
+-- instead would strand `pressed = true` forever when the release lands
+-- outside it.
 local captured = nil
 
 function M.captured_session() return captured end
@@ -53,7 +51,6 @@ end
 ---both would drop it on every tab switch.
 function M.forget(session)
   if captured == session then captured = nil end
-  M.stop_drag_autoscroll(session)
   if session then session.pointer = nil end
 end
 
@@ -83,10 +80,7 @@ function M.forget_selection(session)
   session.find_active_index = nil
   debounce.close(session, "selection_debounce_timer")
   debounce.close(session, "selection_settle_timer")
-  debounce.close(session, "drag_idle_settle_timer")
-  -- The content this drag was selecting against is gone; there is nothing left
-  -- for another edge-scroll step to extend into.
-  M.stop_drag_autoscroll(session)
+  debounce.close(session, "selection_idle_settle_timer")
   if session.pointer then
     session.pointer.selection_request_in_flight = false
     session.pointer.pending_settle = nil
@@ -94,8 +88,7 @@ function M.forget_selection(session)
   end
 end
 
----Shared by `M.locate` and `M.locate_for_drag`: everything both need besides
----the window/point check itself, which differs between them.
+---Everything `M.locate` needs besides the window/point check itself.
 local function interaction_ready(session)
   if not config.get().interaction.enabled then return false end
   if not (session.backend and session.backend.name ~= "cells") then return false end
@@ -120,232 +113,17 @@ function M.locate(session, mouse)
   })
 end
 
----Like `M.locate`, but for a drag already in progress: mouse capture is
----button-scoped (see the module-local `captured` comment above), so the
----pointer leaving the preview window -- or straying inside it but outside
----the placed image itself (blank margin, a winbar) -- must not freeze the
----selection. It should keep extending toward the nearest edge, the same way
----a browser or a native text editor behaves when a drag runs past the edge
----of a scrollable view. `session.last_placement` is already in the same
----absolute screen-cell space `getmousepos()` reports
----(`coordinates.for_window`'s doc comment), so clamping is a plain min/max,
----no unit conversion. The exact point is tried first when the window
----matches, so this never resolves *differently* than `M.locate` would for a
----point already inside the placement -- it only adds a fallback for the
----points `M.locate` would otherwise refuse.
----
----This is only half the fix, and on its own it is a no-op: the edge column it
----clamps to is the page's own side padding, which held no addressable block,
----so every request it produced came back `focus_miss` and was dropped by the
----`result.ok ~= false` checks below. `resolveSelectionInPage` in
----`renderer/src/interact.js` supplies the other half -- see the
----`nearestBlockPoint` comment there. Change either one without the other and
----a drag that leaves the window freezes again.
-function M.locate_for_drag(session, mouse)
-  if not (session and mouse) then return nil end
-  if not interaction_ready(session) then return nil end
-  local placement = session.last_placement
-  local viewport = { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px }
-  if mouse.winid and mouse.winid == session.preview_win then
-    local direct = coordinates.cell_to_css(mouse, placement, viewport)
-    if direct then return direct end
-  end
-  local clamped = {
-    screenrow = math.max(
-      placement.row + 1,
-      math.min(placement.row + placement.height, tonumber(mouse.screenrow) or placement.row + 1)
-    ),
-    screencol = math.max(
-      placement.col + 1,
-      math.min(placement.col + placement.width, tonumber(mouse.screencol) or placement.col + 1)
-    ),
-  }
-  return coordinates.cell_to_css(clamped, placement, viewport)
-end
-
-local function cell_distance(a, b)
-  if not (a and b) then return 0 end
-  return math.max(math.abs(a.row - b.row), math.abs(a.col - b.col))
-end
-
-local function screen_cell(mouse) return { row = tonumber(mouse.screenrow) or 0, col = tonumber(mouse.screencol) or 0 } end
-
----How far past the placement's top or bottom edge the pointer has strayed, in
----cells: negative above, positive below, nil while it is still inside. Measured
----against the same rectangle `M.locate_for_drag` clamps the focus point to, so
----the two agree by construction about where the edge is.
-local function edge_overscroll(session, mouse)
-  local placement = session.last_placement
-  local row = mouse and tonumber(mouse.screenrow)
-  if not (placement and row) then return nil end
-  local top, bottom = placement.row + 1, placement.row + placement.height
-  if row < top then return row - top end
-  if row > bottom then return row - bottom end
-  return nil
-end
-
----Stop the edge-scroll timer and forget that this gesture was auto-scrolling.
----Safe to call unconditionally; every gesture teardown path does.
-function M.stop_drag_autoscroll(session)
-  if not session then return end
-  debounce.close(session, "drag_autoscroll_timer")
-  if session.pointer then session.pointer.autoscroll = nil end
-end
-
----One edge-scroll step. Re-arms itself rather than running on a repeating
----timer, so the gesture ending anywhere simply stops re-arming.
-local function autoscroll_tick(session, pointer)
-  if session.pointer ~= pointer or not (pointer.pressed and pointer.drag_started and pointer.autoscroll) then
-    M.stop_drag_autoscroll(session)
-    return
-  end
-  local cfg = config.get()
-  local overscroll = pointer.autoscroll
-  local limit = math.max(0, (session.document_height_px or 0) - (session.viewport_height_px or 0))
-  -- Speed scales with how far past the edge the pointer is, the way a browser's
-  -- own edge scrolling does: a pointer just outside creeps, one dragged well
-  -- clear of the window travels. Clamped, so flinging the pointer to the far
-  -- corner of the screen does not skip whole pages between frames.
-  local lines = math.min(math.abs(overscroll), cfg.interaction.autoscroll_max_lines)
-  local delta = (overscroll < 0 and -1 or 1) * lines * cfg.sync.navigation_line_px
-  local target = math.max(0, math.min(limit, (session.scroll_y or 0) + delta))
-  if target == session.scroll_y then
-    -- Hard against the top or bottom of the document: there is nothing further
-    -- to reveal, so stop rather than spin sending identical requests forever.
-    M.stop_drag_autoscroll(session)
-    return
-  end
-  session.scroll_y = target
-  -- Same hold every other deliberate scroll takes, so source-cursor follow does
-  -- not yank the preview back while the reader is still dragging.
-  session.manual_scroll_until = vim.uv.now() + cfg.sync.manual_scroll_hold_ms
-  M.schedule_selection_preview(session)
-  debounce.call(
-    session,
-    "drag_autoscroll_timer",
-    math.max(16, cfg.interaction.autoscroll_interval_ms),
-    function() autoscroll_tick(session, pointer) end
-  )
-end
-
----Keep scrolling the document while a drag holds past the top or bottom edge,
----so a selection can run past what is on screen the way it does on any web
----page. Without this the highlight simply stops at the edge, which is the
----limitation readers actually hit: `M.locate_for_drag` clamps an off-window
----point to the edge of the placement, and the edge of the placement is the edge
----of the visible document.
----
----Timer-driven, and that is the whole trick. `<LeftDrag>` fires only while the
----mouse *moves*, so a reader who drags to the bottom edge and holds still --
----the ordinary way of saying "keep going" -- produces no further events at all,
----and anything event-driven would stop dead exactly when it should not.
----
----One round trip per tick does all three jobs: `browser.interact` applies the
----requested scrollY before evaluating the action, so the same
----`selection_preview` that extends the selection also moves the page and
----captures the frame that shows it.
-function M.update_drag_autoscroll(session, mouse)
-  local pointer = session.pointer
-  if not (pointer and pointer.pressed and pointer.drag_started) then return end
-  local cfg = config.get().interaction
-  if not (cfg.autoscroll and cfg.selection) then return end
-  local overscroll = edge_overscroll(session, mouse)
-  if not overscroll then
-    M.stop_drag_autoscroll(session)
-    return
-  end
-  local already_running = pointer.autoscroll ~= nil
-  pointer.autoscroll = overscroll
-  -- A drag that is already scrolling only needs its speed updated; re-arming
-  -- here as well would reset the interval on every mouse event and starve the
-  -- tick under continuous movement.
-  if already_running then return end
-  debounce.call(
-    session,
-    "drag_autoscroll_timer",
-    math.max(16, cfg.autoscroll_interval_ms),
-    function() autoscroll_tick(session, pointer) end
-  )
-end
-
-function M.on_press(session, mouse, point, click_count)
-  click_count = click_count or 1
-  -- A press ends a keyboard selection without settling it: the drag about to
-  -- start replaces it outright, so a settle frame would be a round trip spent
-  -- on a highlight that is already gone.
+---A plain click: place the caret and capture the session for the matching
+---release. There is no drag path anymore, so the pointer record only needs
+---enough shape for `M.on_release` to recognise "a press is outstanding".
+function M.on_press(session, mouse, point)
+  -- A press ends a keyboard selection without settling it: a new click
+  -- replaces it outright, so a settle frame would be a round trip spent on a
+  -- highlight that is already gone.
   if M.visual_active(session) then M.visual_stop(session, false) end
-  session.pointer = {
-    pressed = true,
-    press_cell = screen_cell(mouse),
-    latest_cell = screen_cell(mouse),
-    press_time = vim.uv.now(),
-    drag_started = false,
-    -- The drag's fixed start point, set once on the first threshold crossing
-    -- in on_drag and never moved again for the rest of this gesture.
-    anchor_point = nil,
-    -- The page scroll `anchor_point` was measured against. Once the two
-    -- disagree, the anchor's coordinates no longer describe the anchor and
-    -- requests must pin it to the live DOM node instead (see
-    -- M.request_selection, and resolveSelectionInPage on the renderer side).
-    anchor_scroll_y = nil,
-    -- Signed cells past the placement edge while an edge-scroll is running,
-    -- nil otherwise. Set by M.update_drag_autoscroll; also read by
-    -- `overlay_ready`, which must refuse the overlay while the page moves.
-    autoscroll = nil,
-    selection_request_in_flight = false,
-    newest_pending_drag_point = nil,
-    -- Sticky per-gesture opt-out of the overlay display path: set when a
-    -- frame could not be drawn as overlay rectangles (too many rects, stale
-    -- geometry, backend refusal), after which every remaining frame of this
-    -- gesture uses the captured-frame path. Correct and slow beats fast and
-    -- wrong, and a fresh press gets a fresh chance.
-    overlay_fallback = false,
-    -- Ask the next preview request to carry the tint-sheet PNG (once per
-    -- color: the backend's upload cache stays warm across gestures).
-    overlay_want_sheet = false,
-    -- Set by on_release when a settle request arrives while a preview is
-    -- still in flight; picked up by that preview's own completion callback.
-    pending_settle = nil,
-    -- Same idea, for the idle-settle timer (schedule_selection_preview)
-    -- finding a preview request already in flight.
-    pending_idle_settle = nil,
-    click_count = click_count,
-    multi_click_fired = false,
-  }
+  session.pointer = { pressed = true }
   captured = session
   if point then M.caret_from_click(session, point) end
-  -- <2-LeftMouse>/<3-LeftMouse> are already routed through on_press with
-  -- click_count = 2/3 (mouse.lua's gestures()); dispatching word/paragraph
-  -- select here, on press, matches how a real double/triple-click resolves
-  -- synchronously on mousedown rather than waiting for the release that
-  -- single-click-to-source used to use. multi_click_fired tells on_release
-  -- not to also treat this as a plain-click release.
-  if click_count == 2 and point and config.get().interaction.word_select then
-    session.pointer.multi_click_fired = true
-    M.word_select(session, point)
-  elseif click_count == 3 and point and config.get().interaction.paragraph_select then
-    session.pointer.multi_click_fired = true
-    M.paragraph_select(session, point)
-  end
-end
-
-function M.on_drag(session, mouse)
-  local pointer = session.pointer
-  if not (pointer and pointer.pressed) then return end
-  pointer.latest_cell = screen_cell(mouse)
-  local distance = cell_distance(pointer.press_cell, pointer.latest_cell)
-  if distance >= config.get().interaction.drag_threshold_cells then
-    pointer.drag_started = true
-    pointer.newest_pending_drag_point = M.locate_for_drag(session, mouse)
-    if not pointer.anchor_point and pointer.newest_pending_drag_point then
-      pointer.anchor_point = pointer.newest_pending_drag_point
-      pointer.anchor_scroll_y = session.applied_scroll_y or 0
-    end
-    if config.get().interaction.selection and pointer.anchor_point and pointer.newest_pending_drag_point then
-      M.update_drag_autoscroll(session, mouse)
-      M.schedule_selection_preview(session)
-    end
-  end
 end
 
 ---Whether this gesture's moving frames may be displayed as backend overlay
@@ -356,14 +134,6 @@ end
 ---gesture (`pointer.overlay_fallback`).
 local function overlay_ready(session, pointer)
   if pointer.overlay_fallback then return false end
-  -- Overlay rectangles composite over the base image already on screen, and
-  -- while an edge-scroll is running that image is the *pre-scroll* frame: the
-  -- rectangles would land on whatever text used to be at those pixels. The
-  -- page has to move, so the frame has to be recaptured. Not sticky, unlike
-  -- `overlay_fallback` -- though in practice the first overlay frame after the
-  -- scroll stops will find no clean base at the new position and latch it
-  -- anyway, which is the honest outcome: correct and slower.
-  if pointer.autoscroll then return false end
   local backend = session.backend
   if not (backend and backend.overlay_apply and backend.overlay_supported) then return false end
   if not backend.overlay_supported() then return false end
@@ -417,14 +187,14 @@ local function sheet_dims(session)
 end
 
 ---The actual dispatch behind `M.schedule_selection_preview`: at most one
----`selection_preview` request in flight, only the newest pending drag point
+---`selection_preview` request in flight, only the newest pending focus point
 ---is ever sent (mirroring `controller.schedule_scroll`'s
 ---one-in-flight/one-coalesced-pending shape), and a request already in
 ---flight when this runs drops the point and counts it as coalesced -- the
 ---in-flight request's own completion callback below re-fires for whatever
 ---point is newest by then. `force_device` is set only by the idle-settle
----timer scheduled in `M.schedule_selection_preview`; every ordinary drag
----frame captures at device scale unless `interaction.fast_drag` is on (see
+---timer scheduled in `M.schedule_selection_preview`; every ordinary preview
+---frame captures at device scale unless `interaction.fast_preview` is on (see
 ---`config.lua` for why that is its own knob rather than `render.fast_scroll`,
 ---and why it defaults off).
 ---
@@ -436,25 +206,25 @@ end
 ---gesture when the reason is structural (`overlay_fallback`), or for exactly
 ---one round trip when the backend merely needs the tint sheet uploaded.
 local function attempt_selection_preview(session, pointer, force_device)
-  if session.pointer ~= pointer or not pointer.drag_started then return end
-  local point = pointer.newest_pending_drag_point
+  if session.pointer ~= pointer or not pointer.extending then return end
+  local point = pointer.newest_pending_focus_point
   if not point then return end
   if pointer.selection_request_in_flight then
     if force_device then
       -- The idle-settle timer found a request already in flight. Rather than
       -- drop the sharpen attempt outright (which would leave a genuinely
-      -- paused drag showing a soft frame until the next real movement or
-      -- release), the in-flight request's own completion callback below
+      -- paused extension showing a soft frame until the next motion or
+      -- `visual_stop`), the in-flight request's own completion callback below
       -- picks this up once it finishes.
       pointer.pending_idle_settle = true
     else
-      session.coalesced_drag_events = (session.coalesced_drag_events or 0) + 1
+      session.coalesced_preview_events = (session.coalesced_preview_events or 0) + 1
     end
     return
   end
   pointer.selection_request_in_flight = true
   local requested_point = point
-  local capture_scale = (force_device or not config.get().interaction.fast_drag) and "device" or "css"
+  local capture_scale = (force_device or not config.get().interaction.fast_preview) and "device" or "css"
   local overlay = overlay_ready(session, pointer)
   local overlay_opts = nil
   if overlay then
@@ -472,10 +242,6 @@ local function attempt_selection_preview(session, pointer, force_device)
     overlay = overlay_opts and overlay_opts.overlay or nil,
     sheet = overlay_opts and overlay_opts.sheet or nil,
     anchor_scroll_y = pointer.anchor_scroll_y,
-    -- An edge-scrolling drag drives the page from this very request instead of
-    -- waiting on a separate scroll frame, so it sends the position it wants
-    -- rather than the one already on screen.
-    scroll_y = pointer.autoscroll and session.scroll_y or nil,
   }
   M.request_selection(session, pointer.anchor_point, point, capture_scale, false, function(result, err)
     if session.pointer ~= pointer then return end
@@ -496,7 +262,7 @@ local function attempt_selection_preview(session, pointer, force_device)
           end
           -- This frame displayed nothing; redraw it through whichever path
           -- the flags above now select.
-          pointer.newest_pending_drag_point = pointer.newest_pending_drag_point or requested_point
+          pointer.newest_pending_focus_point = pointer.newest_pending_focus_point or requested_point
           M.schedule_selection_preview(session)
         end
       else
@@ -504,8 +270,8 @@ local function attempt_selection_preview(session, pointer, force_device)
       end
     end
     if pointer.pending_settle then
-      -- Release wins over a still-pending idle sharpen -- the gesture is
-      -- ending, so there is no point capturing a mid-drag frame first.
+      -- Settling wins over a still-pending idle sharpen -- the gesture is
+      -- ending, so there is no point capturing one more moving frame first.
       local pending = pointer.pending_settle
       pointer.pending_settle = nil
       pointer.pending_idle_settle = nil
@@ -514,49 +280,50 @@ local function attempt_selection_preview(session, pointer, force_device)
       pointer.pending_idle_settle = nil
       attempt_selection_preview(session, pointer, true)
     elseif
-      pointer.drag_started
-      and pointer.newest_pending_drag_point
-      and pointer.newest_pending_drag_point ~= requested_point
+      pointer.extending
+      and pointer.newest_pending_focus_point
+      and pointer.newest_pending_focus_point ~= requested_point
     then
       M.schedule_selection_preview(session)
     end
   end, request_opts)
 end
 
----Debounced (`interaction.drag_debounce_ms`, default `0` -- see below),
----coalescing drag-preview request. With the default, dispatch is immediate
----(no fixed frame rate: screenshot and terminal-transfer completion supply
----the pacing, same as scrolling); `drag_debounce_ms` above `0` still
----debounces ahead of that, for anyone who deliberately wants added latency.
+---Debounced (`interaction.preview_debounce_ms`, default `0` -- see below),
+---coalescing selection-preview request. With the default, dispatch is
+---immediate (no fixed frame rate: screenshot and terminal-transfer
+---completion supply the pacing, same as scrolling); `preview_debounce_ms`
+---above `0` still debounces ahead of that, for anyone who deliberately wants
+---added latency.
 ---
----When -- and only when -- `interaction.fast_drag` softens the moving frame,
----this also (re)schedules an idle-settle timer, mirroring
+---When -- and only when -- `interaction.fast_preview` softens the moving
+---frame, this also (re)schedules an idle-settle timer, mirroring
 ---`controller.schedule_scroll`'s own `scroll_settle_timer`:
----`render.scroll_settle_ms` after the *last* drag point with no further
----movement, one frame captures at device scale even though the mouse button
----is still down, so a drag that pauses mid-gesture (the reader dwelling on
----exactly the text being selected, not still moving) is not left soft for as
----long as the pause lasts. With the default `fast_drag = false` every frame
----is already sharp and the timer would be pure overhead, so it is not armed
----at all. `M.settle_selection` on release guarantees the final frame is
----sharp either way.
+---`render.scroll_settle_ms` after the *last* motion with no further movement,
+---one frame captures at device scale even though the selection is still being
+---extended, so a reader who pauses mid-extension (dwelling on exactly the
+---text being selected, not still moving) is not left with a soft frame for as
+---long as the pause lasts. With the default `fast_preview = false` every
+---frame is already sharp and the timer would be pure overhead, so it is not
+---armed at all. `M.settle_selection` on `visual_stop` guarantees the final
+---frame is sharp either way.
 function M.schedule_selection_preview(session)
   local pointer = session.pointer
   if not pointer then return end
   local cfg = config.get().interaction
-  if cfg.fast_drag then
+  if cfg.fast_preview then
     debounce.call(
       session,
-      "drag_idle_settle_timer",
+      "selection_idle_settle_timer",
       config.get().render.scroll_settle_ms,
       function() attempt_selection_preview(session, pointer, true) end
     )
   end
-  if cfg.drag_debounce_ms > 0 then
+  if cfg.preview_debounce_ms > 0 then
     debounce.call(
       session,
       "selection_debounce_timer",
-      cfg.drag_debounce_ms,
+      cfg.preview_debounce_ms,
       function() attempt_selection_preview(session, pointer, false) end
     )
   else
@@ -576,17 +343,14 @@ end
 ---warm). The commit path never sets either, so a release always produces the
 ---true browser-rendered frame.
 ---
----`opts.scroll_y` overrides the scroll this request resolves against, and
----`opts.anchor_scroll_y` states the scroll the anchor was measured at. Both
----exist for selections that move the page mid-gesture; see below.
+---`opts.anchor_scroll_y` states the scroll the anchor was measured at, so a
+---selection that has scrolled since the anchor was set can ask the renderer
+---to pin it to the live DOM node instead of stale coordinates; see below.
 function M.request_selection(session, anchor, focus, capture_scale, is_commit, callback, opts)
   opts = opts or {}
-  -- Ordinarily the scroll to resolve against is the one the image on screen
-  -- shows -- `applied_scroll_y`, not `scroll_y`; see `request_hit` for why. An
-  -- edge-scrolling drag is the one exception: moving the page *is* the point,
-  -- so it passes the position it wants and lets this single round trip scroll,
-  -- extend and capture together.
-  local scroll_y = opts.scroll_y or session.applied_scroll_y or 0
+  -- The scroll to resolve against is the one the image on screen shows --
+  -- `applied_scroll_y`, not `scroll_y`; see `request_hit` for why.
+  local scroll_y = session.applied_scroll_y or 0
   local params = {
     documentId = session.document_id,
     contentRevision = session.renderer_revision,
@@ -658,17 +422,18 @@ end
 --
 -- Not Neovim's own visual mode, and it cannot be: the preview surface holds no
 -- document text, only blank cells sized to the image, so a real visual
--- selection over it would select spaces. What it is instead is a drag driven by
--- the keyboard. An anchor cell is recorded on `v`, every caret motion supplies
--- a new focus cell, and both go through `M.request_selection` -- the same
--- machinery, backpressure, overlay path, settle and copy the mouse already
--- uses. That is why this section is short: there is no second selection
--- mechanism here, only a second way to point at one.
+-- selection over it would select spaces. What it is instead is a selection
+-- extension driven entirely by the keyboard, and the only way to highlight
+-- text in the preview at all. An anchor cell is recorded on `v`, every caret
+-- motion supplies a new focus cell, and both go through `M.request_selection`
+-- -- the same machinery, backpressure, overlay path, settle and copy this
+-- module has always used. That is why this section is short: there is no
+-- second selection mechanism here, only one way to point at one.
 --
--- The pointer record is deliberately the same shape `on_press` builds, with
--- `drag_started` already true. A real mouse press overwrites it, which is
--- exactly right -- clicking during a visual selection ends it and starts a
--- drag, as it would anywhere else.
+-- A real mouse press overwrites `session.pointer` with a plain click record,
+-- which is exactly right -- clicking during a visual selection ends it (see
+-- `M.on_press`'s call to `M.visual_stop`), the same way starting a fresh
+-- gesture anywhere else would.
 -- ---------------------------------------------------------------------------
 
 ---Put the caret where a click landed, snapped to a real glyph -- the pointer
@@ -706,17 +471,15 @@ function M.visual_start(session, linewise)
   session.visual_linewise = linewise == true
   session.pointer = {
     pressed = false,
-    drag_started = true,
+    extending = true,
     anchor_point = anchor,
     anchor_scroll_y = session.applied_scroll_y or 0,
     selection_request_in_flight = false,
-    newest_pending_drag_point = nil,
+    newest_pending_focus_point = nil,
     overlay_fallback = false,
     overlay_want_sheet = false,
     pending_settle = nil,
     pending_idle_settle = nil,
-    click_count = 1,
-    multi_click_fired = false,
   }
   captured = nil
   preview.update_title(session)
@@ -734,7 +497,7 @@ function M.visual_update(session)
   if not rect then return end
   local point = session.visual_linewise and { x = (session.viewport_width_px or 1) - 1, y = rect.y + rect.height / 2 }
     or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
-  pointer.newest_pending_drag_point = point
+  pointer.newest_pending_focus_point = point
   M.schedule_selection_preview(session)
 end
 
@@ -762,16 +525,16 @@ function M.visual_swap(session)
   return true
 end
 
----Leave visual mode. `settle` lands the final sharp frame, the same way
----releasing the mouse does; the highlight itself stays up, and the next `<Esc>`
----clears it through the ordinary precedence in `M.escape`.
+---Leave visual mode. `settle` lands the final sharp frame; the highlight
+---itself stays up, and the next `<Esc>` clears it through the ordinary
+---precedence in `M.escape`.
 function M.visual_stop(session, settle)
   if not M.visual_active(session) then return false end
   session.visual_active = false
   session.visual_linewise = false
   local pointer = session.pointer
-  if settle and pointer and pointer.anchor_point and pointer.newest_pending_drag_point then
-    M.settle_selection(session, pointer, pointer.anchor_point, pointer.newest_pending_drag_point)
+  if settle and pointer and pointer.anchor_point and pointer.newest_pending_focus_point then
+    M.settle_selection(session, pointer, pointer.anchor_point, pointer.newest_pending_focus_point)
   end
   preview.update_title(session)
   return true
@@ -912,66 +675,12 @@ function M.caret_motion(session, granularity, direction, count, from)
   end)
 end
 
----`word_select`, dispatched from `on_press` on a double-click (see there).
-function M.word_select(session, point)
-  if not point then return end
-  if not session.renderer_revision then return end
-  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  interact_request(session, {
-    documentId = session.document_id,
-    contentRevision = session.renderer_revision,
-    action = "word_select",
-    coordinates = { x = point.x, y = point.y },
-    cellWidthPx = point.cellWidthPx,
-    cellHeightPx = point.cellHeightPx,
-    viewportWidthPx = session.viewport_width_px,
-    viewportHeightPx = session.viewport_height_render_px,
-    scrollY = session.applied_scroll_y or 0,
-    captureScale = "device",
-  }, function(result, err)
-    if err or not result or result.ok == false then return end
-    session.selection_active = true
-    session.selection_content_revision = session.renderer_revision
-    session.selection_text_length = type(result.text) == "string" and #result.text or nil
-    require("md-viewer.controller").display_interact_result(session, result)
-    if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
-  end)
-end
-
----`paragraph_select`, dispatched from `on_press` on a triple-click (see
----there). Mirrors `M.word_select` exactly, except the renderer selects the
----enclosing block's whole text instead of expanding to word boundaries.
-function M.paragraph_select(session, point)
-  if not point then return end
-  if not session.renderer_revision then return end
-  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  interact_request(session, {
-    documentId = session.document_id,
-    contentRevision = session.renderer_revision,
-    action = "paragraph_select",
-    coordinates = { x = point.x, y = point.y },
-    cellWidthPx = point.cellWidthPx,
-    cellHeightPx = point.cellHeightPx,
-    viewportWidthPx = session.viewport_width_px,
-    viewportHeightPx = session.viewport_height_render_px,
-    scrollY = session.applied_scroll_y or 0,
-    captureScale = "device",
-  }, function(result, err)
-    if err or not result or result.ok == false then return end
-    session.selection_active = true
-    session.selection_content_revision = session.renderer_revision
-    session.selection_text_length = type(result.text) == "string" and #result.text or nil
-    require("md-viewer.controller").display_interact_result(session, result)
-    if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
-  end)
-end
-
 ---Copy the current selection to the unnamed register, and to `+` when a
 ---system clipboard provider is configured. Always re-queries the live DOM
 ---selection (`selection_text`) rather than trusting cached state, so copy
 ---correctness never depends on any other code path's bookkeeping.
 ---`silent` suppresses the notification (used by `copy_on_select`, which must
----not narrate every drag).
+---not narrate every selection change).
 function M.copy_selection(session, silent)
   if not session.renderer_revision then
     if not silent then vim.notify("md-viewer: nothing selected", vim.log.levels.WARN) end
@@ -1370,51 +1079,23 @@ end
 function M.on_release(session, mouse)
   local pointer = session.pointer
   if not (pointer and pointer.pressed) then return end
-  pointer.latest_cell = screen_cell(mouse)
-  local distance = cell_distance(pointer.press_cell, pointer.latest_cell)
-  local is_drag = pointer.drag_started or distance >= config.get().interaction.drag_threshold_cells
-  local multi_click_fired = pointer.multi_click_fired
-  local last_drag_point = pointer.newest_pending_drag_point
   pointer.pressed = false
-  pointer.drag_started = false
-  pointer.newest_pending_drag_point = nil
-  -- Before the settle below, so the commit resolves against wherever the
-  -- edge-scroll actually stopped rather than racing one more tick.
-  M.stop_drag_autoscroll(session)
   if captured == session then captured = nil end
-  if is_drag then
-    -- Prefer the point under the pointer right now, clamped to the preview
-    -- window's edge if the release lands outside it (same reasoning as
-    -- on_drag); fall back to the last point a drag event actually resolved
-    -- only if that structurally can't be done (no placement yet).
-    local release_point = M.locate_for_drag(session, mouse) or last_drag_point
-    if config.get().interaction.selection and pointer.anchor_point and release_point then
-      M.settle_selection(session, pointer, pointer.anchor_point, release_point)
-    end
-    -- Leave the caret on the end the drag finished at, snapped to a real glyph,
-    -- so a keyboard extension of this selection carries on from there.
-    if release_point then M.caret_from_click(session, release_point) end
-    return
-  end
-  if multi_click_fired then return end -- already handled on press; not also a click.
   -- VS Code-style click-to-deselect: a plain click no longer navigates to
-  -- source at all (removed per operator decision -- it fought the drag-to-
-  -- select gesture, since clicking to dismiss a highlight also relocated the
-  -- cursor). It only clears an existing selection, matching how a browser or
-  -- VS Code's own Markdown preview clears a selection on the next click
-  -- regardless of where that click lands.
+  -- source at all (removed per operator decision). It only clears an existing
+  -- selection, matching how a browser or VS Code's own Markdown preview
+  -- clears a selection on the next click regardless of where that click
+  -- lands.
   if session.selection_active then M.clear_selection(session) end
 end
 
 ---Entry point called by mouse.lua once a gesture and its owning session are
 ---resolved. `point` is the CSS point for press/activate (mouse.lua only
----dispatches those once a point resolves); drag/release recompute it
----themselves since the pointer may have left addressable content mid-drag.
+---dispatches those once a point resolves); release needs none, since it only
+---resets pointer/capture state.
 function M.dispatch(session, gesture, mouse, point)
   if gesture.kind == "press" then
-    M.on_press(session, mouse, point, gesture.click_count)
-  elseif gesture.kind == "drag" then
-    M.on_drag(session, mouse)
+    M.on_press(session, mouse, point)
   elseif gesture.kind == "release" then
     M.on_release(session, mouse)
   elseif gesture.kind == "activate" then

@@ -107,7 +107,7 @@ estimated cell width is probably too large and the terminal is scaling the whole
 screenshot down. Lower `render.estimated_cell_width_px` gradually, or prefer the
 exact values above.
 
-## The caret or the drag highlight is a huge grey block
+## The caret or the selection highlight is a huge grey block
 
 The caret is drawn as a translucent rectangle over the frame already on screen,
 cropped out of a shared tint sheet and placed at natural pixel size. A terminal
@@ -117,22 +117,27 @@ to the edge of the split.
 
 Check the `overlay` line in `:MdViewerDebug`. If it reads `(forced -- this
 profile is not validated for it)`, you have `interaction.selection_overlay =
-"on"` set for a terminal that cannot do this. Remove it; the drag falls back to
-full-frame captures, which are always correct and merely slower.
+"on"` set for a terminal that cannot do this. Remove it; the selection falls
+back to full-frame captures, which are always correct and merely slower.
 `:MdViewerHealth` reports the same thing as a warning.
 
 Warp is the known case — see [terminal-support.md](terminal-support.md#warp).
 The overlay is enabled by default only on iTerm2, Kitty and Ghostty, where a
 human watched it work.
 
-## The preview blinks to a blank pane while dragging a selection
+## The preview blinks to a blank pane if you drag the mouse
 
-If the status line reads `V-BLOCK` or `-- VISUAL --` during the drag, Neovim
-itself has entered Visual mode over the preview: the terminal is reporting a
-modified mouse drag, and Vim's default for `<M-LeftDrag>` is a blockwise Visual
-selection. md-viewer maps every modifier combination and escapes Visual mode if
-one still gets through, so this should not happen — if it does, `:MdViewerDebug`
-output and the terminal name in an issue is exactly what is needed.
+The mouse never highlights text — only `v`/`V` and the motion keys do
+(`:help md-viewer-visual`) — so md-viewer maps only a plain click and its release,
+not a drag, for any modifier. An ordinary mouse drag therefore falls straight
+through to Neovim's own default, which for an unmapped drag is a blockwise
+Visual selection over the preview's blank cells: the status line reads
+`V-BLOCK` or `-- VISUAL --` and the image blinks to a blank pane with a blue
+rectangle over it for one tick. `controller.lua` recovers automatically (one
+`<Esc>` per tick) as soon as it sees the mode change, so this is expected —
+not a bug to report — and it resolves itself the moment the drag ends. If
+Neovim stays stuck in Visual mode past that, `:MdViewerDebug` output and the
+terminal name in an issue is exactly what is needed.
 
 If the image blanks with the status line staying on `NORMAL`, the terminal is
 dropping the placement during replacement. Check `double buffer` in
@@ -214,7 +219,7 @@ With it on, `:MdViewerDebug` reports `animation` with the strategy in use —
 Off is normal in several other cases, and none of them lose the picture: only
 the `kitty_raw` backend can place frames, so `cells` and `nvim_img` cannot
 animate at all; the terminal's pixel cell size has to be measurable (the same
-precondition as the drag-highlight overlay); and only iTerm2, Kitty and Ghostty
+precondition as the selection-highlight overlay); and only iTerm2, Kitty and Ghostty
 are qualified for it. WezTerm is deliberately excluded — see
 [terminal support](terminal-support.md).
 
@@ -222,7 +227,7 @@ On, but still not moving, is usually one of three things. Decoding runs in the
 renderer's Chromium and a long retina-scale recording can take a few seconds
 to start; `:MdViewerDebug` lists each animation as `materializing`,
 `uploading`, `playing`, or with a per-frame count once frames are in. Animation
-is suspended while a drag or visual selection is in progress, while the preview
+is suspended while a click or visual selection is in progress, while the preview
 is occluded by a floating window, and while the completion popup is up —
 `animation_suppressed_reason` names whichever applies. And an image the renderer
 *refused* — a still, one past the size or frame caps, or one whose drawn size
@@ -315,12 +320,12 @@ tabpage.
 Close the preview with `:MdViewerToggle`; md-viewer deletes only the image IDs it
 owns. Do not use global image deletion — it can damage unrelated plugins.
 
-## Clicking, dragging, searching, or copying does nothing
+## Clicking, extending a selection, searching, or copying does nothing
 
 Confirm `:MdViewerDebug` reports `interaction enabled: yes` and that the relevant
-`interaction.*` flag (`selection`, `word_select`, `paragraph_select`, `find`,
-`copy`, `links`) is not disabled. Interaction is unavailable outright on the
-`cells` backend — there is no DOM to hit-test against.
+`interaction.*` flag (`selection`, `visual`, `find`, `copy`, `links`) is not
+disabled. Interaction is unavailable outright on the `cells` backend — there
+is no DOM to hit-test against.
 
 `interaction_request_count` and `interaction_stale_count` distinguish the two
 cases. Both at zero means nothing is being sent at all: check the config above.
@@ -330,13 +335,18 @@ changes again before the renderer answers. A selection captured against
 superseded content must never be shown, so that is a requirement rather than a
 bug; [architecture.md](architecture.md) describes the mechanism.
 
-## A selection does not appear after dragging
+## A `v`/`V` selection does not extend
 
-A drag has to cross `interaction.drag_threshold_cells` (default `1`) before it is
-recognized as a drag rather than a click, so a very small, fast drag inside one
-cell registers as a plain click — which clears any existing selection instead of
-creating one. `:MdViewerDebug`'s `selection_active` and `selection_text_length`
-report whether anything is held selected server-side, independently of whether it
+Highlighting only ever happens through `v`/`V` and the motion keys
+(`:help md-viewer-visual`) — there is no click-and-drag fallback to fall
+back to. If `v` does nothing at all, confirm `interaction.visual` and
+`interaction.selection` are both on (`v` requires both), that the preview
+window is actually focused (the mapping is buffer-local to the preview
+buffer, so keys typed with focus still in the source window never reach
+it), and that the preview has actually rendered at least once — `v` needs
+an existing caret, and one is not placed until the first frame lands.
+`:MdViewerDebug`'s `selection_active` and `selection_text_length` report
+whether anything is held selected server-side, independently of whether it
 is currently visible.
 
 ## A click lands on the wrong character

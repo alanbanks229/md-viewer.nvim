@@ -1,12 +1,15 @@
--- End-to-end regression for the drag-highlight overlay. Spawns a real Neovim
--- server and drives a drag-to-select through the real input layer
--- (nvim_input_mouse -> <LeftMouse>/<LeftDrag>/<LeftRelease> mappings ->
--- getmousepos() -> gesture dispatch), against the real renderer and real
--- Chromium. Asserts the overlay path end to end: moving frames opt out of
--- capture and are drawn as overlay placements, the release settles with a true
--- captured frame, and every overlay placement is deleted after settle. Also
--- invokes :MdViewerDebug and :MdViewerHealth -- the exact user commands --
--- since both report overlay fields.
+-- End-to-end regression for the selection-highlight overlay. Spawns a real
+-- Neovim server and drives a `v`/motions preview visual selection through the
+-- real input layer (nvim_input -> the buffer-local v/j/w/y mappings in
+-- navigation.lua -> interaction.visual_start/visual_update/visual_stop),
+-- against the real renderer and real Chromium. There is no mouse drag to
+-- drive anymore -- highlighting only ever happens through vim-like motions --
+-- so this is the keyboard equivalent of what used to be a real mouse drag.
+-- Asserts the overlay path end to end: moving frames opt out of capture and
+-- are drawn as overlay placements, `y` settles with a true captured frame,
+-- and every overlay placement is deleted after settle. Also invokes
+-- :MdViewerDebug and :MdViewerHealth -- the exact user commands -- since both
+-- report overlay fields.
 --
 -- This is the only check that covers the whole gesture lifecycle against real
 -- input and a real browser; the headless suites cover the pieces, not the
@@ -96,20 +99,22 @@ io.write(
   )
 )
 
--- The drag: press inside the upper text, then a diagonal sweep of drag
--- points, all through the real input queue. Coordinates are 0-based screen
--- cells for nvim_input_mouse.
-local press_row = placement.row + math.floor(placement.height * 0.2)
-local press_col = placement.col + 6
-local function mouse(action, row, col) vim.rpcrequest(chan, "nvim_input_mouse", "left", action, "", 0, row, col) end
-mouse("press", press_row, press_col)
+-- The selection: focus the preview window (`M.open` leaves focus on the
+-- source window, unlike a real mouse click, which never needs it -- see
+-- `caret_from_click`), place a caret with one real motion, then drive `v` and
+-- a sweep of further motions, all through the real input queue.
+rx(SESSION .. [[vim.api.nvim_set_current_win(session.preview_win)]])
+local function input(keys) vim.rpcrequest(chan, "nvim_input", keys) end
+input("l") -- no caret exists yet; this places one and moves it one character
+poll("the initial caret placement", 15000, SESSION .. [[return session.caret_rect ~= nil or nil]])
+input("v")
 vim.uv.sleep(80)
--- Sample the overlay stats mid-gesture, while the selection is still
+-- Sample the overlay stats mid-extension, while the selection is still
 -- growing: the per-frame byte cost only exists on frames whose rect set
 -- changed (an unchanged set diffs to zero bytes -- by design).
 local mid = nil
 for step = 1, 14 do
-  mouse("drag", press_row + math.floor(step * 0.7), press_col + step * 4)
+  input("j2w")
   vim.uv.sleep(35)
   if step >= 6 and mid == nil then
     local ok, sample = pcall(rx, SESSION .. [[
@@ -128,7 +133,7 @@ for step = 1, 14 do
   end
 end
 if mid == nil then
-  mid = poll("overlay frames during the drag", 15000, SESSION .. [[
+  mid = poll("overlay frames during the extension", 15000, SESSION .. [[
     if (session.overlay_frames or 0) > 0 and session.overlay_set then
       return {
         frames = session.overlay_frames,
@@ -141,20 +146,22 @@ if mid == nil then
     return nil
   ]])
 end
-check(mid.frames >= 1, ("overlay frames displayed during the drag (%d)"):format(mid.frames))
-check((mid.rects or 0) >= 1, ("overlay rectangles on screen mid-drag (%d)"):format(mid.rects or 0))
+check(mid.frames >= 1, ("overlay frames displayed during the extension (%d)"):format(mid.frames))
+check((mid.rects or 0) >= 1, ("overlay rectangles on screen mid-extension (%d)"):format(mid.rects or 0))
 check(
   mid.health.overlay_placements >= 1,
-  ("backend holds live overlay placements mid-drag (%d)"):format(mid.health.overlay_placements)
+  ("backend holds live overlay placements mid-extension (%d)"):format(mid.health.overlay_placements)
 )
 check(
   (mid.bytes or 0) > 0 and (mid.bytes or 0) < 20000,
   ("a changed overlay frame cost %s bytes on the wire"):format(tostring(mid.bytes))
 )
 
-mouse("release", press_row + 10, press_col + 56)
+-- `y`: the same key a reader presses to finish a selection. It settles (the
+-- keyboard equivalent of a mouse release) and copies in one motion.
+input("y")
 
-local settled = poll("settle after release", 20000, SESSION .. [[
+local settled = poll("settle after y", 20000, SESSION .. [[
   if session.selection_active and not session.overlay_set and session.retina_png_bytes then
     return {
       selection_len = session.selection_text_length,
@@ -209,10 +216,10 @@ for _, envelope in ipairs(settled.envelopes) do
     if envelope.params.capture == false then commits_no_capture = commits_no_capture + 1 end
   end
 end
-check(previews >= 2, ("the drag produced real preview envelopes (%d)"):format(previews))
+check(previews >= 2, ("the extension produced real preview envelopes (%d)"):format(previews))
 check(previews_no_capture == previews, "every moving preview frame opted out of the capture")
 check(sheets >= 1 and sheets <= 2, ("the tint sheet was requested once, not per frame (%d)"):format(sheets))
-check(commits == 1, ("release produced exactly one settle commit (%d)"):format(commits))
+check(commits == 1, ("y produced exactly one settle commit (%d)"):format(commits))
 check(commits_no_capture == 0, "the commit frame captured a real browser frame")
 
 -- The exact commands a user would run, since both report overlay fields.

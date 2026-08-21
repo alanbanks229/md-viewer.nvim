@@ -125,8 +125,6 @@ test("every interaction action is registered with the correct flags", () => {
     selection_commit: { mutatesVisibleState: true, requiresCoordinates: true, requiresAnchor: true },
     selection_clear: { mutatesVisibleState: true, requiresCoordinates: false },
     selection_text: { mutatesVisibleState: false, requiresCoordinates: false },
-    word_select: { mutatesVisibleState: true, requiresCoordinates: true },
-    paragraph_select: { mutatesVisibleState: true, requiresCoordinates: true },
     find_set: { mutatesVisibleState: true, requiresCoordinates: false, requiresQuery: true },
     find_next: { mutatesVisibleState: true, requiresCoordinates: false },
     find_previous: { mutatesVisibleState: true, requiresCoordinates: false },
@@ -140,8 +138,7 @@ test("every interaction action is registered with the correct flags", () => {
   }
   assert.deepEqual([...Object.keys(INTERACT_ACTIONS)].sort(), [
     "activate_at", "caret_move", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
-    "paragraph_select", "selection_clear", "selection_commit", "selection_preview",
-    "selection_text", "word_select",
+    "selection_clear", "selection_commit", "selection_preview", "selection_text",
   ]);
 });
 

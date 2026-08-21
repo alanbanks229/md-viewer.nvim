@@ -42,7 +42,7 @@ local function current_session(buf)
     or state.visible_in_tab()
 end
 
----Remove the drag-selection overlay rectangles, if any are on screen. Cheap
+---Remove the selection overlay rectangles, if any are on screen. Cheap
 ---no-op otherwise. Every path that invalidates the overlay's geometry funnels
 ---through here: a new base frame (apply_image -- scroll, render, settle), the
 ---image leaving the screen (clear_image), a placement move under a passive
@@ -164,31 +164,32 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- always updated before the frame is applied (interaction.lua sets it in the
   -- request callback, ahead of display).
   --
-  -- The drag overlay composites *over* this frame, so it can only ever add a
-  -- highlight -- never remove one. Starting a second gesture on top of a frame
-  -- that still shows the first gesture's highlight leaves that highlight on
-  -- screen for the whole drag, which is exactly what the operator reported on
-  -- 2026-08-08. `M.restore_clean_base` is how a gesture gets out of it.
+  -- The selection overlay composites *over* this frame, so it can only ever
+  -- add a highlight -- never remove one. Starting a second gesture on top of a
+  -- frame that still shows the first gesture's highlight leaves that
+  -- highlight on screen for the whole gesture, which is exactly what the
+  -- operator reported on 2026-08-08. `M.restore_clean_base` is how a gesture
+  -- gets out of it.
   session.base_selection_painted = session.selection_active == true
   -- The newest frame known to carry no browser-painted selection, kept so a
-  -- drag starting on top of an earlier one can get a clean base back without a
-  -- renderer round trip (see `M.restore_clean_base`).
+  -- gesture starting on top of an earlier one can get a clean base back
+  -- without a renderer round trip (see `M.restore_clean_base`).
   --
   -- Recorded here, at the one place every full frame passes through, rather
   -- than in `M.refresh` alone. A scroll taken while a selection was up used to
   -- drop this cache and nothing put it back: interact frames never reached
   -- `M.refresh`, so clicking to deselect -- which produces a perfectly good
-  -- clean frame -- left the drag overlay disabled until some later render
-  -- happened to land with nothing selected. `restore_clean_base` re-applies
-  -- through here with `selection_active` still true, so it cannot overwrite
-  -- the entry it is reading.
+  -- clean frame -- left the selection overlay disabled until some later
+  -- render happened to land with nothing selected. `restore_clean_base`
+  -- re-applies through here with `selection_active` still true, so it cannot
+  -- overwrite the entry it is reading.
   if not session.base_selection_painted then
     session.clean_image_bytes = image_bytes
     session.clean_image_scroll_y = session.applied_scroll_y or 0
     session.clean_image_revision = session.renderer_revision
     session.clean_image_scale = capture_scale
   end
-  -- Any full frame supersedes the drag overlay: a settle frame has the
+  -- Any full frame supersedes the selection overlay: a settle frame has the
   -- highlight baked in by the browser, and a scroll/render frame moves the
   -- geometry the overlay rectangles were computed against. Cleared *after*
   -- the new frame was placed, never before -- deleting first would blank the
@@ -212,9 +213,10 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   return true
 end
 
----Put a selection-free frame back on screen so drag-overlay rectangles have a
+---Put a selection-free frame back on screen so overlay rectangles have a
 ---clean base to composite over, using the cached PNG rather than a renderer
----round trip -- this runs on the first frame of a drag and must not cost one.
+---round trip -- this runs on the first frame of a gesture and must not cost
+---one.
 ---
 ---Returns false when there is no cached frame that is known to be both
 ---selection-free and taken at the scroll position now displayed, which is the
@@ -234,7 +236,7 @@ function M.restore_clean_base(session)
   return true
 end
 
----Display the drag-selection overlay a no-capture `selection_preview` result
+---Display the selection overlay a no-capture `selection_preview` result
 ---describes: translucent rectangles composited over the base image already on
 ---screen, in place of the full re-captured frame that used to carry every
 ---moving selection. The base image stays exactly what it was -- it remains
@@ -297,7 +299,7 @@ end
 
 ---Draw the caret: one overlay rectangle, shaped like the glyph it sits on.
 ---
----The same `overlay_apply` the drag highlight uses, in its own rect set, so the
+---The same `overlay_apply` the selection highlight uses, in its own rect set, so the
 ---two coexist without either having to know about the other -- a caret inside a
 ---selection is simply two sets of rectangles over one base image. It carries
 ---its own, heavier tint (`CARET_TINT` in the renderer): a selection is a wash
@@ -708,8 +710,7 @@ local function close_session(session, stop_opts)
     "ui_poll_timer",
     "selection_debounce_timer",
     "selection_settle_timer",
-    "drag_idle_settle_timer",
-    "drag_autoscroll_timer",
+    "selection_idle_settle_timer",
   }) do
     debounce.close(session, name)
   end
@@ -1091,7 +1092,7 @@ local function reconcile_placement(session, force)
     end
     -- The base just moved or re-cropped (a float opened or closed over it);
     -- overlay rectangles computed against the old placement are wrong now.
-    -- Cleared after the move rather than re-derived: the next drag frame
+    -- Cleared after the move rather than re-derived: the next selection frame
     -- repaints them against the new placement within one round trip.
     clear_selection_overlay(session)
   end
@@ -1266,11 +1267,12 @@ function M.setup_autocmds()
   })
   -- Neovim's own Visual mode is not usable inside a graphical preview, and
   -- `navigation.lua` says so where it maps `v`/`V` to a *preview* selection
-  -- instead. Saying it was not the same as enforcing it: a mouse chord this
-  -- plugin had not mapped, or `<C-v>`, still put Neovim in Visual mode over the
-  -- surface, where it selects blank cells and paints a highlight across the
-  -- image. Reported from Warp as the preview blinking to a blank pane with a
-  -- blue rectangle on it -- that rectangle was V-BLOCK.
+  -- instead. Saying it was not the same as enforcing it: the plugin maps only
+  -- a plain click and its release over the preview, not a drag, so an
+  -- ordinary mouse drag -- or `<C-v>` -- still puts Neovim in Visual mode over
+  -- the surface, where it selects blank cells and paints a highlight across
+  -- the image. Reported from Warp as the preview blinking to a blank pane
+  -- with a blue rectangle on it -- that rectangle was V-BLOCK.
   --
   -- Excluded for the `cells` backend, whose buffer holds real styled text where
   -- Visual mode and `y` do exactly what a reader would expect.
@@ -1281,8 +1283,8 @@ function M.setup_autocmds()
       local session = state.from_preview(args.buf)
       if not session or session.closed then return end
       if not (session.backend and session.backend.name ~= "cells") then return end
-      -- One escape per tick. Without this a stream of modifier-drag events --
-      -- each re-entering Visual as fast as the escape leaves it -- would spin.
+      -- One escape per tick. Without this a stream of drag events -- each
+      -- re-entering Visual as fast as the escape leaves it -- would spin.
       if session.leaving_visual then return end
       session.leaving_visual = true
       vim.schedule(function()

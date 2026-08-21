@@ -176,7 +176,7 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(response.ok, true, response.error);
     assert.equal(response.result.kind, "selection");
     assert.equal(response.result.ok, true);
-    assert.equal(response.result.collapsed, false, "a real drag must not collapse");
+    assert.equal(response.result.collapsed, false, "a real anchor/focus span must not collapse");
     // Not anchored to the literal first character: a click a few CSS pixels
     // into a block can land the caret just past it (the same terminal-cell
     // edge behavior documented for source-position reporting), which is a
@@ -193,9 +193,9 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     forwardText = forward.result.text;
     const backward = await selectionCommit(renderer, "sel-doc", "1:0", right, left);
     assert.equal(backward.ok, true, backward.error);
-    assert.equal(backward.result.collapsed, false, "dragging right-to-left must not collapse the selection");
+    assert.equal(backward.result.collapsed, false, "a right-to-left anchor/focus pair must not collapse the selection");
     assert.equal(backward.result.text, forwardText,
-      "dragging in either direction across the same two points must select the same text");
+      "either direction across the same two points must select the same text");
   });
 
   await t.test("multi-block selection spans from one paragraph into the next", async () => {
@@ -258,29 +258,31 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     //
     // A selection endpoint is the opposite case, and the miss was a real,
     // operator-reported bug rather than a conservative choice. The margin is
-    // addressable: it is inside the placement, the pointer can sit on those
-    // cells, and interaction.lua's `locate_for_drag` *must* clamp a drag that
-    // left the preview window to exactly this column. The page's padding is
-    // 26px while a terminal cell is ~10-20 CSS px, so the leftmost columns of
-    // every preview landed here, came back `focus_miss`, and were dropped --
-    // which is what "the selection stops extending once my cursor leaves the
-    // render pane" was. Every text UI resolves a drag into the margin the same
-    // way, and so does this now: to the start of the line it is level with.
+    // addressable: it is inside the placement, and this exact point -- x=0,
+    // the page's own left edge -- is precisely where `interaction.lua`'s
+    // `M.visual_start` anchors a linewise (`V`) selection (see its comment:
+    // "the renderer slides an endpoint that lands off content onto the
+    // nearest block"). Before nearestBlockPoint existed this landed
+    // `anchor_miss` and silently declined to start the selection at all, which
+    // is what "V does nothing" was. Every text UI resolves an anchor in the
+    // margin the same way, and so does this now: to the start of the line it
+    // is level with.
     const paragraph = blockAt(blocks, 2);
     const y = Math.round((paragraph.topPx + paragraph.bottomPx) / 2);
     const response = await selectionCommit(renderer, "sel-doc", "1:0", { x: 2, y }, edges(paragraph).right);
     assert.equal(response.ok, true, response.error);
-    assert.equal(response.result.ok, true, "a margin endpoint must resolve, not freeze the drag");
+    assert.equal(response.result.ok, true, "a margin endpoint must resolve, not refuse the selection");
     assert.equal(response.result.collapsed, false);
     assert.match(response.result.text, /^Alpha beta gamma/, "the left margin anchors at the start of that line");
   });
 
-  await t.test("a drag that leaves the preview window keeps extending toward the nearest content", async () => {
-    // The end-to-end shape of the bug above, in the direction it was actually
-    // reported: anchor inside the text, focus clamped to the edge column the
-    // way interaction.lua clamps an out-of-window pointer. Each of these
-    // returned `focus_miss` before the nearest-block fallback existed, so the
-    // selection stayed frozen wherever the pointer crossed the window edge.
+  await t.test("a selection endpoint past the right edge of content still resolves, as V's linewise focus does", async () => {
+    // `M.visual_update`'s linewise focus is pinned at `viewportWidthPx - 1` --
+    // the page's own right edge, past every block's own text -- so `V`
+    // extending onto a short line has to resolve there too, not just at the
+    // left margin `V`'s anchor uses. Each of these used to return `focus_miss`
+    // before the nearest-block fallback existed, so a linewise selection
+    // stayed frozen wherever the caret's line ended short of the page edge.
     const first = blockAt(blocks, 2);
     const later = blockAt(blocks, 6);
     const anchor = { x: 300, y: Math.round((first.topPx + first.bottomPx) / 2) };
@@ -333,33 +335,6 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(response.ok, true, response.error);
     assert.equal(response.result.ok, true, "a point inside a block's own box must never miss");
     assert.match(response.result.text, /election Doc/);
-  });
-
-  await t.test("word_select selects a whole word from a mid-word click", async () => {
-    const paragraph = blockAt(blocks, 2);
-    const y = Math.round((paragraph.topPx + paragraph.bottomPx) / 2);
-    const response = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
-      action: "word_select", coordinates: { x: 60, y }, capture: true,
-    }));
-    if (response.ok && response.result.pngPath) fs.unlinkSync(response.result.pngPath);
-    assert.equal(response.ok, true, response.error);
-    assert.equal(response.result.kind, "selection");
-    assert.equal(response.result.collapsed, false);
-    assert.ok(/^[A-Za-z]+$/.test(response.result.text), `expected a single word, got ${JSON.stringify(response.result.text)}`);
-  });
-
-  await t.test("paragraph_select selects the whole paragraph from a mid-word click, not just one word", async () => {
-    const paragraph = blockAt(blocks, 2);
-    const y = Math.round((paragraph.topPx + paragraph.bottomPx) / 2);
-    const response = await renderer.send("interact", renderer.interactParams("sel-doc", "1:0", {
-      action: "paragraph_select", coordinates: { x: 60, y }, capture: true,
-    }));
-    if (response.ok && response.result.pngPath) fs.unlinkSync(response.result.pngPath);
-    assert.equal(response.ok, true, response.error);
-    assert.equal(response.result.kind, "selection");
-    assert.equal(response.result.collapsed, false);
-    assert.match(response.result.text, /^Alpha beta gamma delta epsilon zeta eta theta iota kappa\.$/,
-      "a triple click must select the paragraph's full text, not one word");
   });
 
   await t.test("selection_text extracts the same text a commit already selected", async () => {
@@ -536,12 +511,13 @@ test("stale selection-preview frames never replace a newer one", async (t) => {
 });
 
 // ---------------------------------------------------------------------------
-// A selection whose page scrolls mid-gesture. This is what edge auto-scroll (a
-// drag held past the bottom of the preview) and keyboard selection both do, and
-// it is the one case where the anchor's coordinates stop describing the anchor:
-// they are viewport-relative, so every scrolled pixel moves them off it, and
-// once the anchor scrolls out of view entirely resolveSelectionPoint refuses
-// the point outright and the whole frame comes back anchor_miss.
+// A selection whose page scrolls mid-gesture -- what a keyboard extension
+// (`v`/`V` plus motions that cross the viewport edge) does when it scrolls the
+// page in-page. This is the one case where the anchor's coordinates stop
+// describing the anchor: they are viewport-relative, so every scrolled pixel
+// moves them off it, and once the anchor scrolls out of view entirely
+// resolveSelectionPoint refuses the point outright and the whole frame comes
+// back anchor_miss.
 // ---------------------------------------------------------------------------
 
 const TALL_DOC = (() => {
@@ -577,17 +553,19 @@ test("a selection survives the page scrolling under it when the anchor is pinned
     return response.result;
   }
 
-  // Establish the anchor at the top of the document, exactly as the first frame
-  // of a drag does -- nothing is pinned yet, because there is nothing to pin to.
+  // Establish the anchor at the top of the document, exactly as the first
+  // frame of a keyboard extension does -- nothing is pinned yet, because
+  // there is nothing to pin to.
   const opening = await preview(0, { x: 400, y: anchor.y });
   assert.equal(opening.ok, true, "the opening frame resolves its anchor from coordinates");
   assert.match(opening.text, /marker01/, "and anchors in the first paragraph");
 
   // Now scroll far enough that the anchor is well off screen, and keep
-  // extending toward the bottom edge -- the auto-scroll case.
+  // extending toward the bottom edge -- an in-page scroll crossing the
+  // viewport, the way a downward motion run does.
   const pinned = await preview(2400, { x: 400, y: 590 }, { anchorPinned: true });
   assert.equal(pinned.ok, true, "a pinned anchor survives scrolling out of the viewport");
-  assert.match(pinned.text, /marker01/, "the selection still starts where the drag started");
+  assert.match(pinned.text, /marker01/, "the selection still starts where the extension started");
   assert.ok(pinned.text.length > opening.text.length * 5,
     `the selection should have grown by pages, got ${pinned.text.length} vs ${opening.text.length}`);
 

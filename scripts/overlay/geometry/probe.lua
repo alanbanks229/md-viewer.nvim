@@ -4,7 +4,7 @@
 -- It draws through the production code path -- `kitty_raw.show` for the base
 -- frame and `kitty_raw.overlay_apply` for the highlight rectangles -- rather
 -- than through hand-written escapes, so what the screenshot shows is what a
--- drag would actually send. The only hand-drawn things are the fiducials, and
+-- moving selection frame would actually send. The only hand-drawn things are the fiducials, and
 -- those are Neovim's own cell backgrounds rather than graphics, so they are
 -- pixel-exact by construction and independent of the protocol under test.
 --
@@ -142,8 +142,9 @@ vim.cmd("redraw")
 -- Wait for the reading to settle before computing anything from it. WezTerm
 -- sizes its pty at half scale and corrects it about two seconds in, with the
 -- grid identical either side, so a probe that reads once at startup measures
--- the wrong terminal. Production re-reads every drag frame and a drag happens
--- long after this; the rig has to reproduce that, not race it.
+-- the wrong terminal. Production re-reads every selection frame and a
+-- selection extension happens long after this; the rig has to reproduce
+-- that, not race it.
 local cell, cell_reason
 local settle_deadline = vim.uv.now() + 15000
 local previous = nil

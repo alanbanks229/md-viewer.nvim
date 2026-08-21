@@ -128,8 +128,8 @@ export function createService({ assetsDir, onShutdown } = {}) {
   // exclusive, and a second parallel queue would let an interaction evaluate while
   // a render is mid-setContent. Head-of-line blocking is handled by the lanes
   // instead -- a superseded task fails its staleness check and returns without
-  // touching the page, so a burst of drag updates behind a slow render costs one
-  // map lookup each rather than one screenshot each.
+  // touching the page, so a burst of selection-preview updates behind a slow
+  // render costs one map lookup each rather than one screenshot each.
   function enqueue(task, ticket) {
     const settle = async () => {
       try {
@@ -296,7 +296,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
       state.lastHit = result.hit ?? null;
       // selection_text is read-only (mutatesVisibleState: false) and must never
       // write state.selection -- a stray write here would let a copy operation
-      // silently "commit" a selection that was never actually dragged. A failed
+      // silently "commit" a selection that was never actually made. A failed
       // resolution (anchor/focus miss) must not overwrite a prior valid
       // selection with an empty one either.
       if (result.kind === "selection" && envelope.action !== "selection_text" && result.ok !== false) {

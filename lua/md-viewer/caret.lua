@@ -12,7 +12,7 @@ local preview = require("md-viewer.preview")
 ---
 ---So: the renderer owns where the caret may be (`caret_move`, which only ever
 ---lands on a real character), and the caret is *drawn* from the glyph box it
----reports, through the same overlay path the drag highlight uses. Neovim's own
+---reports, through the same overlay path the selection highlight uses. Neovim's own
 ---cursor is hidden while that is on screen and follows along underneath as a
 ---shadow, purely so window-level things -- which window is focused, what a
 ---mapping applies to -- keep working.

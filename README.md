@@ -10,9 +10,11 @@ draws in the split through the Kitty graphics protocol. The source stays a
 normal, editable Neovim buffer.
 
 Mouse and keyboard gestures over the preview are forwarded to that live Chromium
-DOM, which does the hit-testing, selection, search and link resolution before the
-viewport is recaptured. You get browser behaviour — but the preview is a PNG
-surface, **NOT** native terminal text and not an embedded webview.
+DOM, which does the hit-testing, search and link resolution before the viewport
+is recaptured. Text highlighting works the same way, but only through vim-like
+motions (`v`/`V` and the usual motion keys) — there is no click-and-drag
+selection. You get browser behaviour — but the preview is a PNG surface,
+**NOT** native terminal text and not an embedded webview.
 
 The renderer opens no window, starts no HTTP server, and listens on no port.
 
@@ -45,7 +47,7 @@ any configuration.
 | Kitty | Supported — full markdown rendering and fast interactions |
 | Ghostty 1.3.1+ | Supported — full markdown rendering and fast interactions |
 | WezTerm | Supported — full markdown rendering with **slower interactions**; fast-path support is pending [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035) |
-| Warp | Experimental — markdown rendering works, but drag highlighting is buggy, animations are disabled, and visual selection may blank the rendered preview ([warp#7789](https://github.com/warpdotdev/Warp/issues/7789)) |
+| Warp | Experimental — markdown rendering works, but the selection highlight is buggy, animations are disabled, and visual selection may blank the rendered preview ([warp#7789](https://github.com/warpdotdev/Warp/issues/7789)) |
 | macOS Terminal.app | Limited — no Kitty graphics support; falls back to the text-only `cells` backend |
 
 **tmux and Zellij are not supported.** No escape-sequence passthrough is
@@ -121,7 +123,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.2.1",
+  version = "v0.3.0-rc1",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -173,7 +175,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.2.1" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc1" },
 })
 
 require("md-viewer").setup({})
@@ -193,9 +195,9 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 
 - Live preview of unsaved changes, following your cursor through the document.
 - A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
-  (iTerm2, Kitty and Ghostty only).
-- Drag-to-select; double-click for a word, triple-click for a block; `y` copies
-  to the unnamed register and the system clipboard.
+  (iTerm2, Kitty and Ghostty only) — the only way to highlight text in the
+  preview, matching Vim rather than a browser; `y` copies to the unnamed
+  register and the system clipboard.
 - Markdown-preview search with `/`, `n` and `N`.
 - Ctrl/Cmd-click follows a link. A local Markdown link opens in Neovim and the
   preview follows it, with `H`/`L` history back and forward — so a documentation
@@ -255,13 +257,14 @@ Counts work on every motion except `gg`/`G` — `10j`, `5w`, `3l`.
 
 ### Mouse
 
+The mouse never highlights text — only `v`/`V` and the motion keys above do
+that. What the mouse still does:
+
 | Gesture | Action |
 |---|---|
-| Click and drag | Selects the dragged text (a real DOM selection) |
-| Drag past the top/bottom edge | Keeps scrolling and extending the selection |
-| Plain click | Clears an active selection; never moves the source cursor |
-| Double-click / triple-click | Selects the word / the enclosing block |
+| Plain click | Places the caret; clears an active selection; never moves the source cursor |
 | Ctrl-click / Cmd-click | Activates a link under the pointer |
+| Scroll wheel | Scrolls the preview |
 
 Copying is always manual — nothing reaches your clipboard on selection unless you
 ask for it.
@@ -303,11 +306,11 @@ boundary is never something you have to infer from a config file.
   shows throughout. Long recordings are thinned to a fixed pixel budget (duration
   preserved, motion choppier) rather than allowed to grow terminal memory without
   bound.
-- Graphical confirmation is partial: image rendering and the drag overlay have
-  been watched on real hardware, but most placement and occlusion behavior is
-  covered by headless tests only.
-- The drag-highlight overlay is off on WezTerm pending an upstream fix, and
-  animated images are off there for the same reason.
+- Graphical confirmation is partial: image rendering and the selection overlay
+  have been watched on real hardware, but most placement and occlusion behavior
+  is covered by headless tests only.
+- The selection-highlight overlay is off on WezTerm pending an upstream fix,
+  and animated images are off there for the same reason.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
