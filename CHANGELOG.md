@@ -3,6 +3,52 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc4] - 2026-08-21
+
+Closes a path that could silently show you the wrong part of the document.
+
+Everything in `0.3.0-rc1` still applies, including that this is a validation
+prerelease and that stable `0.3.0` stays reserved until the throughput A/B has
+been re-run on the 0.80 MB/s link.
+
+### Fixed
+
+- **A slice could be captured from the wrong place, permanently and without
+  saying so.** Capturing a region of the document has exactly one correct
+  implementation — Chromium's CDP `Page.captureScreenshot` with a document-space
+  clip. md-viewer fell back to Playwright's `page.screenshot({clip})` whenever
+  that attempt failed, on the assumption the two were equivalent. **They are
+  not.** Measured on Ubuntu 22.04 / Chromium 151: asking for the document's top
+  while the page sat scrolled at 4800 returned an image that began at block 012
+  and was one viewport tall instead of two. The same clip through CDP returns the
+  same correct image from any scroll position.
+
+  Nothing downstream could notice. The renderer reports back the region it was
+  *asked* for, so the coordinate model, the placements and the retirement all
+  stay provably correct while the pixels inside every slice are of somewhere
+  else — which is what a fault looks like when every diagnostic says the preview
+  is fine.
+
+  There is now no second path: a region the fast path cannot take is refused, and
+  the session falls back to ordinary full-frame captures, which are always
+  correct. Scrolling gets slower; it stops being wrong. `:MdViewerDebug` names
+  the reason in `fallback_reason` rather than leaving it to be inferred.
+
+- **And the timeout that triggered it.** A fixed 10-second budget was applied to
+  a capture whose cost scales with its pixel count, and the *first* one on a page
+  is far slower than the rest — 15,687 ms against 274 ms for the same 12-megapixel
+  region, because it pays for compositor warm-up every later capture reuses. One
+  cold miss latched the fallback for the life of the renderer process, which is
+  why the symptom appeared after a while and cleared on restart. The budget now
+  scales with the region and gives the first capture room to be cold.
+
+### Added
+
+- **`scripts/resident/placement-trace.lua`** reconstructs what the terminal has
+  actually been told to draw, from the graphics stream itself, and flags two base
+  images claiming the same rows. Every other instrument here reports what
+  md-viewer *believes*; this one reports the screen. See `scripts/README.md`.
+
 ## [0.3.0-rc3] - 2026-08-20
 
 The preview showing you somewhere you had already left.
