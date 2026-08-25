@@ -102,6 +102,56 @@ failure and never retries, so losing that race demotes a session to the
 Playwright encoder for the life of the renderer process. Priming at startup is
 what removes the race.
 
+## `resident/drive.lua` — does a resident preview actually work?
+
+```sh
+nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [document.md]
+```
+
+Spawns a second Neovim over RPC with a faked Kitty-capable terminal, opens a
+preview, waits for the document to become resident, then scrolls it and counts
+what reached the terminal. The child records the byte stream instead of drawing
+it, so this needs no display and no graphics terminal — only Node and a
+Chrome/Chromium. Exits non-zero on any failed assertion.
+
+The claim under test is the whole feature: **after warm-up, a scroll costs no
+renderer request and no image bytes.** Against this repo's own README on Ubuntu
+22.04 / Chrome 151:
+
+```
+  22 chunks resident, each uploaded exactly once
+  40 scrolls over a 12,505px document
+    0 renderer requests
+    0 image uploads
+   58 placements in 40 writes, 7,855 bytes total -- 196 bytes per scroll
+```
+
+**Run this after touching `resident.lua`, `resident_session.lua`,
+`controller.lua` or the backend's compose path.** It is the only check that
+exercises the chain rather than the links.
+
+## `rig/first-frame.lua` — did the first capture keep the fast encoder?
+
+```sh
+nvim --headless -u NONE -i NONE -l scripts/rig/first-frame.lua
+```
+
+Drives the renderer directly, reports what the first frame cost and which
+encoder produced it, and exits non-zero if the fast path was lost. Headless, so
+it works over a link that cannot draw. `cdp_fast_png` is the answer you want;
+`playwright_png` means the process lost the CDP encoder on its first capture and
+will not get it back, which is also where `render.scroll_scale` stops working.
+
+## `rig/deploy.sh` — put this tree on the machine that runs Neovim
+
+```sh
+scripts/rig/deploy.sh <ssh-host> [remote-path]
+```
+
+rsyncs the working tree and installs the renderer's locked dependencies on the
+far side, for testing a branch that is not pushed yet or a tree with uncommitted
+changes. Prints the `dir = ` line to put in the lazy.nvim spec on that machine.
+
 ## `overlay/live/` — end-to-end gesture regression
 
 ```sh

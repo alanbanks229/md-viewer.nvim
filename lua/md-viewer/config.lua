@@ -105,6 +105,40 @@ M.defaults = {
     raw_overlay_bleed_cells = 1,
     raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
+    -- Whole-document resident mode: capture the document once as chunks, hold
+    -- them in the terminal, and make scrolling a pure placement. "auto" uses it
+    -- where the terminal and the renderer both support it, "off" keeps the
+    -- per-scroll capture loop everywhere.
+    resident = "auto",
+    -- How many viewports tall one chunk is.
+    --
+    -- Not a first-paint knob. Measured on Ubuntu 22.04 / Chrome 151, the first
+    -- capture of a browser process costs 9,874-16,335ms whatever its size and
+    -- every later one 116-373ms, so the renderer discharges that once at
+    -- startup and chunk size does not bear on it. What this trades is
+    -- per-capture overhead and overlap waste against how long a scroll into an
+    -- uncaptured region waits:
+    --
+    --     1x    4.0 Mpx    116ms capture    396 KB    ~507ms of wire at 0.80 MB/s
+    --     2x    8.1 Mpx    266ms capture    826 KB   ~1058ms
+    --     2.9x 11.7 Mpx    373ms capture   1218 KB   ~1559ms
+    --
+    -- PNG bytes are linear in pixels across that range (94-105 KB/Mpx), so a
+    -- larger chunk buys no compression. Clamped down when the document is wide
+    -- enough that a chunk would exceed Chromium's per-capture ceiling.
+    resident_chunk_viewports = 2,
+    -- Roughly how much terminal image memory a document may occupy.
+    --
+    -- A heuristic, not a guarantee. It is derived from 13 bytes per resident
+    -- pixel, measured on iTerm2 3.6.11 / macOS 15 against synthetic gradients;
+    -- a sustained-RSS run against a real iTerm2 session disagreed with that
+    -- figure by 34x and the discrepancy is unresolved. Kitty, Ghostty and
+    -- WezTerm are unmeasured. `resident_max_chunks` is the bound that holds
+    -- whether or not the per-pixel figure is right.
+    resident_memory_mb = 512,
+    -- The hard bound on how many chunks stay resident, independent of any
+    -- bytes-per-pixel estimate. The reader's own chunk is never retired.
+    resident_max_chunks = 24,
   },
   sync = {
     source_to_preview = true,
@@ -313,6 +347,24 @@ local function validate(cfg)
   assert(
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
+  )
+  assert(
+    cfg.image.resident == "auto" or cfg.image.resident == "off",
+    'md-viewer: image.resident must be "auto" or "off"'
+  )
+  assert(
+    type(cfg.image.resident_chunk_viewports) == "number"
+      and cfg.image.resident_chunk_viewports >= 1
+      and cfg.image.resident_chunk_viewports <= 8,
+    "md-viewer: image.resident_chunk_viewports must be a number between 1 and 8"
+  )
+  assert(
+    type(cfg.image.resident_memory_mb) == "number" and cfg.image.resident_memory_mb > 0,
+    "md-viewer: image.resident_memory_mb must be a positive number"
+  )
+  assert(
+    type(cfg.image.resident_max_chunks) == "number" and cfg.image.resident_max_chunks >= 1,
+    "md-viewer: image.resident_max_chunks must be at least 1"
   )
   assert(type(cfg.browser.fast_png_encode) == "boolean", "md-viewer: browser.fast_png_encode must be boolean")
   assert(type(cfg.preview.loading) == "boolean", "md-viewer: preview.loading must be boolean")

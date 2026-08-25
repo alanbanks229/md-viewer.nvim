@@ -41,14 +41,31 @@ function M.snapshot()
       -- how often the sharp one is paid for at all.
       scroll_settle_ms = session.scroll_settle_ms,
       scroll_settle_source = session.scroll_settle_source,
+      -- Which rendering model this preview is on, and why. Chosen once when the
+      -- session opened; "demoted:" in the reason means a runtime failure moved
+      -- it off the resident path, which is one-way.
+      render_path = session.render_path,
+      render_path_reason = session.render_path_reason,
+      resident_chunks = session.resident and ("%d/%d"):format(
+        session.resident.captured or 0,
+        session.resident.plan and session.resident.plan.count or 0
+      ) or nil,
+      -- What the document cost to make resident. On this path it is the whole
+      -- of the traffic: a scroll afterwards sends placements and no pixels.
+      resident_bytes_total = session.resident and session.resident.bytes or nil,
+      resident_waiting_for_chunk = session.resident_waiting,
       capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,
       capture_ms = session.last_capture_ms,
-      image_update_ms = session.last_image_update_ms,
+      -- How long the *handoff* to Neovim's UI queue took, which is not how long
+      -- the bytes took to arrive and cannot be used to estimate a link rate:
+      -- nvim_ui_send appends and returns, and 24 MB was accepted in 0.03s on a
+      -- link doing 0.80 MB/s. Named for what it is.
+      ui_handoff_ms = session.last_image_update_ms,
       fast_png_bytes = session.fast_png_bytes,
       fast_capture_ms = session.fast_capture_ms,
-      fast_image_update_ms = session.fast_image_update_ms,
+      fast_ui_handoff_ms = session.fast_image_update_ms,
       -- How many frames of each kind were actually captured and transmitted,
       -- and their total bytes. `coalesced_scroll_events` below counts the
       -- opposite -- scroll events dropped before capture -- so these are the

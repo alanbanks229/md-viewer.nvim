@@ -25,11 +25,13 @@
 local config = require("md-viewer.config")
 local state = require("md-viewer.state")
 
--- Bytes on the wire are base64, so 4/3 of the PNG, and the SSM tunnel's
--- measured ceiling is 0.80 MB/s. That makes the transit cost of a frame
--- pngBytes/600 milliseconds. Stated here rather than inline because it is the
--- only reason any of this matters.
-local BYTES_PER_SECOND = 800000
+-- Bytes on the wire are base64, so 4/3 of the PNG. The rate is the one thing
+-- here that cannot be measured from inside Neovim -- nvim_ui_send appends to
+-- Neovim's own UI queue and returns, so a Lua caller sees no back-pressure from
+-- the link under any circumstances -- so it is taken from configuration, or
+-- from the SSM tunnel's documented 0.80 MB/s when nothing is configured.
+-- Measure yours with scripts/ssh-link-speed.sh, from the shell.
+local BYTES_PER_SECOND = config.get().render.ssh_link_bytes_per_sec or 800000
 local function wire_ms(png_bytes)
   if not png_bytes then return nil end
   return (png_bytes * 4 / 3) / BYTES_PER_SECOND * 1000
@@ -108,7 +110,12 @@ local function collect(current)
     -- of the three things this change or its successor can move.
     interval_min = current.fast_interval_min_ms,
     capture_ms = current.fast_capture_ms,
-    send_ms = current.fast_image_update_ms,
+    -- How long handing the frame to Neovim's UI queue took. Reported because it
+    -- is part of the production floor, and deliberately NOT added to any
+    -- estimate of what the frame cost the link: it is a queue insertion, and
+    -- treating it as transmission is what produced link-rate estimates of
+    -- 101,169 B/ms against a link doing 800.
+    handoff_ms = current.fast_image_update_ms,
   }
 end
 
@@ -139,9 +146,14 @@ end
 ---carrying 62 ms of capture and 224 ms of transit is not accounted for, it is
 ---oversubscribed by a factor of five, and the clamp turned the finding into a
 ---row of zeroes.
+---
+---`handoff_ms` is deliberately absent from this sum. It measures a queue
+---insertion, not transmission, and the two things that decide whether frames
+---outrun the link are the capture that produces them and the wire that carries
+---them.
 local function overrun(phase)
   if not (phase.interval_min and phase.fast_png_bytes and phase.interval_min > 0) then return nil end
-  local per_frame = (phase.capture_ms or 0) + (phase.send_ms or 0) + wire_ms(phase.fast_png_bytes)
+  local per_frame = (phase.capture_ms or 0) + wire_ms(phase.fast_png_bytes)
   return per_frame / phase.interval_min
 end
 
@@ -185,7 +197,7 @@ local function report()
     ),
     ("%-26s %14s %14s"):format("frame produced every", ms(a.interval_min), ms(b.interval_min)),
     ("%-26s %14s %14s"):format("  capture (VM Chromium)", ms(a.capture_ms), ms(b.capture_ms)),
-    ("%-26s %14s %14s"):format("  encode + hand to UI", ms(a.send_ms), ms(b.send_ms)),
+    ("%-26s %14s %14s"):format("  hand to UI queue", ms(a.handoff_ms), ms(b.handoff_ms)),
     ("%-26s %14s %14s"):format(
       "  transit (async, queues)",
       ms(wire_ms(a.fast_png_bytes)),
