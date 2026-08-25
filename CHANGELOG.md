@@ -3,6 +3,77 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+**Whole-document resident image mode.** Where the terminal supports it, the
+document is captured once as a handful of chunks, held in the terminal's image
+memory, and scrolling becomes a placement command. After warm-up, scrolling
+costs no renderer request and no pixels on the wire.
+
+Measured on Ubuntu 22.04 / Chrome 151 against this repo's own README — a
+12,505px document in 22 chunks:
+
+```
+  40 scrolls    0 renderer requests
+                0 image uploads
+               58 placements in 40 writes
+            7,855 bytes total -- 196 bytes per scroll
+```
+
+The per-scroll path sends an ~80 KB moving frame and a ~305 KB settle frame,
+which on the 0.80 MB/s link this exists for is ~134ms and ~508ms of wire each.
+
+The path is chosen once when a preview opens and reported by `:MdViewerDebug`
+as `render_path`. A runtime capture failure demotes it to the per-scroll path
+one way, with the reason; nothing promotes back. WezTerm is excluded —
+wezterm#7953 duplicates a cell's attachment list on every repeat placement over
+that cell, and panning is unbounded repeat placements.
+
+The winbar counts the warm-up. Scrolling into a chunk that has not been
+captured yet shows an empty pane rather than the previous picture, and moves
+that chunk to the head of the queue. Leaving the old picture up would present
+pixels of somewhere else as though they belonged to where you are now.
+
+New options: `image.resident`, `image.resident_chunk_viewports`,
+`image.resident_memory_mb`, `image.resident_max_chunks`,
+`render.ssh_link_bytes_per_sec`. See `:help md-viewer-resident`.
+
+### Fixed
+
+**The first capture no longer costs a session its fast encoder.** The first
+`Page.captureScreenshot` of a browser process costs 9,874-16,335ms on Ubuntu
+22.04 / Chrome 151 and every later one 116-373ms, whatever its size — a fixed
+per-process warm-up that rebuilding the page does not restore. That raced
+`CDP_CAPTURE_TIMEOUT_MS` at 10,000ms on the session's first frame, and
+`captureViewportPng` latches `cdpCaptureUnavailable` on its first failure
+without ever retrying, so losing the race silently demoted the whole renderer
+process to the Playwright encoder — which is also where `render.scroll_scale`
+stops working, the "INERT" verdict `scripts/README.md` documented without a
+cause.
+
+The renderer now discharges that warm-up on the blank page at startup, before
+any document is loaded. Three runs each on the rig, before and after:
+
+```
+  before                          after
+    15,489ms  playwright_png        16,161ms  cdp_fast_png
+    21,830ms  playwright_png        22,011ms  cdp_fast_png
+    (no frame at all)               24,525ms  cdp_fast_png
+```
+
+The first frame still costs 16-24 seconds on that host. What changed is that
+it no longer also costs the fast path for the life of the process.
+
+**`:MdViewerDebug` no longer presents a queue insertion as transmission cost.**
+`image_update_ms` is now `ui_handoff_ms`, and `scripts/scroll-scale/ab.lua` has
+dropped it from its per-frame wire estimate. `nvim_ui_send` appends to Neovim's
+own UI queue and returns — 24 MB was accepted in 0.03s on a link doing
+0.80 MB/s — so timing it measures the socket, not the wire. `ab.lua` now takes
+its rate from `render.ssh_link_bytes_per_sec` instead of a hardcoded constant;
+measure yours with `scripts/ssh-link-speed.sh`, from the shell.
+
 ## [0.3.0-rc1] - 2026-08-21
 
 **Prerelease.** Highlighting is now exclusively a keyboard gesture. Mouse
