@@ -65,6 +65,24 @@ M.defaults = {
     -- them -- so the backlog, not the render, is the lag. See
     -- docs/local-render-design.md.
     ssh_scroll_scale = 0.5,
+    -- How fast this link carries bytes, in bytes per second. nil means unknown,
+    -- and unknown is a legitimate answer -- there is no way to observe it from
+    -- inside Neovim, so nothing here infers one.
+    --
+    -- `nvim_ui_send` appends to Neovim's own UI queue and returns; the TUI
+    -- drains that queue later. Measured on a link shaped to 0.80 MB/s, 96
+    -- payloads totalling 24 MB were accepted in 0.03s and no write ever waited.
+    -- A plugin timing its own writes therefore measures a queue insertion and
+    -- concludes the link runs at ~100 MB/s. Real sessions reported 209,046,
+    -- 139,058 and 101,169 B/ms against a link doing 800.
+    --
+    -- Measure it from the shell instead, with Neovim closed:
+    --
+    --     sh scripts/ssh-link-speed.sh
+    --
+    -- Used for warm-up progress estimates and to bound queued upload bytes. A
+    -- value set here is never capped against any other figure.
+    ssh_link_bytes_per_sec = nil,
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.
     -- Playback is expensive when sending constant PNG screenshots.
@@ -248,6 +266,11 @@ local function validate(cfg)
       and cfg.render.ssh_scroll_scale >= 0.25
       and cfg.render.ssh_scroll_scale <= 1,
     "md-viewer: render.ssh_scroll_scale must be a number between 0.25 and 1"
+  )
+  assert(
+    cfg.render.ssh_link_bytes_per_sec == nil
+      or (type(cfg.render.ssh_link_bytes_per_sec) == "number" and cfg.render.ssh_link_bytes_per_sec > 0),
+    "md-viewer: render.ssh_link_bytes_per_sec must be a positive number, or nil when the link rate is unknown"
   )
   assert(
     type(cfg.render.scroll_settle_ms) == "number" and cfg.render.scroll_settle_ms >= 0,
