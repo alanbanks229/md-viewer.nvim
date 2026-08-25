@@ -3,7 +3,12 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.0-rc2] - 2026-08-25
+## [0.3.0-rc5] - 2026-08-25
+
+> Numbered rc5 rather than rc2 because `v0.3.0-rc2` through `rc4` were already
+> spent on an earlier attempt at this feature — a lazily-filled slice grid that
+> was abandoned. Those tags were deleted rather than released, so no version
+> number in this project's history means two different things.
 
 **Prerelease.** Scrolling a preview no longer costs a screenshot. Where the
 terminal supports it the whole document is captured once, held in the
@@ -302,7 +307,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
-[0.3.0-rc2]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc2
+[0.3.0-rc5]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc5
 [0.3.0-rc1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
