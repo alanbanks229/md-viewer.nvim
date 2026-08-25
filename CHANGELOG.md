@@ -3,7 +3,17 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0-rc2] - 2026-08-25
+
+**Prerelease.** Scrolling a preview no longer costs a screenshot. Where the
+terminal supports it the whole document is captured once, held in the
+terminal's image memory, and scrolling becomes a placement command — 196 bytes
+where it used to be tens or hundreds of kilobytes per frame.
+
+This also fixes a defect that has been live since the CDP capture path was
+introduced: on a slow host the first capture of a renderer process could
+exceed its timeout and silently demote the session to the Playwright encoder
+for the life of that process, taking `render.scroll_scale` with it.
 
 ### Added
 
@@ -292,6 +302,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc2]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc2
 [0.3.0-rc1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0
