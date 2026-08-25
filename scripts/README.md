@@ -14,6 +14,40 @@ no direct route out* -- the two pieces of hardware no test machine has.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
+## `resident/registration.mjs` — is a region capture document-absolute?
+
+```sh
+node scripts/resident/registration.mjs
+```
+
+The go/no-go for whole-document resident mode. Captures the same document region
+from three different `window.scrollY` values and asserts the bytes are identical,
+then characterises the two things that make that true: the capture path and the
+`captureBeyondViewport` flag.
+
+It exists because a renderer echoes back the region it was *asked* for. If a clip
+composes with the page's scroll, every chunk holds pixels of wherever the reader
+was standing while the coordinate model, the placements and the retirement all
+stay provably correct — a fault with no downstream detector. Needs a
+Chrome/Chromium install; no display.
+
+Measured on macOS 15 / Chromium 142, 1980x4080 device px (8.1 Mpx):
+
+```
+  CDP, captureBeyondViewport: true    byte-identical at scroll 0, 5767, 11535
+  Playwright page.screenshot({clip})  1980x2040 -- half the requested height,
+                                      different bytes at each position, and it
+                                      throws outright on an interior region
+  captureBeyondViewport: false        correctly sized, beyond-the-fold band
+                                      agrees on 95.5% of samples, worst delta 210
+  cold vs warm                        53/54/68ms cold against 50/79/46ms warm
+```
+
+The last row is the one that does **not** generalise. The ~60x cold penalty on
+record (15,687ms then 274ms, Ubuntu 22.04 / Chromium 151, 12.0 Mpx) does not
+reproduce on macOS at 8.1 Mpx. Run this on the host you are shipping to before
+trusting any timeout derived from it.
+
 ## `overlay/live/` — end-to-end gesture regression
 
 ```sh
