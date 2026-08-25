@@ -127,6 +127,22 @@ local function fallback_notice(session)
   return "%#WarningMsg#⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)%*"
 end
 
+---How much of the document is resident, while any of it is not.
+---
+---Read straight off the session rather than through `resident_session`, which
+---requires this module: a require cycle here would be a load-order failure at
+---startup rather than a wrong string.
+local function warmup_notice(session)
+  local state = session.resident
+  if not state or not state.plan then return nil end
+  local captured, total = state.captured or 0, state.plan.count or 0
+  if total == 0 or captured >= total then return nil end
+  if session.resident_waiting then
+    return ("%%#WarningMsg#waiting for this page — %d/%d%%*"):format(captured, total)
+  end
+  return ("%%#Comment#warming %d/%d%%*"):format(captured, total)
+end
+
 local function title_text(session)
   local text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
   -- The one piece of modal state the preview has, and the winbar is the only
@@ -135,6 +151,8 @@ local function title_text(session)
   if session.visual_active then
     text = text .. "  %#ModeMsg#-- VISUAL" .. (session.visual_linewise and " LINE" or "") .. " --%*"
   end
+  local warming = warmup_notice(session)
+  if warming then text = text .. "  " .. warming end
   local notice = fallback_notice(session)
   if notice then text = text .. "  " .. notice end
   return text

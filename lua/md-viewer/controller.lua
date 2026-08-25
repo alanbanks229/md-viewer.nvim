@@ -14,6 +14,7 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
+local resident_session = require("md-viewer.resident_session")
 
 local M = {}
 local group
@@ -458,6 +459,11 @@ local function show_cached(session)
   return true
 end
 
+---A chunk capture never re-enters the resident bootstrap: it *is* the warm-up.
+local function render_options_is_chunk(render_options)
+  return render_options ~= nil and render_options.resident_chunk ~= nil
+end
+
 function M.refresh(session, render_options)
   local explicit = session == nil
   session = session or current_session()
@@ -589,6 +595,13 @@ function M.refresh(session, render_options)
       finish()
       return
     end
+    -- The render that measured the document is also what the chunk plan is
+    -- derived from, and its frame is the reader's own position rather than a
+    -- remembered one -- so it doubles as first paint while the chunks warm.
+    -- After this, a resident session captures chunks and nothing else.
+    if session.render_path == "resident" and not render_options_is_chunk(render_options) then
+      M.begin_resident(session, meta)
+    end
     finish()
   end)
 end
@@ -598,6 +611,111 @@ function M.schedule(session, delay, timer_name, render_options)
   debounce.call(session, timer_name or "render_timer", delay or config.get().render.debounce_ms, function()
     if valid(session) then M.refresh(session, render_options) end
   end)
+end
+
+-- ---------------------------------------------------------------------------
+-- Resident mode: the document held in the terminal, scrolling by placement.
+-- ---------------------------------------------------------------------------
+
+---Capture the next chunk the warm-up queue wants, one at a time.
+---
+---One in flight is the whole of the backpressure. A chunk capture is 116-373ms
+---and about a second of wire on a slow link, so queueing several would only move
+---the wait from the renderer to the socket.
+function M.pump_resident(session)
+  if not valid(session) or session.render_path ~= "resident" then return end
+  local state = session.resident
+  if not state or state.in_flight then return end
+  local index = resident_session.next_chunk(session)
+  if not index then
+    preview.update_title(session)
+    return
+  end
+  local options = resident_session.capture_options(session, index)
+  if not options then return end
+  state.in_flight = index
+  renderer.request(session, markdown(session), options, function(result, err, stale)
+    if not valid(session) or session.render_path ~= "resident" then return end
+    local live = session.resident
+    if not live or live ~= state then return end
+    state.in_flight = nil
+    if stale then
+      -- Superseded by newer content: the plan this chunk belongs to is gone.
+      return
+    end
+    if err then
+      local code = tostring(err)
+      if
+        code:match("REGION_CAPTURE_UNSUPPORTED")
+        or code:match("REGION_ORIGIN_MOVED")
+        or code:match("REGION_TOO_LARGE")
+      then
+        resident_session.demote(session, code)
+        notify_error("resident preview unavailable, falling back to per-scroll capture: " .. code)
+        M.refresh(session)
+        return
+      end
+      -- Anything else is this one chunk's problem. Put it back and carry on;
+      -- the reader is told by the winbar that it is still warming.
+      state.queue[#state.queue + 1] = index
+      vim.schedule(function() M.pump_resident(session) end)
+      return
+    end
+    local ok, adopt_err = resident_session.adopt(session, index, result.image, result.metadata)
+    if not ok then
+      resident_session.demote(session, adopt_err)
+      notify_error("resident preview refused a chunk: " .. tostring(adopt_err))
+      M.refresh(session)
+      return
+    end
+    resident_session.retain(session, live.drawn or index)
+    M.draw_resident(session)
+    preview.update_title(session)
+    vim.schedule(function() M.pump_resident(session) end)
+  end)
+end
+
+---Draw the reader's position from resident chunks, or clear the preview.
+---
+---A position not yet covered shows nothing rather than the previous screen:
+---leaving the old picture up presents pixels of somewhere else as though they
+---belonged to this position, and the reader has no way to tell.
+function M.draw_resident(session)
+  if not valid(session) or session.render_path ~= "resident" then return end
+  if update_occlusion(session) then
+    clear_image(session)
+    return
+  end
+  local outcome, detail = resident_session.draw(session, session.scroll_y or 0)
+  if outcome == "drawn" then
+    preview.stop_loading(session)
+    session.resident_waiting = nil
+    M.clear_caret_overlay(session)
+    M.place_caret(session)
+    return
+  end
+  if outcome == "waiting" then
+    session.resident_waiting = detail
+    clear_image(session)
+    preview.update_title(session)
+    M.pump_resident(session)
+    return
+  end
+  resident_session.demote(session, detail)
+  notify_error("resident preview could not draw this position: " .. tostring(detail))
+  M.refresh(session)
+end
+
+---Start resident mode from the render that measured the document.
+function M.begin_resident(session, meta)
+  if not valid(session) or session.render_path ~= "resident" then return end
+  local ok, reason = resident_session.begin(session, meta)
+  if not ok then
+    resident_session.demote(session, reason)
+    return
+  end
+  M.draw_resident(session)
+  M.pump_resident(session)
 end
 
 ---The pixel scale for the *moving* frame of a scroll, as a fraction of its
@@ -643,6 +761,13 @@ local function scroll_settle_delay(render)
 end
 
 function M.schedule_scroll(session)
+  -- The whole point of the feature: no renderer request, no capture, no pixels
+  -- on the wire. The document is already in the terminal and a scroll is a
+  -- placement.
+  if session.render_path == "resident" and session.resident then
+    M.draw_resident(session)
+    return
+  end
   local render = config.get().render
   local fast_scale = render.fast_scroll and "css" or "device"
   local scale_factor, scale_source = scroll_capture_scale(render)
@@ -717,6 +842,9 @@ local function close_session(session, stop_opts)
   preview.stop_loading(session)
   preview.restore_cursor()
   caret.forget(session)
+  -- Before clear_image: these are megabytes of terminal memory that iTerm2 does
+  -- not evict on its own, and the session is the only thing that knows the ids.
+  resident_session.release(session)
   clear_image(session)
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
@@ -770,6 +898,10 @@ function M.open(position)
   local session = state.create(source_buf, source_win)
   M.history_init(session)
   session.backend, session.backend_reason = backend, reason
+  -- Decided once, here, and never again for the life of this session. A
+  -- preview that switches rendering model mid-scroll is one whose behaviour
+  -- nobody can reproduce; the only later move is a one-way demotion.
+  session.render_path, session.render_path_reason = resident_session.select_path(session)
   session.preview_buf, session.preview_win = preview.open(position, session)
   -- Size the caret surface now that the split has been created and resized;
   -- `preview.open` cannot do it itself, since the placement it measures needs

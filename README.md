@@ -123,7 +123,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc1",
+  version = "v0.3.0-rc2",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -175,7 +175,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc1" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc2" },
 })
 
 require("md-viewer").setup({})
@@ -194,6 +194,11 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 ## Features
 
 - Live preview of unsaved changes, following your cursor through the document.
+- **Scrolling costs no screenshot.** Where the terminal supports it, the whole
+  document is captured once, kept in the terminal's image memory, and scrolling
+  becomes a placement command — measured at 196 bytes per scroll against the
+  ~80 KB frame the per-scroll path sends. This is what makes a preview usable
+  over a slow SSH link. See `:help md-viewer-resident`.
 - A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
   (iTerm2, Kitty and Ghostty only) — the only way to highlight text in the
   preview, matching Vim rather than a browser; `y` copies to the unnamed
@@ -310,7 +315,16 @@ boundary is never something you have to infer from a config file.
   have been watched on real hardware, but most placement and occlusion behavior
   is covered by headless tests only.
 - The selection-highlight overlay is off on WezTerm pending an upstream fix,
-  and animated images are off there for the same reason.
+  and animated images and whole-document resident mode are off there for the
+  same reason.
+- The first preview of a Neovim session waits for Chromium's one-off capture
+  warm-up, which is a fixed cost per renderer process and measured at 16-24
+  seconds on a modest Linux VM and well under a second on macOS. Later previews
+  in the same session do not pay it.
+- `image.resident_memory_mb` is a heuristic rather than a guaranteed ceiling:
+  the bytes-per-resident-pixel figure it derives from is an iTerm2 measurement
+  that a sustained-RSS run disagreed with by 34x, and other terminals are
+  unmeasured. `image.resident_max_chunks` is the bound that holds regardless.
 - tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.

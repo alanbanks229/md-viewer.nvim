@@ -88,14 +88,18 @@ response, because unchanged block geometry was being returned on every capture; 
 that too brought it under 2,048. A saving measured only on the thing you removed will
 read as a win it is not.
 
-**The better remaining option.** Keep the whole document resident in the terminal and pan
-with crop placements. The protocol support exists and `placement_sequences` already sends
-`x,y,w,h` crop keys, so scrolling within resident content costs about 200 bytes, and it
-needs no second machine at all. It was not chosen because it requires tens of megabytes
-of image data resident in the terminal, and terminal memory under placement churn is
-exactly where this project has been burned before ([`terminal-support.md`](terminal-support.md)
-on wezterm#7953). It is the one alternative here that removes bytes *without* adding a
-round trip, so the measurement above does not invalidate it.
+**The better remaining option — since built, and it was the right one.** Keep the whole
+document resident in the terminal and pan with crop placements. Shipped in 0.3.0-rc2 and
+described in [`architecture.md`](architecture.md); the estimate below of "about 200 bytes"
+per scroll turned out to be 196, measured over 40 scrolls of this repository's own README.
+
+The two reservations recorded here were both real and both were answered rather than
+dismissed. Terminal memory under placement churn is why WezTerm is excluded outright
+(wezterm#7953 duplicates a cell's attachment list on every repeat placement, and panning
+is unbounded repeat placements) and why the resident set is bounded by a hard chunk count
+as well as by a byte estimate. The "tens of megabytes resident" figure is the one part
+still unsettled: the two measurements of terminal memory per resident pixel disagree by
+34x, which is why `image.resident_memory_mb` is documented as a heuristic.
 
 **Two alternatives that cannot work.** Writing to the ssh pty slave from a second
 process: two processes writing one terminal is not atomic, and a write landing inside an

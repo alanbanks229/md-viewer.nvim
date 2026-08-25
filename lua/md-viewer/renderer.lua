@@ -60,6 +60,10 @@ function M.request(session, markdown, options, callback)
     -- moving scroll frame, and ignored by the renderer on the "device" tier --
     -- see `captureViewportPng` for why the settle frame is never scaled.
     captureScaleFactor = options.capture_scale_factor,
+    -- A durable document chunk rather than a frame of the reader's viewport.
+    -- Its clip is document-absolute, so it does not consult `scrollY` above and
+    -- the reply echoes the region back for the caller to check.
+    captureRegion = options.capture_region,
     fontSizePx = cfg.render.font_size_px,
     scrollPastEnd = cfg.render.scroll_past_end,
     scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,

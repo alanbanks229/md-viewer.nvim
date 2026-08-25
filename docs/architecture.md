@@ -271,6 +271,10 @@ All image implementations expose `detect`, `show`, `update`, `move`, `clear`,
 
 ## Scroll synchronization
 
+What a scroll *costs* depends on which rendering model the session picked; see
+"Whole-document resident mode" below. What a scroll *means* is the same either
+way, and is what this section describes.
+
 The preview buffer holds blank cells, never document text; it does not pretend
 browser pixels are editable lines. Buffer-local motions move the caret across
 those cells and update browser `scrollY` when the caret reaches an edge.
@@ -293,6 +297,56 @@ Mouse-wheel mappings exist only while a graphical preview does. The pointer's
 actual window ID selects the session; events outside an md-viewer window fall
 through to Neovim's own wheel behavior, and any previous user mappings are
 restored after the last graphical preview closes.
+
+## Whole-document resident mode
+
+Two models are implemented, and a session picks one when it opens.
+
+The **viewport** model is the original: every scroll position is a fresh
+screenshot of the reader's viewport. Simple, works everywhere, and costs bytes
+proportional to how far you scrolled — an ~80 KB moving frame and a ~305 KB
+settle frame, which on a 0.80 MB/s link is ~134 ms and ~508 ms of wire each.
+
+The **resident** model captures the document once as N chunks, holds every chunk
+in the terminal's image memory, and turns a scroll into a cropped placement.
+Measured against this repository's own README, 40 scrolls over a 12,505 px
+document issued 0 renderer requests, uploaded 0 image bytes, and sent 58
+placements in 7,855 bytes — 196 bytes per scroll.
+
+Three layers, and conflating any two of them is how this feature fails:
+
+    document + viewport geometry  ->  one canonical chunk plan
+    scroll position               ->  which chunks are needed
+    opening scroll position       ->  initial capture priority only
+
+`resident.lua` is the arithmetic and touches no Neovim API, so each of those is
+a test rather than a comment. `resident_session.lua` is the state machine and
+`controller.lua` owns the policy.
+
+Four constraints shape it, all measured rather than assumed:
+
+- **A region capture must be document-absolute.** `page.screenshot({clip})` is
+  not: the same clip returns different bytes at every scroll position and comes
+  back at half the height asked for. Only CDP with `captureBeyondViewport: true`
+  is usable, and there is deliberately no fallback to the other — a wrong
+  picture of the right size cannot be detected downstream, because the reply
+  echoes the region that was *asked* for. `scripts/resident/registration.mjs` is
+  the standing proof.
+- **Chromium cannot capture a tall document in one call.** 12,000,000 device px
+  and 16,384 px tall per `Page.captureScreenshot`, so the document is
+  necessarily N chunks.
+- **Chunks overlap by two pane rows**, computed once per document in whole image
+  pixels, so a viewport landing on a boundary composites from two chunks split
+  at a whole cell row and both halves agree about the same document position.
+- **Terminal memory is the budget, not the wire.** The resident set is bounded
+  by a byte estimate *and* by a hard chunk count, because the byte estimate
+  rests on a figure two measurements disagree about by 34x.
+
+A position that cannot be drawn from resident chunks clears the pane rather than
+leaving the previous screen up. That is the whole design goal restated: a stale
+screen presents pixels of somewhere else as though they belonged to where the
+reader now is, and nothing downstream — not the coordinate model, not the
+placements, not the retirement — can tell.
 
 ## Interaction
 

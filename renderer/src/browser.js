@@ -48,6 +48,41 @@ const MAX_ANIMATION_GEOMETRY_RETRIES = 10;
 // wait a person would sit through.
 const CDP_CAPTURE_TIMEOUT_MS = 10000;
 
+/// How long the startup primer may take. Measured on Ubuntu 22.04 / Chrome 151,
+/// the first Page.captureScreenshot of a browser process costs 9,874-16,335ms
+/// whatever its size, and every later one 116-373ms. The primer is what pays
+/// that once, on the blank page, where nothing is waiting on the answer.
+const PRIMER_TIMEOUT_MS = 60000;
+
+/// A single Page.captureScreenshot is safe to about this much.
+export const MAX_REGION_PIXELS = 12000000;
+export const MAX_REGION_HEIGHT_PX = 16384;
+
+/// Clamp a requested document region and refuse one Chromium cannot capture in
+/// a single call. Pure, so the arithmetic is testable without a browser.
+export function resolveCaptureRegion(requested, { documentHeight, viewportWidth, deviceScaleFactor }) {
+  const rawY = Number(requested?.yPx);
+  const rawHeight = Number(requested?.heightPx);
+  if (!Number.isFinite(rawY) || !Number.isFinite(rawHeight)) {
+    const error = new Error("captureRegion requires finite yPx and heightPx");
+    error.code = "INVALID_REQUEST";
+    throw error;
+  }
+  const yPx = Math.max(0, Math.min(rawY, documentHeight));
+  const heightPx = Math.min(Math.max(1, rawHeight), Math.max(1, documentHeight - yPx));
+  const devicePixelHeight = Math.round(heightPx * deviceScaleFactor);
+  const devicePixelWidth = Math.round(viewportWidth * deviceScaleFactor);
+  if (devicePixelHeight > MAX_REGION_HEIGHT_PX || devicePixelWidth * devicePixelHeight > MAX_REGION_PIXELS) {
+    const error = new Error(
+      `capture region of ${devicePixelWidth}x${devicePixelHeight} device px exceeds the safe ceiling `
+      + `(${MAX_REGION_PIXELS} px, ${MAX_REGION_HEIGHT_PX} px tall)`,
+    );
+    error.code = "REGION_TOO_LARGE";
+    throw error;
+  }
+  return { yPx, heightPx };
+}
+
 /// The complete Chromium command line, exported so a test can assert what is
 /// *not* on it.
 ///
@@ -114,6 +149,12 @@ export class BrowserRenderer {
     // a browser that does not support it costs one failed round trip rather
     // than one on every frame.
     this.cdpCaptureUnavailable = null;
+    // Whether this process has paid its one-off capture warm-up. See
+    // primeCapture(); a first region capture on an unprimed renderer is given a
+    // much larger allowance because it will pay that cost itself.
+    this.primed = false;
+    this.primerMs = null;
+    this.primerError = null;
     this.fastPngEncode = true;
     // A field rather than a constant so a test can prove the stall path without
     // waiting out the real budget.
@@ -151,6 +192,52 @@ export class BrowserRenderer {
     this.cdpCaptureUnavailable = this.cdp ? null : "newCDPSession failed";
     // A brand-new page holds no document, so nothing may claim to be active.
     this.layout = this.viewport = this.active = null;
+    // Deliberately not awaited. It runs concurrently with setContent and the
+    // layout measurement, which is time the first capture would otherwise spend
+    // waiting; `awaitPrimer` is where a capture actually joins it. Awaiting here
+    // would also put the full warm-up in front of :MdViewerHealth, which calls
+    // ensure() only to rebuild the context and report on it.
+    this.primerPromise = this.primeCapture();
+  }
+
+  async awaitPrimer() {
+    try { await this.primerPromise; } catch {}
+  }
+
+  /// Pay the browser process's one-off capture warm-up here, on the blank page,
+  /// before any document exists and while nothing is waiting on a frame.
+  ///
+  /// Measured on Ubuntu 22.04 / Chrome 151: the first Page.captureScreenshot of
+  /// a process costs 9,874-16,335ms and every later one 116-373ms, whatever the
+  /// region size -- 6x the pixels moved it 1.7x, in the wrong direction. It is a
+  /// fixed price per process, and rebuilding the page and context does not
+  /// restore it.
+  ///
+  /// Without this, that cost lands on the session's first real capture and races
+  /// CDP_CAPTURE_TIMEOUT_MS, which it loses often enough to matter (one run in
+  /// scripts/resident/sizing.mjs failed at 15,215ms). captureViewportPng latches
+  /// `cdpCaptureUnavailable` on its first failure and never retries, so losing
+  /// that race demotes the whole process to the Playwright encoder -- silently,
+  /// and on a host where the fast path works from the second capture onward.
+  ///
+  /// A failed primer discharges the warm-up just as well as a successful one, so
+  /// nothing here is fatal and nothing here may set `cdpCaptureUnavailable`.
+  async primeCapture() {
+    this.primed = false;
+    this.primerError = null;
+    if (!this.cdp) return;
+    const started = performance.now();
+    try {
+      await withTimeout(
+        this.cdp.send("Page.captureScreenshot", { format: "png", optimizeForSpeed: true }),
+        PRIMER_TIMEOUT_MS,
+        "capture primer",
+      );
+    } catch (error) {
+      this.primerError = String(error?.message ?? error);
+    }
+    this.primed = true;
+    this.primerMs = round(performance.now() - started);
   }
 
   styles(theme) {
@@ -254,6 +341,10 @@ export class BrowserRenderer {
     const clipScale = scale === "css" ? base * factor : base;
     const usable = this.cdp && this.fastPngEncode && !this.cdpCaptureUnavailable && this.viewport;
     if (usable) {
+      // The process's one-off warm-up is 9,874-16,335ms and this path latches
+      // permanently on its first failure, so joining the primer here is what
+      // keeps an unlucky first frame from demoting the whole process.
+      await this.awaitPrimer();
       try {
         // `clip` is in CSS-pixel *document* coordinates, so it has to carry the
         // page's current scroll offset. Omitting it screenshots the top of the
@@ -309,15 +400,97 @@ export class BrowserRenderer {
     return "playwright_png";
   }
 
-  /// Screenshot the current viewport. Shared by render() and by any interaction
-  /// that mutates visible state, so the mutation and its frame are produced by
-  /// the same queued operation and Lua never has to follow up with a capture.
-  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor }) {
+  /// How long a region capture of this size may take.
+  ///
+  /// Warm captures measured 116ms at 4.0 Mpx and 373ms at 11.7 Mpx on Ubuntu
+  /// 22.04 / Chrome 151, so a megapixel of allowance is roughly 3x the observed
+  /// cost. The unprimed multiplier covers a renderer whose primer did not run.
+  regionCaptureTimeoutMs(region) {
+    const megapixels = (region.heightPx * this.viewport.width * this.deviceScaleFactor ** 2) / 1e6;
+    return Math.max(this.cdpCaptureTimeoutMs, Math.ceil(megapixels * (this.primed ? 1000 : 4000)));
+  }
+
+  /// Capture a region of the document, in document coordinates, independent of
+  /// where the page is scrolled.
+  ///
+  /// Two things make that true and both are load-bearing:
+  ///
+  ///   * **CDP only.** `page.screenshot({clip})` is not document-absolute.
+  ///     Measured on Ubuntu 22.04 / Chrome 151 and macOS 15 / Chromium 142, the
+  ///     same clip returns different bytes at every scroll position, comes back
+  ///     at half the height asked for, and throws outright on an interior
+  ///     region. There is deliberately no fallback to it: a wrong picture of the
+  ///     right size is undetectable downstream, because the reply echoes the
+  ///     region that was *asked* for.
+  ///   * **`captureBeyondViewport: true`.** With it false the same clip returns
+  ///     a correctly sized PNG whose beyond-the-fold band matches on only 94.8%
+  ///     of samples, worst delta 210 of 255. No exception, no short image.
+  ///
+  /// The origin is pinned rather than trusted. Nothing on this path needs the
+  /// page to follow the reader -- a resident session takes no viewport captures
+  /// at all -- so the page is parked at 0 for the capture and put back after.
+  async captureRegionPng(pngPath, region) {
+    if (!this.cdp || !this.fastPngEncode || this.cdpCaptureUnavailable) {
+      const error = new Error(this.cdpCaptureUnavailable ?? "raw CDP capture is unavailable");
+      error.code = "REGION_CAPTURE_UNSUPPORTED";
+      throw error;
+    }
+    await this.awaitPrimer();
+    const restoreTo = this.active?.scrollY ?? 0;
+    await this.page.evaluate(() => window.scrollTo(0, 0));
+    try {
+      const settled = await this.page.evaluate(() => window.scrollY);
+      if (settled !== 0) {
+        const error = new Error(`page would not park at 0 for a region capture (sat at ${settled})`);
+        error.code = "REGION_ORIGIN_MOVED";
+        throw error;
+      }
+      const { data } = await withTimeout(
+        this.cdp.send("Page.captureScreenshot", {
+          format: "png",
+          optimizeForSpeed: true,
+          captureBeyondViewport: true,
+          clip: {
+            x: 0,
+            y: region.yPx,
+            width: this.viewport.width,
+            height: region.heightPx,
+            scale: this.deviceScaleFactor,
+          },
+        }),
+        this.regionCaptureTimeoutMs(region),
+        "Page.captureScreenshot (region)",
+      );
+      const after = await this.page.evaluate(() => window.scrollY);
+      if (after !== 0) {
+        const error = new Error(`region capture moved the page to ${after}`);
+        error.code = "REGION_ORIGIN_MOVED";
+        throw error;
+      }
+      fs.writeFileSync(pngPath, Buffer.from(data, "base64"));
+      return "cdp_region_png";
+    } catch (error) {
+      if (!error.code) error.code = "REGION_CAPTURE_UNSUPPORTED";
+      throw error;
+    } finally {
+      await this.page.evaluate((top) => window.scrollTo(0, top), restoreTo).catch(() => {});
+    }
+  }
+
+  /// Screenshot the current viewport, or a document region when one is asked
+  /// for. Shared by render() and by any interaction that mutates visible state,
+  /// so the mutation and its frame are produced by the same queued operation and
+  /// Lua never has to follow up with a capture.
+  async captureViewport({ documentId, requestId, captureScale, captureScaleFactor, region }) {
     const safeDocument = String(documentId ?? "document").replace(/[^a-zA-Z0-9_-]/g, "_");
     const pngPath = path.join(this.tempDir, `${safeDocument}-${requestId}.png`);
-    const scale = captureScale === "css" ? "css" : "device";
+    // A region is always captured at full device scale: it is durable, held for
+    // the life of the document, and cropped for every later scroll position.
+    const scale = region ? "device" : (captureScale === "css" ? "css" : "device");
     const started = performance.now();
-    const captureEncoder = await this.captureViewportPng(pngPath, scale, captureScaleFactor);
+    const captureEncoder = region
+      ? await this.captureRegionPng(pngPath, region)
+      : await this.captureViewportPng(pngPath, scale, captureScaleFactor);
     const captureMs = performance.now() - started;
     const pngBytes = fs.statSync(pngPath).size;
     // `captureScale` stays the two-value tier the Lua side keys its fast/settle
@@ -332,6 +505,10 @@ export class BrowserRenderer {
       pngBytes,
       captureMs: round(captureMs),
       captureEncoder,
+      // Absent entirely on an ordinary viewport capture, so a reply carrying
+      // them is exactly a reply that captured a region.
+      regionYPx: region?.yPx,
+      regionHeightPx: region?.heightPx,
     };
   }
 
@@ -422,10 +599,22 @@ export class BrowserRenderer {
     const layoutMs = performance.now() - layoutStarted;
 
     const documentHeight = this.layout.documentHeight;
+    // Applied even when this frame is a region capture, whose clip does not
+    // consult it. The page's own scroll position is what every later interaction
+    // resolves against -- hit-testing, the caret, selection, find -- so it has to
+    // keep tracking the reader whether or not this particular frame reads it.
     const scrollY = await this.applyScroll(documentHeight, height, params.scrollY);
+    const region = params.captureRegion
+      ? resolveCaptureRegion(params.captureRegion, {
+        documentHeight,
+        viewportWidth: width,
+        deviceScaleFactor: this.deviceScaleFactor,
+      })
+      : null;
     const capture = await this.captureViewport({
       documentId: params.documentId, requestId, captureScale: params.captureScale,
       captureScaleFactor: params.captureScaleFactor,
+      region,
     });
 
     // The rehydration record. Written on every successful render so an
@@ -465,6 +654,8 @@ export class BrowserRenderer {
       captureScale: capture.captureScale,
       captureScaleFactor: capture.captureScaleFactor,
       captureEncoder: capture.captureEncoder,
+      regionYPx: capture.regionYPx,
+      regionHeightPx: capture.regionHeightPx,
       pngBytes: capture.pngBytes,
       layoutMs: round(layoutMs),
       captureMs: capture.captureMs,
@@ -745,6 +936,13 @@ export class BrowserRenderer {
       discoveryReason: this.discoveryReason,
       activeDocument: this.active?.documentId ?? null,
       cachedDocumentFrames: this.documents.size,
+      // What a region capture -- and therefore resident mode -- depends on.
+      regionCapture: this.cdp && !this.cdpCaptureUnavailable ? "available" : "unavailable",
+      regionCaptureReason: this.cdpCaptureUnavailable ?? null,
+      maxRegionPixels: MAX_REGION_PIXELS,
+      maxRegionHeightPx: MAX_REGION_HEIGHT_PX,
+      primerMs: this.primerMs,
+      primerError: this.primerError,
     };
   }
 

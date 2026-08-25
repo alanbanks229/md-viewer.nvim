@@ -14,6 +14,144 @@ no direct route out* -- the two pieces of hardware no test machine has.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
+## `resident/registration.mjs` — is a region capture document-absolute?
+
+```sh
+node scripts/resident/registration.mjs
+```
+
+The go/no-go for whole-document resident mode. Captures the same document region
+from three different `window.scrollY` values and asserts the bytes are identical,
+then characterises the two things that make that true: the capture path and the
+`captureBeyondViewport` flag.
+
+It exists because a renderer echoes back the region it was *asked* for. If a clip
+composes with the page's scroll, every chunk holds pixels of wherever the reader
+was standing while the coordinate model, the placements and the retirement all
+stay provably correct — a fault with no downstream detector. Needs a
+Chrome/Chromium install; no display.
+
+Measured at 1980x4080 device px (8.1 Mpx) on two hosts:
+
+```
+                                    Ubuntu 22.04 / Chrome 151   macOS 15 / Chromium 142
+  CDP, captureBeyondViewport: true  identical at 0/5767/11535   identical at 0/5767/11535
+  page.screenshot({clip})           1980x2040, all differ       1980x2040, all differ
+  captureBeyondViewport: false      94.8% of samples, delta 210 95.5% of samples, delta 210
+  first capture of the process      13,089ms                    53ms
+  every later capture               161-250ms                   46-79ms
+```
+
+`page.screenshot({clip})` returns half the height asked for, different bytes at
+every scroll position, and throws outright on an interior region. Only the CDP
+path with the flag set is usable.
+
+Two rows do **not** generalise across hosts, and both matter:
+
+- **The cold penalty is per browser process, not per page.** On Ubuntu the
+  process's first region capture took 13,089ms and every later one 161-250ms,
+  *including the first capture on a freshly rebuilt page and context*. A timeout
+  keyed on "have we captured a region on this page" would re-arm an allowance it
+  no longer needs, and one keyed on nothing at all would disable the capture path
+  for the life of the process the first time it fired.
+- **macOS does not pay it.** 53ms cold against 50ms warm. Anything derived from
+  this cost has to be measured on the host it will run on.
+
+## `resident/sizing.mjs` — how big should a chunk be?
+
+```sh
+node scripts/resident/sizing.mjs [--link-bytes-per-sec 800000]
+```
+
+One browser launch per cold measurement, so it takes a few minutes. Measured on
+Ubuntu 22.04 / Chrome 151 at 990x1020 CSS, device scale 2:
+
+```
+  A. first capture of the process       B. discharging it
+     0.5x viewport   2.0 Mpx  16,335ms     blank-page primer at 1x   8,988ms
+     1.5x viewport   6.1 Mpx  10,407ms     then 2.9x on a document     355ms
+     2.9x viewport  11.7 Mpx   9,874ms     the same, unprimed        9,874ms
+
+  C. warm capture
+     vp     Mpx   warm ms   PNG KB   wire ms @ 0.80 MB/s
+     0.5x   2.0       164      188       240
+     1x     4.0       116      396       507
+     1.5x   6.1       168      615       788
+     2x     8.1       266      826     1,058
+     2.5x  10.1       285    1,059     1,355
+     2.9x  11.7       373    1,218     1,559
+```
+
+**Six times the pixels moved the first capture's cost 1.7x, in the wrong
+direction.** It is a fixed per-process price, not a per-region one, and a primer
+on a blank page before any document is loaded discharges it completely. So chunk
+size does not bear on first paint at all, and section C alone sets it.
+
+PNG bytes are linear in pixels here — 94 to 105 KB per Mpx across the whole
+sweep — so a bigger chunk buys no compression. What it trades is per-capture
+overhead and overlap waste against responsiveness: on a 0.80 MB/s link a 2.9x
+chunk is 373ms of capture and 1,559ms of wire, where a 1x chunk is 116ms and
+507ms.
+
+**This section is not only about resident mode.** `CDP_CAPTURE_TIMEOUT_MS` is
+10,000ms and the first capture on this host takes 9,874-16,335ms — including an
+ordinary `captureBeyondViewport: false` viewport capture, which is what every
+session already does on its first render. One of these runs failed outright at
+15,215ms. `captureViewportPng` latches `cdpCaptureUnavailable` on its first
+failure and never retries, so losing that race demotes a session to the
+Playwright encoder for the life of the renderer process. Priming at startup is
+what removes the race.
+
+## `resident/drive.lua` — does a resident preview actually work?
+
+```sh
+nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [document.md]
+```
+
+Spawns a second Neovim over RPC with a faked Kitty-capable terminal, opens a
+preview, waits for the document to become resident, then scrolls it and counts
+what reached the terminal. The child records the byte stream instead of drawing
+it, so this needs no display and no graphics terminal — only Node and a
+Chrome/Chromium. Exits non-zero on any failed assertion.
+
+The claim under test is the whole feature: **after warm-up, a scroll costs no
+renderer request and no image bytes.** Against this repo's own README on Ubuntu
+22.04 / Chrome 151:
+
+```
+  22 chunks resident, each uploaded exactly once
+  40 scrolls over a 12,505px document
+    0 renderer requests
+    0 image uploads
+   58 placements in 40 writes, 7,855 bytes total -- 196 bytes per scroll
+```
+
+**Run this after touching `resident.lua`, `resident_session.lua`,
+`controller.lua` or the backend's compose path.** It is the only check that
+exercises the chain rather than the links.
+
+## `rig/first-frame.lua` — did the first capture keep the fast encoder?
+
+```sh
+nvim --headless -u NONE -i NONE -l scripts/rig/first-frame.lua
+```
+
+Drives the renderer directly, reports what the first frame cost and which
+encoder produced it, and exits non-zero if the fast path was lost. Headless, so
+it works over a link that cannot draw. `cdp_fast_png` is the answer you want;
+`playwright_png` means the process lost the CDP encoder on its first capture and
+will not get it back, which is also where `render.scroll_scale` stops working.
+
+## `rig/deploy.sh` — put this tree on the machine that runs Neovim
+
+```sh
+scripts/rig/deploy.sh <ssh-host> [remote-path]
+```
+
+rsyncs the working tree and installs the renderer's locked dependencies on the
+far side, for testing a branch that is not pushed yet or a tree with uncommitted
+changes. Prints the `dir = ` line to put in the lazy.nvim spec on that machine.
+
 ## `overlay/live/` — end-to-end gesture regression
 
 ```sh
