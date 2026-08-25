@@ -1,5 +1,9 @@
 local M = { name = "kitty_raw" }
 local owned = {}
+-- Image ids the last `M.compose` left placed. Tracked separately from `owned`
+-- because a chunk that scrolls off screen keeps its pixels and loses only its
+-- placements, and the next screen has to know which those were.
+local composed = {}
 local config = require("md-viewer.config")
 local terminal = require("md-viewer.terminal")
 local cellpixels = require("md-viewer.cellpixels")
@@ -1280,10 +1284,160 @@ function M.move(image_id, placement)
   return image_id
 end
 
+-- ---------------------------------------------------------------------------
+-- Resident chunks: the document held in terminal memory, panned by re-cropping.
+--
+-- An ordinary frame is one image covering the pane. A resident screen is one or
+-- two *bands*, each a crop of a different chunk image, stacked to fill the pane.
+-- Scrolling re-emits the crops and sends no pixels at all.
+-- ---------------------------------------------------------------------------
+
+---Place one band: rows [part.row, part.row + part.rows) of the pane, drawn from
+---image rows [part.src_y, part.src_y + part.src_h) of `item`.
+---
+---Splits on the same visible regions an ordinary frame does, so a passive float
+---punches out of a band exactly as it punches out of a full frame.
+local function band_sequences(item, placement, part)
+  local sequences, ids = {}, {}
+  local offset = cell_offset()
+  local rows = math.max(1, math.floor(part.rows or 0))
+  local per_row = (part.src_h or 0) / rows
+  local band_top = math.floor(part.row or 0)
+  for _, region in ipairs(visible_regions(placement)) do
+    local top = math.max(region.y, band_top)
+    local bottom = math.min(region.y + region.height, band_top + rows)
+    if bottom > top then
+      local x1 = math.floor(region.x * item.width_px / placement.width)
+      local x2 = math.floor((region.x + region.width) * item.width_px / placement.width)
+      local y1 = math.floor(part.src_y + (top - band_top) * per_row)
+      local y2 = math.floor(part.src_y + (bottom - band_top) * per_row)
+      local crop_w, crop_h =
+        crop_within(item.width_px, item.height_px, x1, y1, math.max(1, x2 - x1), math.max(1, y2 - y1))
+      if crop_w and region.width >= 1 then
+        local pid = new_placement_id()
+        local control = ("a=p,q=2,C=1,i=%d,p=%d,x=%d,y=%d,w=%d,h=%d,c=%d,r=%d,z=%d%s"):format(
+          item.id,
+          pid,
+          x1,
+          y1,
+          crop_w,
+          crop_h,
+          region.width,
+          bottom - top,
+          zindex(),
+          offset
+        )
+        sequences[#sequences + 1] = at({ row = placement.row + top, col = placement.col + region.x }, command(control))
+        ids[#ids + 1] = pid
+      end
+    end
+  end
+  return table.concat(sequences), ids
+end
+
+---Upload an image and keep it resident without placing it.
+---
+---Owned exactly like any other image, so `M.compose`, `M.hide`, `M.retire` and
+---`M.clear_all` all work on it unchanged; it simply starts with no placements.
+function M.upload(image_bytes)
+  next_id = next_id + 1
+  local id = next_id
+  local width_px, height_px = png_dimensions(image_bytes)
+  if not width_px then return nil, "md-viewer: raw Kitty backend received an invalid PNG" end
+  owned[id] = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
+  send(chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
+  return id
+end
+
+---Draw a screen from one or two resident chunks, in a single write.
+---
+---New placements go out ahead of the deletions they supersede, for the reason
+---`M.move` does it: deleting first leaves the terminal with nothing to
+---composite until the replacement lands, and that gap is visible.
+---
+---`retired` is a list rather than one id because every chunk shares a z layer
+---and Kitty breaks a z tie by image id. A band left placed from the previous
+---screen would draw *over* the live one whenever its id happens to be higher.
+function M.compose(parts, placement)
+  if not parts or #parts == 0 then return nil, "compose needs at least one part" end
+  local sequences, drawn = {}, {}
+  for _, part in ipairs(parts) do
+    local item = owned[part.image_id]
+    if not item then return nil, "compose was given an image that is not resident" end
+    local sequence, ids = band_sequences(item, placement, part)
+    if sequence == "" then return nil, "a band produced no placeable region" end
+    sequences[#sequences + 1] = sequence
+    drawn[#drawn + 1] = { item = item, ids = ids }
+  end
+
+  -- Every chunk the previous screen placed, not merely the ones this screen
+  -- replaces. A chunk scrolled off entirely still holds placements otherwise,
+  -- and a stale band drawing over a live one is undetectable from this side.
+  local removals = {}
+  for image_id in pairs(composed) do
+    local item = owned[image_id]
+    for _, pid in ipairs(item and item.placement_ids or {}) do
+      removals[#removals + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(image_id, pid))
+    end
+    if item then item.placement_ids = {} end
+  end
+  send(table.concat(sequences) .. table.concat(removals))
+
+  composed = {}
+  for _, entry in ipairs(drawn) do
+    entry.item.placement_ids = entry.ids
+    entry.item.placement = vim.deepcopy(placement)
+    composed[entry.item.id] = true
+  end
+  return true
+end
+
+---Drop an image's placements but keep its pixels resident, so it can be placed
+---again without re-uploading. This is what a chunk scrolled off screen gets;
+---`M.retire` is what a chunk over the memory budget gets.
+function M.hide(image_id)
+  local item = owned[image_id]
+  if not item then return false end
+  local removal = deletion_sequences(item.id, item.placement_ids or {})
+  if removal ~= "" then send(removal) end
+  item.placement_ids = {}
+  composed[image_id] = nil
+  return true
+end
+
+---Free the pixels of several images in one write.
+function M.retire(image_ids)
+  local sequences, freed = {}, 0
+  for _, id in ipairs(image_ids or {}) do
+    if owned[id] then
+      sequences[#sequences + 1] = deletion_command(id)
+      owned[id] = nil
+      composed[id] = nil
+      freed = freed + 1
+    end
+  end
+  if #sequences > 0 then send(table.concat(sequences)) end
+  return freed
+end
+
+---Whether this terminal can pan resident chunks by re-cropping placements.
+function M.resident_pan_supported()
+  local ok, reason = M.detect()
+  if not ok then return false, reason end
+  local capability = M.capability()
+  if capability and capability.resident_pan == false then
+    return false,
+      (capability.label or capability.profile_id or "this terminal")
+        .. " does not hold repeated cropped placements affordably"
+  end
+  return true
+end
+
 function M.clear(image_id)
   if not owned[image_id] then return false end
   send(deletion_command(image_id))
   owned[image_id] = nil
+  composed[image_id] = nil
   return true
 end
 
@@ -1291,6 +1445,7 @@ function M.clear_all()
   for id in pairs(owned) do
     M.clear(id)
   end
+  composed = {}
   for set_id in pairs(overlays) do
     M.overlay_clear(set_id)
   end

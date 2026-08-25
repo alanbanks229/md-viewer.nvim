@@ -198,6 +198,13 @@ M.profiles = {
     -- carries the fix: run scripts/overlay/geometry and scripts/overlay/stress
     -- against it, and flip the flag only if both pass.
     selection_overlay = false,
+    -- Off for the same upstream defect, and this is the worst case of it. #7953
+    -- duplicates a cell's attachment list on every repeat placement over that
+    -- cell, and resident panning is nothing but repeat placements over the same
+    -- cells for as long as the preview is open -- one per scroll, unbounded.
+    -- WezTerm keeps the full-frame capture path, which is correct and merely
+    -- slower. Re-qualify with scripts/overlay/stress before flipping it.
+    resident_pan = false,
     -- Off for the same upstream defect, and more firmly. #7953 duplicates a
     -- cell's attachment list on every repeat placement over it -- that is per
     -- placement, not per second, so a slower tick does not make it safe, only
@@ -628,6 +635,11 @@ function M.capability(cfg, env)
     -- Only ever true for profiles someone actually looked at, by eye or by
     -- photograph; see the comment above M.profiles.
     selection_overlay = profile.selection_overlay == true,
+    -- Whether the whole document may be held resident and panned by re-cropping
+    -- placements. Defaults on for a profile that does not say otherwise: the
+    -- operation is the same cropped placement the overlay already validated,
+    -- and a profile that cannot afford it says so (WezTerm, #7953).
+    resident_pan = profile.resident_pan ~= false,
     animation = animation,
     overlay_encoding = profile.overlay_encoding or "sub-cell-offset",
     placement = profile.placement,
