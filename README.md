@@ -194,11 +194,13 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 ## Features
 
 - Live preview of unsaved changes, following your cursor through the document.
-- **Scrolling costs no screenshot.** Where the terminal supports it, the whole
-  document is captured once, kept in the terminal's image memory, and scrolling
-  becomes a placement command — measured at 196 bytes per scroll against the
-  ~80 KB frame the per-scroll path sends. This is what makes a preview usable
-  over a slow SSH link. See `:help md-viewer-resident`.
+- **Scrolling costs no screenshot** (experimental, off by default). Where the
+  terminal supports it, the whole document is captured once, kept in the
+  terminal's image memory, and scrolling becomes a placement command — measured
+  at 196 bytes per scroll against the ~80 KB frame the per-scroll path sends.
+  It trades a long warm-up for that, so it is worth turning on only where the
+  per-scroll capture is what you are actually waiting on:
+  `image = { resident = "auto" }`. See `:help md-viewer-resident`.
 - A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
   (iTerm2, Kitty and Ghostty only) — the only way to highlight text in the
   preview, matching Vim rather than a browser; `y` copies to the unnamed
@@ -321,6 +323,8 @@ boundary is never something you have to infer from a config file.
   warm-up, which is a fixed cost per renderer process and measured at 16-24
   seconds on a modest Linux VM and well under a second on macOS. Later previews
   in the same session do not pay it.
+- Whole-document resident mode is experimental and off by default. Animated
+  images do not animate under it, and the knobs below apply only once it is on.
 - `image.resident_memory_mb` is a heuristic rather than a guaranteed ceiling:
   the bytes-per-resident-pixel figure it derives from is an iTerm2 measurement
   that a sustained-RSS run disagreed with by 34x, and other terminals are
