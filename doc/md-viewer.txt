@@ -23,6 +23,7 @@ CONTENTS                                                  *md-viewer-contents*
 8.  Terminal support ..................... |md-viewer-terminals|
       Remote sessions over SSH ........... |md-viewer-ssh|
       Whole-document resident mode ....... |md-viewer-resident|
+      Why AWS SSM is 0.80 MB/s ........... |md-viewer-ssm-throughput|
 9.  Security ............................. |md-viewer-security|
 10. Health and diagnostics ............... |md-viewer-health|
 
@@ -154,8 +155,8 @@ image ~
     raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
-    resident                     "auto"     "off" keeps the per-scroll capture
-                                            loop (|md-viewer-resident|)
+    resident                     "off"      experimental; "auto" opts in
+                                            (|md-viewer-resident|)
     resident_chunk_viewports     2          1..8; viewports per document chunk
     resident_memory_mb           512        heuristic terminal-memory budget
     resident_max_chunks          24         hard bound on resident chunks
@@ -712,9 +713,19 @@ not be identified on an SSH session, a caveat naming these fixes.
 
 Every refresh sends a full-page PNG down the connection as base64, so on a
 throttled link the wire time per frame outweighs everything else put together.
-Measured on an AWS SSM tunnel with a flat 0.80 MB/s ceiling, one 80 KB moving
-frame is about 134 ms of pure transit and a single wheel spin queues over a
-hundred of them -- the backlog is the lag, not the render.
+On an AWS SSM tunnel, which is flat at 0.80 MB/s, one 80 KB moving frame is
+about 134 ms of pure transit and a single wheel spin queues over a hundred of
+them -- the backlog is the lag, not the render.
+
+That ceiling is SSM's, not SSH's. It is the SSM agent pacing its output at one
+kilobyte per millisecond, which AWS has said they will not raise
+(aws/amazon-ssm-agent#664); an ordinary SSH session goes nowhere near that code
+and measures 16-23 MB/s to a host on the same network. So "remote" is not a
+useful predictor of any of this, and the two adjustments below are applied to
+every SSH session only because Neovim cannot tell an SSM tunnel from a LAN hop
+-- both arrive as an ordinary SSH session. On a fast link they cost a little
+sharpness on a frame that is already moving, which is why they are safe to
+apply blind. `sh scripts/ssh-link-speed.sh` measures yours.
 
 md-viewer therefore does two things differently on an SSH session, both
 without configuration. It captures the moving frame of a scroll at half size,
@@ -760,13 +771,31 @@ settle captures into one, so the cheap scroll frame stops existing. Raising
 
 
                                                           *md-viewer-resident*
-WHOLE-DOCUMENT RESIDENT MODE ~
+WHOLE-DOCUMENT RESIDENT MODE (EXPERIMENTAL) ~
 
-Where the terminal supports it, md-viewer captures the whole document once as
-a handful of chunks, keeps them in the terminal's image memory, and turns
+Where the terminal supports it, md-viewer can capture the whole document once
+as a handful of chunks, keep them in the terminal's image memory, and turn
 scrolling into a placement command. After the warm-up, scrolling costs no
 captures and no pixels on the wire -- about 140 bytes per pan, whatever the
 link.
+
+Off by default. Turn it on with: >
+
+    require("md-viewer").setup({ image = { resident = "auto" } })
+<
+What it trades is a long warm-up and a document's worth of terminal image
+memory for scrolling that sends nothing. Whether that is a good trade depends
+entirely on the link, and by more than most people expect: >
+
+    link                        settle frame    worth it?
+    AWS SSM tunnel (0.80 MB/s)      ~508ms      yes -- this is what it is for
+    plain SSH, host on the LAN      ~19ms       no -- you would only notice
+                                                the warm-up
+<
+Twenty times apart, so "it is remote" predicts nothing. Measure yours before
+turning this on -- `sh scripts/ssh-link-speed.sh`, and see
+`render.ssh_link_bytes_per_sec` below -- and read `render_path` in
+|:MdViewerDebug| to confirm which model a preview actually chose.
 
 Selected once per preview, when it opens, and reported by |:MdViewerDebug| as
 `render_path`. It is never re-decided mid-scroll: a preview that switched
@@ -774,12 +803,24 @@ rendering model while you were reading would be one whose behaviour nobody
 could reproduce. A runtime capture failure demotes it to the ordinary
 per-scroll path, one way, and says so.
 
-The winbar counts the warm-up: `warming 3/9`. Scrolling into a part of the
-document that has not been captured yet shows an empty pane and `waiting for
-this page`, and moves that chunk to the front of the queue. It deliberately
-does not leave the previous picture up -- that would present pixels of
-somewhere else as though they belonged to where you are now, which is
-precisely the fault this design exists to make impossible.
+The winbar counts the warm-up: `warming 3/9`. The frame that measured the
+document stays on screen while the chunks behind it are captured -- it is a
+picture of where you are, taken by the render that built the plan, and there is
+no reason to take it down until the chunks can replace it.
+
+Scrolling into a part of the document that has not been captured yet is the
+other case, and it shows an empty pane and `waiting for this page` while it
+moves that chunk to the front of the queue. It deliberately does not leave the
+previous picture up -- that would present pixels of somewhere else as though
+they belonged to where you are now, which is precisely the fault this design
+exists to make impossible. The two notices mean different things: grey
+`warming` is "there is more coming", yellow `waiting for this page` is "this
+pane is blank and here is why".
+
+Animated images do not animate under resident mode. Animation frames are placed
+against a single base frame, and a resident screen has none -- it is one or two
+crops of chunks that move whenever you scroll. Leave `image.resident` off if a
+document's animations matter more than its scrolling.
 
 WezTerm is excluded. wezterm#7953 duplicates a cell's attachment list on every
 repeat placement over that cell, and panning is nothing but repeat placements
@@ -792,10 +833,14 @@ process costs 9,874-16,335ms whatever its size and every later one 116-373ms,
 so the renderer discharges that once at startup. What chunk size trades is
 per-capture overhead against how long a scroll into an uncaptured region
 waits: >
-    1x     4.0 Mpx    116ms    396 KB    ~507ms of wire at 0.80 MB/s
+    1x     4.0 Mpx    116ms    396 KB    ~507ms of wire
     2x     8.1 Mpx    266ms    826 KB   ~1058ms
     2.9x  11.7 Mpx    373ms   1218 KB   ~1559ms
 <
+The wire column is at 0.80 MB/s, the SSM ceiling this feature exists for. On a
+link twenty times faster it is twenty times smaller and this knob stops
+mattering.
+
 `image.resident_memory_mb` is a heuristic, not a guarantee. It is derived from
 13 bytes per resident pixel, measured on iTerm2 3.6.11 / macOS 15 against
 synthetic gradients; a sustained-RSS run against a real iTerm2 session
@@ -806,14 +851,31 @@ reading is never retired.
 
 `render.ssh_link_bytes_per_sec` is how fast your link carries bytes. There is
 no way to observe this from inside Neovim: `nvim_ui_send` appends to Neovim's
-own UI queue and returns, so on a link shaped to 0.80 MB/s, 96 payloads
-totalling 24 MB were accepted in 0.03 seconds with no write ever waiting. A
-plugin timing its own writes measures a queue insertion and concludes the link
-runs at ~100 MB/s. Measure it from the shell instead, with Neovim closed: >
+own UI queue and returns, so on a 0.80 MB/s link, 96 payloads totalling 24 MB
+were accepted in 0.03 seconds with no write ever waiting. A plugin timing its
+own writes measures a queue insertion and concludes the link runs at ~100 MB/s.
+Measure it from the shell instead, with Neovim closed: >
 
     sh scripts/ssh-link-speed.sh
 <
 Leaving it unset is a legitimate answer and means unknown. Nothing infers one.
+
+                                                    *md-viewer-ssm-throughput*
+Why an AWS SSM tunnel is 0.80 MB/s ~
+
+Because so much of the advice above turns on it. The SSM agent reads at most
+`StreamDataPayloadSize` (1024) bytes from your shell or forwarded port and then
+sleeps a millisecond before sending more, in both of its output paths. One
+kilobyte per millisecond is 1.024 MB/s of ceiling, and real sessions land at
+0.6-0.8. An AWS maintainer confirms both the cause and that it is not going to
+change in aws/amazon-ssm-agent#664 ("0.6 MB/s speeds on 5 GB/s burstable
+instance"), where a reporter on a 27.5 MB/s connection measures the same thing
+after ruling out instance type from t3.micro to m7i.8xlarge.
+
+It has nothing to do with SSH. A plain SSH session touches none of that code:
+measured 2026-08-25, 8 MB through a pty to a host on the same network took
+0.47-0.54 seconds, or 16-18 MB/s. See docs/local-render-design.md for the full
+working.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*

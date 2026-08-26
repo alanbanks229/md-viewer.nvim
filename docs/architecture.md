@@ -300,12 +300,21 @@ restored after the last graphical preview closes.
 
 ## Whole-document resident mode
 
-Two models are implemented, and a session picks one when it opens.
+Two models are implemented, and a session picks one when it opens. The resident
+model is experimental and off by default (`image.resident = "auto"` opts in):
+what it trades is a long warm-up and a document's worth of terminal memory for
+scrolling that sends nothing, and that only pays on a link where the per-scroll
+capture is what the reader is waiting on.
 
 The **viewport** model is the original: every scroll position is a fresh
 screenshot of the reader's viewport. Simple, works everywhere, and costs bytes
 proportional to how far you scrolled — an ~80 KB moving frame and a ~305 KB
-settle frame, which on a 0.80 MB/s link is ~134 ms and ~508 ms of wire each.
+settle frame. On the 0.80 MB/s AWS SSM tunnel this feature was built for that is
+~134 ms and ~508 ms of wire each; on an ordinary SSH session, measured at 16–23
+MB/s to a LAN host, it is ~5 ms and ~19 ms and none of this matters. The gap
+between those two is why resident mode is opt-in rather than automatic — see
+[Where that ceiling comes from](local-render-design.md#ssm-ceiling) for why the
+SSM number is what it is and why it is not a general "over SSH" figure.
 
 The **resident** model captures the document once as N chunks, holds every chunk
 in the terminal's image memory, and turns a scroll into a cropped placement.
@@ -347,6 +356,43 @@ leaving the previous screen up. That is the whole design goal restated: a stale
 screen presents pixels of somewhere else as though they belonged to where the
 reader now is, and nothing downstream — not the coordinate model, not the
 placements, not the retirement — can tell.
+
+### Bootstrap, and who owns the screen
+
+The rule above is about *somewhere else*, not about which capture path produced
+the pixels, and the difference is the whole of the bootstrap. The render that
+measures the document is a picture of the reader's own position; the chunk plan
+is derived from it; and `begin_resident` runs one line after it reaches the
+screen, when no chunk has been captured yet. Blanking there destroys correct
+pixels, so `controller.holding_position` asks the narrower question — is this
+image placed, captured against this content, and captured at this scroll? — and
+the frame stays up until the chunks can replace it. It is retired *after* the
+first compose, never before: deleting first is a blank pane for one write.
+
+Until 0.3.0-rc6 it was blanked immediately, and the viewport model's recovery
+machinery then restored a cached full-viewport frame into a pane the resident
+compositor believed it owned. The two placements shared a z layer, Kitty breaks
+a z tie by image id, and which one the reader saw came down to which integer was
+larger. That is why the two models now agree about ownership:
+
+- `session.image_id` means "the one frame this session owns, and may `update` in
+  place or `clear`". A resident screen has none — putting a chunk id there would
+  let an occluding float free a chunk out from under `resident_session.images`.
+- `session.resident_screen` means "bands are placed", and `state.screen_up`
+  answers "is there anything on this pane" for callers that meant that all
+  along: the selection overlay, the caret, click resolution.
+- `session.last_placement` is recorded by *both*, because it is pure geometry
+  and clicks and the caret resolve against it.
+- `show_cached` restores whichever model the session uses — a re-crop for a
+  resident screen, which costs a few hundred bytes rather than the document.
+- Animation is the one caller that still means `image_id` specifically, and so
+  is off under resident mode: frames are placed once against `last_placement`
+  and nothing re-places them when a pan re-crops the bands underneath.
+
+One limitation is recorded rather than fixed: `kitty_raw`'s `composed` table is
+module-global rather than per session, so two resident previews open at once
+would take each other's screens down. `M.compose` has always retired every
+tracked placement whoever owned it; `M.uncompose` inherits that.
 
 ## Interaction
 

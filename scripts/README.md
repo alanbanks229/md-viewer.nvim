@@ -93,6 +93,12 @@ overhead and overlap waste against responsiveness: on a 0.80 MB/s link a 2.9x
 chunk is 373ms of capture and 1,559ms of wire, where a 1x chunk is 116ms and
 507ms.
 
+The wire column throughout is 0.80 MB/s, which is an **AWS SSM tunnel** and not
+remote sessions in general — see
+[Where that ceiling comes from](../docs/local-render-design.md#ssm-ceiling). An
+ordinary SSH session measures 16–23 MB/s, where every wire figure above drops
+below the capture time next to it and this whole sweep stops being interesting.
+
 **This section is not only about resident mode.** `CDP_CAPTURE_TIMEOUT_MS` is
 10,000ms and the first capture on this host takes 9,874-16,335ms — including an
 ordinary `captureBeyondViewport: false` viewport capture, which is what every
@@ -105,7 +111,7 @@ what removes the race.
 ## `resident/drive.lua` — does a resident preview actually work?
 
 ```sh
-nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [document.md]
+nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [document.md] [--slow-chunks=MS]
 ```
 
 Spawns a second Neovim over RPC with a faked Kitty-capable terminal, opens a
@@ -113,6 +119,17 @@ preview, waits for the document to become resident, then scrolls it and counts
 what reached the terminal. The child records the byte stream instead of drawing
 it, so this needs no display and no graphics terminal — only Node and a
 Chrome/Chromium. Exits non-zero on any failed assertion.
+
+`--slow-chunks=MS` holds every chunk reply back by `MS` before handing it to the
+controller, which is the whole of what a slow link does to this feature. Use it
+for anything about the *warm-up*: on a fast host the first chunk lands before
+the pane can be observed at all, which is how a blank first paint survived to
+0.3.0-rc5. `--slow-chunks=2000` is roughly a chunk's cost on an AWS SSM link.
+
+One of the assertions is the bug that motivated the knob, stated as an
+invariant: **the pane is never both blank and quiet.** Sampled every 100 ms from
+preview open until residency, there is always either a frame placed, or resident
+bands placed, or a spinner saying why there is neither.
 
 The claim under test is the whole feature: **after warm-up, a scroll costs no
 renderer request and no image bytes.** Against this repo's own README on Ubuntu

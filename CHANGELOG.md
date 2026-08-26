@@ -3,6 +3,99 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+**Prerelease.** Resident mode is now experimental and off by default, and the
+bug that made it worth turning off is fixed.
+
+The reported symptom, on a preview of `CONTRIBUTING.md` over an AWS SSM link: a
+flash of yellow `waiting for this page — 0/1` next to the title, and then a
+preview sitting at a position that was not the reader's — scrolling *down*
+brought the top of the document back into view, bottom-first. Intermittent, and
+never seen on a faster host.
+
+### Changed
+
+**`image.resident` now defaults to `"off"`.** It is experimental. What it trades
+is a long warm-up and a document's worth of terminal image memory for scrolling
+that sends nothing, and that only pays on a link slow enough that the per-scroll
+capture is what you are waiting on — not on SSH generally. An ordinary SSH
+session in the tens of MB/s is nowhere near needing it. `image.resident = "auto"`
+opts in; `scripts/ssh-link-speed.sh` measures the link, and `:MdViewerDebug`'s
+`render_path` reports which model a preview actually chose.
+
+**Animated images do not animate under resident mode**, and now say so instead
+of appearing to. Animation frames are placed once against a single base frame
+and a resident screen has none — it is one or two crops that move whenever you
+scroll. They only appeared to work before by riding on the stale frame the fix
+below removes, over which they were drawing at the wrong position anyway.
+
+### Fixed
+
+**The resident bootstrap no longer throws away its own first paint.** The render
+that measures the document is a picture of the reader's own position, and the
+chunk plan is derived from it — but `begin_resident` ran one line after it
+reached the screen, asked for a screen from zero captured chunks, and blanked
+the pane. The invariant it was enforcing is about pixels of *somewhere else*,
+not about which capture path produced them, so the frame now stays up while the
+chunks warm and is retired after the first compose, never before. The winbar
+reads grey `warming 0/1` for that, and reserves the yellow `waiting for this
+page` for a pane that really is blank.
+
+**The two rendering models no longer fight over the pane.** In the window the
+blank pane opened, the 50 ms UI poll saw no image and restored a cached
+full-viewport frame — into a pane the resident compositor believed it owned.
+`compose` retires only the bands it tracks itself, so both stayed placed on the
+same z layer, and Kitty breaks a z tie by image id: which picture the reader saw
+came down to which integer was larger. `session.image_id` now means the one
+frame a session owns and stays nil under resident mode; `state.screen_up`
+answers "is there anything on this pane" for the callers that meant that
+(selection overlay, caret, click resolution); `show_cached` restores whichever
+model the session uses, which for a resident screen is a re-crop rather than a
+re-upload; and an occluding float can finally reach the bands at all.
+
+**A staled chunk capture no longer stalls the warm-up forever.** Every renderer
+request bumps the session's serial, so a settle capture, a resize or a
+`ColorScheme` was enough to stale a chunk that was in flight — and it had
+already been taken off the queue, which nothing rebuilds. The warm-up stopped at
+`n/N` and stayed there. Staled chunks are re-queued now, like failed ones always
+were.
+
+**An edit made during warm-up is no longer silently dropped.** The same serial
+bump ran the other way: a chunk capture could stale the render carrying the
+reader's own change, which was discarded with nothing to re-issue it. The
+warm-up now defers to a content render in flight.
+
+**A theme switch invalidates the resident chunks.** The chunk plan keyed on the
+*configured* theme, which is `"auto"` by default and resolves against
+`background` at request time — so `:set background=light` produced an identical
+key, and an identical key is how the plan decides its chunks are still valid. A
+whole document of dark-theme pixels stayed resident.
+
+`scripts/resident/drive.lua` gained `--slow-chunks=MS`, which is the whole of
+what a slow link does to this feature and what this bug needed to be visible at
+all; on a fast host the first chunk lands before the pane can be observed. Under
+`--slow-chunks=2000`, 61 of 75 warm-up samples showed pixels nothing could vouch
+for before this change and 0 of 80 after.
+
+### Documentation
+
+**The 0.80 MB/s figure this project reasons from is an AWS SSM tunnel, and the
+docs now say which parts of it are SSM's fault.** The number was re-validated and
+stands, but the cause given for it was wrong: it credited the client,
+`session-manager-plugin`, whose 1 KB/1 ms loops pace *keystrokes going up* while
+its `WriteStream` is unthrottled. The pacing that governs pixels is in the SSM
+**agent**, in both of its output paths, and AWS states the cause and declines to
+raise it in [amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664).
+
+The practical consequence is that "over SSH" was never the right frame. An
+ordinary SSH session touches none of that code and measures 16–23 MB/s to a host
+on the same network — twenty times faster — so the wire figures throughout the
+docs are now labelled as SSM's rather than as remote sessions in general, and
+resident mode's guidance says so in a table instead of in a sentence. New:
+`:help md-viewer-ssm-throughput`, and *Where that ceiling comes from* in
+`docs/local-render-design.md`.
+
 ## [0.3.0-rc5] - 2026-08-25
 
 > Numbered rc5 rather than rc2 because `v0.3.0-rc2` through `rc4` were already
