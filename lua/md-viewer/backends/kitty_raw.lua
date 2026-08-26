@@ -485,8 +485,16 @@ end
 ---cell), which is smaller than the captured image whenever the render viewport
 ---over-estimated the cell and larger whenever it under-estimated it -- so the
 ---sheet has to cover whichever is bigger.
+---
+---`item` is nil for a resident screen, which owns no single base frame: it is
+---one or two cropped bands and there is no one image the highlight sits over.
+---The drawn box is the whole answer there, which is also what
+---md-viewer.interaction sizes its sheet from -- so a resident session asks for
+---exactly the sheet it builds. Passing a *chunk* instead would be worse than
+---useless: a chunk is about two viewports tall, so this would demand a sheet
+---that size and `overlay_apply` would refuse every one it was ever handed.
 local function required_sheet_size(item, placement)
-  local width, height = item.width_px, item.height_px
+  local width, height = item and item.width_px or 0, item and item.height_px or 0
   local cell = cellpixels.measure()
   if cell and placement and placement.width and placement.height then
     width = math.max(width, math.ceil(placement.width * cell.width))
@@ -506,8 +514,10 @@ end
 ---supplied. With `tint` nil it answers conservatively for any color, which is
 ---what the caller knows before the first selection result arrives.
 function M.overlay_needs_sheet(base_image_id, tint, placement)
-  local item = owned[base_image_id]
-  if not item then return false end
+  -- A nil id is a resident screen asking on its own behalf, not a caller that
+  -- has lost track of its frame; only an id that names nothing is a refusal.
+  local item = base_image_id and owned[base_image_id] or nil
+  if base_image_id and not item then return false end
   local width, height = required_sheet_size(item, placement)
   local margin = M.overlay_margin()
   if tint then return sheet_for(tint, margin, width, height) == nil end
@@ -595,8 +605,13 @@ end
 function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png, placement)
   local ok_supported, support_reason = M.overlay_supported()
   if not ok_supported then return nil, support_reason end
-  local item = owned[base_image_id]
-  if not item then return nil, "base image is not owned by md-viewer" end
+  -- Nil is legitimate: a resident screen is bands cropped out of chunks and
+  -- owns no base frame at all. `item` is read for exactly two things -- this
+  -- ownership check and `required_sheet_size` -- and everything below is
+  -- derived from `placement`, `cell` and `viewport`, so the highlight lands on
+  -- the same pixels either way.
+  local item = base_image_id and owned[base_image_id] or nil
+  if base_image_id and not item then return nil, "base image is not owned by md-viewer" end
   if not (viewport and tonumber(viewport.widthPx) and tonumber(viewport.heightPx)) then
     return nil, "overlay requires the viewport that produced the base image"
   end
@@ -1390,6 +1405,37 @@ function M.compose(parts, placement)
     composed[entry.item.id] = true
   end
   return true
+end
+
+---Take the composed screen down without freeing anything, in one write.
+---
+---`M.hide` is this for a single chunk; this is the whole screen, and it exists
+---because the caller cannot know which chunks are placed -- `composed` does, and
+---it is the only thing that does. An occlusion has to reach the bands somehow:
+---`clear_image` only ever knew about `session.image_id`, which a resident
+---session does not have, so a float over the preview used to leave the bands
+---compositing underneath it.
+---
+---Only placements go. The pixels stay in terminal memory, so restoring an
+---occluded resident pane costs a re-crop -- a few hundred bytes -- rather than
+---re-uploading the document.
+---
+---`composed` is module-global rather than per session, so two resident previews
+---open at once would take each other's screens down. That is pre-existing --
+---`M.compose` already retires every tracked placement whoever owns it -- and is
+---recorded in docs/architecture.md rather than fixed here.
+function M.uncompose()
+  local removals = {}
+  for image_id in pairs(composed) do
+    local item = owned[image_id]
+    for _, pid in ipairs(item and item.placement_ids or {}) do
+      removals[#removals + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(image_id, pid))
+    end
+    if item then item.placement_ids = {} end
+  end
+  composed = {}
+  if #removals > 0 then send(table.concat(removals)) end
+  return #removals
 end
 
 ---Drop an image's placements but keep its pixels resident, so it can be placed

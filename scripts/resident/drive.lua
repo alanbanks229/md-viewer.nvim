@@ -1,12 +1,20 @@
 -- Does a resident preview actually work end to end?
 --
 --   nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [document.md]
+--                                                                [--slow-chunks=MS]
 --
 -- Spawns a second Neovim over RPC with a faked Kitty-capable terminal, opens a
 -- preview, waits for the document to become resident, then scrolls it and counts
 -- what reached the terminal. The claim under test is the whole feature:
 --
 --     after warm-up, a scroll costs no renderer request and no image bytes.
+--
+-- `--slow-chunks=MS` holds every chunk reply back by MS before handing it to the
+-- controller. That is the whole of what a slow link does to this feature, and it
+-- is what the bootstrap bug needed to be visible: on a fast host the first chunk
+-- lands before anything can observe the pane, which is how a blank first paint
+-- survived to rc5. 2000 is a good number -- it is roughly what a chunk costs on
+-- an AWS SSM link, and it makes the warm-up long enough to watch.
 --
 -- Needs Node and a Chrome/Chromium on this host. No display and no graphics
 -- terminal: the child records the byte stream instead of drawing it. Exits
@@ -15,8 +23,14 @@
 local script = debug.getinfo(1, "S").source:sub(2)
 local repo = vim.fn.fnamemodify(vim.fn.fnamemodify(script, ":p"), ":h:h:h")
 
-local document = vim.v.argv[#vim.v.argv]
-if not document:match("%.md$") then document = repo .. "/README.md" end
+local slow_chunks_ms = 0
+local document = nil
+for _, argument in ipairs(vim.v.argv) do
+  local ms = argument:match("^%-%-slow%-chunks=(%d+)$")
+  if ms then slow_chunks_ms = tonumber(ms) end
+  if argument:match("%.md$") then document = argument end
+end
+document = document or (repo .. "/README.md")
 
 local checks, failures = 0, {}
 local function check(name, passed, detail)
@@ -37,7 +51,7 @@ local function call(code, ...) return vim.rpcrequest(child, "nvim_exec_lua", cod
 local ok, err = pcall(function()
   call(
     [[
-    local repo, document = ...
+    local repo, document, slow_chunks_ms = ...
     vim.opt.runtimepath:prepend(repo)
     -- No real terminal here, so the graphics probe and the cell measurement have
     -- to be stood in for. Everything downstream of them is the real code.
@@ -79,8 +93,17 @@ local ok, err = pcall(function()
     _G.REQUESTS = 0
     local process = require("md-viewer.process")
     local real_request = process.request
+    -- A chunk request is the one that carries a document-absolute region; every
+    -- other request is the reader's own content. Delaying only the former is
+    -- what makes this a slow *warm-up* rather than a slow renderer.
+    local slow = tonumber(slow_chunks_ms) or 0
     process.request = function(method, params, callback)
       _G.REQUESTS = _G.REQUESTS + 1
+      if slow > 0 and params and params.captureRegion then
+        return real_request(method, params, function(result, err)
+          vim.defer_fn(function() callback(result, err) end, slow)
+        end)
+      end
       return real_request(method, params, callback)
     end
 
@@ -89,7 +112,8 @@ local ok, err = pcall(function()
     require("md-viewer.controller").toggle()
   ]],
     repo,
-    document
+    document,
+    slow_chunks_ms
   )
 
   local function nilify(value)
@@ -110,15 +134,47 @@ local ok, err = pcall(function()
     ))
   end
 
-  local function wait(predicate, timeout_ms, label)
+  local function wait(predicate, timeout_ms, label, on_tick)
+    local step = on_tick and 100 or 250
     local waited = 0
     while waited < timeout_ms do
       if predicate() then return true end
-      vim.wait(250)
-      waited = waited + 250
+      if on_tick then on_tick() end
+      vim.wait(step)
+      waited = waited + step
     end
     print("    timed out waiting for " .. label)
     return false
+  end
+
+  -- The reported bug, as an invariant rather than as a story.
+  --
+  -- At every moment during warm-up the pane must be one of: occluded, showing
+  -- resident bands, showing a frame this session can vouch for, or blank with a
+  -- spinner saying why. Nothing else.
+  --
+  -- The last clause is the one that matters, and "blank" was not it. What the
+  -- reader on the slow link actually saw was a pane that was *not* blank -- the
+  -- viewport model's restore path had put a cached full-viewport frame back on
+  -- it, with no record of what position that frame was a picture of, into a pane
+  -- the resident compositor believed it owned. So the test is provenance:
+  -- `apply_image` records `frame_revision` for a frame it can account for, and
+  -- `show_cached` deliberately nils it. A frame on screen with no revision is a
+  -- picture nobody can vouch for, which is the whole fault.
+  --
+  -- Sampled from the driver because the child records the wire rather than
+  -- drawing it, so this needs no graphics terminal.
+  local samples, unaccounted = 0, 0
+  local function sample_pane()
+    samples = samples + 1
+    local up = nilify(call([[
+      local session = select(2, next(require("md-viewer.state").all()))
+      if not session or session.occluded or session.tabpage_hidden or session.ui_suppressed then return true end
+      if session.resident_screen == true then return true end
+      if session.image_id ~= nil then return session.frame_revision ~= nil end
+      return session.loading == true
+    ]]))
+    if up == false then unaccounted = unaccounted + 1 end
   end
 
   local path = wait(function() return session_field("session.render_path") ~= nil end, 20000, "a session")
@@ -130,7 +186,13 @@ local ok, err = pcall(function()
     local total = session_field("session.resident and session.resident.plan and session.resident.plan.count")
     local captured = session_field("session.resident and session.resident.captured")
     return total ~= nil and captured ~= nil and captured >= total
-  end, 240000, "the document to become resident")
+  end, 240000, "the document to become resident", sample_pane)
+
+  check(
+    "the pane only ever shows a picture this session can account for",
+    unaccounted == 0,
+    ("%d of %d warm-up samples showed pixels nobody could vouch for"):format(unaccounted, samples)
+  )
 
   local total = session_field("session.resident and session.resident.plan.count")
   local captured = session_field("session.resident and session.resident.captured")
@@ -147,9 +209,12 @@ local ok, err = pcall(function()
     ("%d chunk uploads for %s chunks"):format(chunk_uploads, tostring(total))
   )
   local uploads = call([[ return _G.WIRE.uploads ]])
+  -- Exactly one, not "at most two". The slack used to cover `show_cached`
+  -- re-uploading a full-viewport frame into a pane the resident compositor
+  -- owned -- which is the bug, so the slack has to go with it.
   check(
     "the only non-chunk upload is the bootstrap frame",
-    uploads - chunk_uploads <= 2,
+    uploads - chunk_uploads <= 1,
     ("%d images on the wire, %d of them chunks"):format(uploads, chunk_uploads)
   )
 

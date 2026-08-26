@@ -48,6 +48,25 @@ function M.demote(session, reason)
   session.resident = nil
 end
 
+---Take the composed screen down, keeping every chunk resident.
+---
+---The resident counterpart of `controller.clear_image`: the pixels are already
+---in the terminal, so an occlusion must not cost them twice -- restoring is a
+---re-crop, not a re-upload. Until this existed nothing could reach the bands at
+---all, because `clear_image` only knew `session.image_id` and a resident
+---session has none, so a focusable float over the preview left the document
+---compositing underneath it.
+---
+---`current.drawn` is deliberately left alone. It is the retention centre and the
+---travel direction, and an occlusion is not travel; whether a screen is up is
+---`session.resident_screen`.
+function M.unplace(session)
+  local current = state(session)
+  if not current then return end
+  local backend = session.backend
+  if backend and backend.uncompose then pcall(backend.uncompose) end
+end
+
 ---Free every chunk this session holds in the terminal.
 function M.release(session)
   local current = state(session)
@@ -57,6 +76,9 @@ function M.release(session)
     ids[#ids + 1] = image_id
   end
   if #ids > 0 and session.backend and session.backend.retire then pcall(session.backend.retire, ids) end
+  -- Retiring an image frees its placements with it, so whatever was composed is
+  -- off the screen now whether or not anyone asked for that.
+  session.resident_screen = false
   current.images = {}
   current.queue = {}
   current.drawn = nil
@@ -78,7 +100,13 @@ function M.begin(session, meta)
     revision = session.renderer_revision,
     width = session.viewport_width_px,
     height = session.viewport_height_render_px,
-    theme = cfg.render.theme,
+    -- The *resolved* theme, not the configured one. `render.theme = "auto"` is
+    -- the default and md-viewer.renderer reads `background` at request time, so
+    -- keying on the literal "auto" made a light/dark switch produce an identical
+    -- key -- and an identical key is exactly how `begin` decides the chunks
+    -- already in the terminal are still valid. `:set background=light` left a
+    -- whole document of dark-theme pixels resident and no way to notice.
+    theme = cfg.render.theme == "auto" and (vim.o.background == "dark" and "dark" or "light") or cfg.render.theme,
     font_size = cfg.render.font_size_px,
     scroll_past_end = cfg.render.scroll_past_end,
     scroll_past_end_offset = cfg.render.scroll_past_end_offset_px,
@@ -100,6 +128,14 @@ function M.begin(session, meta)
   })
   if not plan then return false, reason end
 
+  -- `session.scroll_y` may be ahead of the frame `meta` describes, when a newer
+  -- scroll was requested while this render was in flight. That is the right
+  -- input and not a discrepancy to be corrected: it reaches `warm_order` and
+  -- nothing else, and warm order is layer three of the three-layer split at the
+  -- top of md-viewer.resident -- capture *priority*, never geometry.
+  -- `chunk_plan` above takes no opening position at all, so a newer position
+  -- cannot move a chunk boundary; all it does is warm the chunks the reader is
+  -- heading for ahead of the ones they are leaving.
   local opening = resident.chunks_for(plan, session.scroll_y or 0, meta.viewportHeightPx) or { 1 }
   session.resident = {
     key = key,
@@ -146,6 +182,12 @@ end
 function M.prioritise(session, index)
   local current = state(session)
   if not current or current.images[index] then return end
+  -- Already being captured. Queueing it again would buy nothing -- the capture
+  -- is not cancelled, and `next_chunk` would pop the duplicate and skip it once
+  -- the real one lands -- but it would put a chunk in two places at once, and
+  -- "queue plus captured plus in-flight accounts for every chunk in the plan"
+  -- is the property that makes a stalled warm-up detectable.
+  if current.in_flight == index then return end
   for position, queued in ipairs(current.queue) do
     if queued == index then
       table.remove(current.queue, position)
@@ -208,6 +250,24 @@ function M.retain(session, center)
   end
 end
 
+---The first chunk a viewport at `scroll_y` needs that is not resident yet, or
+---nil when the whole screen can be drawn from what is already here.
+---
+---Split out of `M.draw` rather than duplicated so the controller can ask the
+---question *before* the compose: the loading indicator is a passive float and
+---has to come down ahead of the placements, not after them, or the screen that
+---replaces it keeps a spinner-shaped hole punched out of it.
+function M.missing(session, scroll_y)
+  local current = state(session)
+  if not current then return nil end
+  local needed = resident.chunks_for(current.plan, scroll_y, current.plan.viewport_h)
+  if not needed then return nil end
+  for _, index in ipairs(needed) do
+    if not current.images[index] then return index end
+  end
+  return nil
+end
+
 ---Draw the screen for `scroll_y` from resident chunks.
 ---
 ---Returns "drawn", or "waiting" with the chunk the reader needs next, or
@@ -222,11 +282,10 @@ function M.draw(session, scroll_y)
   local needed, reason = resident.chunks_for(plan, scroll_y, plan.viewport_h)
   if not needed then return "failed", reason end
 
-  for _, index in ipairs(needed) do
-    if not current.images[index] then
-      M.prioritise(session, index)
-      return "waiting", index
-    end
+  local absent = M.missing(session, scroll_y)
+  if absent then
+    M.prioritise(session, absent)
+    return "waiting", absent
   end
 
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -262,6 +321,15 @@ function M.draw(session, scroll_y)
 
   local ok, compose_reason = session.backend.compose(parts, placement)
   if not ok then return "failed", compose_reason end
+
+  -- The resident half of what `apply_image` records for a viewport frame. Not
+  -- bookkeeping: `interaction.locate` resolves clicks against `last_placement`,
+  -- `caret.rect` positions the caret in it, and `coordinates.same` decides
+  -- whether the screen has to follow the window. Those worked in resident mode
+  -- only because `show_cached` happened to have restored a placement of a stale
+  -- frame -- the accident this change removes.
+  session.resident_screen = true
+  session.last_placement = vim.deepcopy(placement)
 
   if current.drawn then
     current.travel = (needed[1] > current.drawn) and 1 or (needed[1] < current.drawn and -1 or current.travel)

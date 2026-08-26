@@ -112,6 +112,15 @@ local function permitted(session)
   if not ok then return false, reason end
   -- Nothing to composite over. A frame placed with no base under it would be a
   -- picture floating on the terminal background.
+  --
+  -- `session.image_id` and not `state.screen_up`, deliberately: this is one of
+  -- the callers that really does mean the viewport model's own frame. Animation
+  -- frames are placed once against `last_placement` and nothing re-places them
+  -- when a resident pan re-crops the bands underneath, so a resident screen
+  -- carries no animation and says so here rather than painting stills at last
+  -- scroll's rows. They appeared to work before only by riding on the frame
+  -- `show_cached` had restored -- over which they were drawing at the wrong
+  -- position anyway.
   if not session.image_id or not session.last_placement then return false, "no frame is on screen" end
   if session.loading or session.render_failed then return false, "the preview is not showing a frame" end
   if session.ui_suppressed then return false, "the UI is suppressed" end
