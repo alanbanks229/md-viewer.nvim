@@ -10,6 +10,8 @@ import {
   resolveCaptureRegion,
 } from "../../renderer/src/browser.js";
 import { discoverChromium } from "../../renderer/src/browser-discovery.js";
+import { renderMarkdown } from "../../renderer/src/markdown.js";
+import { decodePngPixels } from "./helpers/decode-png.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const assetsDir = path.resolve(here, "../../renderer/assets");
@@ -232,4 +234,69 @@ test("the same region returns the same pixels from any scroll position", async (
   assert.ok(digests[2].equals(digests[0]), "region captured at the end differs from the same region at the top");
 
   fs.unlinkSync(first.pngPath);
+});
+
+test("a resident chunk's top band matches an ordinary viewport capture of the same content", async (t) => {
+  // Reported live on an SSM-tunneled host: the instant a resident chunk landed,
+  // the pane showed content from further into the document than scroll_y=0,
+  // read off against tests/fixtures/NUMBERS.md's sequential block-digit
+  // content (one giant <pre><code> block, unlike the stacked <p> blocks the
+  // test above uses, which never reproduced it). The bootstrap frame is an
+  // ordinary captureViewportPng at scrollY=0; chunk 1 is a captureRegionPng at
+  // { yPx: 0 }. Both claim to show the top of the document -- this asserts
+  // they show the *same pixels*, not merely the same claimed region.
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+
+  // The actual fixture the bug was read off against, through the actual
+  // markdown pipeline (highlight.js and all) -- not a synthetic stand-in. A
+  // hand-rolled <pre><code> block of the same rough shape passed this same
+  // assertion cleanly, so the fixture's exact content is load-bearing here.
+  const fixturePath = path.resolve(here, "../fixtures/NUMBERS.md");
+  const { html } = await renderMarkdown(fs.readFileSync(fixturePath, "utf8"), { rawHtml: false, localImages: false });
+  const params = {
+    documentId: "shift-doc", contentRevision: 1,
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 2 },
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
+    captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
+  };
+
+  const bootstrap = await renderer.render(params, html, 1);
+  // chunk_viewports defaults to 2 (lua/md-viewer/resident.lua), so chunk 1
+  // covers twice the viewport height -- matching what the reader's opening
+  // chunk actually asks for in production.
+  const chunk = await renderer.render(
+    { ...params, captureRegion: { yPx: 0, heightPx: params.viewport.heightPx * 2 } },
+    html,
+    2,
+  );
+  assert.equal(chunk.regionYPx, 0);
+  assert.equal(chunk.captureEncoder, "cdp_region_png");
+
+  const bootstrapImg = decodePngPixels(fs.readFileSync(bootstrap.pngPath));
+  const chunkImg = decodePngPixels(fs.readFileSync(chunk.pngPath));
+  fs.unlinkSync(bootstrap.pngPath);
+  fs.unlinkSync(chunk.pngPath);
+
+  assert.equal(bootstrapImg.width, chunkImg.width);
+  assert.equal(bootstrapImg.channels, chunkImg.channels);
+  assert.ok(chunkImg.height >= bootstrapImg.height, "the chunk must be at least as tall as the viewport it covers");
+
+  const stride = bootstrapImg.width * bootstrapImg.channels;
+  let firstBadRow = -1;
+  for (let y = 0; y < bootstrapImg.height; y += 1) {
+    const a = bootstrapImg.pixels.subarray(y * stride, (y + 1) * stride);
+    const b = chunkImg.pixels.subarray(y * stride, (y + 1) * stride);
+    if (!a.equals(b)) { firstBadRow = y; break; }
+  }
+  assert.equal(
+    firstBadRow, -1,
+    `chunk capture diverges from the ordinary viewport capture at device row ${firstBadRow} of ${bootstrapImg.height} -- `
+    + "the resident bootstrap-to-chunk handoff would show the reader pixels of somewhere else",
+  );
 });

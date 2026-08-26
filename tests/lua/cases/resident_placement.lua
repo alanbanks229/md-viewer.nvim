@@ -245,7 +245,18 @@ return function(t)
   t.eq(false, wez_ok, "WezTerm does not hold repeated placements affordably (wezterm#7953)")
   t.ok(type(wez_reason) == "string" and wez_reason:match("WezTerm"), "and the refusal names the terminal")
 
-  for _, profile in ipairs({ "kitty", "ghostty", "iterm2" }) do
+  -- Measured live over a real SSM link on 2026-08-26: re-cropping a resident
+  -- image showed the wrong position, on both a chunk's first placement and a
+  -- later re-crop of one already on screen, with every escape-sequence
+  -- parameter confirmed byte-correct against the chunk plan. Resident mode
+  -- falls back to the viewport model here rather than risk it again.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  local iterm2_ok, iterm2_reason = raw.resident_pan_supported()
+  t.eq(false, iterm2_ok, "iTerm2 does not reliably re-crop a resident image")
+  t.ok(type(iterm2_reason) == "string" and iterm2_reason:match("iTerm2"), "and the refusal names the terminal")
+
+  for _, profile in ipairs({ "kitty", "ghostty" }) do
     config.reset()
     config.setup({ terminal = { profile = profile } })
     t.ok((raw.resident_pan_supported()), profile .. " can pan resident chunks")

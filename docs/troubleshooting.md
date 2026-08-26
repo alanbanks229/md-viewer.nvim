@@ -270,6 +270,27 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame *larger*, and it collapses the moving and settle captures into one so the
 cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
+## A resident preview jumps to the wrong position, or shows torn content
+
+Resident mode (`image.resident = "auto"`, opt-in and off by default) holds a
+document's chunks in the terminal's own image memory and scrolls by asking the
+terminal to re-crop them in place, instead of re-rendering per scroll. On
+iTerm2 3.6.11, that re-crop was measured to be unreliable over a real slow link
+(an AWS SSM tunnel, ~1 MB/s): a chunk's first placement could show content from
+a different position than the one requested, and re-cropping an already-shown
+chunk to a new position could leave the old crop on screen instead. In both
+cases the escape sequence md-viewer sent was confirmed byte-correct — the
+defect is in the terminal applying it, not in what was asked for.
+
+iTerm2's profile now carries `resident_pan = false`
+(`lua/md-viewer/terminal.lua`), so `resident_session.select_path` refuses the
+resident path there and falls back to the viewport model, which re-renders on
+every scroll and does not re-crop anything. `:MdViewerDebug`'s `render_path`
+reports which model a given preview actually chose; `render_path_reason` says
+why. If a preview that should be on viewport model is instead warming chunks,
+check `terminal.profile` (config) and `MD_VIEWER_TERMINAL_PROFILE` (env) for an
+override that is pinning a profile other than `iterm2`.
+
 ## A notification over the preview shows Markdown through its background
 
 A negative `raw_zindex` draws the image below text glyphs but *above* cell
