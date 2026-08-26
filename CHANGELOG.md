@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [0.3.0-rc7] - 2026-08-25
+## [0.3.0-rc7] - 2026-08-26
 
 **Prerelease.** How fast the link is, measured per machine instead of pasted into
 a config file that is symlinked to all of them — and the reasoning behind that
@@ -513,6 +513,8 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc7]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc7
+[0.3.0-rc6]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc6
 [0.3.0-rc5]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc5
 [0.3.0-rc1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc1
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
