@@ -6,21 +6,28 @@
 # Run it from the shell inside the SSH session, with Neovim closed. Prints the
 # `render.ssh_link_bytes_per_sec` line to paste into your md-viewer config.
 #
-# For scale, two links measured with this script and its predecessors:
+# For scale, the two links this script has been run against, measured
+# 2026-08-25 with 64 MB of payload each:
 #
-#     AWS SSM tunnel        ~800,000 B/s   the agent paces its output at a
-#                                          kilobyte per millisecond and AWS says
-#                                          they will not raise it -- see
+#     AWS SSM tunnel      ~1,030,000 B/s   with `Compression yes`. The channel
+#                                          underneath carries ~774,000: the
+#                                          agent paces its output at a kilobyte
+#                                          per millisecond and AWS says they
+#                                          will not raise it. The difference is
+#                                          the compressor, and it is real --
+#                                          see the payload note below and
 #                                          docs/local-render-design.md
-#     plain SSH, LAN host  ~17,000,000     2026-08-25, 8 MB in 0.47-0.54s
+#     plain SSH, LAN host ~14,700,000      no compression, plain TCP/22
 #
-# Twenty times apart, so "it is remote" tells you nothing useful and this is
-# worth actually running.
+# Fourteen times apart, so "it is remote" tells you nothing useful and this is
+# worth actually running. Neither figure is guessable from the other, which is
+# the entire reason this script exists rather than a constant.
 #
 # This has to be a shell script writing to the terminal, and it cannot be a Lua
 # function inside Neovim, because from inside Neovim the answer is not
 # observable. `nvim_ui_send` appends to Neovim's own UI queue and returns; the
-# TUI drains that queue later. On the SSM link above:
+# TUI drains that queue later. On an SSM link doing well under a megabyte a
+# second:
 #
 #     from inside Neovim   96 payloads, 24 MB, 0.03s, no write ever waited
 #     from the shell        8 MB in 11.0s -> 760,267 B/s
@@ -97,19 +104,39 @@ fi
 
 clear_screen() { printf '\033[2J\033[H' 2>/dev/null || true; }
 
-# What gets sent, and why it is not a stream of one repeated byte.
+# What gets sent, and why it is not a stream of one repeated byte -- and what
+# this script therefore measures, which is not the channel.
 #
 # An earlier version sent `tr '\0' '.'`, which is the most compressible payload
 # it is possible to construct. Any compressing hop between here and the terminal
 # -- `ssh -C`, `Compression yes` in a config, a websocket negotiating
 # permessage-deflate -- then carries almost nothing while this script believes it
-# sent the full amount, and reports a rate the link cannot actually do.
+# sent the full amount, and reports a rate the link cannot actually do. On the
+# SSM link, the same 64 MB took 6.36s compressible against 86.23s incompressible:
+# a factor of 13.6, which is the whole of the 8-10 MB/s that script used to
+# report for a link doing well under one.
 #
-# That matters because of what md-viewer sends: base64-encoded PNG. PNG is
-# already deflated, so base64 of it is incompressible, and a rate measured on
-# compressible bytes does not predict it at all. This measures what the plugin
-# actually pushes -- base64 over random bytes -- so a compressing hop is included
-# honestly rather than flattering the result.
+# So the payload is base64 over /dev/urandom, because that is what md-viewer
+# actually pushes: base64-encoded PNG. **It is not incompressible, and an earlier
+# version of this comment claimed it was.** base64 is 64 symbols carried in
+# 8-bit bytes -- six bits of entropy per byte -- so deflate takes it to about 75%
+# whatever is inside, PNG or noise or Shakespeare. The compressor is not defeated
+# here; it is merely held to the one quarter it can always get.
+#
+# That is the right payload anyway, and the number it produces is the useful one,
+# as long as you know which number it is: this measures the **effective** rate,
+# md-viewer's bytes as md-viewer sends them, with whatever a compressing hop
+# gives back already included. It is not the channel's own capacity, and on a
+# compressing link the two differ by exactly that quarter. Measured on an AWS SSM
+# tunnel with `Compression yes`, 2026-08-25:
+#
+#     raw channel, incompressible, 64 MiB x3     774,000 B/s   the channel
+#     this script, base64, through the pty     1,010,000-      what md-viewer
+#                                              1,070,000 B/s   experiences
+#
+# and 774,000 / 0.75 = 1,032,000, which is the measured band. Configure md-viewer
+# with the effective figure -- it is the one that predicts how long a frame takes
+# -- and reach for the channel figure only when arguing about the link itself.
 payload() { dd if=/dev/urandom bs=1024 count=$(( $1 * 768 )) 2>/dev/null | base64; }
 
 # base64 of urandom is ~4/3 of its input, so ask for 768 KB of entropy per
