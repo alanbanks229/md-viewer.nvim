@@ -269,3 +269,25 @@ its mechanism in [SECURITY.md](../SECURITY.md) or
 - raw image cleanup targets only plugin-owned image and placement IDs
 - local file access canonicalized and confined to a document root
 - the graphical preview stays a read-only raster surface
+
+## Code with no live caller right now
+
+Some paths are correct, tested, and reachable in principle, but nothing on any
+host this plugin currently runs on exercises them -- e.g. the resident-mode
+warm-up traffic reductions in `resident_session.lua` and `controller.lua`,
+dormant because no combination of a measured link and a terminal profile in
+active use selects the resident render path today. That is a fact about
+today's deployed hosts, not about the code, and it can flip the moment a host
+or a terminal's `resident_pan` setting changes.
+
+Mark this with a `KEEP_IN_MIND:` comment at the dormant site, stating exactly
+what would need to be true for it to run again and how to exercise it
+deliberately (a stub, a script, an env var) without waiting for a real host to
+change. A grep for `KEEP_IN_MIND` should always find every such site.
+
+Do not delete code just because it currently has no live caller -- that is
+what the comment is for. If a path should be removed outright rather than left
+dormant (the feature it serves is being dropped, not just currently
+unexercised on this fleet), that is a product decision: raise it with the
+operator/orchestrator before deleting it. Once a real host exercises the path
+again, delete the comment along with it -- it has done its job.

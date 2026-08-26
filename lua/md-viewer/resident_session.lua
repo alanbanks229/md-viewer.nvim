@@ -276,6 +276,54 @@ end
 ---The controller asks this right after adopting a chunk, to tell "about to
 ---place pixels that only just arrived" apart from "landed for later, draw
 ---does not touch it yet".
+---
+---KEEP_IN_MIND: dormant on every host this plugin runs on as of 2026-08-26.
+---This function's only caller (`controller.pump_resident`'s settle-before-
+---placing check) is reached only when a session is on the resident render
+---path, which needs both a measured link under image.resident "auto"'s
+---cutoff (~4 MB/s, see resident_mode() in the deployed
+---~/.config/nvim/lua/plugins/md-viewer.lua) and a terminal profile that does
+---not refuse resident_pan (kitty, ghostty, generic_kitty -- not iTerm2, which
+---now refuses it in terminal.lua, and not WezTerm, which always has).
+---aide-spock's link qualifies but runs iTerm2; ichigo's link does not
+---qualify. Neither exercises this today.
+---
+---This is reachable in principle and covered by
+---tests/lua/cases/resident_placement.lua -- it is not orphaned, just
+---currently unexercised. Do not delete it because grep shows no live caller.
+---`scripts/resident/drive.lua` is the existing harness that exercises the
+---whole resident path end to end without a real slow-linked host -- it
+---stubs `terminal.detect` to force `resident_pan = true` on a fake Kitty
+---profile and a slow-chunks delay to stand in for the link:
+---
+---   nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua [doc.md] --slow-chunks=2000
+---
+---Once a real host exercises this path again, delete this note. If you
+---believe this path should be removed outright rather than left dormant
+---(e.g. resident mode is being dropped, not just currently unexercised),
+---that is a product decision -- raise it with the operator/orchestrator
+---before deleting it.
+---
+---What forces a session onto this path without a real slow-linked Kitty or
+---Ghostty host, taken verbatim from scripts/resident/drive.lua's own stub --
+---paste into a scratch buffer and :source it, or run the script directly:
+---
+---   local terminal = require("md-viewer.terminal")
+---   terminal.detect = function()
+---     return {
+---       graphics = "supported",
+---       profile_id = "kitty",
+---       label = "Kitty",
+---       resident_pan = true,
+---       reason = "forced for local testing",
+---     }
+---   end
+---   require("md-viewer").setup({ image = { backend = "kitty_raw", resident = "auto" } })
+---
+---then open a markdown buffer and :MdViewerToggle; :MdViewerDebug's
+---render_path should read "resident". A real link is still whatever it is --
+---pair this with process.request stubbed to defer chunk replies (see
+---drive.lua's --slow-chunks) to see this function's branch actually taken.
 function M.is_needed(session, scroll_y, index)
   local current = state(session)
   if not current then return false end
@@ -319,6 +367,13 @@ function M.draw(session, scroll_y)
   -- new one" -- so a reader sitting still got a placement command interleaved
   -- with every chunk's transmission for no reason. Skip it when nothing this
   -- draw would produce has changed since the last one.
+  --
+  -- KEEP_IN_MIND: this whole function only runs for a session on the resident
+  -- render path, which is currently unreached on every host this plugin runs
+  -- on -- see the longer note on M.is_needed below for why and how to
+  -- exercise it deliberately. Same rule: unexercised, not orphaned; do not
+  -- delete for that reason alone, and raise removing the path itself with
+  -- the operator/orchestrator rather than deciding it here.
   if
     session.resident_screen
     and current.drawn

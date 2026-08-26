@@ -707,6 +707,16 @@ end
 ---and about a second of wire on a slow link, so queueing several would only move
 ---the wait from the renderer to the socket.
 function M.pump_resident(session)
+  -- KEEP_IN_MIND: this whole function is currently unreached on every host
+  -- this plugin runs on -- the render_path ~= "resident" guard right below
+  -- returns before any of the settle-before-placing logic further down
+  -- runs. Reachable in principle, not orphaned; do not delete for lack of a
+  -- live caller. See the fuller note on resident_session.is_needed in
+  -- resident_session.lua for exactly what would have to be true for this to
+  -- run again, and a real, runnable snippet (lifted from
+  -- scripts/resident/drive.lua) that forces this path for local testing
+  -- without a slow real host. Raise removing the path itself with the
+  -- operator/orchestrator rather than deciding it here.
   if not valid(session) or session.render_path ~= "resident" then return end
   -- A render of the reader's content outranks the warm-up: issuing a chunk
   -- capture now would bump `request_serial` and stale it, and a staled content
@@ -774,6 +784,15 @@ function M.pump_resident(session)
       return
     end
     resident_session.retain(session, live.drawn or index)
+    -- KEEP_IN_MIND: this branch (and is_needed itself) is currently
+    -- unreached on every host this plugin runs on -- pump_resident only
+    -- runs at all when session.render_path == "resident" (guarded at the
+    -- top of this function), which needs a measured link under
+    -- image.resident "auto"'s cutoff on a terminal profile that allows
+    -- resident_pan. See the fuller note on resident_session.is_needed in
+    -- resident_session.lua for why, and how to exercise this deliberately.
+    -- Unexercised, not orphaned -- do not delete for lack of a live caller;
+    -- raise removing the path itself with the operator/orchestrator first.
     if resident_session.is_needed(session, session.scroll_y or 0, index) then
       -- The reader is waiting on exactly the chunk that just landed.
       -- `nvim_ui_send` only queues bytes for Neovim's own UI channel to
