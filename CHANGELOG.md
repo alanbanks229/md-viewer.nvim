@@ -3,6 +3,107 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc7] - 2026-08-25
+
+**Prerelease.** How fast the link is, measured per machine instead of pasted into
+a config file that is symlinked to all of them — and the reasoning behind that
+measurement, corrected.
+
+Both halves come out of the same afternoon of measuring. An AWS SSM tunnel
+carries **~1,030,000 B/s**; a LAN host on plain TCP/22 carries **~14,700,000**.
+Fourteen times apart, and one `~/.config/nvim` reaches both: safe-for-the-slower
+is nineteen times low on the faster, and right-for-the-faster is the error
+`render.ssh_link_bytes_per_sec` exists to correct. There is no constant to pick.
+
+### Added
+
+**`:MdViewerMeasureLink` measures this link and caches the answer for this
+machine.** Run it once, from an SSH session, with no preview open; the screen
+floods and clears and it takes up to about a minute. It runs the same
+`scripts/ssh-link-speed.sh` the shell does, in a subprocess writing to the pty
+named by `$SSH_TTY` — the only route that works. The answer is not observable
+from inside Neovim at any link rate (`nvim_ui_send` appends to Neovim's own UI
+queue and returns; 24 MB was accepted in 0.03 s on a 0.80 MB/s link), and a
+subprocess Neovim starts has no controlling terminal to reach `/dev/tty`
+through: opening it fails outright with ENXIO, measured. `$SSH_TTY` names the
+pty by path, and a path needs no controlling terminal.
+
+It refuses outside SSH, with a preview open, or where no terminal device
+resolves — each of which would measure something other than the link.
+
+**`render.ssh_link_bytes_per_sec` now defaults to `"auto"`,** which reads a
+measurement this machine has already made. It never takes one: nothing happens
+at all until `:MdViewerMeasureLink` or `sh scripts/ssh-link-speed.sh
+--write-cache` has been run there. The cache lives under `stdpath("state")`,
+keyed by a hash of the host, both ends of the connection and the terminal, so
+several people sharing a bastion each get their own and no address is ever
+printed. Nothing expires; the age is reported instead.
+
+Precedence is `MD_VIEWER_SSH_LINK_BYTES_PER_SEC` > configuration > cache >
+unknown, mirroring how the cell metrics resolve and for the same reason: the
+environment travels with a session and a shared config file cannot. **A number
+in configuration still wins and is still never capped** — which is also the
+trap, since a rate left in a shared config silently defeats per-machine
+detection on every machine that shares it.
+
+Unknown remains a legitimate answer. `:MdViewerHealth` raises nothing for it.
+
+### Changed
+
+**The resident warm-up says how long it has left,** when the link has been
+measured: `warming 3/12 ~14s` rather than `warming 3/12`. Extrapolated from the
+chunks that document has already produced rather than from its pixel count,
+because PNG against real content is not predictable from geometry — and silent
+unless a chunk has landed *and* the rate came from a measurement. There is no
+honest estimate to build on an inferred one.
+
+**`scripts/ssh-link-speed.sh` gained `--write-cache`, `--samples N`, `--out
+FILE`, `--quiet` and `--print-key`.** `--write-cache` files the answer where
+md-viewer reads it, so a by-hand run needs nothing pasted anywhere; it computes
+the same key in POSIX sh that `md-viewer.linkrate` computes in Lua, and the test
+suite runs `--print-key` against a fabricated environment and compares, because
+a disagreement would file the measurement where nothing reads it and look
+exactly like never having measured. `--samples N` repeats the settled transfer
+and keeps the **lowest**: every way this measurement goes wrong makes it look
+faster, and there is no mechanism that makes it look slower, so averaging keeps
+the inflated samples and the minimum discards them.
+
+**`:MdViewerHealth` reports the link rate** with its tier, its age and how far
+its own samples disagreed, and warns when they disagree by more than 2× — a link
+that answered 0.8 MB/s and then 2.0 has not been measured, and every estimate
+built on it inherits that. Never for an unmeasured link.
+
+**`scripts/scroll-scale/ab.lua` takes its rate from the resolver** instead of a
+hardcoded 800000, and says on the report which tier answered. On the LAN host
+that constant was eighteen times low, which would report a link at 5% of
+capacity as oversubscribed.
+
+### Fixed
+
+**base64 is not incompressible, and `scripts/ssh-link-speed.sh` said it was.**
+Its comment reasoned that PNG is already deflated, so base64 of it cannot be
+compressed. That is about the wrong layer: base64 is 64 symbols carried in
+8-bit bytes — six bits of entropy per byte — so deflate takes it to about 75%
+whatever is inside it.
+
+Not pedantry. It is exactly the gap between `aide-spock`'s raw channel at
+774,000 B/s and the 1,010,000–1,070,000 the same host reports through a pty:
+774,000 ÷ 0.75 = 1,032,000. A reader who believed the old comment would take the
+pty figure for a channel figure and conclude the documented SSM ceiling had been
+beaten. The payload is unchanged — Kitty graphics genuinely puts base64 on the
+wire — but the script now says what it measures: the **effective** rate, with
+whatever a compressing hop gives back already in it, which is the figure that
+predicts a frame's transit time and the one that belongs in configuration.
+
+`docs/local-render-design.md` carries that as a third way to measure an SSM link
+faster than its ceiling, and its ceiling section stops being a prediction: the
+1 KB/ms arithmetic was a reading of the agent's source plus a stranger's
+numbers, and has now been measured against the channel itself with
+`Compression yes` live and excluded by payload choice — 64 MiB of incompressible
+bytes three times, 0.77–0.78 MB/s, 76% of theoretical. The same 64 MiB sent
+compressible took 6.36 s against 86.23 s. That 13.6× is where every inflated SSM
+figure in this repository came from, its own 8.0–10.3 included.
+
 ## [0.3.0-rc6] - 2026-08-25
 
 **Prerelease.** Resident mode is now experimental and off by default, and the

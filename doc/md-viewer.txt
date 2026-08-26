@@ -136,8 +136,9 @@ render ~
                                             and the row below over SSH
     ssh_scroll_scale             0.5        0.25..1; moving-frame scale over
                                             SSH (|md-viewer-ssh|)
-    ssh_link_bytes_per_sec       nil        measured link rate; nil means
-                                            unknown (|md-viewer-resident|)
+    ssh_link_bytes_per_sec       "auto"     measured link rate; "auto" reads
+                                            this machine's own measurement
+                                            (|:MdViewerMeasureLink|)
     animate                      false      play animated GIF and WebP
     animate_fps                  5          1..30; `frames` strategy only
 
@@ -495,6 +496,26 @@ COMMANDS                                                  *md-viewer-commands*
         Selection and search state is reported as lengths and counts only
         -- the selected text is never printed here.
 
+                                                        *:MdViewerMeasureLink*
+:MdViewerMeasureLink
+        Measure how fast this SSH link carries bytes, and cache the answer
+        for this machine. Run it once per machine, from an SSH session, with
+        no preview open. The screen floods and then clears; it takes up to
+        about a minute and you should not type during it.
+
+        It runs `scripts/ssh-link-speed.sh` in a subprocess writing to the
+        pty named by $SSH_TTY, which is the only route that works: the
+        answer is not observable from inside Neovim at all, and a subprocess
+        Neovim starts has no controlling terminal to reach /dev/tty through.
+
+        Refuses outside SSH, with a preview open, or where no terminal
+        device can be resolved -- each of which would measure something
+        other than the link. The result lands under |stdpath()| "state",
+        keyed by a hash, and is read while `render.ssh_link_bytes_per_sec`
+        is "auto". Nothing is written to your configuration.
+
+        See |md-viewer-resident| for what the number is used for.
+
 =============================================================================
 PREVIEW NAVIGATION                                      *md-viewer-navigation*
 
@@ -725,7 +746,7 @@ useful predictor of any of this, and the two adjustments below are applied to
 every SSH session only because Neovim cannot tell an SSM tunnel from a LAN hop
 -- both arrive as an ordinary SSH session. On a fast link they cost a little
 sharpness on a frame that is already moving, which is why they are safe to
-apply blind. `sh scripts/ssh-link-speed.sh` measures yours.
+apply blind. |:MdViewerMeasureLink| measures yours.
 
 md-viewer therefore does two things differently on an SSH session, both
 without configuration. It captures the moving frame of a scroll at half size,
@@ -793,9 +814,11 @@ entirely on the link, and by more than most people expect: >
                                                 the warm-up
 <
 Twenty times apart, so "it is remote" predicts nothing. Measure yours before
-turning this on -- `sh scripts/ssh-link-speed.sh`, and see
+turning this on -- |:MdViewerMeasureLink| once per machine, and see
 `render.ssh_link_bytes_per_sec` below -- and read `render_path` in
-|:MdViewerDebug| to confirm which model a preview actually chose.
+|:MdViewerDebug| to confirm which model a preview actually chose. A measured
+link also puts an estimate on the warm-up: the winbar reads `warming 3/12 ~14s`
+rather than `warming 3/12`.
 
 Selected once per preview, when it opens, and reported by |:MdViewerDebug| as
 `render_path`. It is never re-decided mid-scroll: a preview that switched
@@ -858,6 +881,23 @@ Measure it from the shell instead, with Neovim closed: >
 
     sh scripts/ssh-link-speed.sh
 <
+Add `--write-cache` and there is nothing to paste anywhere: it files the answer
+under |stdpath()| "state", keyed by a hash of this machine and this link, and
+the default `"auto"` reads it from there. |:MdViewerMeasureLink| runs the same
+script from inside Neovim and does the same thing.
+
+`"auto"` never measures on its own -- it only reads what one of those two wrote,
+so a machine where neither has been run stays "unknown" and nothing happens. It
+decides which shell run this machine uses, not whether to take one.
+
+A number set here outranks it, and is never capped against anything. That is
+worth naming as a trap rather than a feature: one `~/.config/nvim` symlinked to
+several machines makes any number in it wrong on all but one of them, and
+silently defeats per-machine detection everywhere. Measured 2026-08-25, an AWS
+SSM tunnel carries ~1,030,000 B/s and a LAN host ~14,700,000 -- fourteen times
+apart, with no constant that serves both. Set a number only for one machine's
+own configuration.
+
 Leaving it unset is a legitimate answer and means unknown. Nothing infers one.
 
                                                     *md-viewer-ssm-throughput*

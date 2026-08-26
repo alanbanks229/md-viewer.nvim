@@ -879,6 +879,12 @@ function M.begin_resident(session, meta)
     resident_session.demote(session, reason)
     return
   end
+  -- The one place the link rate is worth mentioning unprompted: a warm-up is
+  -- about to run and the winbar has no idea how long it will take. Said once per
+  -- Neovim and never once per preview -- linkrate owns that guard -- and phrased
+  -- as a suggestion, because an unmeasured link is not a fault and nothing else
+  -- in md-viewer treats it as one.
+  require("md-viewer.linkrate").notice_unknown()
   M.draw_resident(session)
   M.pump_resident(session)
 end

@@ -2,6 +2,7 @@ local backends = require("md-viewer.backends")
 local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
+local linkrate = require("md-viewer.linkrate")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
 local state = require("md-viewer.state")
@@ -124,6 +125,7 @@ function M.collect(renderer_result, renderer_error)
   local version = vim.version()
   local capability = terminal.capability(cfg.terminal)
   local discovered_executable = renderer_result and renderer_result.executable
+  local _, link_tier, link_detail = linkrate.resolve()
   return {
     neovim = ("%d.%d.%d"):format(version.major, version.minor, version.patch),
     vim_ui_img = type(vim.ui and vim.ui.img) == "table",
@@ -140,6 +142,13 @@ function M.collect(renderer_result, renderer_error)
     -- LC_* and almost nothing else, so TERM_PROGRAM-based identification is
     -- unavailable by construction rather than merely absent.
     ssh = capability.ssh and ("yes (%s)"):format(capability.ssh_evidence) or "no",
+    -- How fast this link carries bytes, and which tier answered. Deliberately
+    -- says nothing about *how* the machine was identified: the cache key is a
+    -- hash precisely because this report is meant to be pasted into public
+    -- issues, and the material behind it is two IP addresses.
+    link_rate = linkrate.describe(),
+    link_rate_tier = link_tier,
+    link_rate_spread = link_detail and link_detail.spread or nil,
     terminal_profile = capability.profile_id .. " (" .. capability.label .. ")",
     terminal_profile_evidence = #capability.evidence > 0 and table.concat(capability.evidence, "; ") or "none",
     graphics_confidence = capability.graphics,
@@ -323,6 +332,7 @@ local function verbose_terminal(report)
     { "platform", report.platform },
     { "multiplexer", report.multiplexer },
     { "ssh session", report.ssh },
+    { "link rate", ("%s [%s]"):format(report.link_rate, report.link_rate_tier) },
     { "terminal profile", ("%s -- graphics %s"):format(report.terminal_profile, report.graphics_confidence) },
     { "identified by", report.terminal_profile_evidence },
   }
@@ -566,6 +576,10 @@ local function build_sections(report, cfg)
         { label = "Backend", value = backend_label(report, cfg), level = "ok" },
         { label = "Image support", value = image_support_text(report.selected_backend), level = "ok" },
         { label = "Reason", value = report.backend_decision, level = "info" },
+        -- "info" and not "ok": unknown is a legitimate value here and must not
+        -- read as a green tick or as a fault. Nothing in md-viewer infers a link
+        -- rate, so the absence of one is a fact rather than a degradation.
+        { label = "Link rate", value = report.link_rate, level = "info" },
       },
     },
     { title = "Terminal", rows = terminal_rows },
@@ -652,6 +666,24 @@ local function build_warnings(report, status, status_reason)
         "A terminal that mishandles overlay placements degrades badly rather than gracefully:",
         "oversized or misplaced highlight and caret rectangles, or unbounded terminal memory.",
         "Remove the override to fall back to full-frame captures, which are always correct.",
+      },
+    }
+  end
+  -- A link that answered 0.8 MB/s and then 2.0 has not been measured; it has
+  -- been sampled twice from something that is not a constant, and every estimate
+  -- built on it inherits that. Raised only for a measurement that disagrees with
+  -- itself -- never for an *unmeasured* link, which is not a fault and which
+  -- nothing else here treats as one.
+  if report.link_rate_spread and report.link_rate_spread > 2 then
+    warnings[#warnings + 1] = {
+      text = ("the cached link measurement's own samples disagree by %.1fx, so this link is not steady enough to estimate from"):format(
+        report.link_rate_spread
+      ),
+      severity = "warn",
+      detail = {
+        "Re-run :MdViewerMeasureLink. If it disagrees again, the link itself is varying and no",
+        "single number describes it; render.ssh_link_bytes_per_sec pins one by hand and is never",
+        "capped against anything.",
       },
     }
   end

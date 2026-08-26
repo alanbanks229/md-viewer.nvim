@@ -43,6 +43,9 @@ local function base_report()
     document_root_excludes_current = false,
     document_root_unbounded = false,
     security_overrides = "none",
+    link_rate = "unknown -- :MdViewerMeasureLink measures it, render.ssh_link_bytes_per_sec pins it",
+    link_rate_tier = "unobservable",
+    link_rate_spread = nil,
     viewport_calibration_tier = "estimated",
     viewport_cell_pixels = "unmeasured (the terminal reports no pixel geometry)",
     viewport_cell_css_px = "n/a (estimated tier)",
@@ -104,6 +107,34 @@ return function(t)
       explicit_cells.status,
       "a user-configured cells backend is healthy -- it is not a fallback, it is what was asked for"
     )
+
+    -- Unknown is not a fault, and this is the pin on that. Nothing in md-viewer
+    -- infers a link rate, so a machine that has never measured one has to come
+    -- out of here silent -- otherwise every session would carry a yellow line
+    -- about a number it was never going to have.
+    local unmeasured = health._diagnose(base_report(), auto_cfg)
+    t.eq(0, #unmeasured.warnings, "an unmeasured link raises no warning")
+    t.ok(section_values(unmeasured):match("unknown"), "though the Rendering section still reports it as unknown")
+
+    -- A measurement that disagrees with itself is a different thing entirely:
+    -- something was observed, and it was not a constant. Every estimate built on
+    -- it inherits that, so it is worth saying once.
+    local unsteady = base_report()
+    unsteady.link_rate = "1,032,241 B/s (measured 2h ago, spread 2.60x, key 0123456789abcdef)"
+    unsteady.link_rate_tier = "cached"
+    unsteady.link_rate_spread = 2.6
+    local wobbly = health._diagnose(unsteady, auto_cfg)
+    t.ok(warning_texts(wobbly):match("2%.6x"), "a measurement that disagrees with itself is surfaced")
+    t.ok(warning_texts(wobbly):match("steady"), "and is named as an unsteady link")
+    t.eq("healthy", wobbly.status, "which is a warning about a number, not a degraded renderer")
+    -- The key is how two links are told apart in a report meant to be pasted
+    -- into a public issue. The material behind it is two IP addresses, and the
+    -- hash is what makes printing it safe at all.
+    t.ok(section_values(wobbly):match("0123456789abcdef"), "the cache key reaches the report")
+
+    local steady = base_report()
+    steady.link_rate_spread = 1.06
+    t.eq(0, #health._diagnose(steady, auto_cfg).warnings, "a measurement that agrees with itself raises nothing")
 
     local never_started = base_report()
     never_started.renderer_process = { running = false }

@@ -347,6 +347,57 @@ return function(t)
     controller.close(source)
   end
 
+  -- ---------------------------------------------------------------------
+  -- What the link rate is actually for: an estimate on the warm-up
+  --
+  -- The bytes come from the chunks this document has already produced, not
+  -- from the plan's geometry -- PNG against real content is not predictable
+  -- from a pixel count. So the estimate exists only once a chunk has landed,
+  -- and only once somebody has measured the link. Neither is inferred.
+  -- ---------------------------------------------------------------------
+  do
+    local linkrate = require("md-viewer.linkrate")
+    local session = open_resident()
+    -- Fabricated rather than warmed for real: `warmup_notice` reads three
+    -- numbers off the session and nothing else, and warming four chunks here
+    -- would test the capture loop instead of the arithmetic.
+    session.resident = { plan = { count = 4 }, captured = 1, bytes = 900000, images = {}, queue = {} }
+
+    config.setup({ image = { backend = "cells" }, render = { ssh_link_bytes_per_sec = nil } })
+    config.get().render.ssh_link_bytes_per_sec = nil
+    linkrate.invalidate()
+    preview.update_title(session)
+    t.ok(winbar(session):match("warming 1/4"), "an unmeasured link still reports progress")
+    t.eq(nil, winbar(session):match("~"), "and promises nothing about when it will finish")
+
+    -- 900,000 PNG bytes for one chunk, three chunks left, base64 on the wire:
+    -- 3.6 MB at 1,030,000 B/s is 3.5 seconds, rounded up because an estimate
+    -- that runs out before the work does is the one that reads as broken.
+    config.setup({ image = { backend = "cells" }, render = { ssh_link_bytes_per_sec = 1030000 } })
+    linkrate.invalidate()
+    preview.update_title(session)
+    t.ok(winbar(session):match("warming 1/4 ~%ds"), "a measured link turns that into a time")
+    t.eq("4", winbar(session):match("~(%d+)s"), "3.6 MB of base64 at 1.03 MB/s rounds up to four seconds")
+
+    -- Past a minute and a half the seconds stop being information. A reader
+    -- shown "~180s" has to do the division themselves.
+    config.setup({ image = { backend = "cells" }, render = { ssh_link_bytes_per_sec = 20000 } })
+    linkrate.invalidate()
+    preview.update_title(session)
+    t.ok(winbar(session):match("~%dm"), "a long warm-up is reported in minutes")
+
+    -- Nothing captured yet means nothing to extrapolate from. The first chunk
+    -- is what makes an estimate possible, and until then silence beats a guess.
+    session.resident.captured, session.resident.bytes = 0, 0
+    preview.update_title(session)
+    t.ok(winbar(session):match("warming 0/4"), "before the first chunk the count still shows")
+    t.eq(nil, winbar(session):match("~"), "but there is nothing to extrapolate from yet")
+
+    controller.close(source)
+    config.reset()
+    linkrate.invalidate()
+  end
+
   renderer.request = real_request
   pcall(vim.api.nvim_buf_delete, source, { force = true })
   pcall(vim.api.nvim_set_current_win, entry_win)

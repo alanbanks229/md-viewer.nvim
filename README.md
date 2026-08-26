@@ -107,6 +107,12 @@ scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
 restores full sharpness the moment scrolling stops, and it waits longer before
 spending that sharp capture (`render.ssh_scroll_settle_ms`).
 
+How throttled the link actually is, md-viewer cannot see: `nvim_ui_send` appends
+to Neovim's own UI queue and returns, so timing a write measures the queue and
+not the wire. `:MdViewerMeasureLink`, run once on a machine, measures it from a
+subprocess and caches the answer there — which is per-machine on purpose, since
+one `~/.config/nvim` reaches hosts that measured fourteen times apart.
+
 Do **not** reach for `render.device_scale_factor = 1` here — it is a
 calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
@@ -238,6 +244,7 @@ by hand when that happens.
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
 | `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
+| `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
 ### Keys, with the preview focused

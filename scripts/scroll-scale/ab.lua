@@ -23,15 +23,24 @@
 -- you stop partway. Nothing is written to disk.
 
 local config = require("md-viewer.config")
+local linkrate = require("md-viewer.linkrate")
 local state = require("md-viewer.state")
 
 -- Bytes on the wire are base64, so 4/3 of the PNG. The rate is the one thing
 -- here that cannot be measured from inside Neovim -- nvim_ui_send appends to
 -- Neovim's own UI queue and returns, so a Lua caller sees no back-pressure from
--- the link under any circumstances -- so it is taken from configuration, or
--- from the SSM tunnel's documented 0.80 MB/s when nothing is configured.
--- Measure yours with scripts/ssh-link-speed.sh, from the shell.
-local BYTES_PER_SECOND = config.get().render.ssh_link_bytes_per_sec or 800000
+-- the link under any circumstances -- so it comes from md-viewer.linkrate, which
+-- resolves an environment override, then configuration, then a measurement
+-- cached on this machine by :MdViewerMeasureLink.
+--
+-- The fallback is the AWS SSM tunnel's documented 0.80 MB/s, and it is now the
+-- *worst* number in the file rather than a reasonable default: this harness
+-- prints saturation percentages, and on the LAN host measured 2026-08-25 that
+-- constant is eighteen times low, which would report a link at 5% of capacity as
+-- oversubscribed. Run :MdViewerMeasureLink before trusting a saturation figure.
+local RESOLVED_RATE, RATE_TIER = linkrate.resolve()
+local BYTES_PER_SECOND = RESOLVED_RATE or 800000
+local RATE_LABEL = ("%.2fMB/s"):format(BYTES_PER_SECOND / 1000000)
 local function wire_ms(png_bytes)
   if not png_bytes then return nil end
   return (png_bytes * 4 / 3) / BYTES_PER_SECOND * 1000
@@ -125,7 +134,7 @@ local function ms(value)
 end
 
 ---How much of the link's capacity a phase actually used: every byte it sent,
----as base64, over the seconds it took, against the 0.80 MB/s ceiling.
+---as base64, over the seconds it took, against the resolved link rate.
 ---
 ---This is the number that says whether transit is the constraint, and it is
 ---the one to trust. `interval_min` cannot say it, because `nvim_ui_send` is
@@ -172,7 +181,7 @@ local function report()
     ("%-26s %14s %14s"):format("", "baseline 1.0x", "treatment 0.5x"),
     ("%-26s %14s %14s"):format("fast_png_bytes", number(a.fast_png_bytes), number(b.fast_png_bytes)),
     ("%-26s %14s %14s"):format(
-      "  transit @0.80MB/s",
+      "  transit @" .. RATE_LABEL,
       a.fast_png_bytes and ("%d ms"):format(wire_ms(a.fast_png_bytes)) or "--",
       b.fast_png_bytes and ("%d ms"):format(wire_ms(b.fast_png_bytes)) or "--"
     ),
@@ -223,6 +232,15 @@ local function report()
     -- construction, so a column for it would imply it was under test when this
     -- run says nothing about it at all.
     ("settle delay was %sms in both arms -- this A/B varies scroll_scale only."):format(tostring(a.settle_ms)),
+    -- Every transit and saturation figure above is this number times a byte
+    -- count, so a reader has to be able to see whether it was measured or
+    -- assumed. An assumed one makes the whole saturation column decorative.
+    RESOLVED_RATE and ("link rate %d B/s (%s) -- every transit and saturation figure rests on it."):format(
+      BYTES_PER_SECOND,
+      RATE_TIER
+    ) or ("link rate UNMEASURED: falling back to %d B/s. Transit and saturation below are guesses; "):format(
+      BYTES_PER_SECOND
+    ) .. "run :MdViewerMeasureLink first.",
     "",
   }
 

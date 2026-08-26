@@ -14,6 +14,14 @@ function M.setup()
   )
   vim.api.nvim_create_user_command("MdViewerHealth", function() require("md-viewer.health").show() end, {})
   vim.api.nvim_create_user_command("MdViewerDebug", function() require("md-viewer.debug").show() end, {})
+  -- A command, and never something a preview does on its own: it floods the
+  -- terminal for the better part of a minute. Run once per machine; the answer
+  -- is cached there and `render.ssh_link_bytes_per_sec = "auto"` reads it.
+  vim.api.nvim_create_user_command(
+    "MdViewerMeasureLink",
+    function() require("md-viewer.linkrate").measure_command() end,
+    { desc = "md-viewer: measure this SSH link's throughput and cache it for this machine" }
+  )
   vim.api.nvim_create_user_command("MdViewerCopy", function() controller.copy() end, {})
   -- No :MdViewerClearSelection or :MdViewerFindClear. Closing this prompt
   -- without a query clears both, and `<Esc>` in the preview window still does

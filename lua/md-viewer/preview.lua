@@ -1,6 +1,8 @@
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
+local linkrate = require("md-viewer.linkrate")
+local resident = require("md-viewer.resident")
 
 local M = {}
 
@@ -127,11 +129,41 @@ local function fallback_notice(session)
   return "%#WarningMsg#⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)%*"
 end
 
+---How much longer a warm-up has to run, or "" when nothing here can say.
+---
+---Estimated from the chunks this document has already produced rather than from
+---the plan's geometry: PNG bytes against real content are not predictable from a
+---pixel count -- the same 4 Mpx chunk is 396 KB of prose and rather less of a
+---page of headings -- so the document's own captured chunks are the best
+---available sample of its own remaining ones. What crosses the wire is base64,
+---hence the 4/3.
+---
+---Silent unless every input is real: one chunk actually captured, bytes actually
+---counted, and a link rate that came from a measurement rather than a guess. An
+---ETA is a promise, and there is no honest one to make from an inferred rate --
+---see md-viewer.linkrate for where the rate is allowed to come from.
+local function warmup_eta(warming)
+  local captured, total = warming.captured or 0, warming.plan.count or 0
+  local bytes = tonumber(warming.bytes) or 0
+  if captured < 1 or bytes <= 0 or total <= captured then return "" end
+  -- Resolved here and passed in, never resolved inside `link_rate`: that
+  -- function takes one parameter on purpose, and the parameter means "a rate
+  -- somebody observed".
+  local bytes_per_sec = linkrate.resolve()
+  local bytes_per_ms = resident.link_rate(bytes_per_sec)
+  if not bytes_per_ms then return "" end
+  local seconds = ((bytes / captured) * (total - captured) * 4 / 3) / bytes_per_ms / 1000
+  if seconds < 1 then return "" end
+  if seconds < 90 then return (" ~%ds"):format(math.ceil(seconds)) end
+  return (" ~%dm"):format(math.ceil(seconds / 60))
+end
+
 ---How much of the document is resident, while any of it is not.
 ---
 ---Read straight off the session rather than through `resident_session`, which
 ---requires this module: a require cycle here would be a load-order failure at
----startup rather than a wrong string.
+---startup rather than a wrong string. `md-viewer.resident` and
+---`md-viewer.linkrate` above are safe to require -- both are leaves.
 local function warmup_notice(session)
   local state = session.resident
   if not state or not state.plan then return nil end
@@ -140,7 +172,7 @@ local function warmup_notice(session)
   if session.resident_waiting then
     return ("%%#WarningMsg#waiting for this page — %d/%d%%*"):format(captured, total)
   end
-  return ("%%#Comment#warming %d/%d%%*"):format(captured, total)
+  return ("%%#Comment#warming %d/%d%s%%*"):format(captured, total, warmup_eta(state))
 end
 
 local function title_text(session)
