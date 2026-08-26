@@ -3,7 +3,7 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0-rc6] - 2026-08-25
 
 **Prerelease.** Resident mode is now experimental and off by default, and the
 bug that made it worth turning off is fixed.
@@ -85,8 +85,9 @@ docs now say which parts of it are SSM's fault.** The number was re-validated an
 stands, but the cause given for it was wrong: it credited the client,
 `session-manager-plugin`, whose 1 KB/1 ms loops pace *keystrokes going up* while
 its `WriteStream` is unthrottled. The pacing that governs pixels is in the SSM
-**agent**, in both of its output paths, and AWS states the cause and declines to
-raise it in [amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664).
+**agent**, in all three of its output paths (`shell.go`, `port_basic.go`,
+`port_mux.go`), and AWS states the cause and declines to raise it in
+[amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664).
 
 The practical consequence is that "over SSH" was never the right frame. An
 ordinary SSH session touches none of that code and measures 16–23 MB/s to a host
@@ -95,6 +96,17 @@ docs are now labelled as SSM's rather than as remote sessions in general, and
 resident mode's guidance says so in a table instead of in a sentence. New:
 `:help md-viewer-ssm-throughput`, and *Where that ceiling comes from* in
 `docs/local-render-design.md`.
+
+**`scripts/ssh-link-speed.sh` now measures with bytes a compressor cannot
+help.** It sent `tr '\0' '.'` — the most compressible payload constructible —
+while md-viewer sends base64 PNG, which is incompressible. Any compressing hop
+upstream (`ssh -C`, `Compression yes`, a websocket negotiating
+permessage-deflate) therefore carried almost nothing while the script believed
+it had sent the full amount, and reported a rate the link cannot do for real
+traffic. It now sends base64 over `/dev/urandom`, and times payload generation
+separately so it cannot quietly report the CPU instead of the link. **Any
+`render.ssh_link_bytes_per_sec` taken with an earlier version should be
+re-measured** — erring high is the failure the option exists to correct.
 
 ## [0.3.0-rc5] - 2026-08-25
 
