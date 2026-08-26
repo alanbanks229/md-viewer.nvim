@@ -380,9 +380,19 @@ end
 ---Two answers, and there is no third. `nvim_ui_send` appends to Neovim's own UI
 ---queue and returns; the TUI drains that queue later, so a Lua caller sees no
 ---back-pressure from the link under any circumstances. 24 MB was accepted in
----0.03s on a link doing 0.80 MB/s. Every throughput sample this plugin can take
----measures a queue insertion, so an inferred rate is not a noisy measurement to
----be filtered -- it is a quantity that was never observed.
+---0.03s on a link doing 0.80 MB/s -- and the rate does not matter to the
+---argument, only the ratio: nothing here waited on anything. Every throughput
+---sample this plugin can take measures a queue insertion, so an inferred rate is
+---not a noisy measurement to be filtered -- it is a quantity that was never
+---observed.
+---
+---**One parameter, and the second one is the whole bug.** Which shell run the
+---number came from -- config, an environment variable, or a measurement cached
+---on this machine -- is `md-viewer.linkrate`'s question, resolved by the caller
+---*before* getting here. All of those are observations somebody made outside
+---Neovim, so none of them weakens what "configured" means: a number arrived, and
+---this function does not care who carried it. What must never arrive is a
+---sample taken in here.
 function M.link_rate(configured_bytes_per_sec)
   local configured = positive(configured_bytes_per_sec)
   if configured then return configured / 1000, "configured" end

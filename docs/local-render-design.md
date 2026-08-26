@@ -13,9 +13,117 @@ Over a fast local pipe that is free. Over a throttled SSH link it is the whole c
 
 The link this was measured on reaches a remote VM through AWS SSM Session Manager
 (WebSocket-over-TLS, not TCP/22). It has a flat **0.80 MB/s** ceiling, confirmed from
-1 KB to 5 MB with no burst allowance, and traceable to AWS's own client:
-`session-manager-plugin` chunks the stream into 1024-byte messages with a deliberate
-1 ms sleep per chunk. There is no setting that raises it.
+1 KB to 5 MB with no burst allowance. There is no setting that raises it.
+
+### Where that ceiling comes from
+
+<a id="ssm-ceiling"></a>Re-validated 2026-08-25, because a number this much of the
+design rests on should not be believed on one session's say-so. It survives, but the
+*explanation* this document used to give for it was wrong, and the wrong one was more
+flattering: it blamed the client, `session-manager-plugin`, which paces the other
+direction.
+
+**AWS says so directly.** In
+[aws/amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664), "0.6
+MB/s speeds on 5 GB/s burstable instance", a reporter measures ~0.6–0.8 MB/s from a
+client whose own link runs at 27.5 MB/s, having ruled out instance type (`t3.micro`
+through `m7i.8xlarge`, no change) and the far-end service. A maintainer answers:
+
+> It's due to: `agent/session/config/config.go#L50` in combination with a max message
+> rate of 1/ms
+
+and closes it with:
+
+> Unfortunately at current time we can't support an increase in scale through our
+> service, so this limitation will be kept for now.
+
+That line 50 is `StreamDataPayloadSize = 1024`. One kilobyte per millisecond is
+**1.024 MB/s**, and the reporter saw it on *both* `AWS-StartPortForwardingSessionToRemoteHost`
+and a plain `aws ssm start-session` — on agent 3.3.3598.0, so it is not an
+upgrade-away problem. See also
+[#227](https://github.com/aws/amazon-ssm-agent/issues/227) and
+[#259](https://github.com/aws/amazon-ssm-agent/issues/259).
+
+**Where the pacing is, in the direction that carries pixels.** Both of the agent's
+output paths — VM → terminal, which is where md-viewer's bytes go — do the same thing:
+
+| session | file | loop |
+|---|---|---|
+| `aws ssm start-session` (plain shell) | `agent/session/shell/shell.go` | reads ≤ `StreamDataPayloadSize` from the pty, then `time.Sleep(time.Millisecond)` — *"Pace the sending to prevent flooding the websocket"* |
+| SSH over SSM (`ProxyCommand`) | `agent/session/plugins/port/port_basic.go` | reads ≤ `StreamDataPayloadSize` from the TCP conn, then `time.Sleep(time.Millisecond)` — *"Wait for TCP to process more data"* |
+
+`time.Sleep` overshoots rather than undershoots, so the achievable band is roughly
+0.7–1.0 MB/s. The 0.80 MB/s measured here sits inside it at 78% of theoretical, and
+matches an unrelated reporter's 0.6–0.8 on unrelated hardware. Three independent lines
+agreeing is why the number is trusted, rather than the one measurement.
+
+**Now measured against the channel itself, 2026-08-25.** Everything above is a reading
+of the agent's source plus a stranger's numbers — a derivation, and a derivation is a
+prediction until something on the actual host agrees with it. It does. On `aide-spock`,
+reached by `ProxyCommand aws ssm start-session --document-name AWS-StartSSHSession` and
+running with `Compression yes`, 64 MiB of incompressible bytes pushed straight down the
+SSH channel three times measured **0.77–0.78 MB/s** — 76% of the 1.024 MB/s the
+kilobyte-per-millisecond loop allows, inside the predicted band, and on the same side of
+it as the third-party report. Compression was live throughout and could only have
+flattered the result; choosing a payload it cannot help is what excluded it.
+
+The same 64 MiB sent as *compressible* bytes on that same session took 6.36 s against
+86.23 s — **13.6×** — which is not a footnote but the measurement that explains every
+inflated SSM figure this repository has ever recorded, including its own.
+
+The client has the mirror-image loops — `ReadStream` in
+`src/sessionmanagerplugin/session/portsession/standardstreamforwarding.go` and
+`handleKeyboardInput` in `.../shellsession/shellsession_unix.go`, both 1024-byte reads
+followed by a 1 ms sleep — but those pace **keystrokes going up**. The client's
+`WriteStream` does `outputStream.Write(payload)` with no chunking and no sleep. The link
+is asymmetric, and md-viewer lives in the throttled half.
+
+**This ceiling belongs to SSM, not to "SSH".** An ordinary SSH session goes through none
+of it. Measured 2026-08-25 against `ssh ichigo`, a LAN host on plain TCP/22: 64 MB over
+the SSH channel in 2.92–3.08 s (**21.8–23.0 MB/s**), and 64 MB of base64'd random bytes
+through a pty — the path `scripts/ssh-link-speed.sh` measures — at **14.7 MB/s**. Compare
+like with like: **28–30×** on the channel, **14×** through a pty. The pty gap is the
+smaller of the two only because SSM's side of it is the one getting a quarter back from
+compression, which is point 2 below. Anything in this repo that reasons from 0.80 MB/s is
+reasoning about an SSM tunnel specifically, and nothing should read it as "remote" or
+"over SSH".
+
+### If you measure an SSM link faster than this
+
+It happens, and it does not mean the arithmetic above is wrong — it means the bytes
+being counted are not the bytes the agent pumped. Three ways that happens, in
+descending order of how much they inflate:
+
+1. **A compressing hop upstream of the agent.** With `Compression yes` (or `ssh -C`),
+   sshd on the VM deflates the stream *before* the SSM agent reads it, so a megabyte of
+   repetitive test data reaches the agent as a few kilobytes and clears its 1 KB/ms pump
+   instantly. `scripts/ssh-link-speed.sh` used to send `tr '\0' '.'` — the most
+   compressible payload constructible — and reported 8.0–10.3 MB/s for this link on that
+   basis. Measured directly: **13.6× on 64 MiB**, so an order of magnitude was not
+   hyperbole. It now sends base64 over `/dev/urandom`. A figure taken before 2026-08-25
+   was measured the old way and should be re-taken.
+2. **base64 is itself compressible, so even the fixed script reads ~33% high.** This is
+   the one that survives the fix, and it is easy to miss because the payload *looks*
+   incompressible — an earlier version of the script's own comment said it was, reasoning
+   that PNG is already deflated. That reasoning is about the wrong layer. base64 is 64
+   symbols carried in 8-bit bytes: six bits of entropy per byte, so deflate takes it to
+   about 75% whatever is inside it. On `aide-spock` that is exactly the gap between the
+   channel's 0.774 MB/s and the 1.01–1.07 MB/s the script reports through the pty —
+   0.774 ÷ 0.75 = 1.032 — and it is a gap worth keeping rather than correcting, because
+   md-viewer's own base64 gets the same quarter back. The script measures the *effective*
+   rate, which is what a frame's transit time is actually made of; the channel figure is
+   what to argue about the link with. Only the first belongs in
+   `render.ssh_link_bytes_per_sec`.
+3. **The host is not reached through an SSM data channel at all.** `ssh -G <host> | grep
+   -i proxycommand` settles it in one command: no `session-manager-plugin` there means
+   none of this section applies to that host.
+
+So the falsifiable form of the claim is narrow and worth stating, and note that it is
+about the channel rather than about anything a pty reports: *sustained transfer of
+incompressible bytes through an SSM data channel cannot exceed ~1.024 MB/s.* Anything
+above that is evidence the traffic is not going through one — but a pty figure above it
+is evidence of nothing until the compressor is subtracted, which is why 1.01–1.07 above
+refutes nothing.
 
 Latency is not the problem. A tiny Kitty capability query round-trips the same relay in
 96 ms, while a 432 KB frame serializes in ~540 ms. Of one settle frame, wire

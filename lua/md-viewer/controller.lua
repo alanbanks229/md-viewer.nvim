@@ -15,6 +15,7 @@ local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
 local resident_session = require("md-viewer.resident_session")
+local linkrate = require("md-viewer.linkrate")
 
 local M = {}
 local group
@@ -63,7 +64,15 @@ local function clear_image(session)
   M.clear_caret_overlay(session)
   if session.image_id and session.backend then session.backend.clear(session.image_id) end
   session.image_id = nil
+  session.frame_scroll_y, session.frame_revision = nil, nil
   session.last_placement = nil
+  -- The resident half of the same thing. A resident session has no `image_id`,
+  -- so the line above was a no-op for it and nothing else held the band ids: an
+  -- occluding float blanked the viewport model's frame and left a resident
+  -- screen compositing underneath it. Only the placements go -- the chunks stay
+  -- in terminal memory, so coming back costs a re-crop rather than the document.
+  session.resident_screen = false
+  resident_session.unplace(session)
   animation.clear(session)
 end
 
@@ -160,6 +169,18 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- What the frame *now on screen* is a picture of. `applied_scroll_y` was set
+  -- from this render's own `meta.scrollY` before we were called, so it is this
+  -- frame's position and not a newer request's.
+  --
+  -- Deliberately not the `clean_image_*` block below, which answers the same
+  -- question about the newest *selection-free* frame: a settle frame with a
+  -- browser-painted highlight in it supersedes what is on screen without
+  -- replacing that cache, so reading `clean_image_scroll_y` as "what is up right
+  -- now" would vouch for a frame that is not up -- the exact class of error the
+  -- resident invariant exists to stop.
+  session.frame_scroll_y = session.applied_scroll_y or 0
+  session.frame_revision = session.renderer_revision
   -- Whether this frame has a browser-painted selection baked into it. Any
   -- capture taken while a DOM selection exists does, and `selection_active` is
   -- always updated before the frame is applied (interaction.lua sets it in the
@@ -252,7 +273,12 @@ function M.display_selection_overlay(session, result)
   if not valid(session) or session.backend.name == "cells" then return false end
   local backend = session.backend
   if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
-  if not (session.image_id and session.last_placement) then return false end
+  -- "Is there a screen to composite over", not "is there a frame this session
+  -- owns": a resident screen is bands cropped out of chunks and deliberately
+  -- carries no `image_id`. The `overlay_apply` call below still passes
+  -- `session.image_id`, which is nil there and which the backend now reads as
+  -- "size the sheet from the placement".
+  if not (state.screen_up(session) and session.last_placement) then return false end
   if type(result) ~= "table" or type(result.rects) ~= "table" then return false end
   if result.rectsTruncated then return false end
   if result.contentRevision ~= session.renderer_revision then return false end
@@ -311,14 +337,17 @@ end
 ---without asking anyone where it went.
 ---
 ---Returns false when the caret cannot be drawn -- no overlay support (the
----backend, or the terminal profile), no base image, or the caret has scrolled
----out of view. The terminal's own cursor is left visible in exactly those
----cases; see `preview.hide_cursor`.
+---backend, or the terminal profile), nothing on the pane at all, or the caret
+---has scrolled out of view. The terminal's own cursor is left visible in
+---exactly those cases; see `preview.hide_cursor`.
 function M.display_caret_overlay(session, tint, sheet_png)
   if not valid(session) or session.backend.name == "cells" then return false end
   local backend = session.backend
   if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
-  if not (session.image_id and session.last_placement) then return false end
+  -- Either model's screen will do; see `display_selection_overlay`. Without
+  -- this a resident preview had no caret at all except when `show_cached`
+  -- happened to have restored a frame for it to sit on.
+  if not (state.screen_up(session) and session.last_placement) then return false end
   local rect = caret.rect(session)
   if not rect then
     M.clear_caret_overlay(session)
@@ -426,12 +455,40 @@ function M.display_interact_result(session, result)
   apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs, result.captureEncoder)
 end
 
+---Put back on screen whatever this session already has, without a renderer
+---round trip. For the viewport model that is the cached PNG; for the resident
+---model it is a re-crop of chunks the terminal is still holding, which is
+---cheaper still.
+---
+---Both models are handled here rather than at the six call sites, because every
+---one of them -- the 50ms poll, WinEnter/FocusGained/VimResume, CompleteDone,
+---WinClosed, WinNew, a resize -- means the same thing: the pane can be drawn
+---again, so put something on it. A resident session that fell through to the PNG
+---branch re-uploaded a full-viewport frame the resident compositor knows nothing
+---about, and left it z-fighting the bands by image id.
 local function show_cached(session)
-  if not valid(session) or session.backend.name == "cells" or not session.last_image_bytes then return false end
+  if not valid(session) or session.backend.name == "cells" then return false end
   if update_occlusion(session) then
     clear_image(session)
     return false
   end
+  if session.render_path == "resident" and session.resident then
+    M.draw_resident(session)
+    -- Same catch-up the cached branch does below, and for the same reason: a
+    -- render dropped while the pane could not be drawn left the document a
+    -- frame behind the source, and an idle preview issues no renders.
+    if session.refresh_deferred then
+      session.refresh_deferred = false
+      M.schedule(session, 0)
+    end
+    -- True whatever `draw_resident` decided. It has already put up a screen, or
+    -- kept the bootstrap frame, or gone blank on purpose and said so in the
+    -- winbar -- and in none of those cases does the caller's fallback (a full
+    -- document re-render) help. That re-render is also a `request_serial` bump,
+    -- which is what used to lose an in-flight chunk.
+    return true
+  end
+  if not session.last_image_bytes then return false end
   preview.stop_loading(session)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
@@ -443,6 +500,11 @@ local function show_cached(session)
   end
   session.image_id = image_id
   session.last_placement = placement
+  -- Unknown, and said so. `last_image_bytes` carries no record of the position
+  -- it was captured at, and the page may well have scrolled since, so nothing
+  -- here can vouch for this frame the way `apply_image` vouches for its own.
+  -- `holding_position` refuses on nil, which is the answer we want.
+  session.frame_scroll_y, session.frame_revision = nil, nil
   -- This path does not go through `apply_image`, so nothing else would put the
   -- frames back: a preview restored from cache after an occlusion would show a
   -- still image and never start again.
@@ -484,9 +546,27 @@ function M.refresh(session, render_options)
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
+  -- A render of the document's content, as opposed to a chunk capture, has
+  -- right of way over the warm-up while it is in flight. `pump_resident` issues
+  -- `renderer.request` too and every request bumps `request_serial`, so an edit
+  -- made during warm-up could be staled by the very next chunk -- and a staled
+  -- render is dropped silently below, with nothing to re-issue it until the
+  -- reader typed again. On a host where the warm-up is minutes rather than
+  -- seconds that is easy to hit. `pump_resident` waits; the callback below
+  -- restarts it either way.
+  local content_render = not render_options_is_chunk(render_options)
+  if content_render then session.content_render_in_flight = true end
   renderer.request(session, markdown(session), render_options, function(result, err, stale)
+    if content_render then session.content_render_in_flight = false end
     local function finish()
       if render_options and render_options.on_complete then render_options.on_complete(stale, err) end
+      -- The warm-up deferred to this render and has to be told it may go on,
+      -- whatever the outcome. The success path re-pumps through
+      -- `M.begin_resident` below; this covers the error and stale exits, which
+      -- would otherwise leave the queue parked forever.
+      if content_render and session.render_path == "resident" and session.resident then
+        vim.schedule(function() M.pump_resident(session) end)
+      end
     end
     if not valid(session) then
       finish()
@@ -598,7 +678,11 @@ function M.refresh(session, render_options)
     -- The render that measured the document is also what the chunk plan is
     -- derived from, and its frame is the reader's own position rather than a
     -- remembered one -- so it doubles as first paint while the chunks warm.
-    -- After this, a resident session captures chunks and nothing else.
+    -- `draw_resident` keeps it up for exactly as long as that is true (see
+    -- `holding_position`); it used to blank it one call later, which is what the
+    -- reader on a slow link saw as a flash of "waiting for this page" over an
+    -- empty pane. After this, a resident session captures chunks and nothing
+    -- else.
     if session.render_path == "resident" and not render_options_is_chunk(render_options) then
       M.begin_resident(session, meta)
     end
@@ -623,7 +707,22 @@ end
 ---and about a second of wire on a slow link, so queueing several would only move
 ---the wait from the renderer to the socket.
 function M.pump_resident(session)
+  -- KEEP_IN_MIND: this whole function is currently unreached on every host
+  -- this plugin runs on -- the render_path ~= "resident" guard right below
+  -- returns before any of the settle-before-placing logic further down
+  -- runs. Reachable in principle, not orphaned; do not delete for lack of a
+  -- live caller. See the fuller note on resident_session.is_needed in
+  -- resident_session.lua for exactly what would have to be true for this to
+  -- run again, and a real, runnable snippet (lifted from
+  -- scripts/resident/drive.lua) that forces this path for local testing
+  -- without a slow real host. Raise removing the path itself with the
+  -- operator/orchestrator rather than deciding it here.
   if not valid(session) or session.render_path ~= "resident" then return end
+  -- A render of the reader's content outranks the warm-up: issuing a chunk
+  -- capture now would bump `request_serial` and stale it, and a staled content
+  -- render is dropped with nothing to re-issue it. `M.refresh`'s callback
+  -- restarts the pump on every exit, so this is a wait rather than a stop.
+  if session.content_render_in_flight then return end
   local state = session.resident
   if not state or state.in_flight then return end
   local index = resident_session.next_chunk(session)
@@ -640,7 +739,23 @@ function M.pump_resident(session)
     if not live or live ~= state then return end
     state.in_flight = nil
     if stale then
-      -- Superseded by newer content: the plan this chunk belongs to is gone.
+      -- Superseded, but not necessarily by anything that invalidates this plan.
+      -- *Every* renderer.request bumps `request_serial`, so a settle capture, a
+      -- resize, a ColorScheme or an OptionSet is enough to stale a chunk that is
+      -- in flight -- and `next_chunk` has already removed this index from the
+      -- queue, so returning here dropped it for good. Nothing rebuilds the
+      -- queue: `resident_session.begin` early-returns on an unchanged key, so
+      -- the warm-up simply stopped at n/N and stayed there, and the region was
+      -- only ever captured if the reader happened to scroll into it. On a link
+      -- where a chunk is a second of wire that is not a rare race.
+      --
+      -- A reply that really does belong to a dead plan is caught above, by
+      -- `live ~= state`: a content change builds a new state table and a
+      -- demotion nils it. Reaching here means the plan is still the live one, so
+      -- put the chunk back and carry on -- the same treatment the error branch
+      -- below has always given.
+      state.queue[#state.queue + 1] = index
+      vim.schedule(function() M.pump_resident(session) end)
       return
     end
     if err then
@@ -669,34 +784,126 @@ function M.pump_resident(session)
       return
     end
     resident_session.retain(session, live.drawn or index)
-    M.draw_resident(session)
-    preview.update_title(session)
+    -- KEEP_IN_MIND: this branch (and is_needed itself) is currently
+    -- unreached on every host this plugin runs on -- pump_resident only
+    -- runs at all when session.render_path == "resident" (guarded at the
+    -- top of this function), which needs a measured link under
+    -- image.resident "auto"'s cutoff on a terminal profile that allows
+    -- resident_pan. See the fuller note on resident_session.is_needed in
+    -- resident_session.lua for why, and how to exercise this deliberately.
+    -- Unexercised, not orphaned -- do not delete for lack of a live caller;
+    -- raise removing the path itself with the operator/orchestrator first.
+    if resident_session.is_needed(session, session.scroll_y or 0, index) then
+      -- The reader is waiting on exactly the chunk that just landed.
+      -- `nvim_ui_send` only queues bytes for Neovim's own UI channel to
+      -- drain -- it does not wait for them to cross the wire -- and a Kitty
+      -- terminal decodes a large image asynchronously with respect to how
+      -- fast it can parse the placement that follows it. Composing right
+      -- away can crop a buffer the terminal has not finished decoding, which
+      -- is indistinguishable from this side: the reply already proved the
+      -- pixels are the right ones. Waiting roughly as long as this chunk's
+      -- own bytes take to cross the measured link gives the terminal a
+      -- realistic chance to finish before being asked to crop it. Only the
+      -- placement waits; the next capture request does not.
+      local bytes = (result.metadata and result.metadata.pngBytes) or #result.image
+      local rate = linkrate.resolve()
+      local settle_ms = rate and math.min(2000, math.max(50, math.ceil(bytes / rate * 1000))) or 200
+      vim.defer_fn(function()
+        if not valid(session) or session.render_path ~= "resident" then return end
+        M.draw_resident(session)
+        preview.update_title(session)
+      end, settle_ms)
+    else
+      M.draw_resident(session)
+      preview.update_title(session)
+    end
     vim.schedule(function() M.pump_resident(session) end)
   end)
+end
+
+---Is the frame already on screen provably a picture of `scroll_y`?
+---
+---The same proof `M.restore_clean_base` demands before it re-shows a cached
+---frame, asked of the frame that is up rather than of the cached one: an image
+---is placed, it was captured against this content, and it was captured at this
+---position. Anything short of all three is a refusal.
+---
+---This is what stops the resident bootstrap blanking its own first paint.
+---`apply_image` lands the render that measured the document -- the reader's own
+---position, captured a call ago -- and `begin_resident` runs one line later with
+---no chunks captured yet, so `draw` can only say "waiting". Waiting is not a
+---reason to take correct pixels down; it is a reason to leave them up until the
+---chunks can replace them. What the invariant forbids is presenting a frame of
+---*somewhere else* as this position, and this is how the two are told apart.
+local function holding_position(session, scroll_y)
+  if not session.image_id then return false end
+  if session.frame_revision ~= session.renderer_revision then return false end
+  return math.abs((session.frame_scroll_y or 0) - scroll_y) <= 0.5
 end
 
 ---Draw the reader's position from resident chunks, or clear the preview.
 ---
 ---A position not yet covered shows nothing rather than the previous screen:
 ---leaving the old picture up presents pixels of somewhere else as though they
----belonged to this position, and the reader has no way to tell.
+---belonged to this position, and the reader has no way to tell. The one
+---exception is `holding_position` above, which is not an exception to that rule
+---but an application of it -- the frame it keeps *is* this position.
 function M.draw_resident(session)
   if not valid(session) or session.render_path ~= "resident" then return end
   if update_occlusion(session) then
     clear_image(session)
     return
   end
-  local outcome, detail = resident_session.draw(session, session.scroll_y or 0)
+  local scroll_y = session.scroll_y or 0
+  -- Ahead of the compose, for the reason `apply_image` takes it down ahead of
+  -- `backend.show`: the indicator is a passive float, so it punches an exclusion
+  -- out of the placement, and taking it down afterwards would leave a
+  -- spinner-shaped hole in the screen that replaced it until the next poll.
+  if not resident_session.missing(session, scroll_y) then preview.stop_loading(session) end
+  local outcome, detail = resident_session.draw(session, scroll_y)
   if outcome == "drawn" then
-    preview.stop_loading(session)
     session.resident_waiting = nil
+    -- The bootstrap frame this screen has just replaced. `compose` retires only
+    -- the bands it tracks itself, so an ordinary frame left placed underneath
+    -- goes on compositing -- and every band shares a z layer with it, which
+    -- Kitty ties by image id, so whether the dead frame draws over the live one
+    -- comes down to which integer happened to be larger. Deleted after the
+    -- compose rather than before it, the same create-then-delete rule `M.move`
+    -- and `M.update` follow: deleting first is a blank pane for one write.
+    if session.image_id then
+      pcall(session.backend.clear, session.image_id)
+      session.image_id = nil
+      session.frame_scroll_y, session.frame_revision = nil, nil
+    end
+    -- Same rule `apply_image` follows, for the same reason: the base under the
+    -- highlight has moved, so rectangles measured against the old one are on the
+    -- wrong text now.
+    clear_selection_overlay(session)
     M.clear_caret_overlay(session)
     M.place_caret(session)
+    preview.update_title(session)
     return
   end
   if outcome == "waiting" then
+    if holding_position(session, scroll_y) then
+      -- Nothing to do and nothing to say: the pane is showing this position,
+      -- captured by the render that measured the document. `resident_waiting`
+      -- stays nil so the winbar reads the grey "warming n/N" rather than the
+      -- yellow "waiting for this page" -- the yellow notice means the reader is
+      -- looking at a blank pane, and they are not.
+      preview.update_title(session)
+      M.pump_resident(session)
+      return
+    end
     session.resident_waiting = detail
     clear_image(session)
+    -- The pane is genuinely empty now. During bootstrap that is the state the
+    -- spinner exists for, and stopping it at first paint was right only because
+    -- there *was* a first paint; here there is not. Once the resident path has
+    -- drawn a screen the winbar carries this instead -- a spinner blinking into
+    -- the middle of the pane on every scroll that outruns the warm-up would be
+    -- noise.
+    if not (session.resident and session.resident.drawn) then preview.start_loading(session) end
     preview.update_title(session)
     M.pump_resident(session)
     return
@@ -714,6 +921,12 @@ function M.begin_resident(session, meta)
     resident_session.demote(session, reason)
     return
   end
+  -- The one place the link rate is worth mentioning unprompted: a warm-up is
+  -- about to run and the winbar has no idea how long it will take. Said once per
+  -- Neovim and never once per preview -- linkrate owns that guard -- and phrased
+  -- as a suggestion, because an unmeasured link is not a fault and nothing else
+  -- in md-viewer treats it as one.
+  require("md-viewer.linkrate").notice_unknown()
   M.draw_resident(session)
   M.pump_resident(session)
 end
@@ -1188,6 +1401,11 @@ end
 ---A placement change the terminal has to be told about -- `coordinates.same`,
 ---so `exclusions` count, not just row/col/width/height.
 ---
+---The viewport model's re-place, and only that: it moves the one frame this
+---session owns. `reconcile_resident` below is the same job for a resident
+---screen, which owns no frame and follows a geometry change by composing its
+---bands again.
+---
 ---Exclusions have to count because of what `raw_zindex = -1` actually means:
 ---in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
 ---below text glyphs but *above* cell background colors (see
@@ -1242,15 +1460,41 @@ local function reconcile_placement(session, force)
   preview.reset_surface(session)
 end
 
+---The resident model's `reconcile_placement`. A viewport frame follows a
+---geometry change with `backend.move`; a resident screen follows it by being
+---composed again, which is the same few hundred bytes and no pixels either way.
+---A resident session with nothing on the pane -- an occlusion that has just
+---lifted -- draws for the first time here.
+local function reconcile_resident(session)
+  if session.ui_suppressed then return end
+  -- Never address the terminal on behalf of a window that is not on screen; see
+  -- `reconcile_placement` for what a hidden tabpage's geometry does.
+  if not coordinates.window_is_displayed(session.preview_win) then return end
+  if not session.resident_screen then
+    M.draw_resident(session)
+    return
+  end
+  local placement = preview.placement(session.preview_win, session.backend.name)
+  if not coordinates.same(session.last_placement, placement) then M.draw_resident(session) end
+end
+
 local function reconcile_occlusion()
   each_session(function(session)
     if session.backend.name ~= "cells" then
       if update_occlusion(session) then
         clear_image(session)
-      elseif not session.image_id then
-        if not show_cached(session) then M.schedule(session, 0) end
-      else
+      elseif session.image_id then
+        -- Includes the resident bootstrap frame, which is an ordinary image and
+        -- re-places through `move` like any other. Hoisting this test ahead of
+        -- the restore arm is behaviour-preserving off the resident path:
+        -- `reconcile_placement` already returned immediately whenever
+        -- `image_id` was nil, so the old `else` arm did nothing in exactly the
+        -- cases that now route elsewhere.
         reconcile_placement(session)
+      elseif session.render_path == "resident" and session.resident then
+        reconcile_resident(session)
+      elseif not show_cached(session) then
+        M.schedule(session, 0)
       end
     end
   end)
@@ -1269,15 +1513,12 @@ start_ui_poll = function(session)
       if valid(session) then
         if update_occlusion(session) then
           clear_image(session)
-        elseif
-          not session.image_id
-          and not session.ui_suppressed
-          and not session.loading
-          and not session.render_failed
-        then
-          if not show_cached(session) then M.schedule(session, 0) end
-        else
+        elseif session.image_id then
           reconcile_placement(session)
+        elseif session.render_path == "resident" and session.resident then
+          reconcile_resident(session)
+        elseif not session.ui_suppressed and not session.loading and not session.render_failed then
+          if not show_cached(session) then M.schedule(session, 0) end
         end
       else
         debounce.close(session, "ui_poll_timer")

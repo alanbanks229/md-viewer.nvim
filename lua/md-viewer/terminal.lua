@@ -116,7 +116,26 @@ M.profiles = {
         .. "the terminal-driven animation extension is unverified here",
     },
     placement = { deletion = "by-id", crop = "cropped-placements" },
-    validation = "operator-validated (drag-highlight overlay, 2026-08-07)",
+    -- Off, and measured rather than assumed. Resident mode holds one image
+    -- per chunk and pans by re-cropping it in place -- exactly the operation
+    -- that failed. Reproduced live over an AWS SSM tunnel (~1 MB/s, the one
+    -- link slow enough to make the race visible rather than instant): a
+    -- freshly-landed chunk's very first placement showed content from a
+    -- different scroll position than the one requested, and re-cropping an
+    -- already-displayed chunk to a new position left the old crop on screen
+    -- -- in both cases with the escape sequence itself confirmed byte-correct
+    -- (placement id, image id and every x/y/w/h/c/r parameter hand-verified
+    -- against the chunk plan's own arithmetic; a real-Chromium test proved
+    -- the uploaded pixels were also correct). Nothing downstream of the
+    -- terminal receiving the bytes could distinguish this from a genuine
+    -- protocol bug in iTerm2 3.6.11's handling of a large image transmission
+    -- and a re-crop under real network latency -- unlike WezTerm's #7953,
+    -- there is no upstream issue to cite yet; this is the first report.
+    -- Selection-overlay placements are a different, much smaller and much
+    -- less frequent operation and are not implicated -- they stay on.
+    resident_pan = false,
+    validation = "operator-validated (drag-highlight overlay, 2026-08-07); resident panning measured "
+      .. "unsafe over a real SSM link (2026-08-26) -- see resident_pan above",
     caveats = {
       {
         kind = "note",
@@ -127,6 +146,14 @@ M.profiles = {
         kind = "note",
         text = "Selection-overlay placements (alpha compositing, sub-cell offsets, placement churn) "
           .. "were validated by the operator in a live iTerm2 session on 2026-08-07.",
+      },
+      {
+        kind = "note",
+        text = "Resident panning is disabled here: re-cropping a resident image was measured to show "
+          .. "the wrong position, both on a chunk's first placement and when re-cropping an "
+          .. "already-displayed one, over a real slow link (AWS SSM tunnel, 2026-08-26). Previews "
+          .. "fall back to the viewport model, which re-renders per scroll instead of re-cropping "
+          .. "and is not affected. See docs/troubleshooting.md.",
       },
     },
   },

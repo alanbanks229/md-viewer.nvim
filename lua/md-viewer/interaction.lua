@@ -6,6 +6,7 @@ local debounce = require("md-viewer.debounce")
 local preview = require("md-viewer.preview")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
+local state = require("md-viewer.state")
 
 local M = {}
 
@@ -129,15 +130,16 @@ end
 ---Whether this gesture's moving frames may be displayed as backend overlay
 ---rectangles instead of full captured frames. Requires a backend
 ---that implements and currently allows the overlay (kitty_raw consults the
----terminal profile and `interaction.selection_overlay`), a base image on
----screen for the rectangles to composite over, and no earlier failure this
----gesture (`pointer.overlay_fallback`).
+---terminal profile and `interaction.selection_overlay`), a screen on the pane
+---for the rectangles to composite over -- from either rendering model, hence
+---`state.screen_up` rather than `session.image_id` -- and no earlier failure
+---this gesture (`pointer.overlay_fallback`).
 local function overlay_ready(session, pointer)
   if pointer.overlay_fallback then return false end
   local backend = session.backend
   if not (backend and backend.overlay_apply and backend.overlay_supported) then return false end
   if not backend.overlay_supported() then return false end
-  if not (session.image_id and session.last_placement) then return false end
+  if not (state.screen_up(session) and session.last_placement) then return false end
   -- The frame on screen may still have the *previous* gesture's highlight
   -- painted into it by the browser, and overlay rectangles composite over it:
   -- they can add a highlight, never remove one. Put the cached selection-free
@@ -571,9 +573,13 @@ function M.caret_motion(session, granularity, direction, count, from)
   -- backend says it has nothing that would serve, which before the first caret
   -- has ever been drawn is "any colour".
   local backend = session.backend
+  -- No `session.image_id` conjunct: a resident screen has none, and asking the
+  -- backend with a nil base is a legitimate question now -- it sizes the sheet
+  -- from the placement, which is the same box `sheet_dims` builds. Gating on the
+  -- id meant a resident preview never asked for the caret sheet and so never
+  -- drew a caret.
   local want_sheet = backend
     and backend.overlay_needs_sheet
-    and session.image_id
     and backend.overlay_needs_sheet(session.image_id, session.caret_tint, session.last_placement)
   -- The column a run of line motions aims at, held across the whole run --
   -- Vim's `curswant`. Seeded from the caret's own left edge when a run starts,

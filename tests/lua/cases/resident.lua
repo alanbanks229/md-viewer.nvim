@@ -267,6 +267,34 @@ return function(t)
   t.eq(800, configured_rate, "a configured rate is never capped against a heuristic")
   t.eq("configured", configured_why)
 
+  -- The argument above is made in prose and enforced by convention, which is how
+  -- it got made twice. The signature itself is checkable: a second parameter
+  -- cannot be added without failing here, whatever it is called and whatever the
+  -- comment above it says.
+  local signature = debug.getinfo(resident.link_rate, "u")
+  t.eq(1, signature.nparams, "link_rate declares exactly one parameter")
+  t.eq(false, signature.isvararg, "and is not variadic, so there is no back door either")
+
+  -- Where that one parameter comes from now, and why it does not weaken any of
+  -- the above. md-viewer.linkrate resolves an environment override, then
+  -- configuration, then a measurement cached on this machine by a shell -- three
+  -- things somebody wrote down *outside* Neovim, and not one of them a
+  -- throughput sample taken in here. The resolution happens in the caller; this
+  -- function still has nowhere to put an estimate.
+  do
+    local config = require("md-viewer.config")
+    local linkrate = require("md-viewer.linkrate")
+    config.setup({ render = { ssh_link_bytes_per_sec = 1030000 } })
+    linkrate.invalidate()
+    local resolved, tier = linkrate.resolve()
+    t.eq("configured", tier, "linkrate resolves the tier before link_rate is called")
+    local rate_ms, why = resident.link_rate(resolved)
+    t.eq(1030, rate_ms, "and its answer arrives here as bytes per millisecond")
+    t.eq("configured", why, "as an observation, which is the only kind this accepts")
+    config.reset()
+    linkrate.invalidate()
+  end
+
   -- -------------------------------------------------------------------
   -- Document identity
   -- -------------------------------------------------------------------

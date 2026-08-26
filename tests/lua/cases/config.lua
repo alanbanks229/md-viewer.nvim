@@ -26,6 +26,11 @@ return function(t)
   t.eq(0.5, cfg.render.ssh_scroll_scale, "an SSH session halves the moving scroll frame")
   t.eq(160, cfg.render.scroll_settle_ms, "the local settle delay is unchanged")
   t.eq(400, cfg.render.ssh_scroll_settle_ms, "an SSH session waits longer before the sharp frame")
+  -- "auto" rather than nil, and rather than any number. One ~/.config/nvim is
+  -- symlinked to machines whose links measured fourteen times apart, so a
+  -- constant is wrong on all but one of them; "auto" reads a measurement each
+  -- machine made for itself, and takes none on its own.
+  t.eq("auto", cfg.render.ssh_link_bytes_per_sec, "the link rate resolves per machine by default")
   config.reset()
   local bad_font_ok, bad_font_err = pcall(config.setup, { render = { font_size_px = 0 } })
   t.eq(false, bad_font_ok, "non-positive render.font_size_px is rejected")
@@ -80,6 +85,20 @@ return function(t)
   -- "follow the session", so it has to survive validation as a real choice.
   local no_ssh_settle = config.setup({ render = { ssh_scroll_settle_ms = nil } })
   t.eq(400, no_ssh_settle.render.ssh_scroll_settle_ms, "omitting the SSH settle delay keeps the default")
+  config.reset()
+  -- A measured number still wins over per-machine detection and is never capped
+  -- against anything, which is both the feature and the trap: see
+  -- md-viewer.linkrate for why a rate in a shared config defeats detection on
+  -- every machine that shares it.
+  local pinned_rate = config.setup({ render = { ssh_link_bytes_per_sec = 1030000 } })
+  t.eq(1030000, pinned_rate.render.ssh_link_bytes_per_sec, "a measured link rate can still be pinned by hand")
+  config.reset()
+  local bad_rate_ok, bad_rate_err = pcall(config.setup, { render = { ssh_link_bytes_per_sec = 0 } })
+  t.eq(false, bad_rate_ok, "a non-positive link rate is rejected")
+  t.ok(tostring(bad_rate_err):match("ssh_link_bytes_per_sec"), "the link rate error names the offending option")
+  config.reset()
+  local bad_rate_word_ok = pcall(config.setup, { render = { ssh_link_bytes_per_sec = "fast" } })
+  t.eq(false, bad_rate_word_ok, 'the only word the link rate accepts is "auto"')
   config.reset()
   -- nil is a value here, not an omission: it is how "follow the session" is
   -- spelled, so it has to survive validation rather than being defaulted away.

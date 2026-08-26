@@ -16,6 +16,7 @@ return function(t)
     "MdViewerFindPrevious",
     "MdViewerBack",
     "MdViewerForward",
+    "MdViewerMeasureLink",
   }) do
     t.ok(exists(name), ("%s is registered"):format(name))
   end

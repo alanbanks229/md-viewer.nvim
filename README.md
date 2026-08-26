@@ -107,6 +107,12 @@ scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
 restores full sharpness the moment scrolling stops, and it waits longer before
 spending that sharp capture (`render.ssh_scroll_settle_ms`).
 
+How throttled the link actually is, md-viewer cannot see: `nvim_ui_send` appends
+to Neovim's own UI queue and returns, so timing a write measures the queue and
+not the wire. `:MdViewerMeasureLink`, run once on a machine, measures it from a
+subprocess and caches the answer there — which is per-machine on purpose, since
+one `~/.config/nvim` reaches hosts that measured fourteen times apart.
+
 Do **not** reach for `render.device_scale_factor = 1` here — it is a
 calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
@@ -123,7 +129,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc5",
+  version = "v0.3.0-rc7",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -175,7 +181,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc5" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc7" },
 })
 
 require("md-viewer").setup({})
@@ -194,11 +200,13 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
 ## Features
 
 - Live preview of unsaved changes, following your cursor through the document.
-- **Scrolling costs no screenshot.** Where the terminal supports it, the whole
-  document is captured once, kept in the terminal's image memory, and scrolling
-  becomes a placement command — measured at 196 bytes per scroll against the
-  ~80 KB frame the per-scroll path sends. This is what makes a preview usable
-  over a slow SSH link. See `:help md-viewer-resident`.
+- **Scrolling costs no screenshot** (experimental, off by default). Where the
+  terminal supports it, the whole document is captured once, kept in the
+  terminal's image memory, and scrolling becomes a placement command — measured
+  at 196 bytes per scroll against the ~80 KB frame the per-scroll path sends.
+  It trades a long warm-up for that, so it is worth turning on only where the
+  per-scroll capture is what you are actually waiting on:
+  `image = { resident = "auto" }`. See `:help md-viewer-resident`.
 - A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
   (iTerm2, Kitty and Ghostty only) — the only way to highlight text in the
   preview, matching Vim rather than a browser; `y` copies to the unnamed
@@ -236,6 +244,7 @@ by hand when that happens.
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
 | `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
+| `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |
 | `:checkhealth md-viewer` | Run Neovim health checks |
 
 ### Keys, with the preview focused
@@ -321,6 +330,8 @@ boundary is never something you have to infer from a config file.
   warm-up, which is a fixed cost per renderer process and measured at 16-24
   seconds on a modest Linux VM and well under a second on macOS. Later previews
   in the same session do not pay it.
+- Whole-document resident mode is experimental and off by default. Animated
+  images do not animate under it, and the knobs below apply only once it is on.
 - `image.resident_memory_mb` is a heuristic rather than a guaranteed ceiling:
   the bytes-per-resident-pixel figure it derives from is an iTerm2 measurement
   that a sustained-RSS run disagreed with by 34x, and other terminals are

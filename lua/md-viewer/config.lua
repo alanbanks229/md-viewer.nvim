@@ -59,30 +59,54 @@ M.defaults = {
     --
     -- 0.5 rather than something smaller because PNG bytes against real content
     -- go as pixels^0.69: quartering the pixels costs about 2.6x fewer bytes,
-    -- and bytes are the entire cost on a throughput-limited link. Measured on
-    -- an AWS SSM tunnel with a flat 0.80 MB/s ceiling, one 80KB moving frame is
-    -- ~134ms of pure wire time and a single wheel spin queues over a hundred of
-    -- them -- so the backlog, not the render, is the lag. See
-    -- docs/local-render-design.md.
+    -- and bytes are the entire cost on a throughput-limited link.
+    --
+    -- The link that motivated the number is an AWS SSM tunnel at 0.80 MB/s,
+    -- where one 80KB moving frame is ~134ms of pure wire time and a single
+    -- wheel spin queues over a hundred of them -- so the backlog, not the
+    -- render, is the lag. That ceiling is SSM's, not SSH's: it is the agent
+    -- pacing its output at a kilobyte per millisecond, and an ordinary SSH
+    -- session (measured: 16-23 MB/s to a LAN host) is twenty times faster. See
+    -- docs/local-render-design.md, "Where that ceiling comes from".
+    --
+    -- Still gated on SSH generally rather than on SSM, because the plugin
+    -- cannot tell the two apart -- SSM arrives as an ordinary SSH session with
+    -- a ProxyCommand -- and a halved moving frame on a fast link costs
+    -- sharpness the reader is unlikely to notice on a frame that is moving.
     ssh_scroll_scale = 0.5,
-    -- How fast this link carries bytes, in bytes per second. nil means unknown,
-    -- and unknown is a legitimate answer -- there is no way to observe it from
-    -- inside Neovim, so nothing here infers one.
+    -- How fast this link carries bytes, in bytes per second. A number pins it;
+    -- "auto" takes a measurement this machine has already made; nil means
+    -- unknown, and unknown is a legitimate answer.
     --
-    -- `nvim_ui_send` appends to Neovim's own UI queue and returns; the TUI
-    -- drains that queue later. Measured on a link shaped to 0.80 MB/s, 96
-    -- payloads totalling 24 MB were accepted in 0.03s and no write ever waited.
-    -- A plugin timing its own writes therefore measures a queue insertion and
-    -- concludes the link runs at ~100 MB/s. Real sessions reported 209,046,
-    -- 139,058 and 101,169 B/ms against a link doing 800.
+    -- Whatever it is, it is not inferred. `nvim_ui_send` appends to Neovim's own
+    -- UI queue and returns; the TUI drains that queue later. On a 0.80 MB/s
+    -- link, 96 payloads totalling 24 MB were accepted in 0.03s and no write ever
+    -- waited. A plugin timing its own writes therefore measures a queue
+    -- insertion and concludes the link runs at ~100 MB/s. Real sessions reported
+    -- 209,046, 139,058 and 101,169 B/ms against a link doing 800. That
+    -- conclusion holds at any link rate, which is why it survives the rate
+    -- itself being re-checked.
     --
-    -- Measure it from the shell instead, with Neovim closed:
+    -- So the number has to come from a shell, and "auto" is about *which* shell
+    -- run. A single number cannot serve here: `~/.config/nvim` is one file
+    -- symlinked to every machine, and measured 2026-08-25 the two behind it are
+    -- fourteen times apart -- ~1,030,000 B/s through an AWS SSM tunnel against
+    -- ~14,700,000 to a LAN host. Safe for the slower is nineteen times low on
+    -- the faster; right for the faster is the error this option exists to
+    -- correct. "auto" resolves it per machine instead.
     --
-    --     sh scripts/ssh-link-speed.sh
+    -- It never measures on its own. It reads a small file under
+    -- `stdpath("state")` that exists only because someone ran
+    -- `:MdViewerMeasureLink` here, or `sh scripts/ssh-link-speed.sh
+    -- --write-cache` from the shell with Neovim closed. Nothing at all happens
+    -- until one of those is run, and a number set here outranks both -- which is
+    -- also the trap: a rate left in a shared config defeats per-machine
+    -- detection on every machine that shares it. See md-viewer.linkrate for the
+    -- full precedence, `MD_VIEWER_SSH_LINK_BYTES_PER_SEC` included.
     --
-    -- Used for warm-up progress estimates and to bound queued upload bytes. A
-    -- value set here is never capped against any other figure.
-    ssh_link_bytes_per_sec = nil,
+    -- Used to estimate how long a resident warm-up will take. It bounds nothing,
+    -- and a value set here is never capped against any other figure.
+    ssh_link_bytes_per_sec = "auto",
     -- Keeping this off improves motion and nothing else.
     -- Better GIF rendering with this architecture needs to be explored.
     -- Playback is expensive when sending constant PNG screenshots.
@@ -109,7 +133,22 @@ M.defaults = {
     -- them in the terminal, and make scrolling a pure placement. "auto" uses it
     -- where the terminal and the renderer both support it, "off" keeps the
     -- per-scroll capture loop everywhere.
-    resident = "auto",
+    --
+    -- Experimental, and off by default. What it trades is a long warm-up and a
+    -- document's worth of terminal image memory for scrolling that sends no
+    -- pixels at all.
+    --
+    -- Worth it only where the per-scroll capture is what the reader is actually
+    -- waiting on, which is a narrower set of links than "remote". At 0.80 MB/s
+    -- -- an AWS SSM tunnel, where the agent paces its output at a kilobyte per
+    -- millisecond -- a settle frame is ~508ms of wire and this feature is the
+    -- difference between usable and not. At 16-23 MB/s, which is what an
+    -- ordinary SSH session to a LAN host measures, the same frame is ~20ms and
+    -- the warm-up is the only thing the reader will notice. Measure before
+    -- turning it on -- `:MdViewerMeasureLink`, once per machine -- and
+    -- `render_path` in :MdViewerDebug says which model a session actually
+    -- chose. A measured link also gives the warm-up an ETA in the winbar.
+    resident = "off",
     -- How many viewports tall one chunk is.
     --
     -- Not a first-paint knob. Measured on Ubuntu 22.04 / Chrome 151, the first
@@ -119,9 +158,13 @@ M.defaults = {
     -- per-capture overhead and overlap waste against how long a scroll into an
     -- uncaptured region waits:
     --
-    --     1x    4.0 Mpx    116ms capture    396 KB    ~507ms of wire at 0.80 MB/s
+    --     1x    4.0 Mpx    116ms capture    396 KB    ~507ms of wire
     --     2x    8.1 Mpx    266ms capture    826 KB   ~1058ms
     --     2.9x 11.7 Mpx    373ms capture   1218 KB   ~1559ms
+    --
+    -- The wire column is at 0.80 MB/s, the SSM ceiling this feature exists for;
+    -- on a link twenty times faster it is twenty times smaller and this knob
+    -- stops mattering.
     --
     -- PNG bytes are linear in pixels across that range (94-105 KB/Mpx), so a
     -- larger chunk buys no compression. Clamped down when the document is wide
@@ -303,8 +346,10 @@ local function validate(cfg)
   )
   assert(
     cfg.render.ssh_link_bytes_per_sec == nil
+      or cfg.render.ssh_link_bytes_per_sec == "auto"
       or (type(cfg.render.ssh_link_bytes_per_sec) == "number" and cfg.render.ssh_link_bytes_per_sec > 0),
-    "md-viewer: render.ssh_link_bytes_per_sec must be a positive number, or nil when the link rate is unknown"
+    'md-viewer: render.ssh_link_bytes_per_sec must be a positive number, "auto" to use a measurement '
+      .. "cached on this machine, or nil when the link rate is unknown"
   )
   assert(
     type(cfg.render.scroll_settle_ms) == "number" and cfg.render.scroll_settle_ms >= 0,
@@ -426,13 +471,15 @@ local function validate(cfg)
   )
 end
 
--- The terminal module memoizes its capability snapshot against the `terminal`
--- config section; a config change is the one event that can invalidate it.
--- Guarded on package.loaded so configuring md-viewer does not load the
--- terminal module as a side effect.
-local function invalidate_terminal()
-  local terminal = package.loaded["md-viewer.terminal"]
-  if terminal and terminal.invalidate then terminal.invalidate() end
+-- Two modules memoize a snapshot taken partly from this configuration -- the
+-- terminal's capabilities and the link rate's precedence tier -- and a config
+-- change is the one event that can invalidate either. Guarded on package.loaded
+-- so configuring md-viewer does not load them as a side effect.
+local function invalidate_memoized()
+  for _, name in ipairs({ "md-viewer.terminal", "md-viewer.linkrate" }) do
+    local module = package.loaded[name]
+    if module and module.invalidate then module.invalidate() end
+  end
 end
 
 function M.setup(opts)
@@ -440,7 +487,7 @@ function M.setup(opts)
   opts = vim.deepcopy(opts or {})
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
-  invalidate_terminal()
+  invalidate_memoized()
   return current
 end
 
@@ -448,7 +495,7 @@ function M.get() return current end
 
 function M.reset()
   current = vim.deepcopy(M.defaults)
-  invalidate_terminal()
+  invalidate_memoized()
 end
 
 return M

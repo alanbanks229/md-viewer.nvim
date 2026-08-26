@@ -159,6 +159,77 @@ return function(t)
   raw.retire({ chunk })
 
   -- -------------------------------------------------------------------
+  -- uncompose: the screen comes down, the document stays in the terminal
+  --
+  -- This is what an occluding float costs a resident preview. Freeing the
+  -- chunks would make coming back cost the whole document again, so the
+  -- distinction between a=d,d=i and a=d,d=I is the entire point of the call.
+  -- -------------------------------------------------------------------
+
+  local a = raw.upload(fake_png())
+  local b = raw.upload(fake_png())
+  raw.compose({
+    { image_id = a, row = 0, rows = 5, src_y = 0, src_h = 50 },
+    { image_id = b, row = 5, rows = 5, src_y = 0, src_h = 50 },
+  }, placement)
+
+  reset()
+  local dropped = raw.uncompose()
+  t.ok(dropped >= 2, "uncompose drops the placements of every band on the screen")
+  t.eq(1, writes(), "however many bands, taking the screen down is one write")
+  t.ok(output():match("a=d,d=i,q=2,i=" .. a), "the upper band's placement goes")
+  t.ok(output():match("a=d,d=i,q=2,i=" .. b), "and so does the lower band's")
+  t.eq(nil, output():match("a=d,d=I"), "but nothing frees the pixels: an occlusion is not a retirement")
+
+  reset()
+  t.eq(0, raw.uncompose(), "a second uncompose has nothing left to take down")
+  t.eq(0, writes(), "and writes nothing")
+
+  reset()
+  t.ok(
+    raw.compose({ { image_id = a, row = 0, rows = 10, src_y = 0, src_h = 100 } }, placement),
+    "an uncomposed screen composes again"
+  )
+  t.eq(nil, output():match("a=t"), "restoring after an occlusion is a re-crop, not a re-upload")
+  raw.uncompose()
+  raw.retire({ a, b })
+
+  -- -------------------------------------------------------------------
+  -- The overlay sizes itself from the placement when there is no base frame,
+  -- which is the only thing a resident screen can offer it. Without this a
+  -- resident preview had no caret and no selection highlight at all.
+  -- -------------------------------------------------------------------
+
+  reset()
+  local resident_sheet = raw.overlay_needs_sheet(nil, nil, placement)
+  t.ok(resident_sheet, "with no sheet cached, a resident screen is told to send one")
+  local set_id, stats = raw.overlay_apply(
+    nil,
+    nil,
+    { { x = 0, y = 0, width = 20, height = 10 } },
+    { widthPx = 100, heightPx = 100 },
+    { r = 0, g = 0, b = 255, a = 0.3 },
+    fake_png(),
+    placement
+  )
+  t.ok(type(set_id) == "number", "and the overlay applies against no base image at all")
+  t.ok(type(stats) == "table" and (stats.rects or 0) >= 1, "with the rectangle it was given")
+  if type(set_id) == "number" then raw.overlay_clear(set_id) end
+
+  reset()
+  local refused_id, refused_why = raw.overlay_apply(
+    99999,
+    99999,
+    { { x = 0, y = 0, width = 20, height = 10 } },
+    { widthPx = 100, heightPx = 100 },
+    { r = 0, g = 0, b = 255, a = 0.3 },
+    fake_png(),
+    placement
+  )
+  t.eq(nil, refused_id, "an id that names nothing is still a refusal -- only nil means 'no base by design'")
+  t.ok(type(refused_why) == "string", "and says so")
+
+  -- -------------------------------------------------------------------
   -- Terminal capability
   -- -------------------------------------------------------------------
 
@@ -174,7 +245,18 @@ return function(t)
   t.eq(false, wez_ok, "WezTerm does not hold repeated placements affordably (wezterm#7953)")
   t.ok(type(wez_reason) == "string" and wez_reason:match("WezTerm"), "and the refusal names the terminal")
 
-  for _, profile in ipairs({ "kitty", "ghostty", "iterm2" }) do
+  -- Measured live over a real SSM link on 2026-08-26: re-cropping a resident
+  -- image showed the wrong position, on both a chunk's first placement and a
+  -- later re-crop of one already on screen, with every escape-sequence
+  -- parameter confirmed byte-correct against the chunk plan. Resident mode
+  -- falls back to the viewport model here rather than risk it again.
+  config.reset()
+  config.setup({ terminal = { profile = "iterm2" } })
+  local iterm2_ok, iterm2_reason = raw.resident_pan_supported()
+  t.eq(false, iterm2_ok, "iTerm2 does not reliably re-crop a resident image")
+  t.ok(type(iterm2_reason) == "string" and iterm2_reason:match("iTerm2"), "and the refusal names the terminal")
+
+  for _, profile in ipairs({ "kitty", "ghostty" }) do
     config.reset()
     config.setup({ terminal = { profile = profile } })
     t.ok((raw.resident_pan_supported()), profile .. " can pan resident chunks")

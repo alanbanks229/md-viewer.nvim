@@ -54,6 +54,16 @@ function M.snapshot()
       -- of the traffic: a scroll afterwards sends placements and no pixels.
       resident_bytes_total = session.resident and session.resident.bytes or nil,
       resident_waiting_for_chunk = session.resident_waiting,
+      -- What is actually on the pane, which the two models answer differently.
+      -- A resident screen owns no `image_id` on purpose (md-viewer.state's
+      -- `screen_up` explains why), so without both of these a resident preview
+      -- reads here as though it were showing nothing at all.
+      resident_screen_placed = session.resident_screen == true,
+      -- The position and content revision the frame named by `image_id` is a
+      -- picture of, or nil when nothing can vouch for it. This is what decides
+      -- whether the resident bootstrap keeps its first paint or blanks the pane.
+      frame_scroll_y = session.frame_scroll_y,
+      frame_revision = session.frame_revision,
       capture_encoder = session.last_capture_encoder,
       png_bytes = session.last_png_bytes,
       layout_ms = session.last_layout_ms,
@@ -61,7 +71,8 @@ function M.snapshot()
       -- How long the *handoff* to Neovim's UI queue took, which is not how long
       -- the bytes took to arrive and cannot be used to estimate a link rate:
       -- nvim_ui_send appends and returns, and 24 MB was accepted in 0.03s on a
-      -- link doing 0.80 MB/s. Named for what it is.
+      -- link doing 0.80 MB/s -- 30 seconds of wire, handed over in 30
+      -- milliseconds. Named for what it is.
       ui_handoff_ms = session.last_image_update_ms,
       fast_png_bytes = session.fast_png_bytes,
       fast_capture_ms = session.fast_capture_ms,

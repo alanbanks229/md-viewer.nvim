@@ -9,6 +9,15 @@ function M.create(source_buf, source_win)
     preview_buf = nil,
     preview_win = nil,
     image_id = nil,
+    -- What the frame `image_id` names is a picture of. Read by the resident
+    -- bootstrap to decide whether the frame already on screen shows the
+    -- reader's position, which is the difference between leaving correct pixels
+    -- up and blanking the pane. Non-nil only while `image_id` is.
+    frame_scroll_y = nil,
+    frame_revision = nil,
+    -- Whether a resident screen (one or two cropped bands) is placed. The
+    -- resident path deliberately owns no `image_id`; see M.screen_up.
+    resident_screen = false,
     backend = nil,
     request_serial = 0,
     applied_serial = 0,
@@ -28,6 +37,10 @@ function M.create(source_buf, source_win)
     cursor_scroll_timer = nil,
     scroll_render_in_flight = false,
     scroll_render_pending = false,
+    -- A render of the document's content is in flight, so md-viewer.controller's
+    -- resident warm-up holds off: a chunk capture would stale it, and a staled
+    -- content render is dropped with nothing to re-issue it.
+    content_render_in_flight = false,
     resize_timer = nil,
     last_image_bytes = nil,
     occluded = false,
@@ -93,6 +106,25 @@ function M.create(source_buf, source_win)
 end
 
 function M.get(source_buf) return sessions[source_buf] end
+
+---Is there a rendered screen on this pane right now, under either rendering
+---model?
+---
+---`session.image_id` answers only for the viewport model. A resident screen is
+---one or two cropped bands and deliberately owns no single frame id, because
+---that field is also the id `clear_image` deletes and `apply_image` updates in
+---place -- and a chunk must never be either. Freeing a chunk out from under
+---`resident_session.images` would leave the next compose refusing an image the
+---terminal no longer has; updating one in place would replace a chunk with a
+---viewport frame.
+---
+---So callers that mean "is there something here to composite an overlay over"
+---ask here. Callers that mean "the frame this session owns and may delete" want
+---`session.image_id` itself and are right to keep using it.
+function M.screen_up(session)
+  if not session then return false end
+  return session.image_id ~= nil or session.resident_screen == true
+end
 
 function M.from_preview(buf)
   for _, session in pairs(sessions) do
