@@ -8,6 +8,7 @@
 ---a scroll only ever crops chunks that already exist. Nothing here takes a
 ---picture of the reader's viewport.
 local config = require("md-viewer.config")
+local coordinates = require("md-viewer.coordinates")
 local preview = require("md-viewer.preview")
 local resident = require("md-viewer.resident")
 
@@ -268,6 +269,24 @@ function M.missing(session, scroll_y)
   return nil
 end
 
+---Whether `index` is one of the chunks a viewport at `scroll_y` needs right
+---now -- i.e. whether composing for `scroll_y` would place `index`, as
+---opposed to a chunk landing resident for a position the reader is not at.
+---
+---The controller asks this right after adopting a chunk, to tell "about to
+---place pixels that only just arrived" apart from "landed for later, draw
+---does not touch it yet".
+function M.is_needed(session, scroll_y, index)
+  local current = state(session)
+  if not current then return false end
+  local needed = resident.chunks_for(current.plan, scroll_y, current.plan.viewport_h)
+  if not needed then return false end
+  for _, candidate in ipairs(needed) do
+    if candidate == index then return true end
+  end
+  return false
+end
+
 ---Draw the screen for `scroll_y` from resident chunks.
 ---
 ---Returns "drawn", or "waiting" with the chunk the reader needs next, or
@@ -290,6 +309,24 @@ function M.draw(session, scroll_y)
 
   local placement = preview.placement(session.preview_win, session.backend.name)
   if not placement or placement.height ~= plan.rows then return "failed", "the pane changed size" end
+
+  -- Every chunk landing during warm-up calls this again for the reader's
+  -- unchanged position, which used to recompose the same bands over and over:
+  -- once per chunk, on top of a link already busy with that chunk's own
+  -- upload. Composing is cheap on this side (a few hundred bytes, no pixels),
+  -- but it is not free on the wire or on the terminal parsing it, and nothing
+  -- downstream distinguishes "recomposed the same picture" from "moved to a
+  -- new one" -- so a reader sitting still got a placement command interleaved
+  -- with every chunk's transmission for no reason. Skip it when nothing this
+  -- draw would produce has changed since the last one.
+  if
+    session.resident_screen
+    and current.drawn
+    and session.applied_scroll_y == scroll_y
+    and coordinates.same(placement, session.last_placement)
+  then
+    return "drawn"
+  end
 
   local parts
   if #needed == 1 then

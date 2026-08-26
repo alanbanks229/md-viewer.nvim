@@ -15,6 +15,7 @@ local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
 local resident_session = require("md-viewer.resident_session")
+local linkrate = require("md-viewer.linkrate")
 
 local M = {}
 local group
@@ -773,8 +774,30 @@ function M.pump_resident(session)
       return
     end
     resident_session.retain(session, live.drawn or index)
-    M.draw_resident(session)
-    preview.update_title(session)
+    if resident_session.is_needed(session, session.scroll_y or 0, index) then
+      -- The reader is waiting on exactly the chunk that just landed.
+      -- `nvim_ui_send` only queues bytes for Neovim's own UI channel to
+      -- drain -- it does not wait for them to cross the wire -- and a Kitty
+      -- terminal decodes a large image asynchronously with respect to how
+      -- fast it can parse the placement that follows it. Composing right
+      -- away can crop a buffer the terminal has not finished decoding, which
+      -- is indistinguishable from this side: the reply already proved the
+      -- pixels are the right ones. Waiting roughly as long as this chunk's
+      -- own bytes take to cross the measured link gives the terminal a
+      -- realistic chance to finish before being asked to crop it. Only the
+      -- placement waits; the next capture request does not.
+      local bytes = (result.metadata and result.metadata.pngBytes) or #result.image
+      local rate = linkrate.resolve()
+      local settle_ms = rate and math.min(2000, math.max(50, math.ceil(bytes / rate * 1000))) or 200
+      vim.defer_fn(function()
+        if not valid(session) or session.render_path ~= "resident" then return end
+        M.draw_resident(session)
+        preview.update_title(session)
+      end, settle_ms)
+    else
+      M.draw_resident(session)
+      preview.update_title(session)
+    end
     vim.schedule(function() M.pump_resident(session) end)
   end)
 end
