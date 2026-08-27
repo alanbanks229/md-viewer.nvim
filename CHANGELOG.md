@@ -3,6 +3,35 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc8] - 2026-08-26
+
+**Prerelease.** iTerm2 no longer re-crops a resident image in place — measured
+live over a real SSM link to show the wrong scroll position, sometimes on a
+chunk's very first placement.
+
+### Fixed
+
+- **Resident mode no longer re-crops in place on iTerm2.** Reproduced against
+  a real slow link: a resident chunk's first placement, or a re-crop of an
+  already-shown chunk to a new position, could display content from a
+  different scroll position than the one requested. Every escape sequence was
+  hand-verified byte-correct against the chunk plan's own arithmetic, and a
+  real-Chromium test confirms the rendered pixels were also correct — the
+  defect is iTerm2 applying the crop, not what was asked for. iTerm2's
+  terminal profile now carries `resident_pan = false`, which falls back to
+  the viewport model (re-render per scroll, never re-crop) there.
+
+### Changed
+
+- **Two measured reductions in resident warm-up traffic**, both currently
+  dormant on every host in active use: a chunk landing during warm-up no
+  longer recomposes the pane if nothing it would draw has changed since the
+  last compose, and the very first placement of a freshly-uploaded chunk now
+  waits roughly as long as its own upload takes to cross the measured link
+  before compositing it, instead of compositing the instant `nvim_ui_send`
+  returns (which only queues bytes for Neovim's UI channel — it does not wait
+  for them to reach the wire).
+
 ## [0.3.0-rc7] - 2026-08-26
 
 **Prerelease.** How fast the link is, measured per machine instead of pasted into
@@ -513,6 +542,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc8]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc8
 [0.3.0-rc7]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc7
 [0.3.0-rc6]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc6
 [0.3.0-rc5]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc5
