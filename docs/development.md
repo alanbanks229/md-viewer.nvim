@@ -217,6 +217,31 @@ option is the wrong shape and should express a fraction of a cell instead.
 **Settle this before adding another terminal's calibration numbers: changing the
 option's shape afterwards is a breaking config change.**
 
+## Measuring the link rate over a fast connection
+
+`:MdViewerMeasureLink`'s cache key includes terminal identity
+(`terminal_id()` in `lua/md-viewer/linkrate.lua`) because on a fast link the
+terminal emulator, not the network, dominates the measured throughput.
+Measured on `ichigo` (2026-08-26), same script, same day, three drains of the
+identical link:
+
+| drain | rate |
+|---|---|
+| iTerm2 rendering it | 14,700,000 B/s |
+| `:MdViewerMeasureLink`, headless Neovim, `/dev/null` | 23,970,342 B/s |
+| `ssh-link-speed.sh` by hand, `/dev/null` | 25,938,722 B/s |
+
+Compression was off for this host, so none of that spread is a compressor —
+it's the terminal. On a link this fast, roughly 40% of the wall clock is the
+emulator, which is why the same host reached from two different terminals can
+measure two different rates, and why the cache key has to include which
+terminal is asking.
+
+**Open:** ichigo's own link rate under a real iTerm2 drain has never been
+measured — only the `/dev/null`-drain figures above exist. An agent has no
+terminal emulator to drain into. Run `:MdViewerMeasureLink` from inside a real
+iTerm2 session on `ichigo` and record the result here.
+
 ## Releasing
 
 The project follows [Semantic Versioning](https://semver.org/). While the major
