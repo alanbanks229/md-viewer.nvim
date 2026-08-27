@@ -2,10 +2,13 @@
 -- `nvim -u` inside a helper-wrapped ssh session. It opens the document nvim
 -- was started on with `render.location = "local"`, waits for the local
 -- render round trip and the injector's glass confirmations, scrolls once by
--- marker, writes the evidence as JSON where the driver can fetch it, and
--- quits. Not a test-suite file: it needs a live helper on the terminal side
--- and proves the pipeline against real ssh, a real sshd forward, and a real
--- browser beside the terminal.
+-- marker, then runs the K4 workload -- a held-key-shaped burst of line
+-- scrolls at 25ms intervals, every position distinct so the surface cache
+-- cannot answer for the capture path -- lets it settle, pulls the helper's
+-- own stage timings over the socket, writes the evidence as JSON where the
+-- driver can fetch it, and quits. Not a test-suite file: it needs a live
+-- helper on the terminal side and proves the pipeline against real ssh, a
+-- real sshd forward, and a real browser beside the terminal.
 
 vim.opt.runtimepath:prepend(vim.fn.expand("~/md-viewer.nvim"))
 local evidence_path = vim.fn.expand("~/mdv-e2e.json")
@@ -34,6 +37,9 @@ local function write_evidence(extra)
       local_marker_frames = session.local_marker_frames or 0,
       local_presented_count = session.local_presented_count or 0,
       renderer_revision = session.renderer_revision,
+      scroll_scale = session.scroll_scale,
+      scroll_scale_source = session.scroll_scale_source,
+      scroll_settle_ms = session.scroll_settle_ms,
     }
   end
   local handle = io.open(evidence_path, "w")
@@ -71,8 +77,69 @@ vim.api.nvim_create_autocmd("VimEnter", {
         vim.cmd("qa!")
         return
       end
-      local deadline = vim.uv.now() + 60000
+      local deadline = vim.uv.now() + 90000
       local scrolled = false
+      local BURST_STEPS = 30
+      local burst_sent = 0
+      local burst_done_at = nil
+      local burst_timer = nil
+      local collecting = false
+
+      local function collect_and_quit(timed_out)
+        if collecting then return end
+        collecting = true
+        local extra = {
+          timed_out = timed_out,
+          burst_steps = burst_sent,
+          presented_after_burst = session.local_presented_count or 0,
+        }
+        -- The helper's half of K4 rides the same health round trip the
+        -- diagnostics use: replica capture counters/timings plus the
+        -- injector's frame time-to-inject, none of which the remote can
+        -- measure for itself.
+        local answered = false
+        require("md-viewer.process").request(
+          "health",
+          { browser = require("md-viewer.config").get().browser },
+          function(result)
+            answered = true
+            if type(result) == "table" then
+              extra.helper = result.localHelper
+              extra.replica = result.replica
+            end
+            write_evidence(extra)
+            vim.cmd("qa!")
+          end
+        )
+        vim.defer_fn(function()
+          if answered then return end
+          extra.helper_health_timed_out = true
+          write_evidence(extra)
+          vim.cmd("qa!")
+        end, 15000)
+      end
+
+      local function start_burst()
+        burst_timer = vim.uv.new_timer()
+        burst_timer:start(
+          0,
+          25,
+          vim.schedule_wrap(function()
+            if burst_sent >= BURST_STEPS then
+              if burst_timer then
+                burst_timer:stop()
+                burst_timer:close()
+                burst_timer = nil
+                burst_done_at = vim.uv.now()
+              end
+              return
+            end
+            burst_sent = burst_sent + 1
+            controller.navigate(session, "line_down")
+          end)
+        )
+      end
+
       local timer = vim.uv.new_timer()
       timer:start(
         500,
@@ -87,13 +154,18 @@ vim.api.nvim_create_autocmd("VimEnter", {
             controller.navigate(session, "half_down")
             return
           end
-          local done = scrolled and presented >= 2
+          if scrolled and presented >= 2 and burst_sent == 0 and not burst_timer then
+            start_burst()
+            return
+          end
           local timed_out = vim.uv.now() > deadline
-          if done or timed_out then
+          -- Three seconds of quiet after the last burst step covers the
+          -- settle re-reference and its capture on any host this runs on.
+          local settled = burst_done_at ~= nil and vim.uv.now() > burst_done_at + 3000
+          if settled or timed_out then
             timer:stop()
             timer:close()
-            write_evidence({ timed_out = timed_out })
-            vim.cmd("qa!")
+            collect_and_quit(timed_out)
           end
         end)
       )

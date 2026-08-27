@@ -40,6 +40,68 @@ local state = {
   notifications = 0,
   fallback_notified = false,
 }
+
+-- K4's remote half: marker emit -> `presented` acknowledgement, on this
+-- machine's clock alone. The two ends do not share a clock, so the one
+-- number the VM can measure honestly is the full round: marker across the
+-- link, helper resolve/capture/inject, acknowledgement back. Glass lights up
+-- one notification leg *before* the sample lands, so this is a strict upper
+-- bound on time-to-glass -- the direction a kill criterion wants to be wrong
+-- in. Superseded markers are never sampled: nothing acknowledges them.
+--
+-- Both tables are rings. A held key emits markers at repeat rate for as long
+-- as a finger stays down, and a diagnostic must not grow with that.
+local EMIT_CAP = 512
+local SAMPLE_CAP = 128
+local emit_ns = {} -- seq -> hrtime at emit, pruned by the ring below
+local emit_ring = {} -- insertion order, so the map stays bounded
+local emit_pos = 0
+local presented_samples = {} -- ms, ring
+local presented_pos = 0
+local presented_count = 0
+local presented_last_ms = nil
+
+local function note_emit(seq)
+  emit_pos = emit_pos % EMIT_CAP + 1
+  local evicted = emit_ring[emit_pos]
+  if evicted then emit_ns[evicted] = nil end
+  emit_ring[emit_pos] = seq
+  emit_ns[seq] = vim.uv.hrtime()
+end
+
+-- Runs inside the uv read callback: table and hrtime work only, no nvim API.
+local function note_presented(seq)
+  local started = emit_ns[seq]
+  if not started then return end
+  emit_ns[seq] = nil
+  local ms = (vim.uv.hrtime() - started) / 1e6
+  presented_pos = presented_pos % SAMPLE_CAP + 1
+  presented_samples[presented_pos] = ms
+  presented_count = presented_count + 1
+  presented_last_ms = ms
+end
+
+local function round1(ms) return math.floor(ms * 10 + 0.5) / 10 end
+
+---Nearest-rank percentiles over the sample window, or nil when nothing has
+---been acknowledged yet -- "no samples" must never print as a fast zero.
+local function presented_snapshot()
+  if presented_count == 0 then return nil end
+  local sorted = {}
+  for _, ms in ipairs(presented_samples) do
+    sorted[#sorted + 1] = ms
+  end
+  table.sort(sorted)
+  local n = #sorted
+  local function rank(q) return sorted[math.max(1, math.ceil(q * n))] end
+  return {
+    count = presented_count,
+    p50_ms = round1(rank(0.5)),
+    p95_ms = round1(rank(0.95)),
+    max_ms = round1(sorted[n]),
+    last_ms = round1(presented_last_ms),
+  }
+end
 local conn -- { pipe, buffer, callbacks, next_id, closed }
 local listeners = {} -- event -> list of callbacks
 -- One-shot consumer for the seq-0 pairing confirmation. Held apart from
@@ -77,9 +139,12 @@ function M.enabled() return config.get().render.location == "local" end
 function M.token() return state.token end
 
 ---Monotonic marker sequence for this attachment. 0 is reserved for the
----pairing probe.
+---pairing probe. The emit timestamp is stamped here: the presenter sends the
+---marker within the same Lua frame, so this is the emit time to within
+---microseconds, and the one call site every marker already passes through.
 function M.next_seq()
   state.seq = state.seq + 1
+  note_emit(state.seq)
   return state.seq
 end
 
@@ -94,6 +159,7 @@ function M.status()
     seq = state.seq,
     requests = state.requests,
     notifications = state.notifications,
+    presented = presented_snapshot(),
   }
 end
 
@@ -263,6 +329,10 @@ local function dispatch_line(line)
       if waiter then vim.schedule(waiter) end
       return
     end
+    -- Sampled here, at receipt in the read callback, not in the scheduled
+    -- listener: the sample is the link's latency and must not inherit the
+    -- main loop's.
+    if value.event == "presented" and type(value.seq) == "number" then note_presented(value.seq) end
     fire(value.event, value)
   end
 end
@@ -460,6 +530,13 @@ function M._reset()
   state.requests = 0
   state.notifications = 0
   state.fallback_notified = false
+  emit_ns = {}
+  emit_ring = {}
+  emit_pos = 0
+  presented_samples = {}
+  presented_pos = 0
+  presented_count = 0
+  presented_last_ms = nil
 end
 
 ---Test seam: the internals a fake helper needs to poke.

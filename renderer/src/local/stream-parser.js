@@ -95,8 +95,10 @@ export class StreamParser {
     this.kittyControl = "";
     this.kittyControlDone = false;
     this.kittyPayloadIsRaster = false;
+    this.kittyPayloadIsMdv = false;
     this.transmissionOpen = false; // an m=1 chunk train is in progress
     this.openIsRaster = false; // ...and it carries transmit payload
+    this.openIsMdv = false; // ...attributed to an md-viewer id space
 
     this.stats = {
       passthroughBytes: 0,
@@ -106,6 +108,20 @@ export class StreamParser {
       malformedMarkers: 0, // committed candidates aborted or over the cap
       remoteGraphicsCommands: 0, // Kitty APCs that arrived in the stream
       remoteRasterBytes: 0, // payload bytes of transmit trains -- fallback PNGs
+      // The attribution split of the two counters above, by image id space.
+      // md-viewer's direct path allocates ids in pid-seeded ranges with
+      // recognizable high bytes (kitty_raw.lua: 0x4d frames, 0x5e animation,
+      // 0x6d sheets), so a graphics command naming one of those ids came from
+      // *some* md-viewer session rendering direct bytes through this wire --
+      // an earlier PNG-mode run, a plugin instance without local mode, or a
+      // demoted session. It cannot say which; the active session's own
+      // fallback counters answer that. What the split settles is the other
+      // direction: raster that is *not* md-viewer-shaped belongs to some
+      // other program in the wrapped session, and is not this plugin's to
+      // explain. (rc9's 1.7 MB on a healthy local session was exactly this
+      // ambiguity, measured on the work laptop 2026-08-27.)
+      remoteMdvGraphicsCommands: 0,
+      remoteMdvRasterBytes: 0,
     };
   }
 
@@ -356,6 +372,7 @@ export class StreamParser {
               }
             } else if (this.kittyPayloadIsRaster) {
               this.stats.remoteRasterBytes += 1;
+              if (this.kittyPayloadIsMdv) this.stats.remoteMdvRasterBytes += 1;
             }
             return;
           }
@@ -386,20 +403,34 @@ export class StreamParser {
       // A fresh command. Transmit-family actions (`t`, `T`, and frame data
       // `f`) are the ones whose payload is pixels.
       const raster = action === "t" || action === "T" || action === "f";
+      // Attribution by id space: the high byte of `i=` tells an md-viewer
+      // direct session's command apart from any other program's. Ids are
+      // 32-bit, so the arithmetic stays exact in a double.
+      const id = /(?:^|,)i=(\d+)(?:,|$)/.exec(control)?.[1] ?? null;
+      const high = id === null ? null : Math.floor(Number(id) / 0x1000000);
+      const mdv = high === 0x4d || high === 0x5e || high === 0x6d;
       this.kittyPayloadIsRaster = raster;
+      this.kittyPayloadIsMdv = mdv;
+      if (mdv) this.stats.remoteMdvGraphicsCommands += 1;
       if (more === "1") {
         this.transmissionOpen = true;
         this.openIsRaster = raster;
+        this.openIsMdv = mdv;
       } else {
         this.transmissionOpen = false;
         this.openIsRaster = false;
+        this.openIsMdv = false;
       }
     } else {
-      // Continuation chunk of the open train (control like `q=2,m=N`).
+      // Continuation chunk of the open train (control like `q=2,m=N`). It
+      // carries no id of its own; it belongs to whoever opened the train.
       this.kittyPayloadIsRaster = this.openIsRaster;
+      this.kittyPayloadIsMdv = this.openIsMdv;
+      if (this.openIsMdv) this.stats.remoteMdvGraphicsCommands += 1;
       if (more !== "1") {
         this.transmissionOpen = false;
         this.openIsRaster = false;
+        this.openIsMdv = false;
       }
     }
   }
@@ -410,6 +441,7 @@ export class StreamParser {
     if (!this.kittyControlDone) this.applyKittyControl();
     this.kittyControlDone = false;
     this.kittyPayloadIsRaster = false;
+    this.kittyPayloadIsMdv = false;
   }
 }
 

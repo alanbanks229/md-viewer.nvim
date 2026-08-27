@@ -268,3 +268,22 @@ test("fuzz: identity minus matched markers, stable across chunkings", () => {
     }
   }
 });
+
+test("remote graphics are attributed by image-id space: md-viewer's direct path vs everything else", () => {
+  // 0x4d000100: a frame id exactly as kitty_raw.lua allocates them
+  // (0x4d000000 + pid-seeded offset). The split answers what rc9's single
+  // counter could not (work laptop, 2026-08-27): whether raster arriving
+  // through the remote stream came from an md-viewer session rendering
+  // direct bytes, or from some unrelated program in the same wrapped
+  // session.
+  const mdvId = 0x4d000100;
+  const mdvTrain =
+    `${ESC}_Ga=t,f=100,t=d,q=2,i=${mdvId},m=1;${"A".repeat(64)}${ST}` + `${ESC}_Gq=2,m=0;${"B".repeat(32)}${ST}`;
+  const mdvPlacement = `${ESC}_Ga=p,q=2,C=1,i=${mdvId},p=9,x=0,y=0;${ST}`;
+  const foreign = `${ESC}_Ga=t,f=100,t=d,q=2,i=7,m=0;${"C".repeat(16)}${ST}`;
+  const { parser } = run(Buffer.from(mdvTrain + mdvPlacement + foreign, "latin1"));
+  assert.equal(parser.stats.remoteGraphicsCommands, 4, "the totals keep counting everything");
+  assert.equal(parser.stats.remoteRasterBytes, 64 + 32 + 16);
+  assert.equal(parser.stats.remoteMdvGraphicsCommands, 3, "train, its continuation, and the placement");
+  assert.equal(parser.stats.remoteMdvRasterBytes, 64 + 32, "the foreign transmit is not md-viewer's to explain");
+});

@@ -260,7 +260,7 @@ if (!flags.echoTest) {
         localHelper: {
           version: helperVersion(),
           parser: { ...parser.stats },
-          injector: { ...injector.stats },
+          injector: { ...injector.stats, timing: injector.timingSnapshot() },
           socket: { ...service.stats },
         },
       }));
@@ -281,7 +281,7 @@ if (!flags.echoTest) {
     service.notify("presented", { seq: tx.seq, doc: tx.doc, scrollY: tx.uploads[0]?.scrollY ?? null });
   service.setStatusProvider(() => ({
     parser: { ...parser.stats },
-    injector: injector ? { ...injector.stats } : null,
+    injector: injector ? { ...injector.stats, timing: injector.timingSnapshot() } : null,
     replica: replica.stats(),
   }));
   try {

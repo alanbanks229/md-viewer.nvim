@@ -65,11 +65,11 @@ fi
 send -l "rm -f ~/mdv-e2e.json; nvim -n -u ~/$remote_repo/scripts/local/e2e-init.lua ~/$remote_repo/tests/fixtures/kitchen-sink.md"
 send Enter
 
-# The init file quits nvim after writing the evidence (or after its own 60s
+# The init file quits nvim after writing the evidence (or after its own 90s
 # deadline). Poll for the file over a separate ssh connection rather than
 # scraping the pane: the pane is full-screen nvim.
 i=0
-while [ "$i" -lt 90 ]; do
+while [ "$i" -lt 150 ]; do
   if ssh $ssh_opts "$host" test -f "mdv-e2e.json" 2>/dev/null; then break; fi
   sleep 1
   i=$((i + 1))
@@ -98,6 +98,7 @@ printf '%s' "$evidence" | node -e '
       ["frames presented (injected)", (s.local_presented_count ?? 0) >= 2, "presented=" + s.local_presented_count],
       ["scroll applied by marker", (s.applied_scroll_y ?? 0) > 0, "appliedScrollY=" + s.applied_scroll_y],
       ["zero direct-byte fallbacks", (e.markers.direct_bytes_fallbacks ?? 1) === 0, "fallbacks=" + e.markers.direct_bytes_fallbacks],
+      ["K4 burst ran", (e.extra.burst_steps ?? 0) >= 30, "burstSteps=" + e.extra.burst_steps],
       ["did not time out", !e.extra.timed_out, "timedOut=" + Boolean(e.extra.timed_out)],
     ];
     let fails = 0;
@@ -105,6 +106,30 @@ printf '%s' "$evidence" | node -e '
       if (!ok) fails += 1;
       console.log(`${name}: ${ok ? "PASS" : "FAIL"}  ${detail}`);
     }
+    // The K4 numbers, formatted for the before/after table a latency change
+    // must quote. Informational, not pass/fail: what "good" means is the
+    // change under test.
+    const fmt = (r) => (r ? `p50=${r.p50Ms ?? r.p50_ms}ms p95=${r.p95Ms ?? r.p95_ms}ms max=${r.maxMs ?? r.max_ms}ms n=${r.count}` : "no samples");
+    const presented = e.status.presented;
+    const injector = e.extra.helper?.injector;
+    const replica = e.extra.replica;
+    console.log("");
+    console.log("K4 marker emit -> presented ack (remote clock): " + fmt(presented && { ...presented, p50Ms: presented.p50_ms, p95Ms: presented.p95_ms, maxMs: presented.max_ms }));
+    console.log("K4 frame time-to-inject (helper clock):        " + fmt(injector?.timing?.frameTimeToInject));
+    console.log("capture queue wait:                            " + fmt(replica?.timing?.captureQueueWait));
+    console.log("capture duration:                              " + fmt(replica?.timing?.captureDuration));
+    if (replica) {
+      console.log(
+        `captures: requested=${replica.capturesRequested ?? "-"} started=${replica.captures} ` +
+          `completed=${replica.capturesCompleted ?? "-"} supersededBeforeStart=${replica.capturesSupersededBeforeStart ?? "-"} ` +
+          `discarded=${replica.capturesDiscarded ?? "-"} served=${replica.surfacesServed}`
+      );
+    }
+    if (injector) {
+      console.log(`injector: accepted=${injector.accepted} superseded=${injector.superseded} injected=${injector.injectedTransactions}`);
+    }
+    const scale = e.sessions[0] ?? {};
+    console.log(`moving scale: ${scale.scroll_scale ?? "none (device only)"} (${scale.scroll_scale_source ?? "-"}), settle ${scale.scroll_settle_ms ?? "-"}ms`);
     console.log("");
     console.log("evidence: " + JSON.stringify(e));
     process.exit(fails === 0 ? 0 : 1);

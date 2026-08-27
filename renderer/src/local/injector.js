@@ -37,13 +37,23 @@
 
 import { uploadSequence, deleteImage } from "./kitty-writer.js";
 import { parseMarkerPayload } from "./markers.js";
+import { createReservoir } from "./timing.js";
 
 export class Injector {
-  constructor({ token, write, resolveUpload, boundary, onPairing }) {
+  constructor({ token, write, resolveUpload, boundary, onPairing, now }) {
     this.token = token;
     this.write = write;
     this.resolveUpload = resolveUpload;
     this.boundary = boundary;
+    // Injectable so the virtual-clock tests can measure the measurement;
+    // production takes the monotonic clock.
+    this.now = now ?? (() => performance.now());
+    // Marker-arrival -> transaction-write, frame markers only, and only for
+    // the transaction that actually lands: a superseded frame is never a
+    // latency sample, because nothing was ever late *to the glass* -- it was
+    // replaced. This is the helper's half of K4; the remote clock cannot
+    // reach in here and is not asked to.
+    this.frameTiming = createReservoir();
     // seq 0 is reserved: it is the pairing probe the remote plugin emits
     // through its own tty to prove which helper sits on this terminal. It
     // carries nothing and is never injected -- it is answered, over the
@@ -96,6 +106,10 @@ export class Injector {
     if (parsed.seq === 0) {
       this.onPairing(parsed);
       return;
+    }
+
+    if (parsed.uploads.some((upload) => upload.kind === "frame")) {
+      parsed.receivedAt = this.now();
     }
 
     if (parsed.uploads.length === 0) {
@@ -178,9 +192,18 @@ export class Injector {
       if (transaction.length === 0) continue;
       this.stats.injectedTransactions += 1;
       this.stats.injectedBytes += transaction.length;
+      if (tx.receivedAt !== undefined) this.frameTiming.add(this.now() - tx.receivedAt);
       this.write(transaction);
       this.onInjected(tx);
     }
+  }
+
+  /// The K4 stage timings, snapshotted as plain data for `--status` and the
+  /// health enrichment. `frameTimeToInject` covers marker arrival at this
+  /// filter to the frame transaction's write -- resolve wait, capture, and
+  /// injection, everything on this side of the wire.
+  timingSnapshot() {
+    return { frameTimeToInject: this.frameTiming.snapshot() };
   }
 
   carryDeletions(tx) {

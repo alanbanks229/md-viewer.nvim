@@ -262,3 +262,40 @@ test("the JS chunker reproduces the real Lua chunker byte-for-byte", () => {
     assert.deepEqual(produced, Buffer.from(expected_b64, "base64"), `id ${id} diverged from the Lua chunker`);
   }
 });
+
+test("K4: frame time-to-inject is sampled for landed frames and never for superseded ones", () => {
+  // A virtual clock measures the measurement: the sample must cover marker
+  // arrival to transaction write for exactly the frames that reached the
+  // terminal. A superseded frame is not late -- it is gone -- and letting it
+  // into the distribution would understate the lag a user actually saw.
+  let clock = 1000;
+  const writes = [];
+  let resolvable = false;
+  const injector = new Injector({
+    token: TOKEN,
+    write: (buf) => writes.push(Buffer.from(buf)),
+    resolveUpload: () => (resolvable ? Buffer.from("PNGBYTES") : null),
+    boundary: () => true,
+    now: () => clock,
+  });
+
+  assert.equal(injector.timingSnapshot().frameTimeToInject, null, "no samples before any frame lands");
+
+  // seq 1 arrives, defers (surface not rendered), and is superseded by seq 2.
+  injector.acceptMarker(payload({ seq: 1, doc: "buffer-1", uploads: [frameUpload(7)], placements: Buffer.from("P1") }));
+  clock = 1010;
+  injector.acceptMarker(payload({ seq: 2, doc: "buffer-1", uploads: [frameUpload(8)], placements: Buffer.from("P2") }));
+  clock = 1052;
+  resolvable = true;
+  injector.tryInject();
+
+  const snap = injector.timingSnapshot().frameTimeToInject;
+  assert.equal(snap.count, 1, "one frame landed, one sample -- the superseded frame contributed nothing");
+  assert.equal(snap.p50Ms, 42, "arrival at 1010, injected at 1052");
+  assert.equal(snap.maxMs, 42);
+
+  // A placement-only transaction is not a frame and takes no sample.
+  clock = 2000;
+  injector.acceptMarker(payload({ seq: 3, doc: "buffer-1", placements: Buffer.from("MOVE") }));
+  assert.equal(injector.timingSnapshot().frameTimeToInject.count, 1);
+});
