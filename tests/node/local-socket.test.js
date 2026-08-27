@@ -111,7 +111,10 @@ test("one client at a time; the second is refused BUSY, and a departed client fr
   first.send({ id: 1, method: "hello", params: { protocol: LOCAL_PROTOCOL } });
   await first.next();
 
+  // The refusal answers the first request rather than the bare connect, so a
+  // busy helper can still serve the read-only `status` query below.
   const second = await connectClient(socketPath);
+  second.send({ id: 1, method: "hello", params: { protocol: LOCAL_PROTOCOL } });
   const refusal = await second.next();
   assert.equal(refusal.code, "BUSY");
   await second.closed;
@@ -125,6 +128,38 @@ test("one client at a time; the second is refused BUSY, and a departed client fr
   const reply = await third.next();
   assert.equal(reply.ok, true);
   third.socket.destroy();
+});
+
+test("status answers without a hello and without disturbing an attached session", async (t) => {
+  const { service } = makeService();
+  service.setStatusProvider(() => ({ parser: { markerCount: 7 } }));
+  t.after(() => service.close());
+  const socketPath = await service.listen();
+
+  // Unattached: a fresh connection asks and leaves; no hello anywhere.
+  const probe = await connectClient(socketPath);
+  probe.send({ id: 9, method: "status" });
+  const idle = await probe.next();
+  assert.equal(idle.ok, true);
+  assert.equal(idle.result.attached, false);
+  assert.equal(idle.result.helperVersion, "md-viewer-local vtest");
+  assert.equal(idle.result.parser.markerCount, 7, "the provider's counters ride the answer");
+  assert.equal(idle.result.token, undefined, "status never leaks the token");
+  await probe.closed;
+
+  // Attached: a second connection's status is answered instead of refused
+  // BUSY, and the live session keeps its slot untouched.
+  const session = await connectClient(socketPath);
+  session.send({ id: 1, method: "hello", params: { protocol: LOCAL_PROTOCOL } });
+  await session.next();
+  const busyProbe = await connectClient(socketPath);
+  busyProbe.send({ id: 2, method: "status" });
+  const live = await busyProbe.next();
+  assert.equal(live.ok, true);
+  assert.equal(live.result.attached, true);
+  await busyProbe.closed;
+  assert.equal(service.connected(), true, "the attached session was not disturbed");
+  session.socket.destroy();
 });
 
 test("post-hello requests route to the handler, errors carry code and detail, notifications flow back", async (t) => {

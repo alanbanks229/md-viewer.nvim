@@ -38,7 +38,7 @@ import { StreamParser } from "./local/stream-parser.js";
 import { Injector } from "./local/injector.js";
 import { markerPrefix, parseMarkerPayload } from "./local/markers.js";
 import { probeTerminal } from "./local/tty-probe.js";
-import { SocketService } from "./local/socket-service.js";
+import { SocketService, defaultSocketDir } from "./local/socket-service.js";
 import { createReplica } from "./local/replica.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -54,16 +54,19 @@ function helperVersion() {
 
 function usage() {
   return [
-    "usage: node renderer/src/local-main.js [--version] [--marker-echo-test] -- <command...>",
+    "usage: node renderer/src/local-main.js [--version] [--status] [--marker-echo-test] -- <command...>",
     "",
     "Wraps an interactive command (normally `ssh <host>`) and filters its",
     "output for md-viewer local-render markers. Run it in place of the plain",
     "ssh invocation, on the machine the terminal is on.",
+    "",
+    "--status queries every helper socket on this machine and prints each",
+    "one's counters as JSON, without disturbing an attached session.",
   ].join("\n");
 }
 
 function parseArgs(argv) {
-  const flags = { version: false, echoTest: false };
+  const flags = { version: false, echoTest: false, status: false };
   let command = null;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
@@ -75,6 +78,8 @@ function parseArgs(argv) {
       flags.version = true;
     } else if (arg === "--marker-echo-test") {
       flags.echoTest = true;
+    } else if (arg === "--status") {
+      flags.status = true;
     } else if (arg.startsWith("--")) {
       throw new Error(`unknown flag: ${arg}\n${usage()}`);
     } else {
@@ -97,6 +102,56 @@ try {
 if (flags.version) {
   process.stdout.write(`${helperVersion()}\n`);
   process.exit(0);
+}
+
+if (flags.status) {
+  // Ask every helper socket on this machine for its counters. The `status`
+  // method answers before any hello and never claims the client slot, so a
+  // live attached session is inspected, not interrupted.
+  const net = await import("node:net");
+  const dir = defaultSocketDir();
+  let entries = [];
+  try {
+    entries = fs.readdirSync(dir).filter((name) => name.endsWith(".sock"));
+  } catch {}
+  if (entries.length === 0) {
+    process.stdout.write(`no helper sockets in ${dir}\n`);
+    process.exit(1);
+  }
+  let failures = 0;
+  for (const name of entries) {
+    const sockPath = path.join(dir, name);
+    const answer = await new Promise((resolve) => {
+      const socket = net.connect(sockPath);
+      let buffer = "";
+      const finish = (value) => {
+        socket.destroy();
+        resolve(value);
+      };
+      socket.setTimeout(3000, () => finish(null));
+      socket.on("error", () => finish(null));
+      socket.on("connect", () => socket.write(`${JSON.stringify({ id: 1, method: "status" })}\n`));
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) return;
+        try {
+          finish(JSON.parse(buffer.slice(0, newline)));
+        } catch {
+          finish(null);
+        }
+      });
+    });
+    if (answer?.ok) {
+      process.stdout.write(`${sockPath}\n${JSON.stringify(answer.result, null, 2)}\n`);
+    } else {
+      // A dead socket file is ordinary (a helper that was SIGKILLed leaves
+      // one); say so rather than failing silently.
+      failures += 1;
+      process.stdout.write(`${sockPath}: no helper answering (stale socket file?)\n`);
+    }
+  }
+  process.exit(failures === entries.length ? 1 : 0);
 }
 
 if (command.length === 0) {
@@ -194,7 +249,24 @@ if (!flags.echoTest) {
       if (parser.atSafeBoundary()) injector.tryInject();
     },
   });
-  service.setRequestHandler(replica.handle);
+  // The health answer is the replica's plus this process's own counters --
+  // parser and injector live out here, and their numbers are what lets the
+  // remote's :MdViewerHealth answer "did any PNG cross this link?" with the
+  // filter's own evidence (parser.remoteGraphicsCommands) instead of a guess.
+  service.setRequestHandler((method, params) => {
+    if (method === "health") {
+      return Promise.resolve(replica.handle(method, params)).then((health) => ({
+        ...health,
+        localHelper: {
+          version: helperVersion(),
+          parser: { ...parser.stats },
+          injector: { ...injector.stats },
+          socket: { ...service.stats },
+        },
+      }));
+    }
+    return replica.handle(method, params);
+  });
   injector = new Injector({
     token,
     write,
@@ -207,6 +279,11 @@ if (!flags.echoTest) {
   });
   injector.onInjected = (tx) =>
     service.notify("presented", { seq: tx.seq, doc: tx.doc, scrollY: tx.uploads[0]?.scrollY ?? null });
+  service.setStatusProvider(() => ({
+    parser: { ...parser.stats },
+    injector: injector ? { ...injector.stats } : null,
+    replica: replica.stats(),
+  }));
   try {
     await service.listen();
   } catch (error) {

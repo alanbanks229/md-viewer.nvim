@@ -46,6 +46,7 @@ export class SocketService {
     this.server = null;
     this.client = null; // the one authenticated connection
     this.requestHandler = null; // (method, params) -> Promise<result>, wired by the session layer
+    this.statusProvider = null; // extra read-only counters for statusSnapshot()
     this.onClientChange = () => {};
     this.stats = { helloCount: 0, refusedBusy: 0, refusedProtocol: 0, requests: 0, notifications: 0 };
   }
@@ -55,6 +56,29 @@ export class SocketService {
   /// hanging or guessing.
   setRequestHandler(handler) {
     this.requestHandler = handler;
+  }
+
+  /// Extra fields for the one-shot `status` answer -- the session layer hands
+  /// in parser/injector/replica counters this class has no business owning.
+  setStatusProvider(provider) {
+    this.statusProvider = provider;
+  }
+
+  /// What `--status` prints: read-only counters and identity, never the
+  /// token and never document content, so answering it without a hello is
+  /// safe on a socket that is already owner-0600.
+  statusSnapshot() {
+    const provided = this.statusProvider ? this.statusProvider() : {};
+    return {
+      helperVersion: this.helperVersion,
+      protocol: LOCAL_PROTOCOL,
+      attached: this.connected(),
+      socket: { ...this.stats },
+      terminal: this.probe
+        ? { kittyGraphics: this.probe.kittyGraphics, cellPixels: this.probe.cellPixels, probeSkipped: this.probe.skipped }
+        : null,
+      ...provided,
+    };
   }
 
   listen() {
@@ -81,11 +105,37 @@ export class SocketService {
 
   accept(socket) {
     if (this.client !== null) {
-      this.stats.refusedBusy += 1;
-      socket.write(
-        `${JSON.stringify({ id: -1, ok: false, code: "BUSY", error: "md-viewer-local already serves one session; a second nvim cannot share the replica" })}\n`
-      );
-      socket.end();
+      // A busy helper still answers exactly one thing -- a `status` request,
+      // so `--status` can inspect a live session without kicking it off the
+      // socket. Anything else on a busy socket gets the BUSY refusal.
+      socket.setNoDelay?.(true);
+      let buffer = "";
+      const timer = setTimeout(() => socket.destroy(), 5000);
+      timer.unref();
+      socket.on("error", () => socket.destroy());
+      socket.on("data", (chunk) => {
+        buffer += chunk.toString("utf8");
+        const newline = buffer.indexOf("\n");
+        if (newline === -1) {
+          if (buffer.length > 4096) socket.destroy();
+          return;
+        }
+        clearTimeout(timer);
+        let message = null;
+        try {
+          message = JSON.parse(buffer.slice(0, newline));
+        } catch {}
+        if (message && Number.isInteger(message.id) && message.method === "status") {
+          this.reply({ socket }, { id: message.id, ok: true, result: this.statusSnapshot() });
+        } else {
+          this.stats.refusedBusy += 1;
+          this.reply(
+            { socket },
+            { id: message?.id ?? -1, ok: false, code: "BUSY", error: "md-viewer-local already serves one session; a second nvim cannot share the replica" }
+          );
+        }
+        socket.end();
+      });
       return;
     }
 
@@ -138,6 +188,16 @@ export class SocketService {
     }
 
     if (!connection.helloDone) {
+      if (message.method === "status") {
+        // One-shot and read-only: the connection answers and ends without
+        // ever counting as the attached client. The slot is released *now*,
+        // not at the close event -- a hello arriving in that gap must not be
+        // refused BUSY on account of a status query that is already done.
+        if (this.client === connection) this.client = null;
+        this.reply(connection, { id: message.id, ok: true, result: this.statusSnapshot() });
+        connection.socket.end();
+        return;
+      }
       if (message.method !== "hello") {
         this.reply(connection, { id: message.id, ok: false, code: "HELLO_REQUIRED", error: "the first request on this socket must be hello" });
         drop();

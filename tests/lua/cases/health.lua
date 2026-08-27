@@ -210,6 +210,58 @@ return function(t)
 
     local clean = health._diagnose(base_report(), auto_cfg)
     t.eq(0, #clean.warnings, "a healthy, conventionally configured session warns about nothing")
+
+    -- Local rendering: the diagnosis answers "where do frames come from"
+    -- with the state machine's own words, and every not-attached state under
+    -- location="local" is a warning that carries the launch command.
+    local local_report = base_report()
+    local_report.render_location = "local"
+    local_report.local_render_phase = "fallback"
+    local_report.local_render_reason = "helper closed the socket"
+    local local_diag = health._diagnose(local_report, auto_cfg)
+    t.ok(
+      warning_texts(local_diag):match('render%.location = "local" but no helper is attached'),
+      "local mode without a helper warns"
+    )
+    t.ok(
+      section_values(local_diag):match("local requested, fallback"),
+      "the Rendering section says what is actually happening"
+    )
+
+    local attached_report = base_report()
+    attached_report.render_location = "local"
+    attached_report.local_render_phase = "attached"
+    attached_report.local_render_helper_version = "md-viewer-local v0.3.0 (abc1234)"
+    attached_report.local_markers_emitted = 41
+    local attached_diag = health._diagnose(attached_report, auto_cfg)
+    t.eq(0, #attached_diag.warnings, "an attached local session warns about nothing")
+    t.ok(section_values(attached_diag):match("local %(attached"), "and the Rendering section reports it as local")
+
+    local raced = base_report()
+    raced.render_location = "local"
+    raced.local_render_phase = "attached"
+    raced.local_direct_byte_fallbacks = 2
+    t.ok(
+      warning_texts(health._diagnose(raced, auto_cfg)):match("fell back to direct PNG bytes"),
+      "mode races are counted and surfaced"
+    )
+
+    local animated = base_report()
+    animated.render_location = "local"
+    animated.local_render_phase = "attached"
+    animated.render_animate = true
+    t.ok(
+      warning_texts(health._diagnose(animated, auto_cfg)):match("render%.animate has no effect"),
+      "animate under local mode says it does nothing"
+    )
+
+    -- Live collection carries the state machine's answer even with the
+    -- feature off, and the verbose dump gives the counters a section.
+    local collected = health.collect()
+    t.eq("off", collected.local_render_phase, "collect reports the localrender phase")
+    t.ok(type(collected.local_markers_emitted) == "number", "and the marker counters")
+    local env_lines = table.concat(health.environment_lines(local_report), "\n")
+    t.ok(env_lines:match("Local Rendering"), "the verbose dump has a Local Rendering section")
     t.eq(0, #clean.notes, "and has nothing to note either")
   end
 

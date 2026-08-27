@@ -190,6 +190,13 @@ function M.snapshot()
       overlay_last_bytes = session.overlay_last_bytes,
       overlay_last_ms = session.overlay_last_ms,
       overlay_last_error = session.overlay_last_error,
+      -- Local rendering, per session: frame markers out versus glass
+      -- confirmations back. Markers climbing while presented stays flat means
+      -- markers leave and nothing injects -- a pairing or filter problem, and
+      -- not one any renderer counter will show.
+      local_marker_frames = session.local_marker_frames or 0,
+      local_presented_count = session.local_presented_count or 0,
+      local_last_presented_scroll_y = session.local_last_presented_scroll_y,
     }
   end
   -- `renderer`, `backends` and `terminal` used to be dumped here as well.
@@ -203,6 +210,13 @@ function M.snapshot()
     -- back. This is the difference between "the click never reached the
     -- plugin" and "the plugin ran the handler and the OS declined".
     last_external_open = require("md-viewer.interaction").last_external or "none",
+    -- The local-render attachment and the marker presenter's counters --
+    -- module-wide like the transport itself, not per session.
+    local_render = (function()
+      local status = require("md-viewer.localrender").status()
+      status.markers = require("md-viewer.backends.kitty_marker").stats()
+      return status
+    end)(),
     events = M.events,
   }
 end

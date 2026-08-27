@@ -3,6 +3,8 @@ local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local linkrate = require("md-viewer.linkrate")
+local localrender = require("md-viewer.localrender")
+local marker_backend = require("md-viewer.backends.kitty_marker")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
 local state = require("md-viewer.state")
@@ -126,6 +128,8 @@ function M.collect(renderer_result, renderer_error)
   local capability = terminal.capability(cfg.terminal)
   local discovered_executable = renderer_result and renderer_result.executable
   local _, link_tier, link_detail = linkrate.resolve()
+  local local_status = localrender.status()
+  local marker_stats = marker_backend.stats()
   return {
     neovim = ("%d.%d.%d"):format(version.major, version.minor, version.patch),
     vim_ui_img = type(vim.ui and vim.ui.img) == "table",
@@ -245,6 +249,31 @@ function M.collect(renderer_result, renderer_error)
     chromium_cached_documents = renderer_result and renderer_result.cachedDocuments or "not queried",
     chromium_lane_documents = renderer_result and renderer_result.laneDocuments or "not queried",
     chromium_interaction_documents = renderer_result and renderer_result.interactionDocuments or "not queried",
+    -- Where frames render and present, and the evidence trail behind it.
+    -- The counters exist so "is this session actually locally rendered, or
+    -- are PNG bytes still crossing the remote link?" is answered by numbers,
+    -- never by how scrolling feels: markers up + zero fallbacks on this side,
+    -- and zero remote `a=t` commands seen by the filter on the other.
+    render_location = cfg.render.location,
+    render_animate = cfg.render.animate == true,
+    local_render_phase = local_status.phase,
+    local_render_reason = local_status.reason,
+    local_render_socket = local_status.socket_path,
+    local_render_helper_version = local_status.helper_version,
+    local_render_protocol = local_status.protocol,
+    local_markers_emitted = marker_stats.markers,
+    local_marker_bytes = marker_stats.marker_bytes,
+    local_direct_byte_fallbacks = marker_stats.direct_bytes_fallbacks,
+    -- The helper process's own counters, present only when the health round
+    -- trip crossed the control socket. parser.remoteGraphicsCommands is the
+    -- filter counting graphics uploads that arrived *from the remote
+    -- stream*: zero while attached is the local-mode invariant holding.
+    local_helper = renderer_result and renderer_result.localHelper or nil,
+    local_remote_graphics_commands = renderer_result
+        and renderer_result.localHelper
+        and renderer_result.localHelper.parser
+        and renderer_result.localHelper.parser.remoteGraphicsCommands
+      or nil,
   }
 end
 
@@ -459,6 +488,37 @@ end
 ---rather than in debug.lua because this module already owns the vocabulary
 ---for describing a machine's capabilities; debug.lua owns what the running
 ---preview is doing with them.
+---The local-render evidence trail. One row when the feature is off; the
+---full counter set once anything local has happened, with the helper's own
+---filter/injector numbers whenever the health round trip crossed the socket.
+local function verbose_local(report)
+  local rows = {
+    { "render location", report.render_location },
+    { "phase", report.local_render_phase },
+  }
+  if report.local_render_reason then rows[#rows + 1] = { "reason", report.local_render_reason } end
+  if report.render_location ~= "local" and (report.local_render_phase or "off") == "off" then return rows end
+  rows[#rows + 1] = { "helper", report.local_render_helper_version or "not attached" }
+  rows[#rows + 1] = { "socket", report.local_render_socket or "none" }
+  rows[#rows + 1] = { "protocol", report.local_render_protocol }
+  rows[#rows + 1] = { "markers emitted", report.local_markers_emitted or 0 }
+  rows[#rows + 1] = { "marker bytes", report.local_marker_bytes or 0 }
+  rows[#rows + 1] = { "direct-byte fallbacks", report.local_direct_byte_fallbacks or 0 }
+  local helper = report.local_helper
+  if helper and helper.parser then
+    rows[#rows + 1] = { "filter: markers seen", helper.parser.markerCount }
+    rows[#rows + 1] = { "filter: remote graphics commands", helper.parser.remoteGraphicsCommands }
+    rows[#rows + 1] = { "filter: passthrough bytes", helper.parser.passthroughBytes }
+  end
+  if helper and helper.injector then
+    rows[#rows + 1] = { "injector: injected", helper.injector.injectedTransactions }
+    rows[#rows + 1] = { "injector: injected bytes", helper.injector.injectedBytes }
+    rows[#rows + 1] = { "injector: superseded", helper.injector.superseded }
+    rows[#rows + 1] = { "injector: carried deletions", helper.injector.carriedDeletionBuffers }
+  end
+  return rows
+end
+
 function M.environment_lines(report)
   local output = {}
   local sections = {
@@ -466,6 +526,7 @@ function M.environment_lines(report)
     { title = "Terminal & Graphics", rows = verbose_terminal(report) },
     { title = "Backend Selection", rows = verbose_backend(report) },
     { title = "Raw Graphics (kitty_raw)", rows = verbose_raw_graphics(report) },
+    { title = "Local Rendering", rows = verbose_local(report) },
     { title = "Renderer Process", rows = verbose_renderer(report) },
     { title = "Security", rows = verbose_security(report) },
     {
@@ -557,6 +618,18 @@ local function process_summary(process)
   return "not started yet"
 end
 
+---One line answering where this session's frames come from. "local" is only
+---a fact while attached; any other phase names itself and its reason, so
+---"configured local but rendering here" cannot read as success.
+local function location_label(report)
+  if report.render_location ~= "local" then return "current (this host renders and ships frames)" end
+  if report.local_render_phase == "attached" then
+    return ("local (attached, helper %s)"):format(report.local_render_helper_version or "version unknown")
+  end
+  local reason = report.local_render_reason and (": " .. split_lines(report.local_render_reason)[1]) or ""
+  return ("local requested, %s%s"):format(report.local_render_phase or "off", reason)
+end
+
 local function build_sections(report, cfg)
   local terminal_rows = {
     { label = "Profile", value = ("%s on %s"):format(report.terminal_profile, report.platform), level = "info" },
@@ -580,6 +653,7 @@ local function build_sections(report, cfg)
         -- read as a green tick or as a fault. Nothing in md-viewer infers a link
         -- rate, so the absence of one is a fact rather than a degradation.
         { label = "Link rate", value = report.link_rate, level = "info" },
+        { label = "Location", value = location_label(report), level = "info" },
       },
     },
     { title = "Terminal", rows = terminal_rows },
@@ -630,6 +704,35 @@ local function build_warnings(report, status, status_reason)
         "Unset security.document_root to root each document in its own project, "
           .. "or adjust security.document_root_markers.",
       },
+    }
+  end
+  if report.render_location == "local" and report.local_render_phase ~= "attached" then
+    warnings[#warnings + 1] = {
+      text = ('render.location = "local" but no helper is attached (%s)'):format(
+        report.local_render_reason or report.local_render_phase or "not attached"
+      ),
+      severity = "warn",
+      detail = {
+        "Frames are rendering on this host and crossing the link as PNGs.",
+        "On the machine your terminal runs on, launch ssh through the helper:",
+        "  node <md-viewer>/renderer/src/local-main.js -- ssh <this-host>",
+      },
+    }
+  end
+  if (report.local_direct_byte_fallbacks or 0) > 0 then
+    warnings[#warnings + 1] = {
+      text = ("%d frame(s) fell back to direct PNG bytes while the marker presenter was installed"):format(
+        report.local_direct_byte_fallbacks
+      ),
+      severity = "warn",
+      detail = { "A mode race: correct pixels, expensive bytes. Recurring counts mean attach/demote is flapping." },
+    }
+  end
+  if report.render_location == "local" and report.render_animate then
+    warnings[#warnings + 1] = {
+      text = "render.animate has no effect in local mode; animated images render as still frames",
+      severity = "warn",
+      detail = { "Animation decode needs Chromium beside the document service, which local mode deliberately splits." },
     }
   end
   -- Neither divisor produced a cell a font could plausibly have, so the
