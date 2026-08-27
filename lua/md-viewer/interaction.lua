@@ -381,6 +381,16 @@ function M.request_selection(session, anchor, focus, capture_scale, is_commit, c
     -- Ask it to reuse the live DOM anchor in that case. Always a boolean, never
     -- nil: the wire-encoding discipline the `modifiers` table follows.
     anchorPinned = opts.anchor_scroll_y ~= nil and math.abs(scroll_y - opts.anchor_scroll_y) > 0.5,
+    -- Which character each point already names, so the renderer resolves the
+    -- exact character instead of re-hit-testing a coordinate that sits at a
+    -- glyph's own centre -- see resolveSelectionInPage's comment on why that
+    -- centre is an unresolvable tie on some glyphs (measured live: "##
+    -- Changelog" anchored at v selected as "hangelog", 2026-08-27). Absent
+    -- once either point has nothing live to carry one from (a click's own
+    -- point, or a re-render invalidating what was tracked), which resolves
+    -- exactly as it did before either index existed.
+    anchorIndex = anchor.index,
+    focusIndex = focus.index,
     cellWidthPx = focus.cellWidthPx,
     cellHeightPx = focus.cellHeightPx,
     viewportWidthPx = session.viewport_width_px,
@@ -481,9 +491,13 @@ function M.visual_start(session, linewise)
   -- Line-wise anchors at the page's own left edge rather than at the caret,
   -- which is what makes `V` cover the whole rendered line and not the tail of
   -- it. The renderer slides an endpoint that lands off content onto the nearest
-  -- block (`nearestBlockPoint`), so the margin resolves to the line's start.
+  -- block (`nearestBlockPoint`), so the margin resolves to the line's start --
+  -- unambiguously, since a margin point is never at a glyph's own tie. Only
+  -- the character-wise anchor sits exactly on one (the caret's own glyph
+  -- centre) and needs `index` to resolve it as the character it names rather
+  -- than re-guess from that centre point.
   local anchor = linewise and { x = 0, y = rect.y + rect.height / 2 }
-    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   session.visual_active = true
   session.visual_linewise = linewise == true
   session.pointer = {
@@ -513,7 +527,7 @@ function M.visual_update(session)
   local rect = caret.rect(session)
   if not rect then return end
   local point = session.visual_linewise and { x = (session.viewport_width_px or 1) - 1, y = rect.y + rect.height / 2 }
-    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   pointer.newest_pending_focus_point = point
   M.schedule_selection_preview(session)
 end
@@ -530,13 +544,15 @@ function M.visual_swap(session)
   local anchor = pointer and pointer.anchor_point
   local rect = caret.rect(session)
   if not (anchor and rect) then return false end
-  pointer.anchor_point = { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+  pointer.anchor_point = { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   pointer.anchor_scroll_y = session.applied_scroll_y or 0
   -- Place the caret on the old anchor by snapping it there; the motion's own
-  -- completion re-sends the selection with the two ends now exchanged. No index
-  -- goes with the box, deliberately: the anchor is a coordinate, so the snap
-  -- below has to resolve it as one rather than resume from wherever the caret
-  -- last was.
+  -- completion re-sends the selection with the two ends now exchanged. No
+  -- index goes with the box passed to set_rect: the anchor being swapped to is
+  -- a coordinate the caret has never occupied (the *old* anchor, not the
+  -- caret's own last position), so the "none" snap below has to resolve it as
+  -- a point rather than resume from an index that would name the wrong
+  -- character.
   caret.set_rect(session, { x = anchor.x, y = anchor.y, width = rect.width, height = rect.height })
   M.caret_motion(session, "none", "forward", 1)
   return true

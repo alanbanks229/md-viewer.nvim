@@ -7,6 +7,21 @@ All notable changes to this project will be documented here. The project uses
 
 ### Fixed
 
+- **A character-wise preview selection could lose its first or last
+  character.** `visual_start`/`visual_update` anchor and extend a selection at
+  the caret's own glyph *centre* -- exactly the tie `caretRangeFromPoint`
+  cannot break (the same ambiguity `caret_move`'s `caretIndex` exists to avoid
+  for the caret itself, documented in `moveCaretInPage`: "at the exact middle
+  of a glyph the boundaries either side are equidistant... differs from glyph
+  to glyph"). Measured live: `v` on a heading's first character selected
+  "## Changelog" as "hangelog". `selection_preview`/`selection_commit` now
+  accept `anchorIndex`/`focusIndex`, resolved against the exact character
+  space `caret_move` already uses instead of re-hit-testing an ambiguous
+  point, and the boundary chosen for each (before vs. after its character)
+  is picked from which endpoint is earlier in the document -- correct for
+  both forward and backward extension. Falls back to coordinate resolution
+  exactly as before whenever an index is absent (a click, or content that
+  has re-rendered since).
 - **Held-key scrolling paced on a round trip it did not need.** rc10 gated
   the next moving marker on the `presented` acknowledgement, so throughput
   in local mode was capped at one AWS SSM round trip per frame regardless of

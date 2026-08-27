@@ -159,6 +159,13 @@ async function selectionCommit(renderer, documentId, contentRevision, anchor, fo
   return response;
 }
 
+async function caretMove(renderer, documentId, contentRevision, coordinates, overrides = {}) {
+  const response = await renderer.send("interact", renderer.interactParams(documentId, contentRevision, {
+    action: "caret_move", coordinates, granularity: "none", ...overrides,
+  }));
+  return response;
+}
+
 test("selection: forward, backward, multi-block, nested markup, code, unicode, clearing, isolation", async (t) => {
   const executable = findRealChromium();
   if (!executable) {
@@ -196,6 +203,57 @@ test("selection: forward, backward, multi-block, nested markup, code, unicode, c
     assert.equal(backward.result.collapsed, false, "a right-to-left anchor/focus pair must not collapse the selection");
     assert.equal(backward.result.text, forwardText,
       "either direction across the same two points must select the same text");
+  });
+
+  await t.test("anchorIndex/focusIndex resolve a glyph's own tie instead of losing the character (regression)", async () => {
+    // interaction.lua's visual_start/visual_update anchor and focus a
+    // character-wise selection at the caret's glyph *centre* -- the exact
+    // point caretRangeFromPoint cannot break a tie at (moveCaretInPage's own
+    // comment: "at the exact middle of a glyph the boundaries either side are
+    // equidistant... stable per glyph and differs from glyph to glyph"). On
+    // "# Selection Doc"'s heading, that landed the anchor one character past
+    // the caret's own glyph, dropping it from the selection -- measured live
+    // on a real preview as "## Changelog" selecting as "hangelog"
+    // (2026-08-27). Without anchorIndex/focusIndex this reproduces the same
+    // way against the heading below; with them it must not.
+    const heading = blockAt(blocks, 0);
+    const headingY = Math.round((heading.topPx + heading.bottomPx) / 2);
+    const first = await caretMove(renderer, "sel-doc", "1:0", { x: 35, y: headingY }, { cellWidthPx: 10 });
+    assert.equal(first.ok, true, first.error);
+    assert.equal(first.result.ok, true, first.result.reason);
+    const firstRect = first.result.rect;
+    const centre = { x: firstRect.x + firstRect.width / 2, y: firstRect.y + firstRect.height / 2 };
+
+    // Move to the heading's last character too, the same way `visual_update`
+    // would after extending the selection to the end of the line.
+    const last = await caretMove(renderer, "sel-doc", "1:0", { x: firstRect.x, y: firstRect.y }, {
+      granularity: "lineboundary", direction: "forward", caretIndex: first.result.index, cellWidthPx: 10,
+    });
+    assert.equal(last.ok, true, last.error);
+    const lastRect = last.result.rect;
+    const lastCentre = { x: lastRect.x + lastRect.width / 2, y: lastRect.y + lastRect.height / 2 };
+
+    const withoutIndices = await selectionCommit(renderer, "sel-doc", "1:0", centre, lastCentre);
+    assert.equal(withoutIndices.ok, true, withoutIndices.error);
+    assert.equal(withoutIndices.result.ok, true, withoutIndices.result.reason);
+
+    const withIndices = await selectionCommit(renderer, "sel-doc", "1:0", centre, lastCentre, {
+      anchorIndex: first.result.index, focusIndex: last.result.index,
+    });
+    assert.equal(withIndices.ok, true, withIndices.error);
+    assert.equal(withIndices.result.ok, true, withIndices.result.reason);
+    assert.equal(withIndices.result.collapsed, false);
+    assert.equal(withIndices.result.text, "Selection Doc",
+      "with indices, both the first and last character of the heading survive");
+
+    // Reversed roles -- anchor on the LAST character, focus on the FIRST --
+    // must resolve identically, proving the fix is direction-aware rather
+    // than "always bias left/right".
+    const reversed = await selectionCommit(renderer, "sel-doc", "1:0", lastCentre, centre, {
+      anchorIndex: last.result.index, focusIndex: first.result.index,
+    });
+    assert.equal(reversed.ok, true, reversed.error);
+    assert.equal(reversed.result.text, "Selection Doc", "backward extension keeps both endpoints too");
   });
 
   await t.test("multi-block selection spans from one paragraph into the next", async () => {

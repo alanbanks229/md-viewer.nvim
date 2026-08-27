@@ -791,6 +791,7 @@ export class BrowserRenderer {
       return this.page.evaluate(resolveSelectionInPage, {
         token, anchor: envelope.anchorCoordinates, focus: envelope.coordinates,
         anchorPinned: envelope.anchorPinned,
+        anchorIndex: envelope.anchorIndex, focusIndex: envelope.focusIndex,
         cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
         maxRects: MAX_SELECTION_RECTS,
       });

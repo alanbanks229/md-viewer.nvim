@@ -238,6 +238,37 @@ export function validateEnvelope(params) {
   // exactly as it did before this existed.
   const anchorPinned = envelope.anchorPinned === true;
 
+  // `caretIndex`'s counterpart for a selection endpoint: which character the
+  // caller already knows this point sits on, in the renderer's own character
+  // space, rather than a point resolveSelectionInPage would have to hit-test
+  // again. Exists for the identical reason caretIndex does -- a selection
+  // anchor or focus placed at a glyph's own centre (interaction.lua's
+  // `visual_start`/`visual_update`) asks caretRangeFromPoint to break a tie at
+  // the exact midpoint between two characters, and the answer depends on
+  // rounding that differs glyph to glyph: on the glyphs that round toward the
+  // next character, a forward `V`/`v` selection anchored on a line's first
+  // character lost it (measured live, 2026-08-27: "## Changelog" selected as
+  // "hangelog"), and a selection extended to a line's last character lost
+  // that one the same way. Optional, and deliberately: a fresh click's anchor
+  // and a selection with nothing live to reuse an index from resolve from
+  // coordinates the way they always did.
+  let anchorIndex = null;
+  let focusIndex = null;
+  if (action.requiresAnchor) {
+    if (envelope.anchorIndex !== undefined && envelope.anchorIndex !== null) {
+      if (!Number.isInteger(envelope.anchorIndex) || envelope.anchorIndex < 0) {
+        throw createInteractError("INVALID_INTERACTION", `${envelope.action} anchorIndex must be a non-negative integer`);
+      }
+      anchorIndex = envelope.anchorIndex;
+    }
+    if (envelope.focusIndex !== undefined && envelope.focusIndex !== null) {
+      if (!Number.isInteger(envelope.focusIndex) || envelope.focusIndex < 0) {
+        throw createInteractError("INVALID_INTERACTION", `${envelope.action} focusIndex must be a non-negative integer`);
+      }
+      focusIndex = envelope.focusIndex;
+    }
+  }
+
   // `caret_move`'s two axes. Validated here rather than in the page so an
   // unknown granularity is an honest INVALID_INTERACTION instead of a caret
   // that silently declines to move.
@@ -379,6 +410,8 @@ export function validateEnvelope(params) {
     coordinates,
     anchorCoordinates,
     anchorPinned,
+    anchorIndex,
+    focusIndex,
     granularity,
     direction,
     motionCount,
@@ -719,6 +752,111 @@ export function resolveSelectionInPage(input) {
     return { error: "DOCUMENT_MISMATCH", expected: token, actual: root.getAttribute("data-md-viewer-doc") };
   }
 
+  // moveCaretInPage's character-space, duplicated rather than shared -- see
+  // this function's own comment for why a page.evaluate body cannot call a
+  // sibling. Built only when an index was actually sent: every caller with
+  // nothing live to reuse an index from (a fresh click, a selection with no
+  // caret history) still resolves from a point exactly as before, and this
+  // walk costs nothing on that path.
+  let indexedNodes = null;
+  let indexedStarts = null;
+  let indexedText = "";
+  function buildCharacterSpace() {
+    if (indexedNodes !== null) return;
+    indexedNodes = [];
+    indexedStarts = [];
+    const blocks = document.querySelectorAll("[data-source-start][data-source-end]");
+    const seen = new Set();
+    let previousInner = null;
+    for (const block of blocks) {
+      const rect = block.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) continue;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node.nodeValue.length > 0 && !seen.has(node)) {
+          seen.add(node);
+          const inner = node.parentElement && node.parentElement.closest("[data-source-start][data-source-end]");
+          if (indexedText.length > 0 && inner !== previousInner) indexedText += "\n";
+          previousInner = inner;
+          indexedNodes.push(node);
+          indexedStarts.push(indexedText.length);
+          indexedText += node.nodeValue;
+        }
+        node = walker.nextNode();
+      }
+    }
+  }
+  // Resolve a flat character index to a (node, offset) Range boundary --
+  // the counterpart to resolveSelectionPoint below, but exact rather than
+  // hit-tested, because the caller already knows which character this is
+  // (its own last caret_move answer, or the character `visual_start`
+  // anchored on) and only needs the DOM position back, not a fresh guess at
+  // one from a pixel. `boundary` picks which side of that character the
+  // Range lands on -- "start" (before it) or "end" (after it, still the
+  // same character, never the next one) -- so the caller can guarantee this
+  // character survives being an endpoint regardless of which direction the
+  // other endpoint sits in.
+  function resolveIndex(flat, boundary) {
+    if (!Number.isInteger(flat) || flat < 0) return null;
+    buildCharacterSpace();
+    if (flat >= indexedText.length) return null;
+    let low = 0;
+    let high = indexedNodes.length - 1;
+    let nodeIndex = 0;
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      if (indexedStarts[mid] <= flat) {
+        nodeIndex = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    const node = indexedNodes[nodeIndex];
+    const charOffset = flat - indexedStarts[nodeIndex];
+    if (charOffset >= node.nodeValue.length) return null;
+    // "end" is one past this character's own start, inside the same text
+    // node -- a single indexed character is one UTF-16 code unit of one
+    // node's value, never split across two, so charOffset + 1 always stays
+    // in bounds here (the length check above already proved a character
+    // exists at charOffset).
+    const offset = boundary === "end" ? charOffset + 1 : charOffset;
+    const element = node.parentElement;
+    if (element === null) return null;
+    const block = element.closest("[data-source-start][data-source-end]");
+    if (block === null) return null;
+    let runElement = element.closest("[data-md-source-id]");
+    if (runElement !== null && !block.contains(runElement)) runElement = null;
+    let runOffset = null;
+    let runLength = null;
+    if (runElement !== null) {
+      runLength = (runElement.textContent || "").length;
+      const runWalker = document.createTreeWalker(runElement, NodeFilter.SHOW_TEXT);
+      let consumed = 0;
+      let current = runWalker.nextNode();
+      while (current !== null) {
+        if (current === node) {
+          runOffset = consumed + offset;
+          break;
+        }
+        consumed += current.nodeValue.length;
+        current = runWalker.nextNode();
+      }
+    }
+    return {
+      node,
+      offset,
+      block: {
+        sourceStart: Number(block.getAttribute("data-source-start")),
+        sourceEnd: Number(block.getAttribute("data-source-end")),
+        sourceId: block.getAttribute("data-md-source-id"),
+        tagName: block.tagName,
+      },
+      inline: runElement === null ? null : { sourceId: runElement.getAttribute("data-md-source-id"), offset: runOffset, textLength: runLength },
+    };
+  }
+
   // Resolve one point to the deepest addressable position: a block, an
   // optional inline provenance run, and a DOM (node, offset) pair usable as a
   // Range boundary. Unlike hitTestInPage's miss cases, a selection endpoint
@@ -1006,27 +1144,62 @@ export function resolveSelectionInPage(input) {
 
   const selection = window.getSelection();
 
-  // A selection whose page scrolls mid-gesture moves its own anchor coordinate
-  // out from under itself. The anchor's viewport y shifts with every scrolled
-  // pixel, and once it leaves the viewport entirely resolveSelectionPoint
-  // refuses it outright (its first line bounds-checks against innerHeight), so
-  // the whole frame returns anchor_miss and interaction.lua's `result.ok ~=
-  // false` check silently drops it -- the highlight freezes at the edge. That
-  // is what happens when a keyboard motion scrolls the page mid-extension.
+  // Resolution order, most precise first:
   //
-  // Reuse the live DOM anchor instead: it is precisely the endpoint
-  // setBaseAndExtent recorded on the previous frame, expressed as a node rather
-  // than a pixel, so scrolling cannot touch it. Falls back to the coordinate
-  // whenever there is nothing live to pin to -- the first frame of a gesture,
-  // or a selection cleared in between -- which is also what makes the field
-  // safe to send unconditionally.
+  // 1. Index. Names the exact character the caller already resolved
+  //    (visual_start's caret, or a previous frame's own focus answer below)
+  //    instead of a coordinate resolveSelectionPoint would have to hit-test
+  //    again -- and a coordinate at a glyph's own centre is exactly the
+  //    unresolvable tie caret_move's `caretIndex` exists to avoid for the
+  //    caret itself; the selection anchor and focus sit on that same tie and
+  //    never had an equivalent fix (measured live: "## Changelog" anchored at
+  //    `v` selected as "hangelog", 2026-08-27). Checked, not trusted, like
+  //    caretIndex: a re-render invalidates it, and resolveIndex reports that
+  //    as null rather than a wrong character.
+  //
+  //    A Range boundary at offset N sits *before* character N, so a selection
+  //    must land at an index's own offset to include it as its FIRST
+  //    character and at (offset + 1) to include it as its LAST -- whichever
+  //    endpoint is earlier in the flat index needs the former, the later
+  //    needs the latter, or neither endpoint's own character survives being
+  //    anchored to it. Both indices are needed to know which is which; when
+  //    only one is available the other endpoint's own resolution (a
+  //    coordinate, or the live DOM anchor below) already stands on its own,
+  //    so this one gets the plain start offset resolveIndex returns by
+  //    default -- exactly how it resolved before either index existed.
+  //
+  // 2. The live DOM anchor, when the page has scrolled since the anchor
+  //    coordinate was measured: the anchor's viewport y shifts with every
+  //    scrolled pixel, and once it leaves the viewport entirely
+  //    resolveSelectionPoint refuses it outright (its first line
+  //    bounds-checks against innerHeight), so the whole frame would return
+  //    anchor_miss and interaction.lua's `result.ok ~= false` check would
+  //    silently drop it -- the highlight freezing at the edge on a keyboard
+  //    motion that scrolled the page mid-extension. The live anchor is
+  //    precisely the endpoint setBaseAndExtent recorded on the previous
+  //    frame, expressed as a node rather than a pixel, so scrolling cannot
+  //    touch it.
+  //
+  // 3. The coordinate, exactly as before either of the above existed.
   let anchor = null;
-  if (input.anchorPinned === true && selection.anchorNode !== null) {
+  let focus = null;
+  const haveBothIndices = Number.isInteger(input.anchorIndex) && Number.isInteger(input.focusIndex);
+  if (haveBothIndices) {
+    const anchorFirst = input.anchorIndex <= input.focusIndex;
+    anchor = resolveIndex(input.anchorIndex, anchorFirst ? "start" : "end");
+    focus = resolveIndex(input.focusIndex, anchorFirst ? "end" : "start");
+  } else if (Number.isInteger(input.anchorIndex)) {
+    anchor = resolveIndex(input.anchorIndex, "start");
+  }
+  if (!anchor && input.anchorPinned === true && selection.anchorNode !== null) {
     anchor = describeNode(selection.anchorNode, selection.anchorOffset);
   }
   if (!anchor) anchor = resolveSelectionPoint(input.anchor.x, input.anchor.y, input.cellWidthPx, input.strategy);
   if (!anchor) return { ok: false, reason: "anchor_miss" };
-  const focus = resolveSelectionPoint(input.focus.x, input.focus.y, input.cellWidthPx, input.strategy);
+  if (!focus && !haveBothIndices && Number.isInteger(input.focusIndex)) {
+    focus = resolveIndex(input.focusIndex, "start");
+  }
+  if (!focus) focus = resolveSelectionPoint(input.focus.x, input.focus.y, input.cellWidthPx, input.strategy);
   if (!focus) return { ok: false, reason: "focus_miss" };
 
   applySelectionRange(selection, anchor.node, anchor.offset, focus.node, focus.offset);
