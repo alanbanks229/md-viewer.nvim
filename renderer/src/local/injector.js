@@ -49,6 +49,10 @@ export class Injector {
     // carries nothing and is never injected -- it is answered, over the
     // socket, by whoever constructed us with this hook.
     this.onPairing = onPairing ?? (() => {});
+    // Called after a transaction's bytes reach the terminal, with the parsed
+    // transaction; the session layer turns it into the `presented`
+    // notification the remote reconciles scroll state from.
+    this.onInjected = () => {};
 
     this.pendingByDoc = new Map(); // doc -> parsed surface transaction, newest only
     this.immediateQueue = []; // placement-only / deletion-only, in arrival order
@@ -175,6 +179,7 @@ export class Injector {
       this.stats.injectedTransactions += 1;
       this.stats.injectedBytes += transaction.length;
       this.write(transaction);
+      this.onInjected(tx);
     }
   }
 

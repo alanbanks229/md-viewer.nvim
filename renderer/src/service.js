@@ -20,6 +20,7 @@ import { renderMarkdown } from "./markdown.js";
 import { AnimationStore } from "./animation.js";
 import { LANES, createLaneError, createLaneRegistry } from "./lanes.js";
 import { validateEnvelope } from "./interact.js";
+import { AssetStore } from "./local/asset-store.js";
 
 const MAX_CACHED_DOCUMENTS = 64;
 
@@ -29,6 +30,8 @@ const MAX_CACHED_DOCUMENTS = 64;
 // power to cancel renders, which is exactly what this design removes.
 const ALLOWED_LANES = {
   render: ["content"],
+  render_prepared: ["content"],
+  prepare: ["content"],
   capture: ["capture", "settle"],
   interact: ["interact"],
 };
@@ -56,6 +59,10 @@ export function createService({ assetsDir, onShutdown } = {}) {
   // describes when this markup was produced rather than what the document says,
   // and that is what disqualifies it from being reused as final.
   const markdownCache = new Map();
+  // Content-addressed bytes behind the `md-asset:` refs `prepare` emits.
+  // Keyed purely by content: two documents sharing an image share one entry,
+  // and re-preparing a revision costs no storage.
+  const documentAssets = new AssetStore();
   // documentId -> per-document interaction state, held in trusted Node memory
   // rather than on the page. setContent destroys page state on every document
   // switch; this map survives it, and it is keyed by document so one preview's
@@ -146,9 +153,16 @@ export function createService({ assetsDir, onShutdown } = {}) {
   function dispatchRender(request) {
     const params = request.params ?? {};
     const captureOnly = request.method === "capture";
+    // The local-render path: the markup was produced by a `prepare` on the
+    // machine the document lives on and crossed the control link already
+    // sanitized, with its images as content-addressed refs the caller has
+    // substituted back to data: URIs. Same lanes, same cache, same browser
+    // path -- only the "markdown -> html" step is elsewhere.
+    const prepared = request.method === "render_prepared";
     if (typeof params.documentId !== "string"
-      || (!captureOnly && typeof params.markdown !== "string")) {
-      throw new Error("render requires documentId and markdown strings; capture requires documentId");
+      || (!captureOnly && !prepared && typeof params.markdown !== "string")
+      || (prepared && typeof params.html !== "string")) {
+      throw new Error("render requires documentId and markdown; render_prepared requires documentId and html; capture requires documentId");
     }
     const lane = resolveLane(request.method, params.lane);
     // Stamped synchronously, before this function's caller reaches any `await`.
@@ -169,7 +183,24 @@ export function createService({ assetsDir, onShutdown } = {}) {
       let markdownKey;
       let markdownReused;
       let html;
-      if (captureOnly) {
+      if (prepared) {
+        markdownKey = JSON.stringify(["prepared", params.contentRevision ?? null]);
+        markdownReused = previous?.key === markdownKey;
+        if (markdownReused) {
+          html = previous.html;
+          rememberMarkdown(params.documentId, previous);
+        } else {
+          html = params.html;
+          rememberMarkdown(params.documentId, {
+            key: markdownKey,
+            html,
+            sourceMap: params.sourceMap ?? null,
+            animations: new Map(),
+            remoteImagesPending: 0,
+          });
+          interactionState.delete(params.documentId);
+        }
+      } else if (captureOnly) {
         if (!previous) {
           const error = new Error("capture cache missing; perform a full render first");
           error.code = "CAPTURE_CACHE_MISS";
@@ -329,6 +360,77 @@ export function createService({ assetsDir, onShutdown } = {}) {
     return enqueue(task, ticket);
   }
 
+  /// The document-service half of local rendering: parse and sanitize the
+  /// markdown exactly as `render` would -- same security pipeline, same
+  /// remote-image policy, same caller-supplied roots -- but stop before the
+  /// browser and extract every validated image into the content-addressed
+  /// store, returning markup whose images are `md-asset:<sha>` refs plus the
+  /// manifest of what those refs mean. The bytes themselves travel only
+  /// through `fetch_assets`, only for the shas the far side reports missing:
+  /// once per content per helper lifetime, never per revision.
+  ///
+  /// This method never touches Chromium, which is the point: in local mode
+  /// the VM-side process runs markdown and policy and nothing heavier.
+  function dispatchPrepare(request) {
+    const params = request.params ?? {};
+    if (typeof params.documentId !== "string" || typeof params.markdown !== "string") {
+      throw new Error("prepare requires documentId and markdown strings");
+    }
+    const ticket = lanes.admit({
+      documentId: params.documentId,
+      lane: resolveLane("prepare", params.lane),
+      requestId: request.id,
+      contentRevision: params.contentRevision,
+    });
+    const task = async () => {
+      const before = lanes.isStale(ticket);
+      if (before) throw lanes.staleError(ticket, before);
+      const rendered = await renderMarkdown(params.markdown, {
+        rawHtml: params.rawHtml === true,
+        localImages: params.localImages === true,
+        maxLocalImageBytes: Number(params.maxLocalImageBytes) || 10 * 1024 * 1024,
+        baseDir: params.baseDir,
+        documentRoot: params.documentRoot,
+        // Animation needs a decode context beside a browser this process is
+        // not running in local mode; the config gate keeps it off, and this
+        // keeps it structurally off.
+        animationStore: null,
+        assetStore: documentAssets,
+      });
+      const after = lanes.isStale(ticket);
+      if (after) throw lanes.staleError(ticket, after);
+      const assets = [];
+      for (const match of rendered.html.matchAll(/md-asset:([0-9a-f]{64})/g)) {
+        const sha = match[1];
+        if (assets.some((entry) => entry.sha === sha)) continue;
+        const entry = documentAssets.get(sha);
+        if (entry) assets.push({ sha, mime: entry.mime, size: entry.data.length });
+      }
+      return {
+        html: rendered.html,
+        sourceMap: rendered.sourceMap,
+        remoteImagesPending: rendered.remoteImagesPending > 0,
+        assets,
+      };
+    };
+    return enqueue(task, ticket);
+  }
+
+  /// Serve asset bytes by sha, for the helper-reported misses. Outside the
+  /// queue: a pure cache read must never wait behind a render.
+  function dispatchFetchAssets(request) {
+    const shas = Array.isArray(request.params?.shas) ? request.params.shas : null;
+    if (!shas) throw new Error("fetch_assets requires a shas array");
+    const assets = [];
+    const unknown = [];
+    for (const sha of shas) {
+      const entry = typeof sha === "string" ? documentAssets.get(sha) : null;
+      if (entry) assets.push({ sha, mime: entry.mime, data: entry.data.toString("base64") });
+      else unknown.push(sha);
+    }
+    return { assets, unknown };
+  }
+
   /// Materialize the PNG frames for animated images, addressed by content hash.
   ///
   /// Deliberately outside `enqueue`. The decode happens in the decode context's
@@ -387,7 +489,9 @@ export function createService({ assetsDir, onShutdown } = {}) {
     }
     if (request.method === "animation") return dispatchAnimation(request);
     if (request.method === "interact") return dispatchInteract(request);
-    if (request.method !== "render" && request.method !== "capture") {
+    if (request.method === "prepare") return dispatchPrepare(request);
+    if (request.method === "fetch_assets") return dispatchFetchAssets(request);
+    if (request.method !== "render" && request.method !== "capture" && request.method !== "render_prepared") {
       throw new Error(`unknown method: ${request.method}`);
     }
     return dispatchRender(request);

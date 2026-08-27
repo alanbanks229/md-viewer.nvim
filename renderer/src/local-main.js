@@ -39,6 +39,7 @@ import { Injector } from "./local/injector.js";
 import { markerPrefix, parseMarkerPayload } from "./local/markers.js";
 import { probeTerminal } from "./local/tty-probe.js";
 import { SocketService } from "./local/socket-service.js";
+import { createReplica } from "./local/replica.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -183,21 +184,29 @@ const parser = new StreamParser({
 });
 
 let service = null;
+let replica = null;
 if (!flags.echoTest) {
   service = new SocketService({ token, helperVersion: helperVersion(), probe });
+  replica = createReplica({
+    assetsDir: path.resolve(here, "../assets"),
+    onNotify: (event, fields) => service.notify(event, fields),
+    onSurfaceReady: () => {
+      if (parser.atSafeBoundary()) injector.tryInject();
+    },
+  });
+  service.setRequestHandler(replica.handle);
   injector = new Injector({
     token,
     write,
-    // Until the replica renderer attaches (it arrives with the session
-    // layer), no surface can resolve; deferred frames simply wait and
-    // deletion-only transactions still work.
-    resolveUpload: () => null,
+    resolveUpload: (upload, doc) => replica.resolveUpload(upload, doc),
     boundary: () => parser.atSafeBoundary(),
     // The pairing probe: the plugin emitted a seq-0 marker through its own
     // tty; only the helper filtering *this* terminal sees it, so answering
     // over the socket is the proof that socket and terminal belong together.
     onPairing: () => service.notify("presented", { seq: 0 }),
   });
+  injector.onInjected = (tx) =>
+    service.notify("presented", { seq: tx.seq, doc: tx.doc, scrollY: tx.uploads[0]?.scrollY ?? null });
   try {
     await service.listen();
   } catch (error) {
@@ -261,7 +270,12 @@ cleanup = () => {
         `rejected-candidates=${parser.stats.rejectedCandidates}\n`
     );
   }
+  // Kill the child before the (awaited) browser teardown, never after a
+  // return that skips it -- a wrapper that forgets this line is exactly how
+  // orphans happen, and the orphan-exit test caught this one being ordered
+  // wrong.
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+  if (replica) return replica.close();
 };
 
 child.on("exit", (code, signal) => {

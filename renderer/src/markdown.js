@@ -115,6 +115,16 @@ function createMarkdown(options) {
     if (result.ok) {
       token.attrSet("src", result.dataUri);
       registerAnimation(token, result.dataUri, options, env);
+      // Local-render document service: the fully validated bytes leave the
+      // markup as a content-addressed reference and cross the link once per
+      // content, not once per revision. This sits after every validation and
+      // after animation registration on purpose -- the ref changes how bytes
+      // *travel*, never what was allowed. Placeholders below stay inline:
+      // they are generated SVG, not document content.
+      if (options.assetStore) {
+        const sha = options.assetStore.putDataUri(result.dataUri);
+        if (sha) token.attrSet("src", `md-asset:${sha}`);
+      }
     } else {
       token.attrSet("src", placeholderDataUri(result.kind, result.label, source));
       // "pending" reads as failed for styling: the alternative is a third
@@ -278,7 +288,11 @@ export async function renderMarkdown(markdown, options) {
       h1: ["id"], h2: ["id"], h3: ["id"], h4: ["id"], h5: ["id"], h6: ["id"],
     },
     allowedSchemes: ["data", "http", "https", "mailto"],
-    allowedSchemesByTag: { img: ["data"], a: ["http", "https", "mailto"] },
+    // `md-asset:` survives sanitization only when this render is extracting
+    // assets; in every other configuration the scheme is stripped like any
+    // other unknown, so a document cannot smuggle a ref to an asset it never
+    // supplied through the ordinary path.
+    allowedSchemesByTag: { img: options.assetStore ? ["data", "md-asset"] : ["data"], a: ["http", "https", "mailto"] },
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });
