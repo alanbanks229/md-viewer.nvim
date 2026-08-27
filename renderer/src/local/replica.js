@@ -24,6 +24,7 @@ import { createService } from "../service.js";
 import { AssetStore } from "./asset-store.js";
 import { buildOverlaySheetPng } from "../overlay-sheet.js";
 import { INTERACT_ACTIONS } from "../interact.js";
+import { createReservoir } from "./timing.js";
 
 const MAX_SURFACES = 16;
 
@@ -31,20 +32,34 @@ function surfaceKey(doc, rev, scrollY, widthPx, heightPx, scale, epoch) {
   return [doc, rev, Math.round(scrollY), `${widthPx}x${heightPx}@${scale}`, `e${epoch}`].join("\0");
 }
 
-export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady = () => {} } = {}) {
+export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady = () => {}, now } = {}) {
   const service = createService({ assetsDir });
   const assets = new AssetStore();
+  const clock = now ?? (() => performance.now());
   const surfaces = new Map(); // surfaceKey -> Buffer (PNG), insertion-LRU
-  const docs = new Map(); // documentId -> { lastParams, epoch, pending }
-  const inflight = new Set(); // surfaceKeys with a capture already dispatched
+  const docs = new Map(); // documentId -> { lastParams, epoch, pending, capture state }
   const missingNotified = new Set(); // doc\0rev already NACKed
   let requestSerial = 0;
-  const stats = { renders: 0, captures: 0, surfacesServed: 0, assetMisses: 0, assetRefused: 0 };
+  const stats = {
+    renders: 0,
+    captures: 0, // dispatched to the browser queue (capturesStarted)
+    capturesRequested: 0, // distinct surface wants that reached the scheduler
+    capturesCompleted: 0,
+    capturesSupersededBeforeStart: 0, // a newer want replaced a queued one
+    capturesDiscarded: 0, // completed or failed without producing a surface
+    surfacesServed: 0,
+    assetMisses: 0,
+    assetRefused: 0,
+  };
+  const timing = {
+    captureQueueWait: createReservoir(), // want recorded -> capture dispatched
+    captureDuration: createReservoir(), // capture dispatched -> pixels stored
+  };
 
   function docRecord(documentId) {
     let record = docs.get(documentId);
     if (!record) {
-      record = { lastParams: null, epoch: 0, pending: null, laidOutRevision: null };
+      record = { lastParams: null, epoch: 0, pending: null, laidOutRevision: null, wanted: null, capturingKey: null };
       docs.set(documentId, record);
     }
     return record;
@@ -219,16 +234,54 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
     // says the cache is the right one.
     if (record.laidOutRevision !== String(upload.rev)) return;
     const key = surfaceKey(documentId, upload.rev, upload.scrollY, upload.widthPx, upload.heightPx, upload.scale, upload.epoch);
-    if (inflight.has(key)) return;
-    inflight.add(key);
+    // One capture in flight per document, newest want wins. The alternative
+    // -- dispatching every missed reference into the serial browser queue --
+    // is what rc9 shipped, and its arithmetic on the work laptop (2026-08-27)
+    // was 517 captures for 206 surfaces served: each new scroll position
+    // admitted a capture that superseded the one already *running*, so the
+    // finished screenshot failed its post-work staleness check and was
+    // discarded, browser flat out, screen mostly still. Holding one want and
+    // dispatching only when idle means the running capture stays current in
+    // its lane, every completed screenshot lands, and a scroll burst costs
+    // captures at the browser's own rate instead of one per position.
+    if (record.capturingKey === key || record.wanted?.key === key) return;
+    if (record.wanted) stats.capturesSupersededBeforeStart += 1;
+    record.wanted = { upload, key, at: clock() };
+    stats.capturesRequested += 1;
+    pumpCapture(documentId, record);
+  }
+
+  function pumpCapture(documentId, record) {
+    if (record.capturingKey || !record.wanted) return;
+    const { upload, key, at } = record.wanted;
+    record.wanted = null;
+    // Re-validated at dispatch, not only at want time: an epoch bump or a new
+    // revision may have landed while this want sat behind a running capture,
+    // and pixels captured for it now could never resolve any live marker.
+    if (record.epoch !== upload.epoch || record.laidOutRevision !== String(upload.rev)) return;
+    record.capturingKey = key;
     stats.captures += 1;
+    timing.captureQueueWait.add(clock() - at);
+    const started = clock();
+    // The marker's scale is the capture's scale: a moving-tier reference
+    // (`c=` below the device factor) is captured reduced, exactly as the
+    // direct path captures its moving frame, and only the settle reference
+    // pays full device resolution. The browser clamps the css factor to
+    // [0.25, 1] on its side too.
+    const device = (record.lastParams.viewport ?? {}).deviceScaleFactor ?? 1;
+    const scaleParams =
+      upload.scale >= device
+        ? { captureScale: "device" }
+        : { captureScale: "css", captureScaleFactor: upload.scale };
     dispatch("capture", {
       ...record.lastParams,
       contentRevision: upload.rev,
       scrollY: upload.scrollY,
-      captureScale: "device",
+      ...scaleParams,
     })
       .then((result) => {
+        timing.captureDuration.add(clock() - started);
+        stats.capturesCompleted += 1;
         const bytes = fs.readFileSync(result.pngPath);
         fs.unlinkSync(result.pngPath);
         storeSurface(key, bytes);
@@ -245,10 +298,27 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
         onSurfaceReady();
       })
       .catch(() => {
-        // Stale-lane losses are the ordinary fate of a superseded scroll;
-        // the marker that superseded it brings its own capture.
+        // A content render bumped the lane out from under this capture; the
+        // new revision's marker brings its own.
+        stats.capturesDiscarded += 1;
       })
-      .finally(() => inflight.delete(key));
+      .finally(() => {
+        record.capturingKey = null;
+        pumpCapture(documentId, record);
+      });
+  }
+
+  function statsSnapshot() {
+    return {
+      ...stats,
+      surfaces: surfaces.size,
+      assets: assets.stats(),
+      documents: docs.size,
+      timing: {
+        captureQueueWait: timing.captureQueueWait.snapshot(),
+        captureDuration: timing.captureDuration.snapshot(),
+      },
+    };
   }
 
   return {
@@ -260,7 +330,7 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
       if (method === "interact") return handleInteract(params);
       if (method === "health") {
         const health = await dispatch("health", params);
-        return { ...health, replica: { ...stats, surfaces: surfaces.size, assets: assets.stats() } };
+        return { ...health, replica: statsSnapshot() };
       }
       if (method === "shutdown") return { shutdown: true };
       const error = new Error(`the local helper does not serve ${method}`);
@@ -299,9 +369,7 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
       return null;
     },
 
-    stats() {
-      return { ...stats, surfaces: surfaces.size, assets: assets.stats(), documents: docs.size };
-    },
+    stats: statsSnapshot,
 
     close() {
       return service.close();

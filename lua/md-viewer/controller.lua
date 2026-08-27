@@ -256,12 +256,21 @@ end
 ---markers have no response, and need none: the clamp arithmetic
 ---(`scroll_maximum`) already bounded the request against the last known
 ---document height.
-local function apply_surface(session, revision, scroll_y, viewport)
+---
+---`opts.scale` overrides the reference's capture scale below the viewport's
+---device factor: the moving frame of a scroll burst. In local mode the
+---pixels never touch the wire, so what the reduced scale buys is not bytes
+---but *capture time* -- the helper screenshots sixteen times fewer pixels at
+---0.5 than at a Retina 2, and capture time is the whole of the frame cadence
+---while a key is held. The settle re-reference restores the device factor,
+---so the frame a reader actually looks at is never the reduced one -- the
+---same never-soft-at-rest rule `render.scroll_scale` documents.
+local function apply_surface(session, revision, scroll_y, viewport, opts)
   preview.reset_surface(session)
   local placement = preview.placement(session.preview_win, session.backend.name)
   session.preview_width_cells = placement.width
   session.preview_height_cells = placement.height
-  local scale = viewport.deviceScaleFactor or 1
+  local scale = opts and opts.scale or viewport.deviceScaleFactor or 1
   local descriptor = {
     width_px = math.floor(viewport.widthPx * scale + 0.5),
     height_px = math.floor(viewport.heightPx * scale + 0.5),
@@ -1142,7 +1151,38 @@ function M.schedule_scroll(session)
       M.schedule(session, 0)
       return
     end
-    apply_surface(session, session.frame_revision, session.scroll_y or 0, session.local_viewport)
+    -- The moving/settle split, carried into local mode with the scale it
+    -- trades redefined: over the wire it bought bytes, here it buys the
+    -- helper's capture time (rc9 captured every scroll frame at full device
+    -- scale, and the capture was the cadence -- measured on the work laptop
+    -- 2026-08-27 as the held-j lag). Same knobs as the direct path:
+    -- `scroll_capture_scale` decides whether a reduced moving frame exists
+    -- at all, `scroll_settle_delay` decides when the sharp one replaces it.
+    local render = config.get().render
+    local moving, scale_source = scroll_capture_scale(render)
+    local viewport = session.local_viewport
+    if moving and moving >= (viewport.deviceScaleFactor or 1) then
+      moving, scale_source = nil, "factor is not below the device scale (full size)"
+    end
+    session.scroll_scale = moving
+    session.scroll_scale_source = scale_source
+    apply_surface(
+      session,
+      session.frame_revision,
+      session.scroll_y or 0,
+      viewport,
+      moving and { scale = moving } or nil
+    )
+    if moving then
+      local settle_ms, settle_source = scroll_settle_delay(render)
+      session.scroll_settle_ms = settle_ms
+      session.scroll_settle_source = settle_source
+      debounce.call(session, "scroll_settle_timer", settle_ms, function()
+        if not valid(session) or not local_mode(session) then return end
+        if not (session.image_id and session.frame_revision and session.local_viewport) then return end
+        apply_surface(session, session.frame_revision, session.scroll_y or 0, session.local_viewport)
+      end)
+    end
     return
   end
   -- The whole point of the feature: no renderer request, no capture, no pixels

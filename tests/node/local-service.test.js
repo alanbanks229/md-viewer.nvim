@@ -269,3 +269,75 @@ test("render_prepared refuses cached markup that was prepared mid-image-fetch", 
   fs.unlinkSync(third.pngPath);
   assert.equal(third.markdownReused, true, "settled markup at the same revision is reused as before");
 });
+
+test("scroll captures are latest-wins, one in flight, at the reference's own scale", { timeout: 120000 }, async (t) => {
+  const executable = realChromium();
+  if (!executable) {
+    t.skip("no approved Chrome/Chromium/Edge on this machine");
+    return;
+  }
+  const replica = createReplica({ assetsDir });
+  t.after(() => replica.close());
+
+  const tall = `<main><h1>Pump</h1>${"<p>line of text to give the page height</p>".repeat(120)}</main>`;
+  const metrics = await replica.handle("render", {
+    documentId: "doc-pump",
+    contentRevision: "9:0",
+    html: tall,
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    scrollY: 0,
+    theme: "dark",
+    fontSizePx: 14,
+    browser: { executable_path: executable, launch_timeout_ms: 20000 },
+  });
+  assert.ok(metrics.documentHeightPx > 480, "the fixture is tall enough to scroll");
+
+  const ref = { kind: "frame", id: 5, rev: "9:0", scrollY: 0, epoch: 0, widthPx: 640, heightPx: 480, scale: 1 };
+
+  // Three scroll positions in one tick, the way a held key produces them.
+  // rc9 dispatched three captures and discarded most of the work stale
+  // (517 captures for 206 surfaces on the work laptop, 2026-08-27); the pump
+  // must capture the first, skip the middle, and finish on the newest.
+  const a = { ...ref, scrollY: 100 };
+  const b = { ...ref, scrollY: 200 };
+  const c = { ...ref, scrollY: 300 };
+  assert.equal(replica.resolveUpload(a, "doc-pump"), null);
+  assert.equal(replica.resolveUpload(b, "doc-pump"), null);
+  assert.equal(replica.resolveUpload(c, "doc-pump"), null);
+
+  const deadline = Date.now() + 30000;
+  let newest = null;
+  while (newest === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    newest = replica.resolveUpload(c, "doc-pump");
+  }
+  assert.ok(newest, "the newest position's surface landed");
+  assert.ok(replica.resolveUpload(a, "doc-pump"), "the capture already running when b/c arrived still landed");
+
+  const stats = replica.stats();
+  assert.equal(stats.capturesRequested, 3, "every distinct want is counted");
+  assert.equal(stats.captures, 2, "but only first-and-newest reached the browser");
+  assert.equal(stats.capturesCompleted, 2);
+  assert.equal(stats.capturesSupersededBeforeStart, 1, "the middle position died in the want slot, not in Chromium");
+  assert.equal(stats.capturesDiscarded, 0, "nothing completed stale -- the running capture stays current");
+  assert.equal(stats.timing.captureQueueWait.count, 2, "queue wait is sampled per dispatched capture");
+  assert.equal(stats.timing.captureDuration.count, 2, "and duration per completed one");
+
+  // The moving tier: a reference below the device factor captures reduced,
+  // and the surface's own pixels prove it. A settle reference at the device
+  // factor stays full size -- the frame a reader rests on is never soft.
+  const moving = { ...ref, scrollY: 40, scale: 0.5 };
+  assert.equal(replica.resolveUpload(moving, "doc-pump"), null);
+  let movingBytes = null;
+  const movingDeadline = Date.now() + 30000;
+  while (movingBytes === null && Date.now() < movingDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    movingBytes = replica.resolveUpload(moving, "doc-pump");
+  }
+  assert.ok(movingBytes, "the moving-tier capture landed");
+  assert.equal(movingBytes.readUInt32BE(16), 320, "half-scale reference -> half-width pixels (IHDR width)");
+
+  const settled = replica.resolveUpload(ref, "doc-pump");
+  assert.ok(settled, "the layout's own device-scale surface is still resolvable");
+  assert.equal(settled.readUInt32BE(16), 640, "and remains full width");
+});

@@ -218,6 +218,52 @@ return function(t)
   t.eq(1, session.local_presented_count, "presented notifications are consumed")
   t.ok(not session.loading, "a presented frame stops the loading indicator")
 
+  -- -- K4: a presented ack against a stamped emit becomes a latency sample --
+
+  local last_seq
+  for _, w in ipairs(writes) do
+    local s = w:match("^\27_Mv=1;t=" .. TOKEN .. ";s=(%d+);")
+    if s then last_seq = tonumber(s) end
+  end
+  t.ok(last_seq and last_seq > 0, "the rig saw real marker seqs to acknowledge")
+  helper.notify({ event = "presented", seq = last_seq, doc = session.document_id, scrollY = 250 })
+  vim.wait(2000, function()
+    local p = localrender.status().presented
+    return p ~= nil and p.count >= 1
+  end, 10)
+  local presented_stats = localrender.status().presented
+  t.ok(presented_stats and presented_stats.count >= 1, "marker emit -> presented ack is sampled")
+  t.ok(presented_stats.p50_ms >= 0 and presented_stats.max_ms >= presented_stats.p50_ms, "the percentiles are ordered")
+
+  -- -- moving tier: reduced-scale scroll markers, device-scale settle -------
+
+  require("md-viewer").setup({
+    render = { location = "local", scroll_scale = 0.5, scroll_settle_ms = 60 },
+    terminal = { profile = "kitty" },
+  })
+  local device_c = marker_writes()[1]:match(",c=([%d.]+);")
+  t.ok(device_c, "the base frame marker names its capture scale")
+  local frames_before2 = #marker_writes()
+  local stdio_before2, renders_before2 = #stdio_calls, #helper.renders
+  controller.navigate(session, "half_down")
+  vim.wait(1000, function() return #marker_writes() >= frames_before2 + 1 end, 10)
+  local moving_frame = marker_writes()[frames_before2 + 1]
+  t.ok(moving_frame:find(",c=0.5;", 1, true), "the scroll marker references the reduced moving scale")
+  -- The settle re-reference is a second marker at the device factor -- still
+  -- no request anywhere: sharpening the resting frame costs the helper one
+  -- capture and the wire a few hundred bytes.
+  vim.wait(2000, function() return #marker_writes() >= frames_before2 + 2 end, 10)
+  local settle_frame = marker_writes()[frames_before2 + 2]
+  t.ok(settle_frame:find(",c=" .. device_c .. ";", 1, true), "the settle marker restores the device scale")
+  t.eq(
+    moving_frame:match(",y=(%d+),"),
+    settle_frame:match(",y=(%d+),"),
+    "the settle re-references the same scroll position sharp"
+  )
+  t.eq(stdio_before2, #stdio_calls, "the moving/settle pair sent no stdio request")
+  t.eq(renders_before2, #helper.renders, "and no socket render")
+  require("md-viewer").setup({ render = { location = "local" }, terminal = { profile = "kitty" } })
+
   -- -- pushed assets: pending render completes through metrics --------------
 
   controller.refresh()
