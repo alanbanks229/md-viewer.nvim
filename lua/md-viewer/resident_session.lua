@@ -24,6 +24,11 @@ function M.select_path(session)
   local cfg = config.get()
   if not session or not session.backend then return "cells", "no backend" end
   if session.backend.name == "cells" then return "cells", "text-only backend" end
+  -- Ahead of every resident check: a locally rendered session scrolls by
+  -- marker, and resident mode's whole reason to exist -- scrolling without
+  -- pixels on the wire -- is already met better. Two scroll owners would be
+  -- exactly the oscillation this function exists to prevent.
+  if require("md-viewer.localrender").active() then return "viewport", "local render owns scrolling" end
   if cfg.image.resident == "off" then return "viewport", "image.resident = off" end
   local backend = session.backend
   if type(backend.resident_pan_supported) ~= "function" then

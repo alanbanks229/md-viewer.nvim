@@ -185,7 +185,12 @@ export function createService({ assetsDir, onShutdown } = {}) {
       let html;
       if (prepared) {
         markdownKey = JSON.stringify(["prepared", params.contentRevision ?? null]);
-        markdownReused = previous?.key === markdownKey;
+        // Same rule as the markdown branch below, carried across the split:
+        // markup prepared while a remote image was still being fetched is not
+        // final whatever the revision says, and the re-render that replaces
+        // its placeholder arrives under the *same* revision. The flag travels
+        // with the render request because only the preparing side knows it.
+        markdownReused = previous?.key === markdownKey && !previous.remoteImagesPending;
         if (markdownReused) {
           html = previous.html;
           rememberMarkdown(params.documentId, previous);
@@ -196,7 +201,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
             html,
             sourceMap: params.sourceMap ?? null,
             animations: new Map(),
-            remoteImagesPending: 0,
+            remoteImagesPending: params.remoteImagesPending === true ? 1 : 0,
           });
           interactionState.delete(params.documentId);
         }

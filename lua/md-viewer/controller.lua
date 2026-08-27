@@ -16,10 +16,12 @@ local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
 local resident_session = require("md-viewer.resident_session")
 local linkrate = require("md-viewer.linkrate")
+local localrender = require("md-viewer.localrender")
 
 local M = {}
 local group
 local start_ui_poll
+local each_session
 
 local function valid(session)
   return session
@@ -232,6 +234,72 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- step in this same tick, so a scroll frame does not drop the animation for
   -- 200ms on its way past.
   animation.adopt(session)
+  return true
+end
+
+---Is this session rendering beside the terminal? True only while the helper
+---is attached and the backend can speak markers; every local branch in this
+---file asks this one question.
+local function local_mode(session)
+  return localrender.active() and session.backend and session.backend.name == "kitty_raw"
+end
+
+---`apply_image` for a frame whose pixels live beside the terminal: emit one
+---frame marker referencing the surface `(doc, rev, scrollY, viewport, epoch)`
+---and do the placement/overlay bookkeeping that goes with a new base frame.
+---No pixels, no request, no waiting -- the helper resolves the reference
+---against its replica and injects at the marker's stream position.
+---
+---The scroll position recorded here is the *requested* one; a clamped
+---request is reconciled from the render response's achieved `scrollY`, the
+---same way `M.refresh`'s callback consumes `meta.scrollY` today. Scroll-only
+---markers have no response, and need none: the clamp arithmetic
+---(`scroll_maximum`) already bounded the request against the last known
+---document height.
+local function apply_surface(session, revision, scroll_y, viewport)
+  preview.reset_surface(session)
+  local placement = preview.placement(session.preview_win, session.backend.name)
+  session.preview_width_cells = placement.width
+  session.preview_height_cells = placement.height
+  local scale = viewport.deviceScaleFactor or 1
+  local descriptor = {
+    width_px = math.floor(viewport.widthPx * scale + 0.5),
+    height_px = math.floor(viewport.heightPx * scale + 0.5),
+    ref = {
+      doc = session.document_id,
+      rev = revision,
+      scrollY = scroll_y,
+      epoch = session.visual_epoch or 0,
+      widthPx = viewport.widthPx,
+      heightPx = viewport.heightPx,
+      scale = scale,
+    },
+  }
+  local ok, image_id, image_err = pcall(function()
+    if session.image_id then return session.backend.update_surface(session.image_id, descriptor, placement) end
+    return session.backend.show_surface(descriptor, placement)
+  end)
+  if not ok or not image_id then
+    session.render_failed = true
+    notify_error(ok and (image_err or "failed to reference local surface") or image_id)
+    return false
+  end
+  session.image_id = image_id
+  session.last_placement = placement
+  session.local_viewport = viewport
+  session.local_marker_frames = (session.local_marker_frames or 0) + 1
+  session.frame_scroll_y = scroll_y
+  session.frame_revision = revision
+  session.applied_scroll_y = scroll_y
+  session.viewport_width_px = viewport.widthPx
+  session.viewport_height_render_px = viewport.heightPx
+  session.viewport_calibration_tier = viewport.tier
+  -- Same supersession rules as apply_image, same order: the base under the
+  -- overlays has moved, clear after the new frame is referenced, then put the
+  -- caret straight back.
+  clear_selection_overlay(session)
+  M.clear_caret_overlay(session)
+  M.place_caret(session)
   return true
 end
 
@@ -546,6 +614,17 @@ function M.refresh(session, render_options)
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
+  -- While a helper attach is still settling, rendering would race it onto
+  -- the direct path -- spawning this host's Chromium and shipping the full
+  -- PNG local mode exists to avoid (window events around the preview split
+  -- opening are exactly when this fires). Both attach outcomes re-render:
+  -- success through the "attached" listener, failure through M.open's
+  -- continuation.
+  if localrender.enabled() and session.backend.name == "kitty_raw" and localrender.status().phase == "connecting" then
+    session.refresh_deferred = true
+    if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
+    return
+  end
   -- A render of the document's content, as opposed to a chunk capture, has
   -- right of way over the warm-up while it is in flight. `pump_resident` issues
   -- `renderer.request` too and every request bumps `request_serial`, so an edit
@@ -556,6 +635,19 @@ function M.refresh(session, render_options)
   -- restarts it either way.
   local content_render = not render_options_is_chunk(render_options)
   if content_render then session.content_render_in_flight = true end
+  if local_mode(session) and content_render then
+    -- Local rendering owns scrolling outright, so a session that selected the
+    -- resident path before the helper attached is demoted the first time it
+    -- renders locally -- two scroll owners is the reproducibility problem
+    -- select_path exists to prevent.
+    if session.render_path == "resident" then resident_session.demote(session, "local render owns scrolling") end
+    -- The frame marker leaves in the same tick as the request: the revision
+    -- is computed here, so pixels never wait for any response. The helper
+    -- holds the marker until its own render resolves the reference.
+    local revision = renderer.content_revision(session)
+    local viewport = preview.viewport(session.preview_win, session.backend.name)
+    apply_surface(session, revision, session.scroll_y or 0, viewport)
+  end
   renderer.request(session, markdown(session), render_options, function(result, err, stale)
     if content_render then session.content_render_in_flight = false end
     local function finish()
@@ -592,6 +684,13 @@ function M.refresh(session, render_options)
       interaction.forget_selection(session)
     end
     local newer_scroll_pending = render_options and render_options.scroll_frame and session.scroll_render_pending
+    -- Local scrolls are markers, not requests, so `scroll_render_pending`
+    -- never marks them; the position itself is the record. A `scroll_y` that
+    -- moved since this render was issued means newer frames are already on
+    -- their way to the glass, and this response must not snap back to it.
+    if meta.local_render then
+      newer_scroll_pending = math.abs((session.scroll_y or 0) - (meta.requestedScrollY or 0)) > 0.5
+    end
     session.latest_blocks = meta.blocks
     session.document_height_px = meta.documentHeightPx
     session.viewport_height_px = meta.viewportHeightPx
@@ -599,11 +698,18 @@ function M.refresh(session, render_options)
     -- The next capture then uses the desired position instead of snapping back
     -- to the older frame's scrollY.
     if not newer_scroll_pending then session.scroll_y = meta.scrollY end
-    session.applied_scroll_y = meta.scrollY
+    if not (meta.local_render and newer_scroll_pending) then session.applied_scroll_y = meta.scrollY end
     session.last_layout_reused = meta.layoutReused == true
     session.last_markdown_reused = meta.markdownReused == true
     session.last_capture_scale = meta.captureScale
-    session.last_png_bytes = meta.pngBytes or #result.image
+    -- A local render carries no image and moves no PNG bytes; the field keeps
+    -- its last direct-path value rather than lying with a zero.
+    if result.image or meta.pngBytes then session.last_png_bytes = meta.pngBytes or #result.image end
+    -- The helper's visual epoch, named by every frame reference. Selection
+    -- and find mutations bump it (their responses carry the new value through
+    -- interaction.lua), which is how DOM changes invalidate local surfaces
+    -- without a content revision.
+    if type(meta.visualEpoch) == "number" then session.visual_epoch = meta.visualEpoch end
     session.last_layout_ms = meta.layoutMs
     session.last_capture_ms = meta.captureMs
     session.viewport_width_px = result.viewport.widthPx
@@ -652,6 +758,19 @@ function M.refresh(session, render_options)
     -- can go on, and a failure caches as a failure, so this stops on its own.
     session.remote_images_pending = meta.remoteImagesPending == true
     if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
+    if meta.local_render then
+      -- The frame itself went up when its marker was emitted, back in the
+      -- tick that issued this request; this response only settles what the
+      -- marker could not know. The achieved scroll is the one reconciliation
+      -- that matters: a clamped request means the frame on glass shows the
+      -- clamp, and every later marker must be built from it -- unless newer
+      -- scroll markers already superseded this frame, in which case theirs is
+      -- the position on glass, not this one's.
+      if not newer_scroll_pending and type(meta.scrollY) == "number" then session.frame_scroll_y = meta.scrollY end
+      session.frame_revision = session.renderer_revision
+      finish()
+      return
+    end
     session.last_image_bytes = result.image
     -- A capture taken while a DOM selection was live has it painted in, so the
     -- cached clean base cannot be this frame. `apply_image` records the
@@ -974,6 +1093,28 @@ local function scroll_settle_delay(render)
 end
 
 function M.schedule_scroll(session)
+  -- Local rendering: a scroll is one marker naming the new position -- no
+  -- renderer request, no capture, no settle timer, and nothing for the
+  -- response cycle the rejected 2026 experiment serialized into every frame.
+  -- The helper resolves the reference from its surface cache or captures
+  -- beside the terminal; superseded markers die in the injector, so there is
+  -- no backpressure to manage here either. Above the resident branch on
+  -- purpose: local render owns scrolling wherever both could apply.
+  if local_mode(session) then
+    if update_occlusion(session) then
+      clear_image(session)
+      session.refresh_deferred = true
+      return
+    end
+    if not (session.image_id and session.frame_revision and session.local_viewport) then
+      -- Nothing referenceable is up yet (first render still in flight, or the
+      -- frame was cleared): a full refresh emits its own marker.
+      M.schedule(session, 0)
+      return
+    end
+    apply_surface(session, session.frame_revision, session.scroll_y or 0, session.local_viewport)
+    return
+  end
   -- The whole point of the feature: no renderer request, no capture, no pixels
   -- on the wire. The document is already in the terminal and a scroll is a
   -- placement.
@@ -1126,7 +1267,27 @@ function M.open(position)
     mouse.attach(M.navigate)
   end
   vim.api.nvim_set_current_win(source_win)
-  M.refresh(session)
+  if localrender.enabled() and backend.name == "kitty_raw" and not localrender.active() then
+    -- The first render waits for the attach to settle rather than racing it:
+    -- losing the race would spawn this host's Chromium and ship one full PNG
+    -- over the very link local mode exists to spare. On success the
+    -- "attached" listener refreshes every open session, this one included;
+    -- failure renders on this host and says so once.
+    localrender.attach(function(ok, reason)
+      if ok then return end
+      vim.notify(
+        ("md-viewer: local rendering unavailable (%s); rendering on this host"):format(reason),
+        vim.log.levels.WARN
+      )
+      -- Every raw session, not just this one: refreshes deferred while the
+      -- attach was settling have no other continuation on the failure path.
+      each_session(function(deferred)
+        if deferred.backend.name == "kitty_raw" then M.refresh(deferred) end
+      end)
+    end)
+  else
+    M.refresh(session)
+  end
   if start_ui_poll then start_ui_poll(session) end
   return session
 end
@@ -1378,9 +1539,18 @@ function M.navigate(session, action, count)
   return M.scroll_by(session, (deltas[action] or 0) * count)
 end
 
-local function each_session(fn)
+each_session = function(fn)
   for _, session in pairs(state.all()) do
     if valid(session) then fn(session) end
+  end
+end
+
+---The session a helper notification names. Notifications carry the document
+---id because the helper knows nothing smaller; nil for a document whose
+---session has since closed, which is a stale notification and not an error.
+local function session_by_document(doc)
+  for _, session in pairs(state.all()) do
+    if session.document_id == doc then return session end
   end
 end
 
@@ -1629,6 +1799,51 @@ function M.setup_autocmds()
     -- module drops them and re-materializes, while terminal-resident uploads
     -- survive by stable content key.
     animation.renderer_exited()
+  end)
+  -- Local rendering's remote half. The socket directories exist in every
+  -- mode because the helper's `ssh -R` bind happens before this plugin runs
+  -- in the session -- the directory has to be there from a previous life.
+  -- The listeners are session-lifetime, like process.on_exit above.
+  localrender.ensure_socket_dirs()
+  -- A frame reached the glass beside the terminal. This is the only moment
+  -- Lua can know pixels are actually up, so it is what retires the loading
+  -- indicator that a direct render would have retired at apply_image.
+  localrender.on("presented", function(event)
+    local session = session_by_document(event.doc)
+    if not session or not valid(session) then return end
+    session.local_presented_count = (session.local_presented_count or 0) + 1
+    session.local_last_presented_scroll_y = event.scrollY
+    if session.loading then preview.stop_loading(session) end
+  end)
+  -- The helper was asked for a revision it has no content for: a marker beat
+  -- its own render request across the two channels (they share no ordering),
+  -- or a push was lost. If the render is still in flight it will satisfy the
+  -- marker by itself; otherwise re-issue it.
+  localrender.on("missing", function(event)
+    local session = session_by_document(event.doc)
+    if not session or not valid(session) then return end
+    if session.content_render_in_flight then return end
+    M.schedule(session, 0)
+  end)
+  -- The helper attached (possibly mid-session, after a restart): re-render
+  -- every raw session locally. The first marker's deletions retire whatever
+  -- direct frame each session had up.
+  localrender.on("attached", function()
+    each_session(function(session)
+      if session.backend.name == "kitty_raw" then M.schedule(session, 0) end
+    end)
+  end)
+  -- The helper died. Injected surfaces died with it (its teardown deletes
+  -- every image it placed), so drop the session bookkeeping that referenced
+  -- them and re-render through the stdio path, which localrender has already
+  -- put back in charge -- presenter included.
+  localrender.on("demoted", function()
+    each_session(function(session)
+      if session.backend.name == "kitty_raw" then
+        clear_image(session)
+        M.schedule(session, 0)
+      end
+    end)
   end)
   group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {

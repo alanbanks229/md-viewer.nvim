@@ -33,6 +33,11 @@ local function interact_request(session, params, callback)
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1
     end
+    -- Local mode: a mutating interact bumps the helper's visual epoch, and
+    -- every frame reference after it must carry the new value or the helper
+    -- will (correctly) refuse to resolve the frame against a DOM it knows
+    -- has changed. Recorded at the one funnel every interact crosses.
+    if result and type(result.visualEpoch) == "number" then session.visual_epoch = result.visualEpoch end
     -- `meta` is passed on as a third argument so a caller can tell a lost race
     -- (routine, and not worth telling the user about) from a real failure.
     -- Callers that only take two arguments are unaffected.

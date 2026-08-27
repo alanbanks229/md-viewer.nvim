@@ -190,3 +190,77 @@ test("replica: pending on missing assets, metrics after the push, surfaces resol
   await assert.rejects(() => replica.handle("prepare", {}), (error) => error.code === "UNSUPPORTED_METHOD");
   await docService.close();
 });
+
+test("a surface is never captured from another revision's markup", { timeout: 120000 }, async (t) => {
+  const executable = realChromium();
+  if (!executable) {
+    t.skip("no approved Chrome/Chromium/Edge on this machine");
+    return;
+  }
+  const replica = createReplica({ assetsDir });
+  t.after(() => replica.close());
+  const base = {
+    documentId: "doc-race",
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    scrollY: 0,
+    theme: "dark",
+    fontSizePx: 14,
+    browser: { executable_path: executable, launch_timeout_ms: 20000 },
+  };
+  await replica.handle("render", { ...base, contentRevision: "1:0", html: "<main><h1>old body</h1></main>" });
+
+  // A marker for revision 2:0 arriving before its render request (the tty
+  // and socket channels share no ordering) must wait, not capture: the only
+  // markup this replica holds is 1:0's, and capturing from it would store
+  // the old revision's pixels under the new revision's key.
+  const racedRef = { kind: "frame", id: 3, rev: "2:0", scrollY: 40, epoch: 0, widthPx: 640, heightPx: 480, scale: 1 };
+  const before = replica.stats().captures;
+  assert.equal(replica.resolveUpload(racedRef, "doc-race"), null, "the raced reference defers");
+  assert.equal(replica.stats().captures, before, "and schedules nothing against the wrong markup");
+
+  // Once 2:0's own render arrives, the same reference resolves through the
+  // ordinary schedule path.
+  await replica.handle("render", { ...base, contentRevision: "2:0", html: "<main><h1>new body</h1></main>" });
+  let bytes = replica.resolveUpload(racedRef, "doc-race");
+  const deadline = Date.now() + 30000;
+  while (bytes === null && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    bytes = replica.resolveUpload(racedRef, "doc-race");
+  }
+  assert.ok(bytes, "the reference resolves once the revision it names has been laid out");
+});
+
+test("render_prepared refuses cached markup that was prepared mid-image-fetch", { timeout: 120000 }, async (t) => {
+  const executable = realChromium();
+  if (!executable) {
+    t.skip("no approved Chrome/Chromium/Edge on this machine");
+    return;
+  }
+  const service = createService({ assetsDir });
+  t.after(() => service.close());
+  const params = (html, remoteImagesPending) => ({
+    documentId: "doc-pending",
+    contentRevision: "9:0",
+    html,
+    remoteImagesPending,
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    scrollY: 0,
+    theme: "dark",
+    browser: { executable_path: executable, launch_timeout_ms: 20000 },
+  });
+
+  // First render: markup carrying a fetch placeholder, flagged as such by the
+  // preparing side. The revision will not change when the image lands -- the
+  // flag is the only thing that can force the re-layout.
+  const first = await service.dispatch({ id: 1, method: "render_prepared", params: params("<main>placeholder</main>", true) });
+  fs.unlinkSync(first.pngPath);
+  assert.equal(first.markdownReused, false);
+
+  const second = await service.dispatch({ id: 2, method: "render_prepared", params: params("<main>fetched image</main>", false) });
+  fs.unlinkSync(second.pngPath);
+  assert.equal(second.markdownReused, false, "same revision, but the pending markup must not be reused");
+
+  const third = await service.dispatch({ id: 3, method: "render_prepared", params: params("<main>fetched image</main>", false) });
+  fs.unlinkSync(third.pngPath);
+  assert.equal(third.markdownReused, true, "settled markup at the same revision is reused as before");
+});

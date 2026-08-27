@@ -134,6 +134,16 @@ function M.active_transport() return transport end
 
 function M.request(method, params, callback)
   if transport then return transport.request(method, params, callback) end
+  return M.request_stdio(method, params, callback)
+end
+
+---Send a request to the stdio renderer child specifically, even while a
+---local-render transport is attached. The render path uses this in local mode
+---for the document-service half (`prepare`, `fetch_assets`): markdown parsing
+---and asset reads belong beside the files whatever machine is presenting
+---frames, and routing them through the socket would hand the helper a path
+---request channel SECURITY.md says it must never have.
+function M.request_stdio(method, params, callback)
   local proc, err = M.start()
   if not proc then
     callback(nil, err)

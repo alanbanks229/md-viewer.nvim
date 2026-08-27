@@ -184,6 +184,22 @@ end
 
 -- -- connection ------------------------------------------------------------
 
+-- While attached, kitty_raw's transactions leave through the marker
+-- presenter; detaching for any reason puts the direct byte path back. The
+-- requires live inside these functions because kitty_marker requires this
+-- module at load time -- a top-level require here would be a cycle.
+local function install_marker_presenter()
+  local raw = require("md-viewer.backends.kitty_raw")
+  raw.set_presenter(require("md-viewer.backends.kitty_marker").present)
+end
+
+local function restore_direct_presenter()
+  local ok_raw, raw = pcall(require, "md-viewer.backends.kitty_raw")
+  if ok_raw then raw.set_presenter(nil) end
+  local ok_marker, marker = pcall(require, "md-viewer.backends.kitty_marker")
+  if ok_marker then marker.reset() end
+end
+
 local function close_conn()
   if not conn then return end
   local closing = conn
@@ -202,6 +218,9 @@ local function demote(reason)
   if state.phase ~= "attached" and state.phase ~= "connecting" then return end
   close_conn()
   process.set_transport(nil)
+  -- Before the "demoted" listeners fire: they re-render, and those renders
+  -- must leave as direct bytes, not as markers nobody is filtering for.
+  restore_direct_presenter()
   state.phase = "fallback"
   state.reason = reason
   state.helper = nil
@@ -356,6 +375,7 @@ local function try_candidate(path, on_done)
           state.phase = "attached"
           state.socket_path = path
           process.set_transport(transport())
+          install_marker_presenter()
           fire("attached", { helper = state.helper })
           finish(true)
         end
@@ -377,17 +397,29 @@ end
 ---Discover, verify, hello, pair. `on_done(ok, reason)` runs once, scheduled.
 ---Candidates are tried newest-first; the reasons for every refusal are
 ---joined into the failure message so ":checkhealth" has something concrete
----to show.
+---to show. A second attach while one is in flight joins it rather than
+---starting a competing scan -- two concurrent hellos against a single-client
+---helper would refuse each other.
+local attach_waiters = {}
 function M.attach(on_done)
   on_done = on_done or function() end
   if state.phase == "attached" then return on_done(true) end
+  attach_waiters[#attach_waiters + 1] = on_done
+  if state.phase == "connecting" then return end
   state.phase = "connecting"
   state.reason = nil
+  local function settle(ok, reason)
+    local waiters = attach_waiters
+    attach_waiters = {}
+    for _, waiter in ipairs(waiters) do
+      waiter(ok, reason)
+    end
+  end
   local paths = M.candidates()
   if #paths == 0 then
     state.phase = "fallback"
     state.reason = "no helper socket found (run md-viewer-local around your ssh session)"
-    return on_done(false, state.reason)
+    return settle(false, state.reason)
   end
   local reasons = {}
   local index = 0
@@ -396,10 +428,10 @@ function M.attach(on_done)
     if index > #paths then
       state.phase = "fallback"
       state.reason = table.concat(reasons, "; ")
-      return on_done(false, state.reason)
+      return settle(false, state.reason)
     end
     try_candidate(paths[index], function(ok, reason)
-      if ok then return on_done(true) end
+      if ok then return settle(true) end
       reasons[#reasons + 1] = reason
       try_next()
     end)
@@ -412,6 +444,7 @@ end
 function M.detach()
   close_conn()
   process.set_transport(nil)
+  restore_direct_presenter()
   state.phase = "off"
   state.reason = nil
   state.helper = nil
@@ -421,6 +454,7 @@ end
 function M._reset()
   M.detach()
   listeners = {}
+  attach_waiters = {}
   pairing_waiter = nil
   state.seq = 0
   state.requests = 0
