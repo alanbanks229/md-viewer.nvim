@@ -39,11 +39,16 @@ import { uploadSequence, deleteImage } from "./kitty-writer.js";
 import { parseMarkerPayload } from "./markers.js";
 
 export class Injector {
-  constructor({ token, write, resolveUpload, boundary }) {
+  constructor({ token, write, resolveUpload, boundary, onPairing }) {
     this.token = token;
     this.write = write;
     this.resolveUpload = resolveUpload;
     this.boundary = boundary;
+    // seq 0 is reserved: it is the pairing probe the remote plugin emits
+    // through its own tty to prove which helper sits on this terminal. It
+    // carries nothing and is never injected -- it is answered, over the
+    // socket, by whoever constructed us with this hook.
+    this.onPairing = onPairing ?? (() => {});
 
     this.pendingByDoc = new Map(); // doc -> parsed surface transaction, newest only
     this.immediateQueue = []; // placement-only / deletion-only, in arrival order
@@ -83,6 +88,11 @@ export class Injector {
       return;
     }
     this.stats.accepted += 1;
+
+    if (parsed.seq === 0) {
+      this.onPairing(parsed);
+      return;
+    }
 
     if (parsed.uploads.length === 0) {
       if (parsed.kill) {

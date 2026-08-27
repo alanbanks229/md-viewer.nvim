@@ -38,6 +38,7 @@ import { StreamParser } from "./local/stream-parser.js";
 import { Injector } from "./local/injector.js";
 import { markerPrefix, parseMarkerPayload } from "./local/markers.js";
 import { probeTerminal } from "./local/tty-probe.js";
+import { SocketService } from "./local/socket-service.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -181,19 +182,54 @@ const parser = new StreamParser({
   },
 });
 
+let service = null;
 if (!flags.echoTest) {
+  service = new SocketService({ token, helperVersion: helperVersion(), probe });
   injector = new Injector({
     token,
     write,
-    // Until the control socket and replica renderer attach (they arrive with
-    // the session layer), no surface can resolve; deferred frames simply wait
-    // and deletion-only transactions still work.
+    // Until the replica renderer attaches (it arrives with the session
+    // layer), no surface can resolve; deferred frames simply wait and
+    // deletion-only transactions still work.
     resolveUpload: () => null,
     boundary: () => parser.atSafeBoundary(),
+    // The pairing probe: the plugin emitted a seq-0 marker through its own
+    // tty; only the helper filtering *this* terminal sees it, so answering
+    // over the socket is the proof that socket and terminal belong together.
+    onPairing: () => service.notify("presented", { seq: 0 }),
   });
+  try {
+    await service.listen();
+  } catch (error) {
+    process.stderr.write(`md-viewer-local: ${error.message}\n`);
+    process.exit(1);
+  }
 }
 
-const child = spawn(command[0], command.slice(1), { stdio: ["inherit", "pipe", "pipe"] });
+// When wrapping ssh, add the reverse forward that lets the remote plugin
+// reach the socket. The remote path must be absolute (sshd refuses relative
+// streamlocal binds -- measured 2026-08-26) and short (sun_path), so it lives
+// under /tmp/md-viewer-<user>, with the user resolved from the operator's own
+// ssh config via `ssh -G` -- no connection is made to find it out. The plugin
+// verifies ownership and permissions before ever using the directory, and the
+// pairing probe makes a spoofed socket unadoptable regardless.
+let effectiveCommand = command;
+if (service && command[0] === "ssh") {
+  try {
+    const resolved = execFileSync("ssh", ["-G", ...command.slice(1)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const user = /^user (\S+)$/m.exec(resolved)?.[1];
+    if (user) {
+      const remoteSock = `/tmp/md-viewer-${user}/r-${crypto.randomBytes(4).toString("hex")}.sock`;
+      effectiveCommand = [command[0], "-R", `${remoteSock}:${service.socketPath}`, ...command.slice(1)];
+    } else {
+      process.stderr.write("md-viewer-local: could not resolve the remote user from ssh -G; no forward added\n");
+    }
+  } catch {
+    process.stderr.write("md-viewer-local: ssh -G failed; no forward added (local rendering will not attach)\n");
+  }
+}
+
+const child = spawn(effectiveCommand[0], effectiveCommand.slice(1), { stdio: ["inherit", "pipe", "pipe"] });
 
 child.on("error", (error) => {
   process.stderr.write(`md-viewer-local: failed to run ${command[0]}: ${error.message}\n`);
@@ -215,6 +251,7 @@ cleanup = () => {
     const bytes = injector.teardown();
     if (bytes.length > 0) write(bytes);
   }
+  if (service) service.close();
   if (flags.echoTest) {
     // The emitter numbers markers 1..N, so max-seq is also the emitted count.
     const missing = echo.maxSeq >= 1 ? echo.maxSeq - echo.received : 0;

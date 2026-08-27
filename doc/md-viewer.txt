@@ -141,6 +141,13 @@ render ~
                                             (|:MdViewerMeasureLink|)
     animate                      false      play animated GIF and WebP
     animate_fps                  5          1..30; `frames` strategy only
+    location                     "current"  current, local. "local" renders
+                                            beside the terminal through the
+                                            md-viewer-local helper; falls
+                                            back loudly when no helper is
+                                            paired. No "auto" until the
+                                            path is validated on a real
+                                            slow link.
 
 browser ~
     executable_path              nil        nil discovers Chrome, Chromium

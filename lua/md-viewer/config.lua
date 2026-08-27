@@ -112,6 +112,15 @@ M.defaults = {
     -- Playback is expensive when sending constant PNG screenshots.
     animate = false,
     animate_fps = 5,
+    -- Where the renderer runs. "current" is the only behavior that existed
+    -- before v0.3.0-rc9: Node and Chromium beside this Neovim. "local" runs
+    -- them beside the *terminal* instead -- for sessions where this Neovim is
+    -- remote and the link is the whole cost (the reference case is an AWS SSM
+    -- tunnel at ~0.8 MB/s) -- and requires the md-viewer-local helper to be
+    -- wrapping the ssh session; without it the session falls back to
+    -- "current" loudly, never silently. There is deliberately no "auto" until
+    -- the local path has been validated on the real slow link it exists for.
+    location = "current",
   },
   browser = {
     executable_path = nil,
@@ -316,6 +325,11 @@ local function validate(cfg)
     "md-viewer: render.font_size_px must be positive"
   )
   assert(type(cfg.render.animate) == "boolean", "md-viewer: render.animate must be a boolean")
+  assert(
+    cfg.render.location == "current" or cfg.render.location == "local",
+    'md-viewer: render.location must be "current" or "local" ("auto" is deliberately not accepted '
+      .. "until the local path has been validated on a real slow link)"
+  )
   -- Bounded at both ends. Below 1 the timer would never fire; above 30 the
   -- placement traffic stops being negligible, which is the only reason drawing
   -- frames this way is affordable at all.
