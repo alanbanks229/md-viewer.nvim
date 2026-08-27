@@ -10,7 +10,12 @@
 -- helper on the terminal side and proves the pipeline against real ssh, a
 -- real sshd forward, and a real browser beside the terminal.
 
-vim.opt.runtimepath:prepend(vim.fn.expand("~/md-viewer.nvim"))
+-- The plugin root is wherever this script lives -- an rsync'd checkout on a
+-- rig host, a lazy.nvim install dir on a real one. Hardcoding either breaks
+-- the other.
+local this_file = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
+local plugin_root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(this_file)))
+vim.opt.runtimepath:prepend(plugin_root)
 local evidence_path = vim.fn.expand("~/mdv-e2e.json")
 pcall(vim.fn.delete, evidence_path)
 

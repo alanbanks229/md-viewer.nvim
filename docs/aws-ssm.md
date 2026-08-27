@@ -58,154 +58,122 @@ The trust boundary (unix socket, token, push-only assets) is documented in
 [SECURITY.md](../SECURITY.md); the moving parts are in
 [architecture.md](architecture.md#render-location).
 
-## Validating a release candidate from the work laptop
+## What the rc9 validation settled
 
-This procedure is written to be followed top to bottom in one sitting. It was
-authored against `v0.3.0-rc9`; substitute the tag being validated.
+The operator ran the full manual procedure against `v0.3.0-rc9` from the work
+laptop over real AWS SSM on 2026-08-27, and it settled the architecture:
 
-### 0. Toolchain check (minutes, fails fast)
+- **K1** (wrapped-ssh topology): PASS — raw mode, resize, escapes, and a
+  full-screen Neovim all hold with the helper on stdout.
+- **K2** (marker transit): PASS — 10,000/10,000 markers, zero missing, zero
+  reordered, zero malformed.
+- **K3** (terminal presentation): demonstrated — iTerm2 3.6.11 rendered
+  filter-injected frames through the real session, across scrolling,
+  selection, find, resize, and reopen. Zero direct-byte fallbacks; the
+  laptop's Chrome rendered every frame and the VM's Chromium sat unused.
+- The link measured 1,025,951 B/s (`:MdViewerMeasureLink`, aide alias,
+  2026-08-27), consistent with the 2026-08-25 ceiling measurements.
 
-On the **work laptop**:
+Two findings from that run drove the rc10 work:
+
+1. **Held-key scrolling felt laggier than the old PNG mode.** The cause was
+   measured, not guessed: the replica dispatched a capture per scroll
+   position into the serial browser queue, each dispatch superseding the one
+   already running, so finished screenshots were discarded stale while the
+   screen sat still — 517 captures for 206 surfaces served. rc10 paces one
+   moving marker in flight (released by the `presented` acknowledgement),
+   captures at a reduced moving scale with a device-scale settle, and holds
+   one capture want per document, newest wins. On the ichigo rig the same
+   30-step burst went from 4 frames presented to 24, and marker-emit→ack
+   from p95 2147 ms to p95 63–167 ms (2026-08-27).
+2. **`remoteGraphicsCommands` was nonzero on a healthy local session** —
+   because the counter counts *every* Kitty graphics command any process
+   sends through the wrapped session, and the run had also exercised the
+   direct PNG path for comparison. The parser now attributes commands and
+   raster bytes by image-id space (`remoteMdvGraphicsCommands`,
+   `remoteMdvRasterBytes`), so "did md-viewer send raster through this
+   link?" and "did something else draw graphics?" are separate answers.
+
+## K4: time-to-glass, measured in the product
+
+K4 is the last kill criterion: scroll time-to-glass ≥ 300 ms means a
+serialized per-frame dependency crept back in. It is now a permanent
+diagnostic rather than a stopwatch exercise:
+
+- The **VM** stamps every marker at emit and samples the `presented`
+  acknowledgement round against it — one clock, a strict upper bound on
+  time-to-glass (glass lights one notification leg before the sample).
+  `:MdViewerDebug` shows it as `local_render.presented` (p50/p95/max over a
+  bounded window).
+- The **helper** samples marker-arrival→frame-injection, capture queue wait,
+  and capture duration on its own clock, plus the last 32 captures with
+  their scroll position and scale. `--status` and the health enrichment
+  carry them.
+- Superseded markers are never samples on either side — nothing acknowledges
+  them, so the distribution describes only frames a reader saw.
+
+Reference numbers, ichigo (LAN SSH, tmux rig, 2026-08-27, rc10 code):
+emit→ack p50 33 ms, p95 63–167 ms across runs; capture p50 27 ms at the 0.5
+moving scale, 41–50 ms at device scale; the one >1 s sample in any run is
+the first frame queueing behind the cold Chromium launch — first-preview
+cost, not scroll cost.
+
+## Validating a release candidate
+
+The rc9 validation was a page of manual steps; it is now two commands and
+two human judgments. Everything below runs on the **laptop**, from the
+helper checkout (one-time setup: clone the repo at the RC tag, then
+`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts` inside
+`renderer/`).
 
 ```sh
-node --version        # need >= 22.12
+# 1. Move both ends to the tag. The VM's Neovim config must already pin
+#    version = "<tag>" -- this script updates and *verifies*, it never edits
+#    your config. It refuses to run on a dirty checkout.
+sh scripts/local/ssm-rc-update.sh <vm-host> <tag>
+
+# 2. Run every automatable leg and produce one artifact.
+sh scripts/local/ssm-validate.sh <vm-host>
 ```
 
-A system Chrome, Chromium, or Edge must be installed; the helper discovers it
-and never downloads one.
+`ssm-validate.sh` runs: toolchain and version agreement on both ends, K1
+(`topology-check.sh`), K2 (10,000-marker echo, scripted end to end), the K4
+live pipeline with its held-key burst and stage timings, the zero-raster
+invariant from the run's own filter counters, and a link measurement. It
+prints `AUTOMATED VALIDATION: PASS/FAIL`, writes
+`artifacts/ssm-validation-<tag>-<date>.md`, and names the result file —
+that file is the thing to report back. `artifacts/` is gitignored: a
+validation record names private host aliases and stays on the operator's
+machine.
 
-### 1. Install the helper on the work laptop
+The human part is deliberately tiny, printed by the validator and recorded
+in the artifact's last section:
 
-```sh
-git clone --branch v0.3.0-rc9 https://github.com/alanbanks229/md-viewer.nvim ~/md-viewer-local
-cd ~/md-viewer-local/renderer
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
-node src/local-main.js --version    # must print v0.3.0-rc9 and a commit hash
-```
-
-### 2. Pin the VM's plugin to the same tag
-
-In the Neovim config the VM uses, pin md-viewer to the tag and enable local
-mode:
-
-```lua
-{
-  "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc9",
-  opts = { render = { location = "local" } },
-}
-```
-
-Then update the plugin on the VM (`:Lazy update md-viewer.nvim` or your
-manager's equivalent; the build hook reinstalls the renderer's locked
-dependencies). Both ends must be on the same tag — the socket hello refuses a
-protocol mismatch by design, and the refusal names the fix.
+1. Hold `j` in a real preview for several seconds — smooth / acceptable /
+   unacceptable.
+2. Stop — does the frame sharpen back to full quality?
 
 `render.location = "local"` with no helper produces one warning per preview
-open and falls back to rendering on the VM. If that is too loud for a config
-shared across machines, gate it: `location = vim.env.MD_VIEWER_LOCAL and
-"local" or "current"`, and export `MD_VIEWER_LOCAL=1` in the sessions you
-launch through the helper.
+open and falls back to rendering on the VM. For a config shared across
+machines, gate it: `location = vim.env.MD_VIEWER_LOCAL and "local" or
+"current"`, and export `MD_VIEWER_LOCAL=1` in the sessions you launch
+through the helper.
 
-### 3. Run the transport rigs over the real link
-
-Both rigs passed on LAN SSH (ichigo, 2026-08-26); this run is their SSM leg.
-
-```sh
-# K1: the wrapped-ssh topology (raw mode, resize, ~., full-screen nvim)
-~/md-viewer-local/scripts/local/topology-check.sh <vm-host>
-
-# K2: marker transit integrity -- run the helper in echo mode, then emit
-# 10,000 sequenced markers from the VM side and read the tally it prints.
-node ~/md-viewer-local/renderer/src/local-main.js --marker-echo-test -- ssh <vm-host>
-# ...in that session, on the VM:
-<repo>/scripts/local/marker-echo-emit.sh <token printed by the helper> 10000
-```
-
-PASS is exact: `missing=0 out-of-order=0 malformed=0`. Any loss or reorder is
-a kill criterion, not a tuning opportunity.
-
-### 4. The live session
-
-```sh
-node ~/md-viewer-local/renderer/src/local-main.js -- ssh <vm-host>
-```
-
-In that session, on the VM, open `tests/fixtures/kitchen-sink.md` from the
-plugin checkout (or any image-bearing document) and work through:
-
-1. **First preview** — time from `:MdViewerOpen` to pixels.
-2. **Scroll**, slow and then as fast as the wheel goes.
-3. **Source sync** — cursor motion in the source follows in the preview.
-4. **Edits** — type; the preview updates within the debounce.
-5. **Images** — local images appear; a remote image appears after its fetch.
-6. **Links** — follow one, come back (`H`).
-7. **Selection and find** — drag a selection, `/` a term, step matches.
-8. **Resize** the window; **close and reopen** the preview.
-9. **Fallback** — kill the helper mid-session (Ctrl-C in its terminal):
-   expect one warning and a working (slower) preview; the ssh session itself
-   dies with the helper, so this ends the run.
-10. **Reconnect** — relaunch through the helper, reopen, confirm re-attach.
-
-### 5. Collect the evidence
-
-While the session is healthy, capture:
-
-- `:MdViewerDebug` — the whole buffer. The decisive numbers are
-  `local_render.phase` (attached), per-session `local_marker_frames` versus
-  `local_presented_count`, and `markers.direct_bytes_fallbacks` (0).
-- `:MdViewerHealth` — the Rendering section's `Location` row and the
-  Warnings section.
-- On the laptop: `node ~/md-viewer-local/renderer/src/local-main.js --status`
-  — the filter's `parser.remoteGraphicsCommands` is the count of graphics
-  uploads that crossed the link as bytes; **zero while attached is the whole
-  claim of the feature**.
-- `:MdViewerMeasureLink` — the link rate, for the record.
-
-### 6. Rollback
+## Rollback
 
 In increasing strength, none of which touch each other:
 
-1. `render.location = "current"` — immediate, no reinstall; the remote path
-   is untouched by local mode.
-2. Pin back `version = "v0.3.0-rc8"` and `:Lazy update md-viewer.nvim`.
+1. `render.location = "current"` (or unset `MD_VIEWER_LOCAL`) — immediate,
+   no reinstall; the remote path is untouched by local mode.
+2. Pin the previous tag in the VM config and re-run
+   `sh scripts/local/ssm-rc-update.sh <vm-host> <previous-tag>` — it moves
+   the helper checkout and the VM plugin together.
 3. State removal: `rm -rf ~/.local/state/md-viewer/local` on the laptop,
    `rm -rf ${XDG_RUNTIME_DIR:-/tmp/md-viewer-$USER}/md-viewer` on the VM.
 
-## Results template
-
-Paste this back, filled in. "Not tested" is an answer; a guess is not.
-
-```
-RC tag / helper --version:
-Laptop OS / terminal + version:
-VM OS / Neovim / Node / Chrome:
-Connection (ssh config form, compression on/off):
-:MdViewerMeasureLink:
-
-K1 topology-check over SSM:            PASS/FAIL (paste tail)
-K2 marker echo over SSM:               received= missing= out-of-order= malformed=
-Attach on open (one-time? notices?):
-First preview time (rough stopwatch):
-Scroll feel, slow / fast:
-Source sync / edits / images / links:
-Selection / find:
-Resize / close-reopen:
-Helper kill -> fallback behavior:
-Re-attach after relaunch:
-
-:MdViewerDebug local_render block:     (paste)
-helper --status:                       (paste; remoteGraphicsCommands = ?)
-:MdViewerHealth warnings:              (paste)
-Failures / screenshots:
-Verdict:
-```
-
 ## What this page does not claim
 
-Until a filled results template from the real SSM environment exists, local
-mode's SSM behavior is a design with local evidence: the transport rigs and
-the full session flow pass on LAN SSH (ichigo, 2026-08-26), and the byte-flow
-invariants are pinned by tests. The release notes for any tag carrying this
-feature say "AWS SSM validation pending" until that changes — do not edit
-that sentence away without the evidence in hand.
+The architecture is validated (rc9, above). What each new RC still owes is
+its own feel check on the real link: the release notes for a tag say "AWS
+SSM validation pending" until a filled artifact from the work laptop exists
+for that tag — do not edit that sentence away without the artifact in hand.
