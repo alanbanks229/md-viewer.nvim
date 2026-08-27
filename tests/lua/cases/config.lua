@@ -171,4 +171,14 @@ return function(t)
   table.sort(missing)
   t.eq(0, #missing, "every option appears in *md-viewer-options*: " .. table.concat(missing, ", "))
   t.ok(documented > 60, ("the option table covers the whole surface (%d options)"):format(documented))
+
+  -- plugin/md-viewer.lua calls setup() with no arguments after every rtp
+  -- load, and plugin files run *after* a manual init file's explicit setup --
+  -- so the argless call must defer, not clobber. Measured clobbering
+  -- render.location back to "current" through `nvim -u` before this guard.
+  require("md-viewer").setup({ render = { location = "local" } })
+  require("md-viewer").setup()
+  t.eq("local", config.get().render.location, "an argless setup defers to an explicit configuration")
+  require("md-viewer").setup({})
+  t.eq("current", config.get().render.location, "an explicit empty setup still reconfigures")
 end
