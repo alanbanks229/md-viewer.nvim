@@ -3,6 +3,54 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc10] - 2026-08-27
+
+**Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**
+rc9's AWS SSM validation passed on the work laptop (2026-08-27): K1 topology,
+K2 marker transit (10,000/10,000), and iTerm2 presenting filter-injected
+frames through the real link, with zero raster bytes crossing it. rc10 is the
+performance and operator-experience pass that run asked for: held-key
+scrolling is fixed from measurements, time-to-glass is a permanent
+diagnostic, and RC validation is two commands instead of an afternoon.
+**The rc10 feel check on the real SSM link is pending**; nothing else is.
+
+### Fixed
+
+- **Held-key scrolling in local mode.** rc9 dispatched a capture per scroll
+  position into the helper's serial browser queue; each dispatch superseded
+  the capture already running, so finished screenshots were discarded stale
+  while the screen sat still — the work laptop measured 517 captures for 206
+  surfaces served. Three changes, all measured on the ichigo rig
+  (2026-08-27): the replica holds one capture want per document (newest
+  wins, one in flight — completed screenshots always land); moving frames
+  are captured at the direct path's reduced scroll scale with a device-scale
+  settle re-reference when motion stops (the resting frame is never the soft
+  one); and the controller paces moving markers on the `presented`
+  acknowledgement, so held-key motion is visible at the browser's own frame
+  rate. A 30-step scroll burst went from 4 frames on glass to 24, and
+  marker-emit→presented from p95 2147 ms to p95 63–167 ms.
+
+### Added
+
+- **K4 time-to-glass, measured in the product.** The VM samples marker
+  emit → `presented` acknowledgement on its own clock
+  (`:MdViewerDebug` → `local_render.presented`, p50/p95/max); the helper
+  samples marker-arrival → injection, capture queue wait, and capture
+  duration, and keeps its last 32 captures with scroll position and scale
+  (`--status`, health enrichment). Superseded frames are never samples —
+  the distribution describes only frames a reader saw.
+- **Remote-graphics attribution.** The filter splits its remote-stream
+  graphics counters by image-id space (`remoteMdvGraphicsCommands`,
+  `remoteMdvRasterBytes`), so raster from an md-viewer direct session and
+  graphics from unrelated programs in the same wrapped session stop sharing
+  one ambiguous number — the exact ambiguity rc9's validation hit.
+- **Two-command RC validation.** `scripts/local/ssm-rc-update.sh` moves the
+  laptop helper and the VM plugin to one tag and verifies they agree;
+  `scripts/local/ssm-validate.sh` runs K1, K2, the K4 burst workload,
+  version and zero-raster checks, and the link measurement, then writes one
+  gitignored Markdown artifact and leaves the human exactly two judgments.
+  docs/aws-ssm.md now documents this workflow and records what rc9 settled.
+
 ## [0.3.0-rc9] - 2026-08-27
 
 **Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**
@@ -593,6 +641,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc10]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc10
 [0.3.0-rc9]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc9
 [0.3.0-rc8]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc8
 [0.3.0-rc7]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc7
