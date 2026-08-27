@@ -930,7 +930,11 @@ export class BrowserRenderer {
 
   async health(options) {
     const executable = this.resolveExecutable(options);
-    await this.ensure(options, 1);
+    // Reuse whatever scale a live session is already rendering at: forcing 1
+    // here mismatches `ensure`'s scale guard against an active render at
+    // scale 2 (the default), tearing down the context and losing `this.active`
+    // -- so a health check while a preview is open blanked the preview.
+    await this.ensure(options, this.deviceScaleFactor ?? 1);
     return {
       chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page),
       discoveryReason: this.discoveryReason,

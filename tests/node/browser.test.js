@@ -86,6 +86,29 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   assert.equal(fs.existsSync(tempDir), false);
 });
 
+test("a health check while a document is active does not blank it", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+  const params = { documentId: "buffer-9", contentRevision: 1, viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 2 },
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
+    captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22 };
+  const html = '<h1 data-source-start="0" data-source-end="1">Heading</h1>';
+  await renderer.render(params, html, 1);
+  assert.equal(renderer.active.documentId, "buffer-9");
+  // :MdViewerDebug/:MdViewerHealth run this against a live session; it must
+  // reuse the session's own scale rather than defaulting to 1, or the scale
+  // mismatch tears down the context and blanks the open preview.
+  const health = await renderer.health({ executable_path: executable });
+  assert.equal(health.chromiumLaunch, "succeeded");
+  assert.equal(health.activeDocument, "buffer-9");
+  assert.equal(renderer.active.documentId, "buffer-9");
+});
+
 test("rejects an invalid configured Chromium path", () => {
   const renderer = new BrowserRenderer({ assetsDir });
   assert.throws(() => renderer.resolveExecutable({ executable_path: "/definitely/missing/chrome" }), /does not exist/);

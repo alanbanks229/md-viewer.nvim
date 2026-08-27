@@ -434,6 +434,73 @@ return function(t)
     t.eq(false, interaction.visual_active(session), "Esc leaves visual mode")
   end
 
+  -- ---------------------------------------------------------------------
+  -- Held-key repeat: a same-direction motion arriving while one is still in
+  -- flight accumulates into the next request's count instead of sending its
+  -- own round trip. Fixed 2026-08-27 -- an `interact` request crosses the
+  -- same AWS SSM tunnel a scroll marker does (~85-120ms each way, measured
+  -- on aide-spock), and unbatched key-repeat queued one request per keystroke
+  -- behind it, which is why held-`j` visibly lagged behind release.
+  -- ---------------------------------------------------------------------
+  do
+    caret.forget(session)
+    session.caret_desired_x = nil
+    -- One slot per request, in send order, so each can be resolved by index.
+    -- Appended by an explicit counter, not `#callbacks`: resolving an earlier
+    -- index below sets that slot to nil, and `#` on a table with a hole in it
+    -- is undefined in Lua -- the very first resolve silently corrupted every
+    -- append after it when this used `callbacks[#callbacks + 1]`.
+    local callbacks, callback_count = {}, 0
+    process.request = function(_, params, callback)
+      requests[#requests + 1] = params
+      callback_count = callback_count + 1
+      callbacks[callback_count] = callback
+    end
+    local function resolve(index, y)
+      local callback = callbacks[index]
+      callbacks[index] = nil
+      callback({ kind = "caret", ok = true, rect = { x = 100, y = y, width = 9, height = 18 } }, nil)
+    end
+
+    requests = {}
+    interaction.caret_motion(session, "line", "forward", 1)
+    t.eq(1, #requests, "the first press of a run sends its own request immediately")
+    t.eq(1, requests[1].count, "at its own count, not yet inflated by anything")
+
+    -- Three more `j` presses arrive before the first request has answered --
+    -- exactly what held-key repeat produces against a round trip this slow.
+    interaction.caret_motion(session, "line", "forward", 1)
+    interaction.caret_motion(session, "line", "forward", 1)
+    interaction.caret_motion(session, "line", "forward", 1)
+    t.eq(1, #requests, "none of the three repeats sent their own request")
+
+    resolve(1, 218)
+    t.eq(2, #requests, "the in-flight request's answer flushed exactly one follow-up")
+    t.eq(3, requests[2].count, "carrying the three repeats folded into it, not one each")
+    t.eq(218, caret.rect(session).y, "the caret already reflects the first request's answer")
+
+    -- A different motion arriving mid-flight is not held back -- `w` must not
+    -- wait behind `j`'s follow-up (request 2, still unresolved), and the two
+    -- must not have their counts folded together.
+    interaction.caret_motion(session, "word", "forward", 1)
+    t.eq(3, #requests, "a different motion fires at once rather than batching with an unrelated one")
+    t.eq("line", requests[2].granularity)
+    t.eq("word", requests[3].granularity)
+
+    -- A same-direction `j` after `w` was sent must not be folded into `w`'s
+    -- slot -- `w`'s in-flight record is keyed to "word", not "line".
+    interaction.caret_motion(session, "line", "forward", 1)
+    t.eq(4, #requests, "line after word is a different motion too, and fires at once")
+
+    resolve(3, 218)
+    resolve(4, 218)
+    -- request 2 (the original `j` follow-up) is left unresolved on purpose:
+    -- its answer, in real use, is superseded server-side (lanes.js) once a
+    -- newer interact is admitted, so it never reaches this callback. Settling
+    -- 3 and 4 must not resurrect a flush for it.
+    t.eq(4, #requests, "settling the later answers sends nothing further")
+  end
+
   process.request = original_request
   controller.schedule_scroll = original_schedule_scroll
   controller.close()

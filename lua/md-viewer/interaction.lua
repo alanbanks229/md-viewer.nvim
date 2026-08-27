@@ -571,18 +571,20 @@ end
 ---(or, with no caret yet, the top-left of the image) onto the nearest real
 ---character. That is how the caret is first placed, and how a click re-places
 ---it.
-function M.caret_motion(session, granularity, direction, count, from)
-  if not config.get().interaction.enabled then return end
-  if not session.renderer_revision then return end
-  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  if not session.last_placement then return end
+---`caret_motion`'s actual request, unconditional -- the gate below decides
+---when this runs. Split out so the gate can flush an accumulated repeat
+---through the exact same path a single keypress uses.
+local function send_caret_motion(session, granularity, direction, count, from, on_done)
   -- `from` is a click: start the motion from where the pointer landed rather
   -- than from wherever the caret happened to be. Otherwise this is the caret's
   -- own position as a point, which the renderer uses only when it has no index
   -- to resume from (`caretIndex` below) -- the caret's first placement, and the
   -- first motion after a re-render.
   local point = from or caret.origin(session)
-  if not point then return end
+  if not point then
+    if on_done then on_done() end
+    return
+  end
   -- The caret's tint is its own, so it needs its own sheet -- once, then the
   -- backend's upload cache serves every later frame. Asked for whenever the
   -- backend says it has nothing that would serve, which before the first caret
@@ -647,7 +649,10 @@ function M.caret_motion(session, granularity, direction, count, from)
     viewportHeightPx = session.viewport_height_render_px,
     scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
-    if err or not result or result.ok ~= true or type(result.rect) ~= "table" then return end
+    if err or not result or result.ok ~= true or type(result.rect) ~= "table" then
+      if on_done then on_done() end
+      return
+    end
     local controller = require("md-viewer.controller")
     -- A motion past the edge of the viewport scrolls the page in-page, the same
     -- way a find step does. Nothing captures a frame for a read-only action, so
@@ -693,6 +698,60 @@ function M.caret_motion(session, granularity, direction, count, from)
       controller.display_caret_overlay(session, result.selectionTint, sheet_png)
     end
     M.visual_update(session)
+    if on_done then on_done() end
+  end)
+end
+
+---A caret motion is a renderer round trip: it answers with a glyph box the
+---renderer alone computed, so it cannot be a marker like a scroll is. Held-key
+---repeat fires far faster than that round trip returns (measured on aide-spock
+---2026-08-27: an `interact` request crosses the same AWS SSM tunnel a scroll
+---marker does, ~85-120ms each way), and nothing paced it -- every keystroke
+---queued its own request, so held-`j` visibly lagged behind release by as many
+---round trips as keys were pressed while one was already in flight.
+---
+---`caret_move` already takes a `count` (renderer/src/interact.js steps it in a
+---loop), so a repeat of the *same* motion that arrives while one is still in
+---flight is not sent on its own: it accumulates into a pending count, flushed
+---as a single follow-up request the moment the in-flight one resolves. The
+---first press of a run still goes out immediately, so a single `j` costs
+---exactly what it always did.
+---
+---A *different* motion arriving mid-flight (`w` then `l` before `w` answers)
+---is not held back: it fires at once. The interact lane (`lanes.js`) already
+---supersedes an older in-flight request for the same document when a newer one
+---is admitted, so `w`'s answer, if it lands after being superseded, resolves
+---as `STALE_INTERACTION` and `send_caret_motion` drops it -- exactly the
+---existing behaviour for two racing interacts, unrelated to this change.
+function M.caret_motion(session, granularity, direction, count, from)
+  if not config.get().interaction.enabled then return end
+  if not session.renderer_revision then return end
+  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
+  if not session.last_placement then return end
+  count = math.max(1, math.floor(count or 1))
+  local inflight = session.caret_motion_inflight
+  -- A click (`from`) or a snap ("none") always fires on its own: both name a
+  -- specific point on screen, which an accumulated count cannot represent, and
+  -- neither is what key-repeat produces -- so neither is tracked as batchable.
+  local batchable = not from and granularity ~= "none"
+  if batchable and inflight and inflight.granularity == granularity and inflight.direction == direction then
+    inflight.pending_count = (inflight.pending_count or 0) + count
+    return
+  end
+  local slot = nil
+  if batchable then
+    slot = { granularity = granularity, direction = direction }
+    session.caret_motion_inflight = slot
+  end
+  send_caret_motion(session, granularity, direction, count, from, function()
+    -- Compared by identity, not by (granularity, direction): a different
+    -- motion may have started and finished while this one was in flight,
+    -- installing and clearing its own slot in between, and a same-named
+    -- repeat of *this* motion after that would look identical by field
+    -- comparison alone while belonging to a completely different request.
+    if not slot or session.caret_motion_inflight ~= slot then return end
+    session.caret_motion_inflight = nil
+    if slot.pending_count then M.caret_motion(session, granularity, direction, slot.pending_count) end
   end)
 end
 

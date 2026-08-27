@@ -3,6 +3,73 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Held-key scrolling paced on a round trip it did not need.** rc10 gated
+  the next moving marker on the `presented` acknowledgement, so throughput
+  in local mode was capped at one AWS SSM round trip per frame regardless of
+  capture cost. Measured live against aide-spock (2026-08-27): capture
+  itself took 15–50 ms (`--status` → `replica.timing.captureDuration`) but
+  the round trip the ack added put end-to-end frame time (`:MdViewerDebug`
+  → `local_render.presented`) at p50 116 ms / p95 180 ms — an SSM tunnel
+  round trip, not the browser, was the held-`j` bottleneck. The gate is
+  removed: every scroll emits its marker immediately. The backpressure it
+  existed to provide is already in `replica.js`'s `scheduleSurface` /
+  `pumpCapture` (one capture want per document, newest wins, a superseded
+  want never dispatched), so a burst still costs captures at the helper's
+  own rate, just without waiting a network round trip between them.
+- **Local-mode scrolling was pixelated for no reason.** `render.ssh_scroll_scale`
+  (default 0.5) shrank every moving scroll frame to save bytes crossing SSH --
+  a trade that makes sense on the direct path, which puts the captured frame
+  on the wire. Local mode never does that regardless of resolution (only a
+  ~0.3-1 KB marker crosses SSH either way), so scrolling inherited the
+  blur-while-moving/sharpen-at-rest behavior for a byte saving it never spent.
+  Measured on aide-spock (2026-08-27): full-resolution local capture cost
+  31-52 ms against 15-34 ms at half scale (`--status` ->
+  `replica.timing.captureDuration`) -- a ~15-20 ms difference, dwarfed by the
+  ~85-120 ms round trip the fix above already removed. Local mode now always
+  captures scroll frames at full device scale; `render.scroll_scale` still
+  overrides it explicitly if a laptop's own capture time becomes the
+  constraint.
+- **`:MdViewerDebug`/`:MdViewerHealth` blanked an open preview.** The health
+  check forced its Chromium context to device-scale 1 regardless of what a
+  live session was already rendering at; the mismatch against the session's
+  actual scale (2 by default) tore down the context and cleared the active
+  document, so running either command while a preview was open blanked it.
+  Health now reuses whatever scale is already active.
+- **The startup terminal probe could read the wrong window size for the
+  whole session.** `tty-probe.js` paired a live pixel-size query to the
+  terminal (`CSI 14t`) with Node's cached `process.stdout.columns`/`rows`,
+  which can still hold Node's `80x25` default if the helper starts before
+  the terminal has propagated its real size to the pty. Observed on
+  aide-spock (2026-08-27): a session's `helper_terminal.cellPixels` reported
+  `80x25` while Neovim's own preview window was already 88 columns wide in
+  the same session -- impossible if the terminal were really that narrow,
+  and every placement for the rest of the session inherited the wrong cell
+  size, producing a garbled rectangle partway down the pane. The probe now
+  also sends `CSI 18t` (text-area size in characters) and reads columns/rows
+  from that live reply instead of Node's cache, so both numbers come from
+  the terminal at the same moment and can never disagree.
+- **Held-`j` inside the preview lagged behind release by as many round trips
+  as keys pressed while one was already in flight.** Moving the caret is not
+  a marker -- `caret_move` asks the renderer for a real glyph box and waits
+  for the answer, so it crosses the same AWS SSM tunnel a scroll marker does
+  (~85-120 ms each way, measured on aide-spock 2026-08-27) -- and nothing
+  paced it: every keystroke queued its own `interact` request, so a held key
+  visibly lagged behind release by as many round trips as keys fired while
+  one was still outstanding. `caret_move` already takes a `count`
+  (`renderer/src/interact.js` steps it in a loop), so a same-direction repeat
+  arriving while one is in flight no longer sends its own request: it
+  accumulates into a pending count, flushed as one follow-up the moment the
+  in-flight request resolves. A single tap still costs exactly one request; a
+  held key now costs one round trip per *answer*, not one per keystroke. A
+  different motion arriving mid-flight (`w` then `l` before `w` answers) is
+  not held back -- it fires at once, and the interact lane's existing
+  supersession (`lanes.js`) drops a stale answer if the interrupted request's
+  reply lands late.
+
 ## [0.3.0-rc10] - 2026-08-27
 
 **Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**

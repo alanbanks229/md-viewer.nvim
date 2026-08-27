@@ -23,6 +23,7 @@ return function(t)
   local process = require("md-viewer.process")
   local resident_session = require("md-viewer.resident_session")
   local raw = require("md-viewer.backends.kitty_raw")
+  local terminal = require("md-viewer.terminal")
 
   -- -- rig -------------------------------------------------------------------
 
@@ -263,26 +264,57 @@ return function(t)
   t.eq(stdio_before2, #stdio_calls, "the moving/settle pair sent no stdio request")
   t.eq(renders_before2, #helper.renders, "and no socket render")
 
-  -- -- pacing: one moving marker in flight, the ack flushes the newest ------
-
-  local function last_marker_seq()
-    local s
-    for _, w in ipairs(writes) do
-      local m = w:match("^\27_Mv=1;t=" .. TOKEN .. ";s=(%d+);")
-      if m then s = tonumber(m) end
-    end
-    return s
-  end
-  helper.notify({ event = "presented", seq = last_marker_seq(), doc = session.document_id, scrollY = 250 })
-  vim.wait(2000, function() return session.local_scroll_marker_at == nil end, 10)
+  -- -- pacing: every scroll emits its own marker, none wait on an ack -------
+  --
+  -- Waiting for `presented` before emitting the next marker used to cap
+  -- throughput at one AWS SSM round trip per frame (p50 116ms measured on
+  -- aide-spock 2026-08-27) regardless of how fast the helper could capture
+  -- (15-50ms, same session). The helper's own `scheduleSurface`/`pumpCapture`
+  -- (replica.js) already hold one capture want per document and drop a
+  -- superseded one before it starts, so the Lua side no longer needs to gate
+  -- markers on an ack to avoid flooding -- it can fire one per scroll and let
+  -- the helper's own backpressure absorb a burst.
   local frames_now = #marker_writes()
   controller.navigate(session, "line_down")
   controller.navigate(session, "line_down")
-  t.eq(frames_now + 1, #marker_writes(), "the second scroll coalesced behind the in-flight marker")
-  t.eq(true, session.local_scroll_pending, "and is recorded pending")
-  helper.notify({ event = "presented", seq = last_marker_seq(), doc = session.document_id, scrollY = 0 })
-  vim.wait(2000, function() return #marker_writes() >= frames_now + 2 end, 10)
-  t.ok(#marker_writes() >= frames_now + 2, "the acknowledgement flushed the coalesced newest position")
+  t.eq(frames_now + 2, #marker_writes(), "no ack is required between scrolls -- both markers went out")
+  require("md-viewer").setup({ render = { location = "local" }, terminal = { profile = "kitty" } })
+
+  -- -- local mode ignores ssh_scroll_scale: no wire bytes to trade for it ---
+  --
+  -- `ssh_scroll_scale` shrinks the direct path's moving frame to save bytes
+  -- crossing SSH. Local mode never puts a captured frame on the wire at all
+  -- (only a marker does, regardless of the frame's resolution), so applying
+  -- it here bought no bytes and cost sharpness for nothing -- confirmed live
+  -- on aide-spock (2026-08-27): full-resolution local capture cost 31-52ms
+  -- against 15-34ms at half scale, a ~15-20ms difference dwarfed by the
+  -- ~85-120ms AWS SSM round trip `schedule_scroll` no longer waits on above.
+  local saved_ssh_env = {}
+  for _, key in ipairs({ "SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT" }) do
+    saved_ssh_env[key] = vim.env[key]
+  end
+  vim.env.SSH_CONNECTION = "10.0.0.4 51000 10.0.0.9 22"
+  vim.env.SSH_TTY = nil
+  vim.env.SSH_CLIENT = nil
+  terminal.invalidate()
+  require("md-viewer").setup({
+    render = { location = "local", scroll_scale = nil, ssh_scroll_scale = 0.5 },
+    terminal = { profile = "kitty" },
+  })
+  t.eq(true, terminal.detect().ssh, "the rig now presents as an SSH session")
+  local frames_ssh = #marker_writes()
+  controller.navigate(session, "line_down")
+  vim.wait(1000, function() return #marker_writes() >= frames_ssh + 1 end, 10)
+  local ssh_local_frame = marker_writes()[frames_ssh + 1]
+  t.ok(
+    not ssh_local_frame:find(",c=0.5;", 1, true),
+    "local mode over SSH still captures full size, ignoring ssh_scroll_scale"
+  )
+  t.eq("local mode (full size -- no wire bytes to trade sharpness for)", session.scroll_scale_source)
+  for key, value in pairs(saved_ssh_env) do
+    vim.env[key] = value
+  end
+  terminal.invalidate()
   require("md-viewer").setup({ render = { location = "local" }, terminal = { profile = "kitty" } })
 
   -- -- pushed assets: pending render completes through metrics --------------

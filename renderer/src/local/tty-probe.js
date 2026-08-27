@@ -40,6 +40,7 @@ import tty from "node:tty";
 
 const DA1_REPLY = /\x1b\[\?[0-9;]*c/;
 const PIXEL_REPLY = /\x1b\[4;(\d+);(\d+)t/;
+const CELL_COUNT_REPLY = /\x1b\[8;(\d+);(\d+)t/;
 const KITTY_REPLY = /\x1b_Gi=31;([^\x1b]*)\x1b\\/;
 
 // A 1x1 RGB pixel, the canonical capability query. Any i=31 response --
@@ -79,10 +80,20 @@ export function probeTerminal({ output = process.stdout, timeoutMs = 500 } = {})
       input.destroy();
 
       const pixels = PIXEL_REPLY.exec(buffer);
+      const cellCount = CELL_COUNT_REPLY.exec(buffer);
       const kitty = KITTY_REPLY.exec(buffer);
       const da1 = DA1_REPLY.exec(buffer);
-      const cols = output.columns ?? null;
-      const rows = output.rows ?? null;
+      // Read from the terminal's own reply (CSI 18t), not Node's cached
+      // `output.columns`/`rows`: those can still hold the 80x25 default if
+      // this helper starts before the terminal has propagated its real size
+      // down to the pty (observed on aide-spock 2026-08-27 -- a session
+      // opened with `helper_terminal.cellPixels.cols/rows` at 80x25 while
+      // Neovim's own preview window was already 88 columns wide, which is
+      // impossible if the terminal were really that narrow). Every later
+      // placement inherits this number for the session's life, so a
+      // fallback read here is not a one-frame glitch, it is wrong for good.
+      const cols = cellCount ? Number(cellCount[2]) : output.columns ?? null;
+      const rows = cellCount ? Number(cellCount[1]) : output.rows ?? null;
       let cellPixels = null;
       if (pixels && cols && rows) {
         const heightPx = Number(pixels[1]);
@@ -113,6 +124,6 @@ export function probeTerminal({ output = process.stdout, timeoutMs = 500 } = {})
     const timer = setTimeout(() => finish(true), timeoutMs);
     input.setRawMode(true);
     input.on("data", onData);
-    output.write(`\x1b[14t${KITTY_QUERY}\x1b[c`);
+    output.write(`\x1b[14t\x1b[18t${KITTY_QUERY}\x1b[c`);
   });
 }

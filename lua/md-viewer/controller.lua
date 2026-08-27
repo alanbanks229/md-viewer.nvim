@@ -1110,6 +1110,23 @@ local function scroll_capture_scale(render)
   return nil, "local session (full size)"
 end
 
+---`scroll_capture_scale` for local-render mode, kept separate rather than
+---sharing the `terminal.detect().ssh` branch above: `ssh_scroll_scale`
+---trades sharpness for *wire bytes*, and local mode never puts a captured
+---frame on the wire regardless of resolution -- only a ~0.3-1 KB marker
+---crosses SSH either way. Reusing it here bought nothing and cost
+---sharpness for free. Measured on aide-spock (2026-08-27): a full-resolution
+---local capture (device scale 2) costs 31-52ms against 15-34ms at half scale
+---(`--status` -> `replica.timing.captureDuration`) -- a ~15-20ms difference,
+---not the ~85-120ms AWS SSM round trip `schedule_scroll` no longer waits on.
+---Full size by default; an explicit `render.scroll_scale` still applies, for
+---a laptop where local capture time itself is the constraint.
+local function local_scroll_capture_scale(render)
+  if not render.fast_scroll then return nil, "render.fast_scroll=false (no moving frame)" end
+  if render.scroll_scale ~= nil then return render.scroll_scale, "explicit override (render.scroll_scale)" end
+  return nil, "local mode (full size -- no wire bytes to trade sharpness for)"
+end
+
 ---How long scrolling must be idle before the sharp settle capture is taken, and
 ---where the number came from.
 ---
@@ -1151,46 +1168,38 @@ function M.schedule_scroll(session)
       M.schedule(session, 0)
       return
     end
-    -- The moving/settle split, carried into local mode with the scale it
-    -- trades redefined: over the wire it bought bytes, here it buys the
-    -- helper's capture time (rc9 captured every scroll frame at full device
-    -- scale, and the capture was the cadence -- measured on the work laptop
-    -- 2026-08-27 as the held-j lag). Same knobs as the direct path:
-    -- `scroll_capture_scale` decides whether a reduced moving frame exists
-    -- at all, `scroll_settle_delay` decides when the sharp one replaces it.
+    -- The moving/settle split, carried into local mode but scaled by
+    -- `local_scroll_capture_scale`, not the direct path's SSH-gated one: see
+    -- that function's comment for why local mode does not trade sharpness
+    -- for bytes it never spends. `scroll_settle_delay` (still shared) decides
+    -- when the settle frame replaces the moving one.
     local render = config.get().render
-    local moving, scale_source = scroll_capture_scale(render)
+    local moving, scale_source = local_scroll_capture_scale(render)
     local viewport = session.local_viewport
     if moving and moving >= (viewport.deviceScaleFactor or 1) then
       moving, scale_source = nil, "factor is not below the device scale (full size)"
     end
     session.scroll_scale = moving
     session.scroll_scale_source = scale_source
-    -- One moving marker in flight, newest position wins -- the direct path's
-    -- "one capture at a time is sufficient backpressure", paced here by the
-    -- `presented` acknowledgement instead of the capture callback. Without
-    -- it, markers at key-repeat rate outrun the helper's capture and the
-    -- pending reference moves on before its pixels exist: the ichigo rig
-    -- measured a 30-step burst putting exactly one moving frame on glass
-    -- (2026-08-27). Paced, every completed capture lands, so held-key motion
-    -- is visible at the browser's own frame rate. The deadline covers a lost
-    -- acknowledgement: one hiccup, never a dead scroll -- and the settle
-    -- timer below emits regardless, so the resting frame is always right.
-    local now = vim.uv.now()
-    if session.local_scroll_marker_at and (now - session.local_scroll_marker_at) < 400 then
-      session.local_scroll_pending = true
-      session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
-    else
-      session.local_scroll_marker_at = now
-      session.local_scroll_pending = false
-      apply_surface(
-        session,
-        session.frame_revision,
-        session.scroll_y or 0,
-        viewport,
-        moving and { scale = moving } or nil
-      )
-    end
+    -- Every scroll emits a marker immediately -- no gate on the `presented`
+    -- ack. That ack crosses the same link a marker does: on AWS SSM
+    -- (~1 MB/s, ~100ms RTT measured on aide-spock 2026-08-27), waiting for it
+    -- capped throughput at one round trip per frame (p50 116ms, ~8-9
+    -- frames/sec) regardless of capture cost (15-50ms measured on the same
+    -- session's `--status`). The backpressure this used to buy is already
+    -- provided on the other end: replica.js's `scheduleSurface`/`pumpCapture`
+    -- hold one capture want per document and drop a superseded one before it
+    -- starts (`capturesSupersededBeforeStart`), which is exactly rc9's
+    -- problem (517 captures for 206 surfaces -- every miss dispatched into
+    -- the queue) without rc9's fix undone. Markers now cost only the
+    -- helper's own capture rate, not a round trip on top of it.
+    apply_surface(
+      session,
+      session.frame_revision,
+      session.scroll_y or 0,
+      viewport,
+      moving and { scale = moving } or nil
+    )
     if moving then
       local settle_ms, settle_source = scroll_settle_delay(render)
       session.scroll_settle_ms = settle_ms
@@ -1902,15 +1911,6 @@ function M.setup_autocmds()
     session.local_presented_count = (session.local_presented_count or 0) + 1
     session.local_last_presented_scroll_y = event.scrollY
     if session.loading then preview.stop_loading(session) end
-    -- The helper just landed a transaction, so it is free for the next one:
-    -- release the moving-marker gate and flush the newest coalesced position.
-    if session.local_scroll_marker_at then
-      session.local_scroll_marker_at = nil
-      if session.local_scroll_pending then
-        session.local_scroll_pending = false
-        M.schedule_scroll(session)
-      end
-    end
   end)
   -- The helper was asked for a revision it has no content for: a marker beat
   -- its own render request across the two channels (they share no ordering),
