@@ -215,6 +215,38 @@ escape sequence wedges it. Returning data through `TermResponse`: replying to Ne
 means injecting into ssh's *input*, which means owning stdin, which means allocating a
 pty, which means a native module that cannot be installed on a machine with no egress.
 
+## Postscript: the 2026-08 retry (v0.3.0-rc9)
+
+The retry this document said should reuse the substitution mechanism exists,
+on the `feat/adaptive-local-render` branch, as `render.location = "local"`.
+It keeps exactly what this page said to keep and inverts exactly what it
+measured failing:
+
+- **What inverted.** The experiment served the request/response renderer
+  protocol over the socket, so every frame paid the ~92–96 ms serialized
+  round trip measured above. The retry replicates instead: revisioned
+  document state streams to a renderer beside the terminal asynchronously,
+  and a frame is presented by a ~0.3–1 KB **marker** riding the existing
+  terminal byte stream — a transaction referencing a surface the helper
+  resolves locally, not a byte-for-byte token for one prepared upload. A
+  scroll emits a marker and nothing else; nothing anywhere waits for a
+  response before pixels move.
+- **What the cost became.** RTT stopped being the price; bytes-once became
+  the price. Content-addressed asset bytes cross the link once per content
+  hash, not per frame, and no raster frame crosses at all —
+  `tests/lua/cases/controller_local.lua` pins that as a byte-flow invariant
+  over recorded `nvim_ui_send` writes.
+- **What stayed true.** Both "alternatives that cannot work" above remain
+  untouched: the helper's ssh child inherits stdin (ssh owns the tty, raw
+  mode, `~.` and WINCH exactly as before), and nothing ever writes to the
+  pty from a second process — the filter is the single writer, injecting
+  whole transactions only at tokenizer-safe boundaries.
+
+The reference-environment manual, validation procedure and results template
+live in [aws-ssm.md](aws-ssm.md). This document stays as the record of the
+experiment that was measured and removed; nothing above this line has been
+rewritten.
+
 ## References
 
 - [`architecture.md`](architecture.md) — the data flow, and the two live `scroll_scale`

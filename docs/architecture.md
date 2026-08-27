@@ -29,7 +29,11 @@ then unlinks it. Both sides reject or supersede stale work.
 No WebSocket, deliberately: the renderer is already persistent, no connection is
 re-established per edit, and a WebSocket would require a listening HTTP/TCP
 endpoint while leaving browser layout, PNG capture, and terminal image transfer
-untouched. Scroll-only work reuses cached HTML, the live DOM, document geometry
+untouched. Neither the plugin nor the renderer ever listens on any port; the one
+listener anywhere in the system is the optional local-render helper's unix-domain
+socket, on the operator's own machine, never TCP (see
+[Render location](#render-location) and SECURITY.md — a test pins the never-TCP
+part). Scroll-only work reuses cached HTML, the live DOM, document geometry
 and the token source map, then performs a page scroll and viewport screenshot
 alone.
 
@@ -512,6 +516,58 @@ belongs to that session even if the pointer leaves the window first, which
 matters because a release with no matching capture would otherwise leave
 `session.pointer` stuck "pressed". A plain click places the caret and clears
 an active selection, but never moves the source cursor.
+
+<a id="render-location"></a>
+## Render location
+
+`render.location` decides where frames are rasterized and presented, and
+nothing else about the model: revisions, lanes, staleness, placement math and
+the interaction envelope are identical in both locations because they are the
+same code.
+
+- **`"current"`** (default): everything above — render beside Neovim, ship
+  PNG bytes to the terminal.
+- **`"local"`** (opt-in): the operator launches ssh through
+  `renderer/src/local-main.js` on the machine the terminal runs on. The
+  helper probes the terminal (the one moment queries are safe — it
+  exclusively owns the tty before ssh exists), listens on a 0600 unix socket
+  in a 0700 directory, and adds an `ssh -R` forward so the remote plugin can
+  reach it. The VM keeps markdown parsing and the whole security pipeline
+  (`prepare`: markdown → sanitized html with content-addressed `md-asset:`
+  refs); the helper runs the browser (`render_prepared`) beside the terminal
+  and resolves frames from its own surface cache.
+
+The presentation seam is `kitty_raw`'s presenter: every terminal transaction
+the direct path would write is instead serialized as one authenticated marker
+APC — token, monotonic sequence, document, surface references where pixels
+would be, and the *literal* placement/deletion escapes the Lua builders
+produced, base64ed. The helper's filter (the sole writer to the tty) swallows
+markers, materializes their uploads from the replica, and injects whole
+transactions at tokenizer-safe boundaries.
+
+The invariants the marker transaction path keeps, each pinned by a test:
+
+- **Single terminal writer.** ssh owns stdin untouched; the filter owns
+  stdout; injected transactions are one uninterrupted write at a safe
+  boundary (tokenizer ground state, no split UTF-8, no open `m=1` chunk
+  train).
+- **Newest wins, deletions never lost.** A superseded marker's placements are
+  dropped, its deletions carried into the next injected transaction —
+  ghost-frame prevention (`local-injector.test.js`).
+- **No raster in the remote stream.** Zero PNG payloads and zero upload
+  commands in any `nvim_ui_send` write during a local session
+  (`controller_local.lua`'s byte-flow sweep), and the filter counts remote
+  graphics commands so `:MdViewerHealth` can prove it live.
+- **No response-gated frames.** The frame marker is emitted in the same tick
+  as the render request; responses settle geometry and clamps only. A scroll
+  is one marker, no request — the serialized-RTT failure of the removed
+  experiment (docs/local-render-design.md) has no path back in.
+- **Fallback is a state, never a silence.** Socket death restores the direct
+  presenter and stdio renderer, notifies once, and records the reason where
+  health and debug report it.
+
+Trust boundary and threat model: [SECURITY.md](../SECURITY.md). Reference
+environment and validation: [aws-ssm.md](aws-ssm.md).
 
 ## Lifecycle
 

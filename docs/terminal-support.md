@@ -56,6 +56,25 @@ the SSH section of [troubleshooting.md](troubleshooting.md).
 | WezTerm | `Supported` for image rendering; the overlay **and animation** are deliberately off | See below. |
 | Warp | `Experimental` for image rendering; the selection-highlight overlay and animation are off | Operator-driven, 2026-08-11, macOS. Launched, looked at, and two defects found — see below. |
 
+## Local rendering (`render.location = "local"`)
+
+The local path changes which machine draws, not the escape sequences drawn —
+frames are the same Kitty-protocol transactions, injected by the helper's
+filter instead of written by Neovim. It still gets its own status line per
+terminal, because rc8 proved byte-correct sequences can misdraw under
+timing a terminal did not expect, and local injection inverts the upload
+timing completely.
+
+Every terminal is currently **`Protocol-compatible but unvalidated`** for the
+local path. iTerm2 — the reference environment's terminal — moves to
+`Supported` only after an operator-driven qualification of a filter-injected
+session on real hardware, not before; the others follow the ordinary
+[qualification procedure](development.md#qualifying-a-terminal) run through
+the helper. What has been validated so far is the transport substrate on LAN
+SSH (topology and 10,000-marker transit integrity, ichigo, 2026-08-26 — zero
+loss, zero reorder), which is evidence about the pipe, not about any
+terminal's compositor.
+
 ## Animated images
 
 Playback is off by default (`render.animate = false`), and with it off the

@@ -118,6 +118,24 @@ calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
 of the reasoning.
 
+**Local rendering (experimental).** On a link too slow for pictures at all —
+the measured case is AWS SSM's ~0.8 MB/s — `render.location = "local"` moves
+the browser to your side of the connection instead of shrinking what crosses
+it. Launch ssh through the helper on the machine your terminal runs on:
+
+```sh
+node <md-viewer>/renderer/src/local-main.js -- ssh <host>
+```
+
+and set `render = { location = "local" }` in the remote Neovim's opts. Frames
+then render and display beside your terminal; the connection carries prepared
+markup, asset bytes once each, and ~0.3–1 KB frame markers — no PNGs in
+either direction. Both ends must run the same md-viewer version (the
+handshake refuses a mismatch and names the fix), and if the helper is absent
+the preview says so once and renders remotely as before.
+[docs/aws-ssm.md](docs/aws-ssm.md) is the full manual, including validation
+status per environment.
+
 ## Installation
 
 The build hook installs the locked renderer dependencies. Both flags are

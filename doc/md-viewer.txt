@@ -24,6 +24,7 @@ CONTENTS                                                  *md-viewer-contents*
       Remote sessions over SSH ........... |md-viewer-ssh|
       Whole-document resident mode ....... |md-viewer-resident|
       Why AWS SSM is 0.80 MB/s ........... |md-viewer-ssm-throughput|
+      Local rendering .................... |md-viewer-local|
 9.  Security ............................. |md-viewer-security|
 10. Health and diagnostics ............... |md-viewer-health|
 
@@ -923,6 +924,44 @@ It has nothing to do with SSH. A plain SSH session touches none of that code:
 measured 2026-08-25, 8 MB through a pty to a host on the same network took
 0.47-0.54 seconds, or 16-18 MB/s. See docs/local-render-design.md for the full
 working.
+
+                                                             *md-viewer-local*
+Local rendering (experimental) ~
+
+`render.location = "local"` answers the ceiling above by moving the browser
+to your side of the connection instead of shrinking what crosses it. On the
+machine your terminal runs on, launch ssh through the helper: >sh
+
+    node <md-viewer>/renderer/src/local-main.js -- ssh <host>
+<
+and set `render = { location = "local" }` in the remote Neovim. The remote
+keeps Markdown parsing and the whole security pipeline; the helper renders
+frames beside the terminal and injects them into the session's own byte
+stream. What crosses the link is prepared markup, each asset's bytes once,
+and a ~0.3-1 KB marker per frame -- no PNG in either direction, and no frame
+ever waits on a round trip. Scrolling in particular sends one marker and
+nothing else.
+
+Requirements and behavior:
+
+- The helper machine needs Node >= 22.12 and a system Chrome/Chromium/Edge
+  (discovered, never downloaded), plus this repository checked out at the
+  SAME version as the remote plugin -- the handshake refuses a mismatch and
+  its message names the older side.
+- With no helper (or after it dies), the preview warns once and renders
+  remotely exactly as before; nothing else changes. The reason is kept in
+  |:MdViewerHealth| and `:MdViewerDebug`'s `local_render` block.
+- `$MD_VIEWER_LOCAL_SOCKET` pins the control-socket path when the automatic
+  scan picks the wrong helper (two helper sessions to one host).
+- `render.animate` has no effect in local mode; animated images render as
+  still frames.
+- `node .../local-main.js --status` prints every local helper's counters;
+  `parser.remoteGraphicsCommands` staying at zero is the proof that no
+  pixels are crossing the link.
+
+The full manual -- topology, trust boundary, per-environment validation
+status, and the procedure for validating a new environment -- is
+docs/aws-ssm.md, with the design record in docs/local-render-design.md.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*

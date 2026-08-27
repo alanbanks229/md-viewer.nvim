@@ -270,6 +270,56 @@ divisor, not a size knob: lowering it doubles the CSS viewport and makes the
 frame *larger*, and it collapses the moving and settle captures into one so the
 cheap scroll frame stops existing. `:help md-viewer-ssh` has the measurements.
 
+## Local rendering says "local rendering unavailable" on open
+
+`render.location = "local"` needs the helper wrapped around the ssh session
+*before* Neovim starts inside it:
+
+```sh
+node <md-viewer>/renderer/src/local-main.js -- ssh <host>
+```
+
+The warning's parenthetical is the discovery scan's own verdict, one entry
+per candidate socket. "no helper socket found" means no `ssh -R` forward
+landed (the helper prints a message at launch if it could not add one);
+"mode ... is looser than 0600" means the remote socket file failed the
+permission check; "hello refused (PROTOCOL_MISMATCH: ...)" means the two
+checkouts are on different md-viewer versions — pin both to the same tag,
+the refusal text says which side is older. `$MD_VIEWER_LOCAL_SOCKET` pins
+the socket path explicitly when the scan picks wrong.
+
+## Local rendering attaches but "pairing probe unanswered"
+
+The socket answered hello but the helper filtering *this* terminal never saw
+the probe marker, so the plugin refused to adopt it — most often two helper
+sessions to one host, where the scan found the other session's socket first.
+Close the stale session (or its socket file under
+`${XDG_RUNTIME_DIR:-/tmp/md-viewer-$USER}/md-viewer/`), or point
+`$MD_VIEWER_LOCAL_SOCKET` at the right one. A multiplexer between ssh and
+the terminal (tmux/screen inside the session) also eats the probe: the
+filter must sit directly on the byte stream Neovim writes to.
+
+## The preview works, but is it actually rendering locally?
+
+Do not judge by feel. `:MdViewerHealth`'s Rendering section has a `Location`
+row that answers in words, and the counters prove it: `:MdViewerDebug`'s
+`local_render` block shows the attachment phase and markers emitted, and on
+the laptop `node .../local-main.js --status` prints the filter's
+`parser.remoteGraphicsCommands` — the number of graphics uploads that
+arrived from the remote as bytes. Zero while attached means no PNG is
+crossing the link; a climbing number means the session demoted (the reason
+is in health) and frames are crossing as pixels again.
+
+## Local rendering demoted mid-session ("rendering on this host instead")
+
+The control socket died — the notification appears once, and every later
+frame renders remotely, correct but paying the link again. The reason is
+kept in `:MdViewerHealth`'s warnings and `:MdViewerDebug`'s
+`local_render.reason`. Re-attach by reopening the preview from a session
+launched through the helper; a helper that died takes its ssh session with
+it, so this normally means starting a fresh session rather than repairing
+the old one.
+
 ## A resident preview jumps to the wrong position, or shows torn content
 
 Resident mode (`image.resident = "auto"`, opt-in and off by default) holds a

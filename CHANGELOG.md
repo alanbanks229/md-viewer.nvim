@@ -3,6 +3,57 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0-rc9] - 2026-08-27
+
+**Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**
+Adds opt-in local rendering: the browser runs beside your terminal, and no
+frame crosses the connection as pixels. Built for the AWS SSM environment's
+measured ~0.8 MB/s ceiling; **AWS SSM validation is pending** — the transport
+and the full session flow are validated on LAN SSH, and docs/aws-ssm.md
+carries the exact procedure and results template for the real-link run.
+`render.location` defaults to `"current"`; nothing changes unless you opt in.
+
+### Added
+
+- **`render.location = "local"`** renders and presents frames beside the
+  terminal. Launch ssh through the helper on the machine your terminal runs
+  on — `node <md-viewer>/renderer/src/local-main.js -- ssh <host>` — and the
+  connection carries prepared markup, each asset's bytes once, and a
+  ~0.3–1 KB marker per frame instead of an ~80–305 KB PNG per frame. A
+  scroll sends one marker and no request at all. See `:help md-viewer-local`.
+- **A pairing handshake that cannot cross-wire.** The plugin adopts a helper
+  only after a versioned hello *and* a probe marker through its own tty that
+  only the helper filtering that terminal can see. Version skew between the
+  two checkouts is refused with the fix in the message.
+- **Loud, reversible fallback.** No helper, a dead socket, or a mid-session
+  crash produces one warning and remote rendering exactly as before; the
+  reason lands in `:MdViewerHealth` and `:MdViewerDebug`.
+- **Diagnostics that answer "is anything still crossing as pixels?"** with
+  counters on both ends: marker and fallback counts in health/debug, and a
+  helper `--status` flag whose `parser.remoteGraphicsCommands` counts
+  graphics uploads that arrived from the remote stream — zero while attached
+  is the invariant holding.
+- **`docs/aws-ssm.md`**: the reference-environment manual — topology, why SSM
+  is not SSH, the trust boundary, the validation procedure, and the results
+  template.
+
+### Security
+
+- The plugin and renderer still open no listening port. The optional helper
+  listens on one unix-domain socket (0600 in a 0700 directory, never TCP — a
+  test pins it) on the operator's own machine, for one ssh session's
+  lifetime. Asset transfer is push-only and content-addressed: the helper
+  can never request a path, and every push is verified against its hash.
+  Remote-image fetching stays on the document's machine. SECURITY.md has the
+  full boundary.
+
+### Changed
+
+- In local mode, resident mode demotes ("local render owns scrolling"),
+  `render.animate` is structurally off (still frames, with a health warning
+  if configured on), and the moving/settle capture split never engages —
+  there is no wire to save.
+
 ## [0.3.0-rc8] - 2026-08-26
 
 **Prerelease.** iTerm2 no longer re-crops a resident image in place — measured
@@ -542,6 +593,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc9]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc9
 [0.3.0-rc8]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc8
 [0.3.0-rc7]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc7
 [0.3.0-rc6]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc6

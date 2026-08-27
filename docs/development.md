@@ -242,11 +242,43 @@ measured — only the `/dev/null`-drain figures above exist. An agent has no
 terminal emulator to drain into. Run `:MdViewerMeasureLink` from inside a real
 iTerm2 session on `ichigo` and record the result here.
 
+## The local-render helper
+
+`renderer/src/local-main.js` is the optional per-session process behind
+`render.location = "local"` — same package, zero extra dependencies. Run it in
+place of plain ssh, on the machine the terminal is on:
+
+```sh
+node renderer/src/local-main.js -- ssh <host>     # the session wrapper
+node renderer/src/local-main.js --version         # what a bug report should quote
+node renderer/src/local-main.js --status          # counters from every helper socket
+node renderer/src/local-main.js --marker-echo-test -- ssh <host>   # K2 transit rig
+```
+
+Its tests are part of the ordinary node suite (`local-*.test.js`: stream
+parser + passthrough fuzz, injector rules, socket hello/pairing, replica
+renders, no-TCP, orphan-exit). The pieces that need real hardware have rigs
+under `scripts/local/`: `topology-check.sh` proves the wrapped-ssh topology
+(raw mode, resize, `~.`) against a real host, and `marker-echo-emit.sh` is
+the remote half of the echo test. Two hard-won facts to preserve when
+touching it: the helper must never read `process.stdin` (the tty probe opens
+its own `/dev/tty` — see the header in `local/tty-probe.js` for the measured
+failure), and remote forward paths must be absolute and short
+(`sshd` refuses relative streamlocal binds; `sun_path` caps at ~104 bytes).
+
 ## Releasing
 
 The project follows [Semantic Versioning](https://semver.org/). While the major
 version is `0`, a breaking change is allowed in a MINOR bump; that carve-out ends
 at `1.0.0`.
+
+**Release candidates may be tagged on an unmerged feature branch** when the
+point of the RC is validation in an environment this machine cannot reach —
+tags are fetchable regardless of branch, so a lazy.nvim `version` pin works
+either way. `v0.3.0-rc9` set the precedent: the branch merges after the
+remote evidence comes back, not before. Everything else in the checklist
+applies unchanged, and the release notes must say what validation is still
+pending.
 
 1. Run all three automated suites from a clean checkout.
 2. Work through [Manual verification](#manual-verification) on at least one
@@ -287,7 +319,11 @@ Preserve these unless a proposal explicitly revisits them. Each is stated with
 its mechanism in [SECURITY.md](../SECURITY.md) or
 [architecture.md](architecture.md):
 
-- no listening port; renderer transport is child-process stdin/stdout
+- the plugin and renderer open no listening port; renderer transport is
+  child-process stdin/stdout, and the one listener anywhere — the optional
+  local-render helper's unix socket, operator-launched on the operator's own
+  machine — is never TCP (a test pins that) and never gains a path-request
+  channel: assets are push-only
 - browser networking blocked unconditionally; remote images fetched only by the
   Node process, only from public destinations, on every redirect hop
 - Playwright uses an existing browser and manages no downloads

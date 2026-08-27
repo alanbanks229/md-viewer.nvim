@@ -50,6 +50,40 @@ Fixes are provided for `main` and the latest tagged release.
   decoders rather than by hand-written LZW in the Node process, and anything
   malformed or past the caps falls back to the still frame.
 
+## The optional local-render helper
+
+The plugin and the renderer open no listening port of any kind, ever. With
+`render.location = "local"` the operator additionally runs
+`renderer/src/local-main.js` by hand around their own ssh session, and that
+helper is the one listener in the system. Its boundary:
+
+- **One unix-domain socket, never TCP** (`tests/node/local-no-listening-port.test.js`
+  pins the never-TCP part): mode 0600 in a 0700 directory under the
+  operator's own `~/.local/state`, alive for the lifetime of one ssh session.
+  The remote endpoint is the `ssh -R` forward the helper adds to its own ssh
+  invocation; the plugin verifies the remote socket file's owner and
+  permissions before use, and garbage-collects stale ones.
+- **A per-run 128-bit token** authenticates markers. It travels only over the
+  control socket's hello, never through the terminal stream, and the one-shot
+  unauthenticated `status` query answers counters only — never the token,
+  never document content. Adoption additionally requires the **pairing
+  probe**: the plugin emits a sequence-0 marker through its own tty, and only
+  the helper whose filter sits on that terminal can confirm it — a spoofed
+  socket can say hello but can never pair.
+- **Assets are push-only.** The helper can never request a path; the VM
+  pushes content-addressed bytes that already passed the unchanged VM-side
+  validation (document-root confinement, magic bytes, size caps, the SSRF
+  policy above), and the helper verifies each push against its hash — the
+  channel cannot rename one image into another. Remote-image fetching stays
+  on the VM: the helper's Node process makes no outbound connections, and
+  its Chromium runs the identical route-abort/deny-all-CSP/JavaScript-off
+  configuration as the VM's.
+- **Markers cannot execute anything.** A marker is a frame/placement
+  description; its placement bytes are terminal graphics escapes built by
+  the plugin, injected only at parse-safe boundaries, and anything without
+  the token — including a hostile file `cat`ed in the session — passes
+  through the filter byte-for-byte unexamined.
+
 ## Deliberate trade-offs
 
 Two settings widen the boundary on purpose. Neither is inferred from a config
