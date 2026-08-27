@@ -363,7 +363,12 @@ function M.display_selection_overlay(session, result)
   end
   local started = vim.uv.hrtime()
   local sheet_png = nil
-  if type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
+  if local_mode(session) then
+    -- Never bytes here: the helper synthesizes the sheet from the reference
+    -- the backend completes (tint, size, margin), so "need_sheet" cannot
+    -- occur in local mode and no PNG rides any response.
+    sheet_png = { ref = true }
+  elseif type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
     local ok, decoded = pcall(vim.base64.decode, result.overlaySheetPng)
     if ok then sheet_png = decoded end
   end
@@ -427,6 +432,9 @@ function M.display_caret_overlay(session, tint, sheet_png)
   end
   session.caret_tint = tint or session.caret_tint
   if not session.caret_tint then return false end
+  -- Same rule as the selection overlay: local mode passes a reference and the
+  -- helper synthesizes the caret sheet beside the terminal.
+  if local_mode(session) then sheet_png = { ref = true } end
   local ok, set_id = pcall(
     backend.overlay_apply,
     session.caret_overlay_set,
@@ -494,7 +502,29 @@ end
 ---`renderer.lua`; the display half is `apply_image`, shared verbatim.
 function M.display_interact_result(session, result)
   if not valid(session) or session.backend.name == "cells" then return end
-  if type(result) ~= "table" or type(result.pngPath) ~= "string" then return end
+  if type(result) ~= "table" then return end
+  if local_mode(session) then
+    -- No PNG crossed the socket and none was captured. The mutation lives in
+    -- the helper's DOM behind the visual epoch its response carried (recorded
+    -- by interaction.lua's funnel before this ran), so displaying it is one
+    -- frame marker: the new epoch makes the old surface unresolvable and
+    -- forces the capture beside the terminal.
+    if result.contentRevision and result.contentRevision ~= session.renderer_revision then return end
+    if type(result.scrollY) == "number" then
+      session.applied_scroll_y = result.scrollY
+      session.scroll_y = result.scrollY
+    end
+    if update_occlusion(session) then
+      clear_image(session)
+      session.refresh_deferred = true
+      return
+    end
+    if session.renderer_revision and session.local_viewport then
+      apply_surface(session, session.renderer_revision, session.scroll_y or 0, session.local_viewport)
+    end
+    return
+  end
+  if type(result.pngPath) ~= "string" then return end
   local cfg = config.get().render
   local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
   vim.uv.fs_unlink(result.pngPath)

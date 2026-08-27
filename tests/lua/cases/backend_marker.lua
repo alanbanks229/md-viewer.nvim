@@ -150,6 +150,41 @@ return function(t)
   raw.clear(a)
   raw.clear(b)
 
+  -- A selection overlay in marker mode: the caller passes a reference, the
+  -- backend completes it (tint as rrggbbaa, required size, margin), and the
+  -- sheet upload is its own transaction ahead of the crop placements --
+  -- the same write boundary the direct path keeps, with zero PNG bytes.
+  reset_writes()
+  local overlay_base = raw.show_surface(frame_ref("buffer-9", "2:0"), placement)
+  reset_writes()
+  local set_id, overlay_err = raw.overlay_apply(
+    nil,
+    overlay_base,
+    { { x = 5, y = 5, width = 20, height = 10 } },
+    { widthPx = 100, heightPx = 100 },
+    { r = 58, g = 123, b = 213, a = 0.8 },
+    { ref = true },
+    placement
+  )
+  t.ok(set_id, "the overlay applied against a surface base: " .. tostring(overlay_err))
+  t.eq(2, #writes, "a new sheet is one transaction, the crops another")
+  local sheet_marker = parse(writes[1])
+  t.eq(1, #sheet_marker.uploads, "the sheet travels as one upload reference")
+  t.ok(
+    sheet_marker.uploads[1]:match("^s,i=%d+,g=3a7bd5cc,w=%d+,h=%d+,x=0,y=0$"),
+    "the reference is tint and geometry, nothing else: " .. sheet_marker.uploads[1]
+  )
+  t.eq("", sheet_marker.place, "the sheet upload places nothing")
+  local crops = parse(writes[2])
+  t.eq(0, #crops.uploads, "the crop transaction uploads nothing")
+  t.ok(crops.place:find("a=p", 1, true), "crop placements ride p= as literal escapes")
+  t.eq(nil, writes[1]:find("iVBOR", 1, true), "no sheet bytes anywhere")
+  raw.overlay_clear(set_id)
+  raw.clear(overlay_base)
+  -- The sheet cache is module state; leaving this case's sheet in it would
+  -- hand later cases a warm cache they assert is cold.
+  raw.clear_all()
+
   -- PNG bytes under the marker presenter are a mode race: the frame is
   -- presented directly -- correct pixels, expensive bytes -- and counted,
   -- never silently dropped and never wrapped in a marker.

@@ -696,7 +696,32 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
       end
       upload = { png = sheet_png, width_px = width_px, height_px = height_px }
     elseif type(sheet_png) == "table" and sheet_png.ref then
-      upload = { ref = sheet_png.ref, width_px = need_w, height_px = need_h }
+      -- The reference is completed here rather than by the caller because the
+      -- required size and this terminal's margin are knowledge this function
+      -- owns; the caller only says "synthesize, don't ship bytes". The tint
+      -- travels as rrggbbaa so the helper's overlay-sheet.js builds the
+      -- byte-identical sheet the direct path would have been handed.
+      local alpha = math.max(0, math.min(255, math.floor((tonumber(tint and tint.a) or 0) * 255 + 0.5)))
+      local function channel(value) return math.max(0, math.min(255, math.floor(tonumber(value) or 0))) end
+      upload = {
+        ref = {
+          kind = "sheet",
+          tint = ("%02x%02x%02x%02x"):format(
+            channel(tint and tint.r),
+            channel(tint and tint.g),
+            channel(tint and tint.b),
+            alpha
+          ),
+          -- Ceiled: the marker grammar carries integers, and a sheet may
+          -- only ever round up -- it has to cover the box, not fit it.
+          widthPx = math.ceil(need_w),
+          heightPx = math.ceil(need_h),
+          marginX = margin and margin.x or 0,
+          marginY = margin and margin.y or 0,
+        },
+        width_px = math.ceil(need_w),
+        height_px = math.ceil(need_h),
+      }
     else
       return nil, "need_sheet"
     end

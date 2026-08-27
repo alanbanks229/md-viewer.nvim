@@ -168,7 +168,11 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
   }
 
   async function handleInteract(params) {
-    const result = await dispatch("interact", params);
+    // Structural, not advisory: whatever the envelope asked for, no capture
+    // runs and no sheet is built. Mutations are displayed by the frame marker
+    // the remote emits against the bumped epoch, and sheets are synthesized
+    // from marker references -- PNG bytes have no business in any response.
+    const result = await dispatch("interact", { ...params, capture: false, overlaySheet: undefined });
     const record = docRecord(params.documentId);
     if (INTERACT_ACTIONS[params.action]?.mutatesVisibleState && result) {
       // The frame on screen no longer matches the DOM; a new epoch makes
@@ -178,13 +182,15 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
     }
     if (result && typeof result === "object") {
       // No PNG ever crosses the socket. An interact that captured anyway
-      // (the remote is expected not to ask) is stripped, not forwarded.
+      // (the remote is expected not to ask, and the dispatch above refuses
+      // to) is stripped, not forwarded -- sheets included.
       if (typeof result.pngPath === "string") {
         try {
           fs.unlinkSync(result.pngPath);
         } catch {}
         delete result.pngPath;
       }
+      delete result.overlaySheetPng;
       result.visualEpoch = record.epoch;
     }
     return result;

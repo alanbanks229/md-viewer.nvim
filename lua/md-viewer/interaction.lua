@@ -29,6 +29,16 @@ function M.captured_session() return captured end
 ---third `meta` argument.
 local function interact_request(session, params, callback)
   session.interaction_request_count = (session.interaction_request_count or 0) + 1
+  if require("md-viewer.localrender").active() then
+    -- The no-PNG envelope: in local mode a mutation is displayed by a frame
+    -- marker against the bumped visual epoch, so the same-operation capture
+    -- would render bytes nobody reads, and sheet PNGs are synthesized beside
+    -- the terminal from a reference. The replica enforces both ends of this
+    -- too; stating it in the envelope keeps the request honest about what it
+    -- wants.
+    params.capture = false
+    params.overlaySheet = nil
+  end
   process.request("interact", params, function(result, err, meta)
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1

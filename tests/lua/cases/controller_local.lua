@@ -273,6 +273,38 @@ return function(t)
   })
   vim.wait(2000, function() return not session.content_render_in_flight end, 10)
 
+  -- -- interact display: a mutation is one frame marker at the new epoch ----
+
+  session.visual_epoch = 1 -- what interaction.lua's funnel records from a mutating response
+  local frames_before_interact = #marker_writes()
+  controller.display_interact_result(
+    session,
+    { contentRevision = session.renderer_revision, scrollY = 40, visualEpoch = 1 }
+  )
+  local interact_frames = marker_writes()
+  t.eq(frames_before_interact + 1, #interact_frames, "a PNG-less interact result displays as one frame marker")
+  t.ok(
+    interact_frames[#interact_frames]:find("y=40,e=1,", 1, true),
+    "the marker carries the mutated epoch and the result's scroll"
+  )
+  t.eq(40, session.applied_scroll_y, "the interact's scroll position is applied")
+
+  -- -- selection overlay: crops composite over a synthesized sheet ----------
+
+  local writes_before_overlay = #writes
+  local applied, overlay_reason = controller.display_selection_overlay(session, {
+    rects = { { x = 4, y = 4, width = 30, height = 12 } },
+    contentRevision = session.renderer_revision,
+    scrollY = session.applied_scroll_y,
+    selectionTint = { r = 58, g = 123, b = 213, a = 0.8 },
+  })
+  t.eq(true, applied, "the overlay applied without any sheet bytes: " .. tostring(overlay_reason))
+  local sheet_write = writes[writes_before_overlay + 1]
+  t.ok(
+    sheet_write:find("u=s,", 1, true) and sheet_write:find("g=3a7bd5cc", 1, true),
+    "the sheet crossed as a tint reference the helper synthesizes"
+  )
+
   -- -- select_path: local rendering owns scrolling ---------------------------
 
   local path, reason = resident_session.select_path({ backend = raw })
@@ -312,6 +344,9 @@ return function(t)
   -- -- teardown --------------------------------------------------------------
 
   controller.close(source)
+  -- The overlay case warmed the backend's tint-sheet cache; later cases
+  -- assert it cold.
+  backends.get("kitty_raw").clear_all()
   helper.server:close()
   localrender._reset()
   process.request_stdio = real_request_stdio

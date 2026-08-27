@@ -166,19 +166,24 @@ test("replica: pending on missing assets, metrics after the push, surfaces resol
   }
   assert.ok(scrolledBytes, "the scheduled capture produced the scrolled surface");
 
-  // A mutating interact bumps the visual epoch and never ships a PNG.
+  // A mutating interact bumps the visual epoch and never ships a PNG --
+  // even when the envelope explicitly asks for the capture and the sheet,
+  // the replica refuses both structurally.
   const found = await replica.handle("interact", {
     documentId: "doc-local",
     contentRevision: "7:0",
     action: "find_set",
     query: "body",
+    capture: true,
+    overlaySheet: { widthPx: 640, heightPx: 480 },
     viewportWidthPx: 640,
     viewportHeightPx: 480,
     cellWidthPx: 8,
     cellHeightPx: 16,
   });
   assert.equal(found.visualEpoch, 1, "a visible-state mutation bumps the epoch");
-  assert.equal(found.pngPath, undefined, "no PNG path ever crosses the socket");
+  assert.equal(found.pngPath, undefined, "no PNG path ever crosses the socket, asked for or not");
+  assert.equal(found.overlaySheetPng, undefined, "no sheet bytes either -- sheets synthesize from marker refs");
 
   // Sheets are derivable locally from the ref alone.
   const sheet = replica.resolveUpload(
