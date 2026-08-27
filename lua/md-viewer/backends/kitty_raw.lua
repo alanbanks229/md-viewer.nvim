@@ -44,6 +44,16 @@ local function at(placement, sequence)
   return ("\27[s\27[%d;%dH%s\27[u"):format(placement.row + 1, placement.col + 1, sequence)
 end
 
+---The complete upload transmission for one image id. Named because it is a
+---cross-language contract, not just a convenience: the local-render helper
+---re-implements exactly this function in JS (`renderer/src/local/
+---kitty-writer.js`) to materialize uploads on the terminal's machine, and
+---`scripts/local/dump-upload-golden.lua` dumps this one's output so the two
+---can be compared byte-for-byte.
+local function upload_sequence(id, image_bytes)
+  return chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+end
+
 local function active_profile()
   local capability = terminal.detect()
   return terminal.profiles[capability.profile_id] or terminal.profiles.unknown, capability.profile_id
@@ -339,12 +349,11 @@ local function build_show(image_bytes, placement)
   local id = next_id
   local width_px, height_px = png_dimensions(image_bytes)
   if not width_px then error("md-viewer: raw Kitty backend received an invalid PNG") end
-  local encoded = vim.base64.encode(image_bytes)
   local item = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
   owned[id] = item
   -- Upload once, then use cropped placements so passive floating UI can punch
   -- out only its own cells instead of blanking the complete preview.
-  local upload = chunks(encoded, ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+  local upload = upload_sequence(id, image_bytes)
   local sequence, ids = placement_sequences(item, placement)
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
@@ -1597,5 +1606,10 @@ end
 -- guard to a no-op and re-running the suite is what surfaced that; asserting
 -- them directly is what fixed it.
 M._preconditions = { cell_is_placeable = cell_is_placeable, crop_within = crop_within }
+
+-- Exported for `scripts/local/dump-upload-golden.lua` only: the upload
+-- chunker is the one escape builder the local-render helper reimplements in
+-- JS, and the dump is what pins the two implementations to the same bytes.
+M._upload_sequence = upload_sequence
 
 return M
