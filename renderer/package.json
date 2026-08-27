@@ -1,6 +1,6 @@
 {
   "name": "md-viewer-renderer",
-  "version": "0.3.0-rc8",
+  "version": "0.3.0-rc9",
   "private": true,
   "type": "module",
   "description": "Persistent local Markdown renderer for md-viewer.nvim",
