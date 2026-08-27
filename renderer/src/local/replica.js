@@ -55,6 +55,11 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
     captureQueueWait: createReservoir(), // want recorded -> capture dispatched
     captureDuration: createReservoir(), // capture dispatched -> pixels stored
   };
+  // The last few captures with their identity, because an aggregate cannot
+  // answer "which capture was the slow one" -- the question every latency
+  // regression opens with.
+  const RECENT_CAPTURES = 32;
+  const recentCaptures = [];
 
   function docRecord(documentId) {
     let record = docs.get(documentId);
@@ -280,7 +285,10 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
       ...scaleParams,
     })
       .then((result) => {
-        timing.captureDuration.add(clock() - started);
+        const ms = clock() - started;
+        timing.captureDuration.add(ms);
+        recentCaptures.push({ scrollY: upload.scrollY, scale: upload.scale, ms: Math.round(ms) });
+        if (recentCaptures.length > RECENT_CAPTURES) recentCaptures.shift();
         stats.capturesCompleted += 1;
         const bytes = fs.readFileSync(result.pngPath);
         fs.unlinkSync(result.pngPath);
@@ -318,6 +326,7 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
         captureQueueWait: timing.captureQueueWait.snapshot(),
         captureDuration: timing.captureDuration.snapshot(),
       },
+      recentCaptures: [...recentCaptures],
     };
   }
 

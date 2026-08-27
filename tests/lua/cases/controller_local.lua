@@ -262,6 +262,27 @@ return function(t)
   )
   t.eq(stdio_before2, #stdio_calls, "the moving/settle pair sent no stdio request")
   t.eq(renders_before2, #helper.renders, "and no socket render")
+
+  -- -- pacing: one moving marker in flight, the ack flushes the newest ------
+
+  local function last_marker_seq()
+    local s
+    for _, w in ipairs(writes) do
+      local m = w:match("^\27_Mv=1;t=" .. TOKEN .. ";s=(%d+);")
+      if m then s = tonumber(m) end
+    end
+    return s
+  end
+  helper.notify({ event = "presented", seq = last_marker_seq(), doc = session.document_id, scrollY = 250 })
+  vim.wait(2000, function() return session.local_scroll_marker_at == nil end, 10)
+  local frames_now = #marker_writes()
+  controller.navigate(session, "line_down")
+  controller.navigate(session, "line_down")
+  t.eq(frames_now + 1, #marker_writes(), "the second scroll coalesced behind the in-flight marker")
+  t.eq(true, session.local_scroll_pending, "and is recorded pending")
+  helper.notify({ event = "presented", seq = last_marker_seq(), doc = session.document_id, scrollY = 0 })
+  vim.wait(2000, function() return #marker_writes() >= frames_now + 2 end, 10)
+  t.ok(#marker_writes() >= frames_now + 2, "the acknowledgement flushed the coalesced newest position")
   require("md-viewer").setup({ render = { location = "local" }, terminal = { profile = "kitty" } })
 
   -- -- pushed assets: pending render completes through metrics --------------

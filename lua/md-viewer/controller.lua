@@ -1166,13 +1166,31 @@ function M.schedule_scroll(session)
     end
     session.scroll_scale = moving
     session.scroll_scale_source = scale_source
-    apply_surface(
-      session,
-      session.frame_revision,
-      session.scroll_y or 0,
-      viewport,
-      moving and { scale = moving } or nil
-    )
+    -- One moving marker in flight, newest position wins -- the direct path's
+    -- "one capture at a time is sufficient backpressure", paced here by the
+    -- `presented` acknowledgement instead of the capture callback. Without
+    -- it, markers at key-repeat rate outrun the helper's capture and the
+    -- pending reference moves on before its pixels exist: the ichigo rig
+    -- measured a 30-step burst putting exactly one moving frame on glass
+    -- (2026-08-27). Paced, every completed capture lands, so held-key motion
+    -- is visible at the browser's own frame rate. The deadline covers a lost
+    -- acknowledgement: one hiccup, never a dead scroll -- and the settle
+    -- timer below emits regardless, so the resting frame is always right.
+    local now = vim.uv.now()
+    if session.local_scroll_marker_at and (now - session.local_scroll_marker_at) < 400 then
+      session.local_scroll_pending = true
+      session.coalesced_scroll_events = (session.coalesced_scroll_events or 0) + 1
+    else
+      session.local_scroll_marker_at = now
+      session.local_scroll_pending = false
+      apply_surface(
+        session,
+        session.frame_revision,
+        session.scroll_y or 0,
+        viewport,
+        moving and { scale = moving } or nil
+      )
+    end
     if moving then
       local settle_ms, settle_source = scroll_settle_delay(render)
       session.scroll_settle_ms = settle_ms
@@ -1884,6 +1902,15 @@ function M.setup_autocmds()
     session.local_presented_count = (session.local_presented_count or 0) + 1
     session.local_last_presented_scroll_y = event.scrollY
     if session.loading then preview.stop_loading(session) end
+    -- The helper just landed a transaction, so it is free for the next one:
+    -- release the moving-marker gate and flush the newest coalesced position.
+    if session.local_scroll_marker_at then
+      session.local_scroll_marker_at = nil
+      if session.local_scroll_pending then
+        session.local_scroll_pending = false
+        M.schedule_scroll(session)
+      end
+    end
   end)
   -- The helper was asked for a revision it has no content for: a marker beat
   -- its own render request across the two channels (they share no ordering),
