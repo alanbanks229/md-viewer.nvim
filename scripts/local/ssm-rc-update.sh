@@ -49,8 +49,9 @@ git -c advice.detachedHead=false checkout "$tag"
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer >/dev/null
 helper_version=$(node renderer/src/local-main.js --version)
 say "helper --version: $helper_version"
+short_tag=${tag#v}
 case $helper_version in
-  "$tag "*|"$tag") : ;;
+  *"v$short_tag "*|*"v$short_tag") : ;;
   *) fail "helper reports '$helper_version', not $tag -- the checkout and the version metadata disagree" ;;
 esac
 
