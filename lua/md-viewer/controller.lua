@@ -294,6 +294,19 @@ local function apply_surface(session, revision, scroll_y, viewport, opts)
     return false
   end
   session.image_id = image_id
+  -- Not yet true: `image_id` here is a reference the marker just carried
+  -- toward the helper, not proof any pixels exist on the terminal for it.
+  -- The upload is a network round trip in local mode (never true of the
+  -- direct path's apply_image, which ships real bytes synchronously in the
+  -- same transaction) -- so anything that addresses this id before its own
+  -- `presented` notification lands (below, set true) is placing or cropping
+  -- around a reference the terminal has nothing to draw for. Measured live
+  -- (2026-08-27): the ui_poll's reconcile_placement and the caret's
+  -- overlay_apply both fired within one 50ms tick of a fresh open, against
+  -- an id whose upload had not arrived, leaving a patchwork of resolved and
+  -- unresolved placements on screen until an unrelated later frame overwrote
+  -- it clean -- which is why scrolling "fixed" it.
+  session.local_frame_confirmed = false
   session.last_placement = placement
   session.local_viewport = viewport
   session.local_marker_frames = (session.local_marker_frames or 0) + 1
@@ -430,6 +443,12 @@ function M.display_caret_overlay(session, tint, sheet_png)
   -- this a resident preview had no caret at all except when `show_cached`
   -- happened to have restored a frame for it to sit on.
   if not (state.screen_up(session) and session.last_placement) then return false end
+  -- Local mode: session.image_id may still be an unresolved reference (see
+  -- apply_surface). Cropping the caret's tint out of it before its own
+  -- upload lands addresses an id the terminal has nothing to draw for.
+  -- Neovim's own cursor stays visible in the meantime, same as any other
+  -- "cannot draw the caret yet" case this function already returns false for.
+  if local_mode(session) and not session.local_frame_confirmed then return false end
   local rect = caret.rect(session)
   if not rect then
     M.clear_caret_overlay(session)
@@ -1690,6 +1709,13 @@ end
 ---new first, so the re-crop is no longer visible as anything.
 local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
+  -- In local mode, image_id is a reference that may not have any pixels on
+  -- the terminal yet -- see apply_surface's local_frame_confirmed comment.
+  -- Re-cropping it before its own upload lands addresses an id the terminal
+  -- draws nothing for, so the poll tick that would have done this waits for
+  -- the next one instead; the reconcile is idempotent and this is not lost,
+  -- only deferred.
+  if local_mode(session) and not session.local_frame_confirmed then return end
   -- Never address the terminal on behalf of a window that is not on screen:
   -- its reported geometry is a hidden tabpage's, so any placement built from
   -- it lands on top of the tabpage the user is actually looking at. The
@@ -1910,7 +1936,18 @@ function M.setup_autocmds()
     if not session or not valid(session) then return end
     session.local_presented_count = (session.local_presented_count or 0) + 1
     session.local_last_presented_scroll_y = event.scrollY
+    -- Any presented event proves the upload pipeline has resolved at least
+    -- one transaction for this document since the current image_id was
+    -- assigned (apply_surface sets this false the instant it sends a new
+    -- reference, before its upload can possibly have landed) -- so it is
+    -- safe for reconcile_placement/the caret overlay to address that id now.
+    session.local_frame_confirmed = true
     if session.loading then preview.stop_loading(session) end
+    -- The caret's own placement may have bailed out above (image_id was
+    -- still unconfirmed when something last asked for it); retry now that
+    -- it is. Idempotent either way: place_caret no-ops without a focused
+    -- preview window, and redraws in place if the caret is already up.
+    M.place_caret(session)
   end)
   -- The helper was asked for a revision it has no content for: a marker beat
   -- its own render request across the two channels (they share no ordering),

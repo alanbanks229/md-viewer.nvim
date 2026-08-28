@@ -173,6 +173,40 @@ return function(t)
   t.ok(frames[1]:find("d=buffer%-" .. source), "the marker names its document")
   t.ok(frames[1]:find("r=" .. rev1 .. ",y=0,", 1, true), "the reference is this revision at scroll 0")
 
+  -- -- unconfirmed image_id: reconcile and the caret hold off ----------------
+  --
+  -- The marker above sent a *reference* to the helper; nothing has confirmed
+  -- pixels exist on the terminal for it yet (no `presented` event has fired
+  -- -- the render response below answers geometry, not glass confirmation).
+  -- Anything that would address this image_id now -- the occlusion/cmdline
+  -- reconcile, the caret overlay -- must hold off, or it draws around an id
+  -- the terminal has nothing to show for. Measured live (2026-08-27): both
+  -- fired within one 50ms poll tick of a fresh open and left a patchwork of
+  -- resolved and unresolved placements on screen, fixed only by an unrelated
+  -- later frame overwriting it -- which is why scrolling "fixed" it.
+  local function placement_only_markers()
+    local found = {}
+    for _, w in ipairs(writes) do
+      if w:sub(1, 3) == "\27_M" and not w:find("u=f", 1, true) then found[#found + 1] = w end
+    end
+    return found
+  end
+  t.eq(false, session.local_frame_confirmed, "sanity: nothing has confirmed this image_id's upload yet")
+  local placements_before = #placement_only_markers()
+  vim.api.nvim_exec_autocmds("CmdlineEnter", {})
+  vim.api.nvim_exec_autocmds("CmdlineLeave", {})
+  t.eq(
+    placements_before,
+    #placement_only_markers(),
+    "reconcile_placement (force=true, via CmdlineEnter/Leave) held off: the id is still unconfirmed"
+  )
+  helper.notify({ event = "presented", seq = 1, doc = session.document_id, scrollY = 0 })
+  vim.wait(2000, function() return session.local_frame_confirmed end, 10)
+  t.eq(true, session.local_frame_confirmed, "a presented event confirms the reference has real pixels now")
+  vim.api.nvim_exec_autocmds("CmdlineEnter", {})
+  vim.api.nvim_exec_autocmds("CmdlineLeave", {})
+  t.ok(#placement_only_markers() > placements_before, "reconcile_placement proceeds once the frame is confirmed")
+
   t.eq("prepare", stdio_calls[1].method, "markdown crossed stdio as a prepare")
   t.ok(stdio_calls[1].params.markdown:find("body text", 1, true), "prepare carries the raw markdown")
   t.eq(nil, stdio_calls[1].params.animate, "animation stays structurally off in local mode")
@@ -213,10 +247,14 @@ return function(t)
 
   -- -- presented: glass confirmation retires the loading indicator ----------
 
+  -- Baseline taken fresh rather than assumed 0: the unconfirmed-image_id
+  -- block above already sent one presented event of its own, to confirm the
+  -- open's own reference before this section starts.
+  local presented_before = session.local_presented_count or 0
   session.loading = true
   helper.notify({ event = "presented", seq = 3, doc = session.document_id, scrollY = 250 })
-  vim.wait(2000, function() return (session.local_presented_count or 0) >= 1 end, 10)
-  t.eq(1, session.local_presented_count, "presented notifications are consumed")
+  vim.wait(2000, function() return (session.local_presented_count or 0) > presented_before end, 10)
+  t.eq(presented_before + 1, session.local_presented_count, "presented notifications are consumed")
   t.ok(not session.loading, "a presented frame stops the loading indicator")
 
   -- -- K4: a presented ack against a stamped emit becomes a latency sample --

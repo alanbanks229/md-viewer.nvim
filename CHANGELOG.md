@@ -7,6 +7,23 @@ All notable changes to this project will be documented here. The project uses
 
 ### Fixed
 
+- **A fresh preview could show a patchwork of resolved and unresolved
+  content, fixed only by scrolling.** In local mode, `apply_surface` sets
+  `session.image_id` the instant a frame's marker is sent -- a reference
+  that has to cross an AWS SSM round trip before any pixels exist for it,
+  never true of the direct path's `apply_image`, which ships real bytes
+  synchronously in the same transaction. Nothing gated the occlusion/cmdline
+  reconcile (`reconcile_placement`, on a 50ms poll from the moment the
+  preview opens) or the caret overlay from addressing that id before its own
+  upload landed. Measured live (2026-08-27) with byte-level write logging: on
+  a fresh open, both fired within one poll tick against an unresolved id,
+  producing several placement-only transactions before the real upload
+  arrived -- an unknown id draws nothing under Kitty's `q=2`, so the terminal
+  showed a mix of resolved and unresolved regions until an unrelated later
+  frame (e.g. a scroll) overwrote it clean, which is why scrolling always
+  "fixed" it. Both call sites now hold off until a `presented` notification
+  confirms the current image_id's upload has actually reached the terminal;
+  the caret retries itself once that happens.
 - **A preview could render solid black after reopening Neovim inside the same
   local-render helper session.** The operator's workflow -- one laptop-side
   helper process (`node renderer/src/local-main.js -- ssh <host>`) wrapping
