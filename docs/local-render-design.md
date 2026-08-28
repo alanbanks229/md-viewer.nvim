@@ -218,7 +218,7 @@ pty, which means a native module that cannot be installed on a machine with no e
 ## Postscript: the 2026-08 retry (v0.3.0-rc9)
 
 The retry this document said should reuse the substitution mechanism exists,
-on the `feat/adaptive-local-render` branch, as `render.location = "local"`.
+first shipped in `v0.3.0-rc9`, as `render.location = "local"`.
 It keeps exactly what this page said to keep and inverts exactly what it
 measured failing:
 

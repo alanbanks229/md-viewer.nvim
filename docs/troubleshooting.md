@@ -261,9 +261,10 @@ discarded. If terminal transfer still dominates, lowering
 of its natural size, which the settle frame undoes as soon as scrolling stops.
 `scroll_scale` in `:MdViewerDebug` reports the factor in force and where it came
 from — over SSH it is `render.ssh_scroll_scale` (default `0.5`) without any
-configuration. Read it beside `capture_encoder`: the numeric factor needs the
-`cdp_fast_png` path, and a session on `playwright_png` gets full-size frames no
-matter what is set.
+configuration, and under `render.location = "local"` it is full size, because
+no pixels cross the link and there is nothing to trade sharpness for. Read it
+beside `capture_encoder`: the numeric factor needs the `cdp_fast_png` path, and
+a session on `playwright_png` gets full-size frames no matter what is set.
 
 Do **not** lower `render.device_scale_factor` for this. It is a calibration
 divisor, not a size knob: lowering it doubles the CSS viewport and makes the
@@ -304,11 +305,17 @@ filter must sit directly on the byte stream Neovim writes to.
 Do not judge by feel. `:MdViewerHealth`'s Rendering section has a `Location`
 row that answers in words, and the counters prove it: `:MdViewerDebug`'s
 `local_render` block shows the attachment phase and markers emitted, and on
-the laptop `node .../local-main.js --status` prints the filter's
-`parser.remoteGraphicsCommands` — the number of graphics uploads that
-arrived from the remote as bytes. Zero while attached means no PNG is
-crossing the link; a climbing number means the session demoted (the reason
-is in health) and frames are crossing as pixels again.
+the laptop `node .../local-main.js --status` prints the filter's counters.
+
+Read the **attributed** one: `parser.remoteMdvGraphicsCommands` (and
+`remoteMdvRasterBytes`) counts only graphics whose image ids belong to an
+md-viewer session, and zero while attached is the invariant holding. Its
+unattributed sibling `parser.remoteGraphicsCommands` counts every graphics
+command any program in the wrapped session sends, so a nonzero value there
+is not evidence of anything on its own — anything else drawing images
+through the same ssh session raises it. A climbing *attributed* number means
+the session demoted (the reason is in health) and frames are crossing as
+pixels again.
 
 ## Local rendering demoted mid-session ("rendering on this host instead")
 

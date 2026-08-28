@@ -5,184 +5,116 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.0-rc11] - 2026-08-28
+
+**The final release candidate for 0.3.0, tagged on the unmerged
+`feat/adaptive-local-render` branch.** It closes local rendering out with the
+last round of correctness and latency fixes measured on the real AWS SSM link
+(aide-spock, 2026-08-27), and adds the document-navigation surface the branch
+was always heading for: pane-scoped preview tabs, optional Obsidian wikilinks,
+rendered line numbers, and a statusline progress API.
+
+**AWS SSM validation for this tag is pending.** The individual fixes below were
+measured live against the real link, but no `ssm-validate.sh` artifact exists
+for rc11 and no operator feel check has been recorded for it. Run
+`sh scripts/local/ssm-rc-update.sh <vm-host> v0.3.0-rc11` and then
+`sh scripts/local/ssm-validate.sh <vm-host>`; see
+[docs/aws-ssm.md](docs/aws-ssm.md).
+
 ### Added
 
-- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders note,
-  path, alias, heading-hierarchy, and block-id links and follows them through
-  pane-scoped preview tabs. Vault lookup is case-insensitive for bare stems,
+- **Pane-scoped preview documents and tabs.** Every followed Markdown document
+  owns a stable, unlisted `md-viewer://preview/...` buffer. Clickable winbar
+  tabs, `[b`/`]b`, and `:MdViewerTabNext`/`:MdViewerTabPrevious`/
+  `:MdViewerTabClose` switch only the preview pane; `gf` and
+  `:MdViewerRevealSource` reveal a document in the editable source pane.
+  History is independent of tab order and recreates a closed document with its
+  saved scroll target.
+- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders and
+  follows note, path, alias, heading-hierarchy, and block-id links through the
+  same preview tabs. Vault lookup is case-insensitive for bare stems,
   duplicate-aware, rescanned on activation, and confined against traversal and
-  symlink escapes. No obsidian.nvim runtime dependency is introduced.
-- **Real pane-scoped preview document buffers and tabs.** Every followed
-  Markdown document now owns a stable, unlisted `md-viewer://preview/...`
-  buffer. Clickable winbar tabs, `[b`/`]b`, and the new
-  `:MdViewerTabNext`/`:MdViewerTabPrevious`/`:MdViewerTabClose` commands switch
-  only the preview pane; `gf` and `:MdViewerRevealSource` explicitly reveal a
-  document in the editable source pane. Preview history is independent of tab
-  order and recreates closed documents with their saved scroll target.
+  symlink escapes. No obsidian.nvim dependency is introduced — this is syntax
+  compatibility, not an integration. See `:help md-viewer-obsidian`.
 - **Manual split adoption.** Running `:MdViewerToggle` in one of exactly two
   splits showing the same Markdown adopts the current split as the preview and
-  restores its original buffer, view, dimensions, and window options on close.
-  Ambiguous or fixed layouts fall back to a plugin-owned preview split.
-- Closing a preview document now sends a renderer `forget` request, promptly
-  releasing its browser, interaction, lane, replica, and local-surface caches.
+  restores its buffer, view, dimensions, and window options on close. Ambiguous
+  or fixed layouts fall back to a plugin-owned split.
+- **Absolute and relative rendered line numbers.**
+  `:MdViewerToggleAbsoluteLineNumbers` and `:MdViewerToggleRelativeLineNumbers`
+  select one three-state preference (`preview.line_numbers`). Relative mode
+  shows distance around the caret while keeping the caret line's absolute
+  index. The cells backend uses Neovim's native number options.
+- **A statusline progress API.** `statusline_progress()` reports
+  `All`/`Top`/`Bot`/`NN%` from the rendered document's own geometry, and a
+  deduplicated `MdViewerProgressChanged` User event lets a configured
+  statusline refresh itself. See `:help md-viewer-statusline`.
 
 ### Fixed
 
-- **A fresh preview could show a patchwork of resolved and unresolved
-  content, fixed only by scrolling.** In local mode, `apply_surface` sets
-  `session.image_id` the instant a frame's marker is sent -- a reference
-  that has to cross an AWS SSM round trip before any pixels exist for it,
-  never true of the direct path's `apply_image`, which ships real bytes
-  synchronously in the same transaction. Nothing gated the occlusion/cmdline
-  reconcile (`reconcile_placement`, on a 50ms poll from the moment the
-  preview opens) or the caret overlay from addressing that id before its own
-  upload landed. Measured live (2026-08-27) with byte-level write logging: on
-  a fresh open, both fired within one poll tick against an unresolved id,
-  producing several placement-only transactions before the real upload
-  arrived -- an unknown id draws nothing under Kitty's `q=2`, so the terminal
-  showed a mix of resolved and unresolved regions until an unrelated later
-  frame (e.g. a scroll) overwrote it clean, which is why scrolling always
-  "fixed" it. Both call sites now hold off until a `presented` notification
-  confirms the current image_id's upload has actually reached the terminal;
-  the caret retries itself once that happens.
+- **A fresh preview could show a patchwork of resolved and unresolved content
+  that only scrolling fixed.** In local mode a frame's image id is live the
+  instant its marker is sent, before the upload it names has crossed the link;
+  the occlusion reconcile and the caret overlay both addressed that id first,
+  and an unknown id draws nothing. Both now wait for the `presented`
+  acknowledgement, and the caret retries once it arrives.
 - **A preview could render solid black after reopening Neovim inside the same
-  local-render helper session.** The operator's workflow -- one laptop-side
-  helper process (`node renderer/src/local-main.js -- ssh <host>`) wrapping
-  one long-lived ssh session, with Neovim itself quit and reopened many times
-  inside it -- left the control-socket connection to die from the OS on
-  `:qa` (an unhandled EOF) rather than a real close the helper could react
-  to. The helper's per-document state (`replica.js`'s `docs` map, epoch and
-  laid-out revision included; `injector.js`'s `lastSurfaceSeq`) is keyed only
-  by `documentId`, which a fresh Neovim process regenerates identically for
-  the same file (e.g. "buffer-1") -- so it persisted across every restart,
-  and a fresh session's first frame reference (epoch 0, per a fresh Lua
-  session's own state) could be silently refused forever by
-  `scheduleSurface`'s epoch guard against a counter the outgoing session left
-  elevated. Measured live (2026-08-27). `VimLeavePre` now calls
-  `localrender.detach()` when attached, closing the control-socket pipe for
-  real; the helper's socket server answers with a real `onClientChange(false)`
-  handler that retires the outgoing session's terminal placements
-  (`injector.teardown()`, reused from the helper's own process-exit path) and
-  clears the replica's per-document state (`replica.reset()`), so the next
-  session's `docRecord` starts fresh.
+  local-render helper session.** The helper keys per-document state by an id a
+  fresh Neovim regenerates identically, so a new session inherited the outgoing
+  one's elevated epoch counter and had every frame refused. `VimLeavePre` now
+  closes the control socket for real, and the helper retires the outgoing
+  session's placements and clears its replica state on disconnect.
 - **A character-wise preview selection could lose its first or last
-  character.** `visual_start`/`visual_update` anchor and extend a selection at
-  the caret's own glyph *centre* -- exactly the tie `caretRangeFromPoint`
-  cannot break (the same ambiguity `caret_move`'s `caretIndex` exists to avoid
-  for the caret itself, documented in `moveCaretInPage`: "at the exact middle
-  of a glyph the boundaries either side are equidistant... differs from glyph
-  to glyph"). Measured live: `v` on a heading's first character selected
-  "## Changelog" as "hangelog". `selection_preview`/`selection_commit` now
-  accept `anchorIndex`/`focusIndex`, resolved against the exact character
-  space `caret_move` already uses instead of re-hit-testing an ambiguous
-  point, and the boundary chosen for each (before vs. after its character)
-  is picked from which endpoint is earlier in the document -- correct for
-  both forward and backward extension. Falls back to coordinate resolution
-  exactly as before whenever an index is absent (a click, or content that
-  has re-rendered since).
-- **Held-key scrolling paced on a round trip it did not need.** rc10 gated
-  the next moving marker on the `presented` acknowledgement, so throughput
-  in local mode was capped at one AWS SSM round trip per frame regardless of
-  capture cost. Measured live against aide-spock (2026-08-27): capture
-  itself took 15–50 ms (`--status` → `replica.timing.captureDuration`) but
-  the round trip the ack added put end-to-end frame time (`:MdViewerDebug`
-  → `local_render.presented`) at p50 116 ms / p95 180 ms — an SSM tunnel
-  round trip, not the browser, was the held-`j` bottleneck. The gate is
-  removed: every scroll emits its marker immediately. The backpressure it
-  existed to provide is already in `replica.js`'s `scheduleSurface` /
-  `pumpCapture` (one capture want per document, newest wins, a superseded
-  want never dispatched), so a burst still costs captures at the helper's
-  own rate, just without waiting a network round trip between them.
-- **Local-mode scrolling was pixelated for no reason.** `render.ssh_scroll_scale`
-  (default 0.5) shrank every moving scroll frame to save bytes crossing SSH --
-  a trade that makes sense on the direct path, which puts the captured frame
-  on the wire. Local mode never does that regardless of resolution (only a
-  ~0.3-1 KB marker crosses SSH either way), so scrolling inherited the
-  blur-while-moving/sharpen-at-rest behavior for a byte saving it never spent.
-  Measured on aide-spock (2026-08-27): full-resolution local capture cost
-  31-52 ms against 15-34 ms at half scale (`--status` ->
-  `replica.timing.captureDuration`) -- a ~15-20 ms difference, dwarfed by the
-  ~85-120 ms round trip the fix above already removed. Local mode now always
-  captures scroll frames at full device scale; `render.scroll_scale` still
-  overrides it explicitly if a laptop's own capture time becomes the
-  constraint.
-- **`:MdViewerDebug`/`:MdViewerHealth` blanked an open preview.** The health
-  check forced its Chromium context to device-scale 1 regardless of what a
-  live session was already rendering at; the mismatch against the session's
-  actual scale (2 by default) tore down the context and cleared the active
-  document, so running either command while a preview was open blanked it.
-  Health now reuses whatever scale is already active.
-- **The startup terminal probe could read the wrong window size for the
-  whole session.** `tty-probe.js` paired a live pixel-size query to the
-  terminal (`CSI 14t`) with Node's cached `process.stdout.columns`/`rows`,
-  which can still hold Node's `80x25` default if the helper starts before
-  the terminal has propagated its real size to the pty. Observed on
-  aide-spock (2026-08-27): a session's `helper_terminal.cellPixels` reported
-  `80x25` while Neovim's own preview window was already 88 columns wide in
-  the same session -- impossible if the terminal were really that narrow,
-  and every placement for the rest of the session inherited the wrong cell
-  size, producing a garbled rectangle partway down the pane. The probe now
-  also sends `CSI 18t` (text-area size in characters) and reads columns/rows
-  from that live reply instead of Node's cache, so both numbers come from
-  the terminal at the same moment and can never disagree.
-- **Held-`j` inside the preview lagged behind release by as many round trips
-  as keys pressed while one was already in flight.** Moving the caret is not
-  a marker -- `caret_move` asks the renderer for a real glyph box and waits
-  for the answer, so it crosses the same AWS SSM tunnel a scroll marker does
-  (~85-120 ms each way, measured on aide-spock 2026-08-27) -- and nothing
-  paced it: every keystroke queued its own `interact` request, so a held key
-  visibly lagged behind release by as many round trips as keys fired while
-  one was still outstanding. `caret_move` already takes a `count`
-  (`renderer/src/interact.js` steps it in a loop), so a same-direction repeat
-  arriving while one is in flight no longer sends its own request: it
-  accumulates into a pending count, flushed as one follow-up the moment the
-  in-flight request resolves. A single tap still costs exactly one request; a
-  held key now costs one round trip per *answer*, not one per keystroke. A
-  different motion arriving mid-flight (`w` then `l` before `w` answers) is
-  not held back -- it fires at once, and the interact lane's existing
-  supersession (`lanes.js`) drops a stale answer if the interrupted request's
-  reply lands late.
-
-- **Preview motion made the global Lualine bar blink and still reported the
-  wrong percentage.** md-viewer and Lualine alternately replaced the preview
-  window's `'statusline'`: md-viewer briefly wrote a bare ruler, then Lualine
-  restored the complete bar and recomputed progress from the viewport-sized
-  shadow buffer (`3/56`, the `5%` visible in the report) rather than from the
-  rendered document. md-viewer no longer writes `'statusline'` at all. Its
-  `statusline_progress()` API reports `All`/`Top`/`Bot`/`NN%` from the same
-  full-document visual-line geometry navigation uses, following the caret
-  after caret motion and the viewport midpoint after scroll-only motion. A
-  deduplicated `MdViewerProgressChanged` User event lets the configured
-  statusline refresh without two renderers fighting over one option.
-
-### Added
-
-- **Absolute and relative rendered line numbers.**
-  `:MdViewerToggleAbsoluteLineNumbers` and
-  `:MdViewerToggleRelativeLineNumbers` select one three-state preference
-  (`preview.line_numbers = "off" | "absolute" | "relative"`). Repeating the
-  active mode turns numbering off; invoking the other command switches modes
-  directly. Relative mode shows distance around the caret while retaining the
-  caret line's absolute visual-line index. Numbers now use each browser line
-  box's vertical midpoint through the caret's pixel-to-cell transform instead
-  of its top edge, removing the upward bias visible beside headings and tall
-  lines. The cells backend uses Neovim's native number options.
+  character.** Selections anchored at a glyph's exact centre — the one tie
+  browser hit-testing cannot break. `v` on a heading's first character selected
+  `## Changelog` as `hangelog`. Selection now resolves through the same
+  character-index space the caret already uses, falling back to coordinates
+  only when no index is available.
+- **Held-key scrolling paced on a round trip it did not need.** rc10 gated each
+  moving frame on the `presented` acknowledgement, capping throughput at one
+  SSM round trip per frame (p50 116 ms / p95 180 ms measured on aide-spock,
+  against a 15–50 ms capture). The gate is gone; the backpressure it duplicated
+  already lives in the replica's one-capture-want-per-document rule.
+- **Local-mode scrolling was pixelated for no reason.**
+  `render.ssh_scroll_scale` shrank every moving frame to save bytes that local
+  mode never sends — only a ~0.3–1 KB marker crosses the link either way.
+  Scroll frames are now captured at full device scale; `render.scroll_scale`
+  still overrides that.
+- **Held `j` inside the preview lagged behind release by one round trip per
+  keystroke.** Caret motion asks the renderer for a real glyph box, and nothing
+  paced those requests. A same-direction repeat arriving while one is in flight
+  now accumulates into a pending count flushed as a single follow-up, so a held
+  key costs one round trip per *answer* rather than per keystroke. A different
+  motion arriving mid-flight is still sent at once.
+- **The startup terminal probe could read the wrong window size for a whole
+  session.** It paired a live pixel-size query with Node's cached
+  `columns`/`rows`, which can still hold the `80x25` default if the helper
+  starts before the pty learns its real size — every placement afterwards
+  inherited the wrong cell size. The probe now reads both numbers from the
+  terminal at the same moment.
+- **`:MdViewerDebug` and `:MdViewerHealth` blanked an open preview.** The health
+  check forced its browser context to device-scale 1; the mismatch tore down the
+  context and cleared the active document. Health now reuses the active scale.
+- **The zero-raster invariant was judged from the wrong counter.**
+  `:MdViewerDebug` and `scripts/local/ssm-validate.sh` both read
+  `remoteGraphicsCommands`/`remoteRasterBytes`, which count graphics from
+  *every* program sharing the wrapped ssh session — so anything else drawing
+  an image failed the check. Both now use the md-viewer-attributed
+  `remoteMdv*` counters rc10 introduced, and debug shows them beside the
+  unattributed ones.
+- **Preview motion made a global statusline blink and still reported the wrong
+  percentage.** md-viewer and the statusline plugin alternately replaced the
+  preview window's `'statusline'`, and progress was computed from the
+  viewport-sized shadow buffer rather than the rendered document. md-viewer no
+  longer writes `'statusline'` at all.
 
 ### Changed
 
-- **Leaving Visual mode (`<Esc>`) now clears the preview's highlight
-  immediately, matching real Vim.** `visual_stop` used to leave the
-  highlight up -- its own comment said a second `<Esc>` was needed to clear
-  it through `M.escape`'s ordinary precedence. `settle_selection` still
-  lands the final sharp frame first (and still runs `copy_on_select`, if
-  configured, so a fast `v`...`<Esc>` still copies exactly what was shown),
-  but the clear now rides its completion via a new `on_settled` callback
-  parameter, so it never races a settle a coalesced `pointer.pending_settle`
-  was about to re-target. A plain click ending a selection with no settle to
-  wait on (`M.on_press`'s `visual_stop(session, false)`) clears immediately
-  for the same reason -- nothing displayed needs preserving. Since every
-  selection in this plugin is reached through Visual mode (there is no
-  mouse-drag path), a later separate click now has nothing left to clear.
+- **Leaving Visual mode (`<Esc>`) clears the preview highlight immediately**,
+  matching Vim. The final sharp frame still lands first, and `copy_on_select`
+  still runs, so a fast `v`…`<Esc>` copies exactly what was shown.
+- Closing a preview document sends a renderer `forget` request, promptly
+  releasing its browser, interaction, lane, replica, and local-surface caches.
 
 ## [0.3.0-rc10] - 2026-08-27
 
@@ -822,6 +754,7 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc11]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc11
 [0.3.0-rc10]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc10
 [0.3.0-rc9]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc9
 [0.3.0-rc8]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc8

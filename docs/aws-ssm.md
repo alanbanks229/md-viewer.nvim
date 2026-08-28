@@ -80,12 +80,20 @@ Two findings from that run drove the rc10 work:
    measured, not guessed: the replica dispatched a capture per scroll
    position into the serial browser queue, each dispatch superseding the one
    already running, so finished screenshots were discarded stale while the
-   screen sat still — 517 captures for 206 surfaces served. rc10 paces one
-   moving marker in flight (released by the `presented` acknowledgement),
-   captures at a reduced moving scale with a device-scale settle, and holds
-   one capture want per document, newest wins. On the ichigo rig the same
-   30-step burst went from 4 frames presented to 24, and marker-emit→ack
-   from p95 2147 ms to p95 63–167 ms (2026-08-27).
+   screen sat still — 517 captures for 206 surfaces served. rc10 answered
+   with three changes: one capture want per document (newest wins), a
+   reduced moving capture scale with a device-scale settle, and one moving
+   marker in flight released by the `presented` acknowledgement. On the
+   ichigo rig the same 30-step burst went from 4 frames presented to 24, and
+   marker-emit→ack from p95 2147 ms to p95 63–167 ms (2026-08-27).
+
+   **rc11 kept the first and dropped the other two**, measured on aide-spock
+   over the real link (2026-08-27): the acknowledgement gate capped
+   throughput at one SSM round trip per frame (end-to-end p50 116 ms / p95
+   180 ms against a 15–50 ms capture), and the reduced moving scale bought a
+   ~15–20 ms capture saving on a path that puts no pixels on the wire at
+   all. The capture-want rule is the backpressure; the link is not.
+
 2. **`remoteGraphicsCommands` was nonzero on a healthy local session** —
    because the counter counts *every* Kitty graphics command any process
    sends through the wrapped session, and the run had also exercised the

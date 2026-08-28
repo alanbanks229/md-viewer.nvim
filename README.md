@@ -147,7 +147,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc10",
+  version = "v0.3.0-rc11",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -199,7 +199,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc10" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc11" },
 })
 
 require("md-viewer").setup({})

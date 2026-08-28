@@ -290,14 +290,22 @@ function M.collect(renderer_result, renderer_error)
     local_marker_bytes = marker_stats.marker_bytes,
     local_direct_byte_fallbacks = marker_stats.direct_bytes_fallbacks,
     -- The helper process's own counters, present only when the health round
-    -- trip crossed the control socket. parser.remoteGraphicsCommands is the
-    -- filter counting graphics uploads that arrived *from the remote
-    -- stream*: zero while attached is the local-mode invariant holding.
+    -- trip crossed the control socket. parser.remoteGraphicsCommands counts
+    -- *every* graphics upload arriving from the remote stream, including
+    -- ones belonging to other programs in the wrapped session, so it is not
+    -- the local-mode invariant on its own. remoteMdvGraphicsCommands is the
+    -- md-viewer-attributed subset (by image-id space); that is the number
+    -- expected to stay zero while attached.
     local_helper = renderer_result and renderer_result.localHelper or nil,
     local_remote_graphics_commands = renderer_result
         and renderer_result.localHelper
         and renderer_result.localHelper.parser
         and renderer_result.localHelper.parser.remoteGraphicsCommands
+      or nil,
+    local_remote_mdv_graphics_commands = renderer_result
+        and renderer_result.localHelper
+        and renderer_result.localHelper.parser
+        and renderer_result.localHelper.parser.remoteMdvGraphicsCommands
       or nil,
   }
 end
@@ -543,6 +551,8 @@ local function verbose_local(report)
   if helper and helper.parser then
     rows[#rows + 1] = { "filter: markers seen", helper.parser.markerCount }
     rows[#rows + 1] = { "filter: remote graphics commands", helper.parser.remoteGraphicsCommands }
+    rows[#rows + 1] = { "filter: remote md-viewer graphics", helper.parser.remoteMdvGraphicsCommands }
+    rows[#rows + 1] = { "filter: remote md-viewer raster bytes", helper.parser.remoteMdvRasterBytes }
     rows[#rows + 1] = { "filter: passthrough bytes", helper.parser.passthroughBytes }
   end
   if helper and helper.injector then

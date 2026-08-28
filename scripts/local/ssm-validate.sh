@@ -135,8 +135,13 @@ raster=$(printf '%s' "$k4_evidence" | node -e '
       const e = JSON.parse(s);
       const p = e.extra.helper?.parser ?? {};
       const fallbacks = e.markers?.direct_bytes_fallbacks;
-      console.log(`remoteRasterBytes=${p.remoteRasterBytes} remoteMdvRasterBytes=${p.remoteMdvRasterBytes} directByteFallbacks=${fallbacks}`);
-      process.exitCode = (p.remoteRasterBytes === 0 && fallbacks === 0) ? 0 : 1;
+      console.log(`remoteMdvRasterBytes=${p.remoteMdvRasterBytes} remoteRasterBytes=${p.remoteRasterBytes} (unattributed) directByteFallbacks=${fallbacks}`);
+      // Gate on the md-viewer-attributed counter only. remoteRasterBytes
+      // counts graphics from every program sharing the wrapped session, so
+      // gating on it fails the run for anything else that draws an image --
+      // exactly the ambiguity rc9's validation hit and rc10's id-space split
+      // exists to remove. It stays in the line above as context, not a gate.
+      process.exitCode = (p.remoteMdvRasterBytes === 0 && fallbacks === 0) ? 0 : 1;
     } catch { console.log("evidence unreadable"); process.exitCode = 1; }
   });' 2>/dev/null)
 [ $? -eq 0 ] && check "zero raster over the link" pass "$raster" || check "zero raster over the link" fail "$raster"

@@ -15,6 +15,7 @@ CONTENTS                                                  *md-viewer-contents*
       Remote images ...................... |md-viewer-remote-images|
       Animated images .................... |md-viewer-animation|
 4.  Commands ............................. |md-viewer-commands|
+      Statusline integration ............. |md-viewer-statusline|
 5.  Preview navigation ................... |md-viewer-navigation|
       Mappings ........................... |md-viewer-mappings|
       Keyboard selection ................. |md-viewer-visual|
@@ -138,7 +139,9 @@ render ~
     scroll_settle_ms             160        idle before the sharp capture
     ssh_scroll_settle_ms         400        what an SSH session waits instead
     scroll_scale                 nil        0.25..1. nil is full size locally
-                                            and the row below over SSH
+                                            and the row below over SSH; also
+                                            full size under location="local",
+                                            which sends no pixels either way
     ssh_scroll_scale             0.5        0.25..1; moving-frame scale over
                                             SSH (|md-viewer-ssh|)
     ssh_link_bytes_per_sec       "auto"     measured link rate; "auto" reads
@@ -569,7 +572,7 @@ COMMANDS                                                  *md-viewer-commands*
 
         See |md-viewer-resident| for what the number is used for.
 
-STATUSLINE INTEGRATION ~
+STATUSLINE INTEGRATION ~                                 *md-viewer-statusline*
 
 `require("md-viewer").statusline_progress()` returns `All`, `Top`, `Bot`, or
 `NN%` while a graphical preview buffer is current, and nil for every other
@@ -726,10 +729,11 @@ recreated when history returns to it.
 
 H and L are preview-local, installed beside the keys the preview already owns
 (`y`, `/`, `n`, `N`, `gg`, `G`), and shadow "top/bottom of screen" -- which
-addresses nothing in a preview buffer holding no document text. They are gated on
-`interaction.links`. Both commands work from either window and change only the
-preview pane. `[b` and `]b` cycle open tabs without extending history; `gf` is
-the explicit operation that reveals and focuses the active source document.
+addresses nothing in a preview buffer holding no document text. They are gated
+on `interaction.links`. Both commands work from either window and change only
+the preview pane. `[b` and `]b` cycle open tabs without extending history;
+`gf` is the explicit operation that reveals and focuses the active source
+document.
 
 Navigating from the middle abandons the forward branch, as a browser does.
 The list is capped at `interaction.history_limit` (default 32) and records a
@@ -1057,8 +1061,10 @@ Requirements and behavior:
 - `render.animate` has no effect in local mode; animated images render as
   still frames.
 - `node .../local-main.js --status` prints every local helper's counters;
-  `parser.remoteGraphicsCommands` staying at zero is the proof that no
-  pixels are crossing the link.
+  `parser.remoteMdvGraphicsCommands` staying at zero is the proof that no
+  md-viewer pixels are crossing the link. Its unattributed sibling
+  `parser.remoteGraphicsCommands` counts graphics from every program in the
+  wrapped session, so a nonzero value there proves nothing by itself.
 
 The full manual -- topology, trust boundary, per-environment validation
 status, and the procedure for validating a new environment -- is
@@ -1076,12 +1082,12 @@ confined to a canonical document root (|md-viewer-document-root|). Initial
 npm ci installation may contact the configured npm registry.
 
 Mouse and keyboard interaction resolves against the same already-sanitized
-document. Local-file link activation re-checks the document root the same way image loading does
-(symlinks included), and search and selection text is always handled as plain
-text, never interpreted as markup. With |md-viewer-obsidian| enabled, a
-wikilink activation scans Markdown filenames within the vault and re-checks
-both lexical and realpath containment before loading one; missing notes are
-never created.
+document. Local-file link activation re-checks the document root the same way
+image loading does (symlinks included), and search and selection text is
+always handled as plain text, never interpreted as markup. With
+|md-viewer-obsidian| enabled, a wikilink activation scans Markdown filenames
+within the vault and re-checks both lexical and realpath containment before
+loading one; missing notes are never created.
 
 A local link is never handed to the operating system when the target is
 something it would execute rather than display: macOS bundles and scripts,
