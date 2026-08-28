@@ -122,6 +122,22 @@ All notable changes to this project will be documented here. The project uses
   supersession (`lanes.js`) drops a stale answer if the interrupted request's
   reply lands late.
 
+### Changed
+
+- **Leaving Visual mode (`<Esc>`) now clears the preview's highlight
+  immediately, matching real Vim.** `visual_stop` used to leave the
+  highlight up -- its own comment said a second `<Esc>` was needed to clear
+  it through `M.escape`'s ordinary precedence. `settle_selection` still
+  lands the final sharp frame first (and still runs `copy_on_select`, if
+  configured, so a fast `v`...`<Esc>` still copies exactly what was shown),
+  but the clear now rides its completion via a new `on_settled` callback
+  parameter, so it never races a settle a coalesced `pointer.pending_settle`
+  was about to re-target. A plain click ending a selection with no settle to
+  wait on (`M.on_press`'s `visual_stop(session, false)`) clears immediately
+  for the same reason -- nothing displayed needs preserving. Since every
+  selection in this plugin is reached through Visual mode (there is no
+  mouse-drag path), a later separate click now has nothing left to clear.
+
 ## [0.3.0-rc10] - 2026-08-27
 
 **Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**

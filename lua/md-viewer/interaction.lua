@@ -412,9 +412,16 @@ end
 ---and let that preview's own completion callback pick it up. `settle_ms`
 ---debounces the request itself, mirroring `scroll_settle_ms`'s role in
 ---`controller.schedule_scroll`.
-function M.settle_selection(session, pointer, anchor, point)
+---
+---`on_settled`, when given, runs once the settle this call started has fully
+---resolved -- including any later position a coalesced `pending_settle`
+---superseded it with, so a caller waiting to act on "the selection is now
+---exactly what the reader last saw" (`visual_stop` clearing the highlight
+---once leaving Visual mode has committed it) never fires early against a
+---settle that was about to move again.
+function M.settle_selection(session, pointer, anchor, point, on_settled)
   if pointer.selection_request_in_flight then
-    pointer.pending_settle = { anchor = anchor, point = point }
+    pointer.pending_settle = { anchor = anchor, point = point, on_settled = on_settled }
     return
   end
   pointer.selection_request_in_flight = true
@@ -438,7 +445,9 @@ function M.settle_selection(session, pointer, anchor, point)
       if pointer.pending_settle then
         local pending = pointer.pending_settle
         pointer.pending_settle = nil
-        M.settle_selection(session, pointer, pending.anchor, pending.point)
+        M.settle_selection(session, pointer, pending.anchor, pending.point, pending.on_settled)
+      elseif on_settled then
+        on_settled()
       end
     end, settle_opts)
   end)
@@ -558,16 +567,32 @@ function M.visual_swap(session)
   return true
 end
 
----Leave visual mode. `settle` lands the final sharp frame; the highlight
----itself stays up, and the next `<Esc>` clears it through the ordinary
----precedence in `M.escape`.
+---Leave visual mode. Matches real Vim's own `<Esc>`-from-Visual behaviour:
+---the highlight clears the instant the mode is left, not on a second press.
+---`settle` lands the final sharp frame first (and runs copy_on_select, if
+---configured) so a fast `v`...`<Esc>` still copies exactly what was last
+---shown before the highlight disappears; the clear is deferred to
+---`settle_selection`'s own completion so it never races a settle that was
+---about to move the selection again (`pointer.pending_settle`).
 function M.visual_stop(session, settle)
   if not M.visual_active(session) then return false end
   session.visual_active = false
   session.visual_linewise = false
   local pointer = session.pointer
   if settle and pointer and pointer.anchor_point and pointer.newest_pending_focus_point then
-    M.settle_selection(session, pointer, pointer.anchor_point, pointer.newest_pending_focus_point)
+    M.settle_selection(
+      session,
+      pointer,
+      pointer.anchor_point,
+      pointer.newest_pending_focus_point,
+      function() M.clear_selection(session) end
+    )
+  else
+    -- No settle to wait on (a plain click replacing the gesture outright, or
+    -- nothing was ever extended to) -- nothing displayed needs preserving, so
+    -- the highlight goes now rather than waiting on a round trip that was
+    -- never going to happen.
+    M.clear_selection(session)
   end
   preview.update_title(session)
   return true
