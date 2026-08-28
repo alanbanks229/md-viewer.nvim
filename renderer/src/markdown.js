@@ -6,6 +6,7 @@ import { attachSourceMaps } from "./source-map.js";
 import { rawImagePlugin } from "./raw-image.js";
 import { resolveLocalImage } from "./security.js";
 import { REMOTE_IMAGES, resolveRemoteImages } from "./remote-images.js";
+import { obsidianPlugin } from "./obsidian.js";
 import {
   SOURCE_MAP_BUILDER,
   createSourceMapBuilder,
@@ -65,6 +66,7 @@ function createMarkdown(options) {
   md.use(taskLists, { enabled: false, label: true, labelAfter: true });
   md.use(alertPlugin);
   md.use(headingAnchorPlugin);
+  if (options.obsidianEnabled) md.use(obsidianPlugin);
   // Ahead of provenance on purpose: `provenancePlugin` wraps every rule already
   // present in the inline ruler at install time, so registering here is what
   // gives a converted `<img>` the same span capture -- and therefore the same
@@ -115,6 +117,16 @@ function createMarkdown(options) {
     if (result.ok) {
       token.attrSet("src", result.dataUri);
       registerAnimation(token, result.dataUri, options, env);
+      // Local-render document service: the fully validated bytes leave the
+      // markup as a content-addressed reference and cross the link once per
+      // content, not once per revision. This sits after every validation and
+      // after animation registration on purpose -- the ref changes how bytes
+      // *travel*, never what was allowed. Placeholders below stay inline:
+      // they are generated SVG, not document content.
+      if (options.assetStore) {
+        const sha = options.assetStore.putDataUri(result.dataUri);
+        if (sha) token.attrSet("src", `md-asset:${sha}`);
+      }
     } else {
       token.attrSet("src", placeholderDataUri(result.kind, result.label, source));
       // "pending" reads as failed for styling: the alternative is a third
@@ -259,7 +271,7 @@ export async function renderMarkdown(markdown, options) {
       // only resolves against this document's own map, so the worst a `rawHtml`
       // document can do by forging one is send its own click somewhere else in
       // itself -- the same bounded exposure `data-source-start` already has.
-      "*": ["class", "data-source-start", "data-source-end", "data-alert-title", "data-md-source-id"],
+      "*": ["class", "data-source-start", "data-source-end", "data-alert-title", "data-md-source-id", "data-md-obsidian-block-id"],
       // `width`/`height` carry across from a raw `<img>` only. sanitize-html
       // validates attribute *names* and never their values, so raw-image.js's
       // bare-integer check is the actual guard and this entry is only what lets
@@ -277,8 +289,15 @@ export async function renderMarkdown(markdown, options) {
       input: ["type", "checked", "disabled"], label: ["class"], th: ["style"], td: ["style"],
       h1: ["id"], h2: ["id"], h3: ["id"], h4: ["id"], h5: ["id"], h6: ["id"],
     },
-    allowedSchemes: ["data", "http", "https", "mailto"],
-    allowedSchemesByTag: { img: ["data"], a: ["http", "https", "mailto"] },
+    allowedSchemes: ["data", "http", "https", "mailto", "md-viewer-obsidian"],
+    // `md-asset:` survives sanitization only when this render is extracting
+    // assets; in every other configuration the scheme is stripped like any
+    // other unknown, so a document cannot smuggle a ref to an asset it never
+    // supplied through the ordinary path.
+    allowedSchemesByTag: {
+      img: options.assetStore ? ["data", "md-asset"] : ["data"],
+      a: ["http", "https", "mailto", "md-viewer-obsidian"],
+    },
     allowProtocolRelative: false,
     parser: { lowerCaseAttributeNames: true },
   });

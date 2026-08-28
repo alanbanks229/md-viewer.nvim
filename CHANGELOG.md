@@ -3,6 +3,218 @@
 All notable changes to this project will be documented here. The project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.3.0-rc11] - 2026-08-28
+
+**The final release candidate for 0.3.0, tagged on the unmerged
+`feat/adaptive-local-render` branch.** It closes local rendering out with the
+last round of correctness and latency fixes measured on the real AWS SSM link
+(aide-spock, 2026-08-27), and adds the document-navigation surface the branch
+was always heading for: pane-scoped preview tabs, optional Obsidian wikilinks,
+rendered line numbers, and a statusline progress API.
+
+**AWS SSM validation for this tag is pending.** The individual fixes below were
+measured live against the real link, but no `ssm-validate.sh` artifact exists
+for rc11 and no operator feel check has been recorded for it. Run
+`sh scripts/local/ssm-rc-update.sh <vm-host> v0.3.0-rc11` and then
+`sh scripts/local/ssm-validate.sh <vm-host>`; see
+[docs/aws-ssm.md](docs/aws-ssm.md).
+
+### Added
+
+- **Pane-scoped preview documents and tabs.** Every followed Markdown document
+  owns a stable, unlisted `md-viewer://preview/...` buffer. Clickable winbar
+  tabs, `[b`/`]b`, and `:MdViewerTabNext`/`:MdViewerTabPrevious`/
+  `:MdViewerTabClose` switch only the preview pane; `gf` and
+  `:MdViewerRevealSource` reveal a document in the editable source pane.
+  History is independent of tab order and recreates a closed document with its
+  saved scroll target.
+- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders and
+  follows note, path, alias, heading-hierarchy, and block-id links through the
+  same preview tabs. Vault lookup is case-insensitive for bare stems,
+  duplicate-aware, rescanned on activation, and confined against traversal and
+  symlink escapes. No obsidian.nvim dependency is introduced — this is syntax
+  compatibility, not an integration. See `:help md-viewer-obsidian`.
+- **Manual split adoption.** Running `:MdViewerToggle` in one of exactly two
+  splits showing the same Markdown adopts the current split as the preview and
+  restores its buffer, view, dimensions, and window options on close. Ambiguous
+  or fixed layouts fall back to a plugin-owned split.
+- **Absolute and relative rendered line numbers.**
+  `:MdViewerToggleAbsoluteLineNumbers` and `:MdViewerToggleRelativeLineNumbers`
+  select one three-state preference (`preview.line_numbers`). Relative mode
+  shows distance around the caret while keeping the caret line's absolute
+  index. The cells backend uses Neovim's native number options.
+- **A statusline progress API.** `statusline_progress()` reports
+  `All`/`Top`/`Bot`/`NN%` from the rendered document's own geometry, and a
+  deduplicated `MdViewerProgressChanged` User event lets a configured
+  statusline refresh itself. See `:help md-viewer-statusline`.
+
+### Fixed
+
+- **A fresh preview could show a patchwork of resolved and unresolved content
+  that only scrolling fixed.** In local mode a frame's image id is live the
+  instant its marker is sent, before the upload it names has crossed the link;
+  the occlusion reconcile and the caret overlay both addressed that id first,
+  and an unknown id draws nothing. Both now wait for the `presented`
+  acknowledgement, and the caret retries once it arrives.
+- **A preview could render solid black after reopening Neovim inside the same
+  local-render helper session.** The helper keys per-document state by an id a
+  fresh Neovim regenerates identically, so a new session inherited the outgoing
+  one's elevated epoch counter and had every frame refused. `VimLeavePre` now
+  closes the control socket for real, and the helper retires the outgoing
+  session's placements and clears its replica state on disconnect.
+- **A character-wise preview selection could lose its first or last
+  character.** Selections anchored at a glyph's exact centre — the one tie
+  browser hit-testing cannot break. `v` on a heading's first character selected
+  `## Changelog` as `hangelog`. Selection now resolves through the same
+  character-index space the caret already uses, falling back to coordinates
+  only when no index is available.
+- **Held-key scrolling paced on a round trip it did not need.** rc10 gated each
+  moving frame on the `presented` acknowledgement, capping throughput at one
+  SSM round trip per frame (p50 116 ms / p95 180 ms measured on aide-spock,
+  against a 15–50 ms capture). The gate is gone; the backpressure it duplicated
+  already lives in the replica's one-capture-want-per-document rule.
+- **Local-mode scrolling was pixelated for no reason.**
+  `render.ssh_scroll_scale` shrank every moving frame to save bytes that local
+  mode never sends — only a ~0.3–1 KB marker crosses the link either way.
+  Scroll frames are now captured at full device scale; `render.scroll_scale`
+  still overrides that.
+- **Held `j` inside the preview lagged behind release by one round trip per
+  keystroke.** Caret motion asks the renderer for a real glyph box, and nothing
+  paced those requests. A same-direction repeat arriving while one is in flight
+  now accumulates into a pending count flushed as a single follow-up, so a held
+  key costs one round trip per *answer* rather than per keystroke. A different
+  motion arriving mid-flight is still sent at once.
+- **The startup terminal probe could read the wrong window size for a whole
+  session.** It paired a live pixel-size query with Node's cached
+  `columns`/`rows`, which can still hold the `80x25` default if the helper
+  starts before the pty learns its real size — every placement afterwards
+  inherited the wrong cell size. The probe now reads both numbers from the
+  terminal at the same moment.
+- **`:MdViewerDebug` and `:MdViewerHealth` blanked an open preview.** The health
+  check forced its browser context to device-scale 1; the mismatch tore down the
+  context and cleared the active document. Health now reuses the active scale.
+- **The zero-raster invariant was judged from the wrong counter.**
+  `:MdViewerDebug` and `scripts/local/ssm-validate.sh` both read
+  `remoteGraphicsCommands`/`remoteRasterBytes`, which count graphics from
+  *every* program sharing the wrapped ssh session — so anything else drawing
+  an image failed the check. Both now use the md-viewer-attributed
+  `remoteMdv*` counters rc10 introduced, and debug shows them beside the
+  unattributed ones.
+- **Preview motion made a global statusline blink and still reported the wrong
+  percentage.** md-viewer and the statusline plugin alternately replaced the
+  preview window's `'statusline'`, and progress was computed from the
+  viewport-sized shadow buffer rather than the rendered document. md-viewer no
+  longer writes `'statusline'` at all.
+
+### Changed
+
+- **Leaving Visual mode (`<Esc>`) clears the preview highlight immediately**,
+  matching Vim. The final sharp frame still lands first, and `copy_on_select`
+  still runs, so a fast `v`…`<Esc>` copies exactly what was shown.
+- Closing a preview document sends a renderer `forget` request, promptly
+  releasing its browser, interaction, lane, replica, and local-surface caches.
+
+## [0.3.0-rc10] - 2026-08-27
+
+**Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**
+rc9's AWS SSM validation passed on the work laptop (2026-08-27): K1 topology,
+K2 marker transit (10,000/10,000), and iTerm2 presenting filter-injected
+frames through the real link, with zero raster bytes crossing it. rc10 is the
+performance and operator-experience pass that run asked for: held-key
+scrolling is fixed from measurements, time-to-glass is a permanent
+diagnostic, and RC validation is two commands instead of an afternoon.
+**The rc10 feel check on the real SSM link is pending**; nothing else is.
+
+### Fixed
+
+- **Held-key scrolling in local mode.** rc9 dispatched a capture per scroll
+  position into the helper's serial browser queue; each dispatch superseded
+  the capture already running, so finished screenshots were discarded stale
+  while the screen sat still — the work laptop measured 517 captures for 206
+  surfaces served. Three changes, all measured on the ichigo rig
+  (2026-08-27): the replica holds one capture want per document (newest
+  wins, one in flight — completed screenshots always land); moving frames
+  are captured at the direct path's reduced scroll scale with a device-scale
+  settle re-reference when motion stops (the resting frame is never the soft
+  one); and the controller paces moving markers on the `presented`
+  acknowledgement, so held-key motion is visible at the browser's own frame
+  rate. A 30-step scroll burst went from 4 frames on glass to 24, and
+  marker-emit→presented from p95 2147 ms to p95 63–167 ms.
+
+### Added
+
+- **K4 time-to-glass, measured in the product.** The VM samples marker
+  emit → `presented` acknowledgement on its own clock
+  (`:MdViewerDebug` → `local_render.presented`, p50/p95/max); the helper
+  samples marker-arrival → injection, capture queue wait, and capture
+  duration, and keeps its last 32 captures with scroll position and scale
+  (`--status`, health enrichment). Superseded frames are never samples —
+  the distribution describes only frames a reader saw.
+- **Remote-graphics attribution.** The filter splits its remote-stream
+  graphics counters by image-id space (`remoteMdvGraphicsCommands`,
+  `remoteMdvRasterBytes`), so raster from an md-viewer direct session and
+  graphics from unrelated programs in the same wrapped session stop sharing
+  one ambiguous number — the exact ambiguity rc9's validation hit.
+- **Two-command RC validation.** `scripts/local/ssm-rc-update.sh` moves the
+  laptop helper and the VM plugin to one tag and verifies they agree;
+  `scripts/local/ssm-validate.sh` runs K1, K2, the K4 burst workload,
+  version and zero-raster checks, and the link measurement, then writes one
+  gitignored Markdown artifact and leaves the human exactly two judgments.
+  docs/aws-ssm.md now documents this workflow and records what rc9 settled.
+
+## [0.3.0-rc9] - 2026-08-27
+
+**Prerelease, tagged on the unmerged `feat/adaptive-local-render` branch.**
+Adds opt-in local rendering: the browser runs beside your terminal, and no
+frame crosses the connection as pixels. Built for the AWS SSM environment's
+measured ~0.8 MB/s ceiling; **AWS SSM validation is pending** — the transport
+and the full session flow are validated on LAN SSH, and docs/aws-ssm.md
+carries the exact procedure and results template for the real-link run.
+`render.location` defaults to `"current"`; nothing changes unless you opt in.
+
+### Added
+
+- **`render.location = "local"`** renders and presents frames beside the
+  terminal. Launch ssh through the helper on the machine your terminal runs
+  on — `node <md-viewer>/renderer/src/local-main.js -- ssh <host>` — and the
+  connection carries prepared markup, each asset's bytes once, and a
+  ~0.3–1 KB marker per frame instead of an ~80–305 KB PNG per frame. A
+  scroll sends one marker and no request at all. See `:help md-viewer-local`.
+- **A pairing handshake that cannot cross-wire.** The plugin adopts a helper
+  only after a versioned hello *and* a probe marker through its own tty that
+  only the helper filtering that terminal can see. Version skew between the
+  two checkouts is refused with the fix in the message.
+- **Loud, reversible fallback.** No helper, a dead socket, or a mid-session
+  crash produces one warning and remote rendering exactly as before; the
+  reason lands in `:MdViewerHealth` and `:MdViewerDebug`.
+- **Diagnostics that answer "is anything still crossing as pixels?"** with
+  counters on both ends: marker and fallback counts in health/debug, and a
+  helper `--status` flag whose `parser.remoteGraphicsCommands` counts
+  graphics uploads that arrived from the remote stream — zero while attached
+  is the invariant holding.
+- **`docs/aws-ssm.md`**: the reference-environment manual — topology, why SSM
+  is not SSH, the trust boundary, the validation procedure, and the results
+  template.
+
+### Security
+
+- The plugin and renderer still open no listening port. The optional helper
+  listens on one unix-domain socket (0600 in a 0700 directory, never TCP — a
+  test pins it) on the operator's own machine, for one ssh session's
+  lifetime. Asset transfer is push-only and content-addressed: the helper
+  can never request a path, and every push is verified against its hash.
+  Remote-image fetching stays on the document's machine. SECURITY.md has the
+  full boundary.
+
+### Changed
+
+- In local mode, resident mode demotes ("local render owns scrolling"),
+  `render.animate` is structurally off (still frames, with a health warning
+  if configured on), and the moving/settle capture split never engages —
+  there is no wire to save.
+
 ## [0.3.0-rc8] - 2026-08-26
 
 **Prerelease.** iTerm2 no longer re-crops a resident image in place — measured
@@ -542,6 +754,9 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
+[0.3.0-rc11]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc11
+[0.3.0-rc10]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc10
+[0.3.0-rc9]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc9
 [0.3.0-rc8]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc8
 [0.3.0-rc7]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc7
 [0.3.0-rc6]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0-rc6

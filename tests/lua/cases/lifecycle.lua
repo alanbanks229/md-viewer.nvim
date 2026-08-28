@@ -182,5 +182,104 @@ return function(t)
     pcall(vim.api.nvim_buf_delete, buf, { force = true })
   end
 
+  -- ---------------------------------------------------------------------
+  -- VimLeavePre detaches an attached local-render helper, not just the
+  -- ordinary sessions close_all already tears down.
+  --
+  -- Without this, the operator's own workflow -- one helper process
+  -- wrapping one long-lived ssh session, with Neovim itself quit and
+  -- reopened many times inside it -- left the control-socket connection to
+  -- die from the OS (an unhandled EOF) rather than a real close the
+  -- helper's socket server could react to. Nothing on the helper side ever
+  -- learned the outgoing session was gone, so its per-document state
+  -- (epoch, seq floor) persisted across every restart -- and a fresh
+  -- Neovim process regenerates the identical documentId ("buffer-1") for
+  -- the same file, so its first frame could be silently refused as stale
+  -- against a counter the session that just quit left elevated. Measured
+  -- live as a preview rendering solid black on reopen (2026-08-27).
+  -- ---------------------------------------------------------------------
+  do
+    local localrender = require("md-viewer.localrender")
+    local TOKEN = ("ab"):rep(16)
+    local tmp = vim.fn.tempname()
+    local dir = tmp .. "/md-viewer"
+    vim.fn.mkdir(dir, "p")
+    vim.uv.fs_chmod(dir, 448) -- 0700
+    local real_runtime = vim.env.XDG_RUNTIME_DIR
+    vim.env.XDG_RUNTIME_DIR = tmp
+
+    local sock_path = dir .. "/r-leave01.sock"
+    local server_client -- the socket server's end of the accepted connection
+    local server_saw_close = false
+    local server = vim.uv.new_pipe(false)
+    assert(server:bind(sock_path))
+    vim.uv.fs_chmod(sock_path, 384) -- 0600
+    server:listen(16, function(err)
+      assert(not err, err)
+      local client = vim.uv.new_pipe(false)
+      server:accept(client)
+      server_client = client
+      local buffer = ""
+      client:read_start(function(rerr, data)
+        if rerr or not data then
+          server_saw_close = true
+          return
+        end
+        buffer = buffer .. data
+        while true do
+          local nl = buffer:find("\n", 1, true)
+          if not nl then break end
+          local line = buffer:sub(1, nl - 1)
+          buffer = buffer:sub(nl + 1)
+          local message = vim.json.decode(line, { luanil = { object = true } })
+          if message.method == "hello" then
+            client:write(vim.json.encode({
+              id = message.id,
+              ok = true,
+              result = {
+                protocol = localrender.PROTOCOL,
+                helperVersion = "md-viewer-local vtest",
+                token = TOKEN,
+                terminal = { kittyGraphics = "verified" },
+              },
+            }) .. "\n")
+          end
+        end
+      end)
+    end)
+
+    local real_ui_send = vim.api.nvim_ui_send
+    local sent_ui = {}
+    vim.api.nvim_ui_send = function(bytes) sent_ui[#sent_ui + 1] = bytes end
+    vim.env.MD_VIEWER_LOCAL_SOCKET = sock_path
+
+    local attach_ok
+    localrender.attach(function(ok) attach_ok = ok end)
+    vim.wait(3000, function() return #sent_ui > 0 end, 10)
+    t.ok(
+      sent_ui[1] and sent_ui[1]:find(";t=" .. TOKEN .. ";s=0;", 1, true),
+      "sanity: the pairing probe carrying the hello's token reached the terminal stream"
+    )
+    -- Confirm the probe over the socket, the same way the real helper would
+    -- once its own filter sees the marker on this terminal.
+    server_client:write(vim.json.encode({ event = "presented", seq = 0 }) .. "\n")
+    vim.wait(3000, function() return attach_ok ~= nil end, 10)
+    t.eq(true, attach_ok, "sanity: local render is attached before VimLeavePre fires")
+    t.eq(true, localrender.active(), "sanity: phase is attached")
+
+    vim.api.nvim_exec_autocmds("VimLeavePre", {})
+    vim.wait(1000, function() return server_saw_close end, 10)
+
+    t.eq(true, server_saw_close, "VimLeavePre closed the control-socket connection the helper's server can see")
+    t.eq(false, localrender.active(), "VimLeavePre detached local render, not only close_all's ordinary sessions")
+
+    vim.api.nvim_ui_send = real_ui_send
+    server:close()
+    if vim.uv.fs_stat(sock_path) then vim.uv.fs_unlink(sock_path) end
+    localrender._reset()
+    vim.env.MD_VIEWER_LOCAL_SOCKET = nil
+    vim.env.XDG_RUNTIME_DIR = real_runtime
+  end
+
   config.reset()
 end

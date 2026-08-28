@@ -2,6 +2,12 @@ local protocol = require("md-viewer.protocol")
 
 local M = {}
 local instance
+-- When md-viewer.localrender has attached a control-socket transport, every
+-- request routes there instead of the stdio child; nil means the stdio path
+-- below, which is byte-for-byte the pre-local-render behavior. Module-level
+-- rather than per-session because `render.location` is global config: all
+-- sessions render in the same place.
+local transport
 -- Process-lifetime, registered once at plugin setup, like an augroup: nothing
 -- ever needs to unregister one. In-flight requests already error correctly
 -- through deliver_error() below; these listeners exist for session-level Lua
@@ -118,7 +124,26 @@ end
 ---Neovim session.
 function M.on_exit(callback) exit_listeners[#exit_listeners + 1] = callback end
 
+---Route requests to the local-render helper. `nil` restores the stdio
+---renderer (which spawns lazily on the next request, exactly as after a
+---crash). Owned by md-viewer.localrender; nothing else may call it.
+function M.set_transport(value) transport = value end
+
+---Exported for tests and diagnostics: which way requests currently go.
+function M.active_transport() return transport end
+
 function M.request(method, params, callback)
+  if transport then return transport.request(method, params, callback) end
+  return M.request_stdio(method, params, callback)
+end
+
+---Send a request to the stdio renderer child specifically, even while a
+---local-render transport is attached. The render path uses this in local mode
+---for the document-service half (`prepare`, `fetch_assets`): markdown parsing
+---and asset reads belong beside the files whatever machine is presenting
+---frames, and routing them through the socket would hand the helper a path
+---request channel SECURITY.md says it must never have.
+function M.request_stdio(method, params, callback)
   local proc, err = M.start()
   if not proc then
     callback(nil, err)

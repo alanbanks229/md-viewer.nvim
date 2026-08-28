@@ -3,15 +3,38 @@ local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
 local linkrate = require("md-viewer.linkrate")
 local resident = require("md-viewer.resident")
+local state = require("md-viewer.state")
 
 local M = {}
 
-local split_commands = {
-  right = "rightbelow vsplit",
-  left = "leftabove vsplit",
-  below = "rightbelow split",
-  above = "leftabove split",
-}
+local click_actions = {}
+local next_click_id = 0
+
+local function click_id(pane, action)
+  next_click_id = next_click_id + 1
+  click_actions[next_click_id] = action
+  pane.winbar_click_ids = pane.winbar_click_ids or {}
+  pane.winbar_click_ids[#pane.winbar_click_ids + 1] = next_click_id
+  return next_click_id
+end
+
+function M.clear_clicks(pane)
+  for _, id in ipairs(pane and pane.winbar_click_ids or {}) do
+    click_actions[id] = nil
+  end
+  if pane then pane.winbar_click_ids = nil end
+end
+
+_G.MdViewerWinbarClick = function(minwid, _, button)
+  local action = click_actions[tonumber(minwid)]
+  if not action then return end
+  local controller = require("md-viewer.controller")
+  if button == "m" or action.close then
+    controller.tab_close(action.session)
+  elseif button == "l" then
+    controller.activate_document(action.session)
+  end
+end
 
 local loading_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 
@@ -118,6 +141,46 @@ local function source_title(source_buf)
   return filename:gsub("%%", "%%%%")
 end
 
+local function escaped(value) return tostring(value):gsub("%%", "%%%%") end
+
+local function path_parts(path)
+  local parts = {}
+  for part in path:gmatch("[^/\\]+") do
+    parts[#parts + 1] = part
+  end
+  return parts
+end
+
+---Shortest path suffixes that distinguish every document in a pane. Untitled
+---buffers fall back to their buffer number, which is stable for the session.
+local function tab_labels(pane)
+  local parts, labels = {}, {}
+  for index, document in ipairs(pane.documents) do
+    local path = vim.api.nvim_buf_get_name(document.source_buf)
+    parts[index] = path ~= "" and path_parts(vim.fs.normalize(path)) or { "[No Name " .. document.source_buf .. "]" }
+  end
+  for index, own in ipairs(parts) do
+    local depth = 1
+    while depth < #own do
+      local suffix = table.concat(own, "/", math.max(1, #own - depth + 1))
+      local unique = true
+      for other, candidate in ipairs(parts) do
+        if other ~= index then
+          local theirs = table.concat(candidate, "/", math.max(1, #candidate - depth + 1))
+          if suffix == theirs then
+            unique = false
+            break
+          end
+        end
+      end
+      if unique then break end
+      depth = depth + 1
+    end
+    labels[index] = table.concat(own, "/", math.max(1, #own - depth + 1))
+  end
+  return labels
+end
+
 ---When `image.backend = "auto"` picked the text-cell fallback because no
 ---graphical backend was available (e.g. macOS Terminal.app, or any terminal
 ---with no Kitty-graphics evidence), surface that in the preview title instead
@@ -176,7 +239,27 @@ local function warmup_notice(session)
 end
 
 local function title_text(session)
-  local text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  local pane = session.pane
+  local text = ""
+  if pane and #pane.documents > 0 then
+    M.clear_clicks(pane)
+    local labels = tab_labels(pane)
+    for index, document in ipairs(pane.documents) do
+      local active = document == pane.active
+      local tab_action = click_id(pane, { session = document })
+      local close_action = click_id(pane, { session = document, close = true })
+      text = text
+        .. (active and "%#MdViewerTabActive#" or "%#MdViewerTabInactive#")
+        .. ("%%%d@v:lua.MdViewerWinbarClick@"):format(tab_action)
+        .. " "
+        .. escaped(labels[index])
+        .. " %T"
+        .. ("%%%d@v:lua.MdViewerWinbarClick@"):format(close_action)
+        .. "×%T%* "
+    end
+  else
+    text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  end
   -- The one piece of modal state the preview has, and the winbar is the only
   -- place it can be said: Neovim's own mode indicator reports normal mode,
   -- because as far as Neovim is concerned that is what this is.
@@ -198,26 +281,221 @@ function M.update_title(session)
   then
     return
   end
-  vim.wo[session.preview_win].winbar = title_text(session)
+  local active = session.pane and session.pane.active or session
+  vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
+  vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+  vim.wo[session.preview_win].winbar = title_text(active)
 end
 
-function M.open(position, session)
-  local cfg = config.get()
-  position = position or cfg.split.position
-  vim.cmd(split_commands[position])
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(win, buf)
+local line_number_ns = vim.api.nvim_create_namespace("md-viewer_line_numbers")
 
+local function line_center(line) return (line.topPx + line.bottomPx) / 2 end
+
+---The rendered visual line nearest document-coordinate `y`. Geometry is
+---ordered, so two neighbours around the binary-search insertion point are the
+---only candidates whose centres can win.
+local function nearest_line_index(lines, y)
+  if not (lines and lines[1]) then return nil end
+  local low, high = 1, #lines
+  while low <= high do
+    local middle = math.floor((low + high) / 2)
+    if line_center(lines[middle]) < y then
+      low = middle + 1
+    else
+      high = middle - 1
+    end
+  end
+  local after = math.max(1, math.min(#lines, low))
+  local before = math.max(1, after - 1)
+  if math.abs(line_center(lines[before]) - y) <= math.abs(line_center(lines[after]) - y) then return before end
+  return after
+end
+
+local function caret_line_index(session)
+  local rect = session.caret_rect
+  if not rect then return nil end
+  local y = (session.caret_scroll_y or 0) + rect.y + rect.height / 2
+  return nearest_line_index(session.latest_lines, y)
+end
+
+local function viewport_line_index(session)
+  local height = session.viewport_height_render_px or session.viewport_height_px or 0
+  return nearest_line_index(session.latest_lines, (session.applied_scroll_y or 0) + height / 2)
+end
+
+local function progress_text(session)
+  local document_height = session.document_height_px or 0
+  local viewport_height = session.viewport_height_px or 0
+  if document_height <= viewport_height then return "All" end
+
+  local lines = session.latest_lines or {}
+  local total = #lines
+  local basis = session.progress_basis == "caret" and "caret" or "viewport"
+  local index = basis == "caret" and caret_line_index(session) or viewport_line_index(session)
+  if total > 0 and index then
+    if basis == "caret" then
+      if index == 1 then return "Top" end
+      if index == total then return "Bot" end
+    else
+      local maximum = math.max(0, document_height - viewport_height)
+      local scroll = session.applied_scroll_y or 0
+      if scroll <= 0 then return "Top" end
+      if scroll >= maximum - 0.5 then return "Bot" end
+    end
+    return string.format("%d%%", math.max(1, math.min(99, math.floor((index / total) * 100))))
+  end
+
+  -- Before the first render has delivered visual-line geometry, retain an
+  -- honest pixel fallback rather than exposing the viewport-sized shadow
+  -- buffer's native percentage.
+  local y
+  if basis == "caret" and session.caret_rect then
+    y = (session.caret_scroll_y or 0) + session.caret_rect.y + session.caret_rect.height / 2
+  else
+    y = (session.applied_scroll_y or 0) + viewport_height / 2
+  end
+  if y <= 0 then return "Top" end
+  if y >= document_height - 1 then return "Bot" end
+  return string.format("%d%%", math.max(1, math.min(99, math.floor((y / document_height) * 100))))
+end
+
+---A raw, human-readable progress label for statusline integrations. nil means
+---the current buffer is not a graphical md-viewer preview and the caller should
+---fall back to its ordinary component.
+function M.statusline_progress(buf)
+  local session = state.from_preview(buf or vim.api.nvim_get_current_buf())
+  if not session or not session.backend or session.backend.name == "cells" then return nil end
+  return progress_text(session)
+end
+
+---Publish progress without taking ownership of 'statusline'. The last label is
+---cached so a run of motions within one percentage does not churn a global
+---statusline renderer such as Lualine.
+function M.update_progress(session)
+  if not session or not session.backend or session.backend.name == "cells" then return end
+  local text = progress_text(session)
+  if text == session.last_progress_text then return end
+  session.last_progress_text = text
+  vim.api.nvim_exec_autocmds("User", {
+    pattern = "MdViewerProgressChanged",
+    modeline = false,
+    data = { buf = session.preview_buf, win = session.preview_win, progress = text },
+  })
+end
+
+function M.set_progress_basis(session, basis)
+  assert(basis == "caret" or basis == "viewport", "progress basis must be caret or viewport")
+  session.progress_basis = basis
+  M.update_progress(session)
+end
+
+---Draw absolute or caret-relative rendered visual-line numbers. The browser's
+---line boxes vary in height, so their vertical centres go through the same
+---CSS-pixel-to-terminal-cell conversion as the caret. Using top edges was the
+---one-row-up bias visible on headings and other tall lines.
+function M.update_line_numbers(session)
+  if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
+  vim.api.nvim_buf_clear_namespace(session.preview_buf, line_number_ns, 0, -1)
+  local mode = config.get().preview.line_numbers
+  if session.backend and session.backend.name == "cells" then
+    if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
+      vim.wo[session.preview_win].number = mode ~= "off"
+      vim.wo[session.preview_win].relativenumber = mode == "relative"
+    end
+    return
+  end
+  if mode == "off" then return end
+  vim.api.nvim_set_hl(0, "MdViewerLineNumber", { link = "LineNr", default = true })
+  vim.api.nvim_set_hl(0, "MdViewerCurrentLineNumber", { link = "CursorLineNr", default = true })
+  local placement = session.last_placement
+  if not placement and session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
+    placement = M.placement(session.preview_win, session.backend and session.backend.name)
+  end
+  if not placement or placement.height <= 0 then return end
+  local viewport_height = session.viewport_height_render_px or 0
+  if viewport_height <= 0 then return end
+  local scroll_y = session.applied_scroll_y or 0
+  local current = mode == "relative" and caret_line_index(session) or nil
+  local by_row = {}
+  for index, line in ipairs(session.latest_lines or {}) do
+    if line.bottomPx > scroll_y and line.topPx < scroll_y + viewport_height then
+      local relative_y = line_center(line) - scroll_y
+      local row = coordinates.css_to_cell(
+        { x = 0, y = relative_y },
+        placement,
+        { widthPx = session.viewport_width_px or 1, heightPx = viewport_height }
+      )
+      if row then
+        local row_center = ((row - 0.5) / placement.height) * viewport_height
+        local distance = math.abs(relative_y - row_center)
+        if not by_row[row] or distance < by_row[row].distance then
+          local value = index
+          if current and index ~= current then value = math.abs(index - current) end
+          by_row[row] = {
+            distance = distance,
+            value = value,
+            highlight = current == index and "MdViewerCurrentLineNumber" or "MdViewerLineNumber",
+          }
+        end
+      end
+    end
+  end
+  for row, number in pairs(by_row) do
+    pcall(vim.api.nvim_buf_set_extmark, session.preview_buf, line_number_ns, row - 1, 0, {
+      virt_text = { { tostring(number.value), number.highlight } },
+      virt_text_pos = "overlay",
+    })
+  end
+end
+
+local window_options = {
+  "number",
+  "relativenumber",
+  "signcolumn",
+  "foldcolumn",
+  "wrap",
+  "cursorline",
+  "spell",
+  "scrolloff",
+  "sidescrolloff",
+  "winhighlight",
+  "winbar",
+  "winfixbuf",
+}
+
+local function snapshot_window(win)
+  local snapshot = {
+    buf = vim.api.nvim_win_get_buf(win),
+    view = vim.api.nvim_win_call(win, vim.fn.winsaveview),
+    width = vim.api.nvim_win_get_width(win),
+    height = vim.api.nvim_win_get_height(win),
+    options = {},
+  }
+  for _, name in ipairs(window_options) do
+    local ok, value = pcall(vim.api.nvim_get_option_value, name, { win = win })
+    if ok then snapshot.options[name] = value end
+  end
+  return snapshot
+end
+
+function M.create_buffer(session)
+  local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].buflisted = false
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "md-viewer"
-  vim.api.nvim_buf_set_name(buf, "md-viewer://preview/" .. buf)
+  local pane_id = session.pane and session.pane.id or 0
+  vim.api.nvim_buf_set_name(buf, ("md-viewer://preview/%d/%d"):format(pane_id, buf))
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
   vim.bo[buf].modifiable = false
   vim.bo[buf].readonly = true
+  session.preview_buf = buf
+  return buf
+end
 
+local function configure_window(win, session)
+  local cfg = config.get()
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = "no"
@@ -245,14 +523,71 @@ function M.open(position, session)
   vim.api.nvim_set_hl(0, "MdViewerInertVisual", { blend = 100, nocombine = true })
   vim.wo[win].winhighlight = "Visual:MdViewerInertVisual,VisualNOS:MdViewerInertVisual"
 
-  if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
+  if cfg.preview.winbar then
+    vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
+    vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+    vim.wo[win].winbar = title_text(session)
+  end
+  if session.backend and session.backend.name == "cells" then
+    vim.wo[win].number = cfg.preview.line_numbers ~= "off"
+    vim.wo[win].relativenumber = cfg.preview.line_numbers == "relative"
+  end
+end
 
-  if position == "right" or position == "left" then
-    vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))
+function M.open(position, session, adopt_win)
+  local cfg = config.get()
+  position = position or cfg.split.position
+  local buf = session.preview_buf or M.create_buffer(session)
+  local win
+  if adopt_win then
+    win = adopt_win
+    session.pane.owned = false
+    session.pane.original = snapshot_window(win)
+    vim.wo[win].winfixbuf = false
+    vim.api.nvim_win_set_buf(win, buf)
   else
+    -- The destination buffer exists before the split: no observable frame can
+    -- show a second copy of the source and be mistaken for another source pane.
+    win = vim.api.nvim_open_win(buf, true, { split = position, win = -1 })
+  end
+  session.preview_win = win
+  session.pane.preview_win = win
+  configure_window(win, session)
+  vim.wo[win].winfixbuf = true
+
+  if not adopt_win and (position == "right" or position == "left") then
+    vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))
+  elseif not adopt_win then
     vim.api.nvim_win_set_height(win, math.max(8, math.floor(vim.o.lines * cfg.split.width)))
   end
   return buf, win
+end
+
+function M.show_document(session)
+  local pane, win = session.pane, session.pane and session.pane.preview_win
+  if not (win and vim.api.nvim_win_is_valid(win)) then return false end
+  vim.wo[win].winfixbuf = false
+  local ok = pcall(vim.api.nvim_win_set_buf, win, session.preview_buf)
+  if ok then
+    session.preview_win = win
+    configure_window(win, session)
+  end
+  vim.wo[win].winfixbuf = true
+  return ok
+end
+
+function M.restore_adopted(pane)
+  local win, original = pane and pane.preview_win, pane and pane.original
+  if not (original and win and vim.api.nvim_win_is_valid(win)) then return false end
+  vim.wo[win].winfixbuf = false
+  if vim.api.nvim_buf_is_valid(original.buf) then pcall(vim.api.nvim_win_set_buf, win, original.buf) end
+  for name, value in pairs(original.options) do
+    pcall(vim.api.nvim_set_option_value, name, value, { win = win })
+  end
+  pcall(vim.api.nvim_win_set_width, win, original.width)
+  pcall(vim.api.nvim_win_set_height, win, original.height)
+  pcall(vim.api.nvim_win_call, win, function() vim.fn.winrestview(original.view) end)
+  return true
 end
 
 -- The reader's real `guicursor`, held while the preview is focused and the

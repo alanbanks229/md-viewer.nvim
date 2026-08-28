@@ -99,7 +99,7 @@ test("remote images are fetched and inlined regardless of host -- there is no al
     "both hosts were contacted -- neither is special-cased");
 });
 
-test("arbitrary data-* attributes on raw HTML are stripped -- only the four provenance keys survive", async () => {
+test("arbitrary data-* attributes on raw HTML are stripped -- only named internal keys survive", async () => {
   const { html } = await renderMarkdown(
     '<div data-foo="bar" data-onclick="evil()" data-md-source-id="forged" data-source-start="99">x</div>',
     { rawHtml: true, localImages: false, maxLocalImageBytes: 1, baseDir: here, documentRoot: here }

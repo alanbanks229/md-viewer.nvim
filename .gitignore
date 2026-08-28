@@ -4,3 +4,6 @@ nvim.log
 .DS_Store
 tmp/
 .claude/
+# Validation artifacts name private host aliases; they belong to the
+# operator's machine, never to the public repository.
+artifacts/

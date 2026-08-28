@@ -1,8 +1,17 @@
-local M = { version = "0.3.0-rc8" }
+local M = { version = "0.3.0-rc11" }
 local initialized = false
+local configured = false
 
 function M.setup(opts)
   if vim.fn.has("nvim-0.12") ~= 1 then error("md-viewer.nvim requires Neovim 0.12+") end
+  -- plugin/md-viewer.lua calls this with no arguments so zero-config works.
+  -- Plugin files load *after* a manual init file has already called setup
+  -- with real options, so the argless call must defer to an explicit
+  -- configuration rather than clobber it back to defaults -- measured doing
+  -- exactly that through `nvim -u` in the live-pipeline rig. An explicit
+  -- setup({...}) still reconfigures every time, as documented.
+  if opts == nil and configured then return M end
+  configured = configured or opts ~= nil
   require("md-viewer.config").setup(opts or {})
   if not initialized then
     initialized = true
@@ -16,5 +25,10 @@ function M.open(position) return require("md-viewer.controller").open(position) 
 function M.close() return require("md-viewer.controller").close() end
 function M.toggle(position) return require("md-viewer.controller").toggle(position) end
 function M.refresh() return require("md-viewer.controller").refresh() end
+function M.tab_next() return require("md-viewer.controller").tab_next() end
+function M.tab_previous() return require("md-viewer.controller").tab_previous() end
+function M.tab_close() return require("md-viewer.controller").tab_close() end
+function M.reveal_source() return require("md-viewer.controller").reveal_source() end
+function M.statusline_progress() return require("md-viewer.preview").statusline_progress() end
 
 return M

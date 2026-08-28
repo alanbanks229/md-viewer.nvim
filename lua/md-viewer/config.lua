@@ -7,6 +7,9 @@ M.defaults = {
     winbar = true,
     loading = true,
     loading_interval_ms = 80,
+    -- Rendered visual lines, not Markdown source lines. `relative` mirrors
+    -- Neovim's number+relativenumber display: the caret line stays absolute.
+    line_numbers = "off",
   },
   render = {
     debounce_ms = 200,
@@ -112,6 +115,15 @@ M.defaults = {
     -- Playback is expensive when sending constant PNG screenshots.
     animate = false,
     animate_fps = 5,
+    -- Where the renderer runs. "current" is the only behavior that existed
+    -- before v0.3.0-rc9: Node and Chromium beside this Neovim. "local" runs
+    -- them beside the *terminal* instead -- for sessions where this Neovim is
+    -- remote and the link is the whole cost (the reference case is an AWS SSM
+    -- tunnel at ~0.8 MB/s) -- and requires the md-viewer-local helper to be
+    -- wrapping the ssh session; without it the session falls back to
+    -- "current" loudly, never silently. There is deliberately no "auto" until
+    -- the local path has been validated on the real slow link it exists for.
+    location = "current",
   },
   browser = {
     executable_path = nil,
@@ -205,6 +217,13 @@ M.defaults = {
     -- the default boundary is the project rather than the document's folder.
     document_root_markers = { ".git", ".hg", ".svn" },
     document_root = nil,
+  },
+  obsidian = {
+    -- Native wikilink navigation for an Obsidian vault. This is semantic
+    -- compatibility only; md-viewer never loads or calls obsidian.nvim.
+    enabled = false,
+    -- nil uses the same detected/configured root as local-link security.
+    vault_root = nil,
   },
   interaction = {
     enabled = true,
@@ -316,6 +335,11 @@ local function validate(cfg)
     "md-viewer: render.font_size_px must be positive"
   )
   assert(type(cfg.render.animate) == "boolean", "md-viewer: render.animate must be a boolean")
+  assert(
+    cfg.render.location == "current" or cfg.render.location == "local",
+    'md-viewer: render.location must be "current" or "local" ("auto" is deliberately not accepted '
+      .. "until the local path has been validated on a real slow link)"
+  )
   -- Bounded at both ends. Below 1 the timer would never fire; above 30 the
   -- placement traffic stops being negligible, which is the only reason drawing
   -- frames this way is affordable at all.
@@ -417,6 +441,11 @@ local function validate(cfg)
     type(cfg.preview.loading_interval_ms) == "number" and cfg.preview.loading_interval_ms > 0,
     "md-viewer: preview.loading_interval_ms must be positive"
   )
+  local line_number_modes = { off = true, absolute = true, relative = true }
+  assert(
+    line_number_modes[cfg.preview.line_numbers],
+    "md-viewer: preview.line_numbers must be off, absolute, or relative"
+  )
   assert(
     terminal_profiles[cfg.terminal.profile],
     "md-viewer: terminal.profile must be one of auto, iterm2, kitty, wezterm, ghostty, warp, "
@@ -427,6 +456,11 @@ local function validate(cfg)
   local animation_modes = { auto = true, native = true, frames = true, off = true }
   assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
+  assert(type(cfg.obsidian.enabled) == "boolean", "md-viewer: obsidian.enabled must be boolean")
+  assert(
+    cfg.obsidian.vault_root == nil or (type(cfg.obsidian.vault_root) == "string" and cfg.obsidian.vault_root ~= ""),
+    "md-viewer: obsidian.vault_root must be a non-empty path or nil"
+  )
   assert(
     vim.islist(cfg.security.document_root_markers),
     "md-viewer: security.document_root_markers must be a list of marker names"

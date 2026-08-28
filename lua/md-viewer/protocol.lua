@@ -21,4 +21,17 @@ function M.decode(line)
   return value
 end
 
+---Decode one NDJSON line from the local-render control socket. Unlike
+---`M.decode` it enforces no envelope: the socket carries `{id, ok, ...}`
+---responses and id-less `{event = ...}` notification lines, and the
+---transport classifies them after decoding. Same `luanil` rule as above, for
+---the same reason.
+function M.decode_line(line)
+  if type(line) ~= "string" or line == "" then return nil, "empty line" end
+  local ok, value = pcall(vim.json.decode, line, { luanil = { object = true } })
+  if not ok then return nil, "invalid JSON: " .. tostring(value) end
+  if type(value) ~= "table" then return nil, "line is not an object" end
+  return value
+end
+
 return M

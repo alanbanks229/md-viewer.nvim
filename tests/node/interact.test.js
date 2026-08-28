@@ -129,6 +129,7 @@ test("every interaction action is registered with the correct flags", () => {
     find_next: { mutatesVisibleState: true, requiresCoordinates: false },
     find_previous: { mutatesVisibleState: true, requiresCoordinates: false },
     find_clear: { mutatesVisibleState: true, requiresCoordinates: false },
+    obsidian_scroll: { mutatesVisibleState: false, requiresCoordinates: false, requiresObsidianAnchor: true },
   };
   for (const [action, flags] of Object.entries(expected)) {
     assert.ok(INTERACT_ACTIONS[action], `${action} is not registered in INTERACT_ACTIONS`);
@@ -138,7 +139,7 @@ test("every interaction action is registered with the correct flags", () => {
   }
   assert.deepEqual([...Object.keys(INTERACT_ACTIONS)].sort(), [
     "activate_at", "caret_move", "find_clear", "find_next", "find_previous", "find_set", "hit_test",
-    "selection_clear", "selection_commit", "selection_preview", "selection_text",
+    "obsidian_scroll", "selection_clear", "selection_commit", "selection_preview", "selection_text",
   ]);
 });
 

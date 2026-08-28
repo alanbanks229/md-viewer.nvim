@@ -75,6 +75,31 @@ test("supersedes stale requests and shuts the renderer down", async (t) => {
   assert.equal(fourth.code, "CAPTURE_CACHE_MISS");
   assert.match(fourth.error, /capture cache missing/);
 
+  // Closing a pane tab uses this request to release every cache keyed by the
+  // stable preview document id. A later history visit must therefore take the
+  // ordinary full-render fallback instead of finding a half-forgotten frame.
+  child.stdin.write(`${JSON.stringify({ id: 5, method: "forget", params: { documentId: "ordering" } })}\n`);
+  const forgetDeadline = Date.now() + 5000;
+  while (responses.length < 5 && Date.now() < forgetDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  const fifth = responses.find((response) => response.id === 5);
+  assert.deepEqual(fifth, { id: 5, ok: true, result: { forgotten: true } });
+
+  child.stdin.write(`${JSON.stringify({ id: 6, method: "health", params: {} })}\n`);
+  const healthDeadline = Date.now() + 5000;
+  while (responses.length < 6 && Date.now() < healthDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  const sixth = responses.find((response) => response.id === 6);
+  assert.equal(sixth.ok, true);
+  assert.equal(sixth.result.cachedDocuments, 0);
+  assert.equal(sixth.result.cachedDocumentFrames, 0);
+  assert.equal(sixth.result.interactionDocuments, 0);
+
+  child.stdin.write(`${JSON.stringify({ id: 7, method: "capture", params: captureParams })}\n`);
+  const forgottenCaptureDeadline = Date.now() + 5000;
+  while (responses.length < 7 && Date.now() < forgottenCaptureDeadline) await new Promise((resolve) => setTimeout(resolve, 20));
+  const seventh = responses.find((response) => response.id === 7);
+  assert.equal(seventh.ok, false);
+  assert.equal(seventh.code, "CAPTURE_CACHE_MISS");
+
   child.stdin.write(`${JSON.stringify({ id: 0, method: "shutdown", params: {} })}\n`);
   const exitCode = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("renderer did not shut down")), 5000);

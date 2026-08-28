@@ -194,6 +194,21 @@ local function interaction_mappings()
     end,
     "Clear search, then selection, then normal Escape",
   }
+  list[#list + 1] = {
+    "]b",
+    function(session) controller().tab_next(session) end,
+    "Next document tab in this preview pane",
+  }
+  list[#list + 1] = {
+    "[b",
+    function(session) controller().tab_previous(session) end,
+    "Previous document tab in this preview pane",
+  }
+  list[#list + 1] = {
+    "gf",
+    function(session) controller().reveal_source(session) end,
+    "Reveal this preview document in the source pane",
+  }
   return list
 end
 

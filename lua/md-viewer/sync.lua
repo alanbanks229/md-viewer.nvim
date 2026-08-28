@@ -112,6 +112,7 @@ function M.source_cursor(session, refresh, tolerance)
   local current_ratio = (target - (session.scroll_y or 0)) / math.max(1, session.viewport_height_px)
   if math.abs(current_ratio - anchor) <= (tolerance or 0.10) then return end
   session.scroll_y = M.scroll_for_block(block, session.viewport_height_px, session.document_height_px, anchor, line)
+  session.progress_basis = "viewport"
   refresh(session)
 end
 

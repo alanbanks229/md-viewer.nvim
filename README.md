@@ -118,6 +118,24 @@ calibration divisor rather than a size knob, and lowering it makes the frame
 *larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
 of the reasoning.
 
+**Local rendering (experimental).** On a link too slow for pictures at all —
+the measured case is AWS SSM's ~0.8 MB/s — `render.location = "local"` moves
+the browser to your side of the connection instead of shrinking what crosses
+it. Launch ssh through the helper on the machine your terminal runs on:
+
+```sh
+node <md-viewer>/renderer/src/local-main.js -- ssh <host>
+```
+
+and set `render = { location = "local" }` in the remote Neovim's opts. Frames
+then render and display beside your terminal; the connection carries prepared
+markup, asset bytes once each, and ~0.3–1 KB frame markers — no PNGs in
+either direction. Both ends must run the same md-viewer version (the
+handshake refuses a mismatch and names the fix), and if the helper is absent
+the preview says so once and renders remotely as before.
+[docs/aws-ssm.md](docs/aws-ssm.md) is the full manual, including validation
+status per environment.
+
 ## Installation
 
 The build hook installs the locked renderer dependencies. Both flags are
@@ -129,7 +147,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc8",
+  version = "v0.3.0-rc11",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -181,7 +199,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc8" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc11" },
 })
 
 require("md-viewer").setup({})
@@ -212,9 +230,15 @@ Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
   preview, matching Vim rather than a browser; `y` copies to the unnamed
   register and the system clipboard.
 - Markdown-preview search with `/`, `n` and `N`.
-- Ctrl/Cmd-click follows a link. A local Markdown link opens in Neovim and the
-  preview follows it, with `H`/`L` history back and forward — so a documentation
-  tree can be read by clicking through it.
+- Real pane-scoped preview buffers with clickable winbar tabs. They are hidden
+  from global bufferlines, and a manually duplicated Markdown split is adopted
+  in place and restored when the preview is toggled off.
+- Ctrl/Cmd-click follows a link. A local Markdown link opens a pane-scoped
+  preview tab without disturbing the editable source split; `H`/`L` walk
+  preview history and `gf` explicitly reveals the active source document.
+- Optional native Obsidian wikilinks (`[[Note]]`, aliases, heading paths, and
+  block IDs) use the same preview tabs and history, with no obsidian.nvim
+  runtime dependency.
 - Animated GIF and WebP actually animate, drawn by the terminal over the still
   frame the screenshot captured. Off by default; `render.animate = true` turns
   it on.
@@ -233,6 +257,50 @@ from the operating system and sizes the render to match. `:help
 md-viewer-calibration` covers the two cases where it cannot — and what to set
 by hand when that happens.
 
+### Obsidian wikilinks (optional)
+
+Obsidian syntax is off by default. Enable it for a vault with:
+
+```lua
+require("md-viewer").setup({
+  obsidian = {
+    enabled = true,
+    vault_root = vim.g.obsidian_vault_root, -- nil uses the document/security root
+  },
+})
+```
+
+Md-Viewer then renders and follows `[[Note]]`, `[[path/to/Note]]`, optional
+`.md`, `[[Note|Label]]`, `[[#Heading]]`, `[[Note#Parent#Child]]`, and
+`[[Note#^block-id]]`. Bare note names are matched case-insensitively by filename
+stem; duplicate names open `vim.ui.select` with vault-relative paths. Targets
+are rescanned when a link is activated, missing notes are never created, and
+every path and symlink remains confined to the vault root. Embeds/transclusion
+(`![[...]]`) and frontmatter aliases are not implemented.
+
+[obsidian.nvim](https://github.com/obsidian-nvim/obsidian.nvim) is an optional
+editing companion, not a dependency. Its official stable-release Lazy pattern
+can point at the same vault:
+
+```lua
+{
+  "obsidian-nvim/obsidian.nvim",
+  version = "*",
+  opts = {
+    legacy_commands = false,
+    workspaces = {
+      { name = "vault", path = vim.g.obsidian_vault_root },
+    },
+  },
+}
+```
+
+The responsibilities stay separate: Md-Viewer owns rendered previews and
+preview-tab wikilinks; obsidian.nvim provides editor completion, LSP
+navigation, backlinks, rename, and note operations. The Obsidian desktop app
+uses the same Markdown files and `.obsidian` settings and does not need to be
+running unless another helper explicitly depends on it.
+
 ## Usage
 
 | Command | Action |
@@ -242,10 +310,21 @@ by hand when that happens.
 | `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
 | `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
+| `:MdViewerTabNext` / `:MdViewerTabPrevious` | Cycle document tabs in the preview pane |
+| `:MdViewerTabClose` | Close the active preview document tab |
+| `:MdViewerRevealSource` | Show the active preview document in the source pane and focus it |
+| `:MdViewerToggleAbsoluteLineNumbers` | Show absolute rendered visual-line numbers; repeat to turn them off |
+| `:MdViewerToggleRelativeLineNumbers` | Show caret-relative visual-line numbers; repeat to turn them off |
 | `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
 | `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |
 | `:checkhealth md-viewer` | Run Neovim health checks |
+
+Statusline integrations can call `require("md-viewer").statusline_progress()`.
+It returns `All`, `Top`, `Bot`, or `NN%` for the active graphical preview and
+`nil` elsewhere, so the statusline can fall back to its normal progress
+component. The `User MdViewerProgressChanged` event fires only when that label
+changes.
 
 ### Keys, with the preview focused
 
@@ -266,6 +345,8 @@ the size of the glyph it is on.
 | `y` | Copy the selection |
 | `/` `n` `N` | Search, next match, previous match |
 | `H` `L` | Back / forward through followed-link history |
+| `[b` `]b` | Previous / next document tab in the preview pane |
+| `gf` | Reveal this preview document in the editable source pane |
 
 Counts work on every motion except `gg`/`G` — `10j`, `5w`, `3l`.
 
@@ -295,9 +376,11 @@ requests; requests to loopback, private, link-local, and other non-public
 destinations are refused, on the initial URL and on every redirect hop — not
 something to configure, just how it works. Local images and local links are
 confined to a canonical document root — by default the project enclosing the
-document — with symlinks resolved. Interaction adds no new attack surface:
-nothing re-parses Markdown or touches the filesystem on a click, and diagnostics
-report selection and search state as lengths and counts only.
+document — with symlinks resolved. Ordinary interaction never re-parses
+Markdown. When Obsidian mode is enabled, a wikilink click scans Markdown
+filenames inside the configured vault, then re-applies lexical and realpath
+containment before loading a target; it never creates a missing note.
+Diagnostics report selection and search state as lengths and counts only.
 
 Both `![alt](url)` and a bare `<img src="url">` go through that same path; an
 `<img>` is parsed into an ordinary Markdown image whether or not

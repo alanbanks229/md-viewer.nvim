@@ -29,7 +29,11 @@ then unlinks it. Both sides reject or supersede stale work.
 No WebSocket, deliberately: the renderer is already persistent, no connection is
 re-established per edit, and a WebSocket would require a listening HTTP/TCP
 endpoint while leaving browser layout, PNG capture, and terminal image transfer
-untouched. Scroll-only work reuses cached HTML, the live DOM, document geometry
+untouched. Neither the plugin nor the renderer ever listens on any port; the one
+listener anywhere in the system is the optional local-render helper's unix-domain
+socket, on the operator's own machine, never TCP (see
+[Render location](#render-location) and SECURITY.md — a test pins the never-TCP
+part). Scroll-only work reuses cached HTML, the live DOM, document geometry
 and the token source map, then performs a page scroll and viewport screenshot
 alone.
 
@@ -44,21 +48,24 @@ completion provide the pacing.
 The moving frame carries a third dimension, `render.scroll_scale`, resolved by
 `controller.schedule_scroll` from the session rather than from configuration
 alone: unset it is full size locally and `render.ssh_scroll_scale` over SSH,
-because the cost it trades sharpness against is wire time and wire time only
-exists over SSH. It reaches the CDP screenshot's `clip.scale` as a numeric
-factor; Playwright's own `scale` is a two-value enum, so the fallback path
-silently produces the full-size frame instead. **Invariant:** the factor applies
-only to the moving capture. The settle frame is the picture a reader is actually
-looking at, and a preview left permanently soft is the one defect this
-optimization could plausibly introduce — so the renderer refuses the factor on
-the `device` tier as well as the Lua side never sending it there, and
-`fast_scroll = false` (which leaves no separate moving frame) resolves to no
-factor at all. **Invariant:** placement geometry is independent of capture scale.
-The rectangle comes from cells and the CSS viewport, so a frame captured at 0.5×
-is placed into the same cells with the same `c`/`r` keys and the terminal scales
-it; `tests/lua/cases/scroll_scale.lua` asserts the two streams' cell geometry is
+because the cost it trades sharpness against is wire time. That test is about
+the wire, not the hostname — `render.location = "local"` is an SSH session that
+puts no pixels on the wire, so it resolves to full size too. It reaches the CDP
+screenshot's `clip.scale` as a numeric factor; Playwright's own `scale` is a
+two-value enum, so the fallback path silently produces the full-size frame
+instead. **Invariant:** the factor applies only to the moving capture. The
+settle frame is the picture a reader is actually looking at, and a preview left
+permanently soft is the one defect this optimization could plausibly introduce
+— so the renderer refuses the factor on the `device` tier as well as the Lua
+side never sending it there, and `fast_scroll = false` (which leaves no
+separate moving frame) resolves to no factor at all. **Invariant:** placement
+geometry is independent of capture scale. The rectangle comes from cells and
+the CSS viewport, so a frame captured at 0.5× is placed into the same cells
+with the same `c`/`r` keys and the terminal scales it;
+`tests/lua/cases/scroll_scale.lua` asserts the two streams' cell geometry is
 identical. Why the obvious alternative is wrong, and what it would take to stop
-sending pixels altogether, is in [local-render-design.md](local-render-design.md).
+sending pixels altogether, is in
+[local-render-design.md](local-render-design.md).
 
 **Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
 allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
@@ -101,13 +108,17 @@ still frame always underneath.
 
 ## Preview surface and coordinates
 
-`preview.lua` creates a read-only `nofile` scratch buffer, never a terminal.
+`preview.lua` creates one stable, read-only `nofile` buffer per preview
+document, never a terminal. The buffers are unlisted and use `bufhidden=hide`,
+so they are real Neovim buffers without entering a global bufferline. A pane's
+window is temporarily `winfixbuf`; plugin tab activation unlocks it only for
+the controlled buffer swap.
 `coordinates.lua` derives the placement rectangle from `screenpos(win, topline, 1)`
 plus the window's width and height, so a winbar, statusline, tabline, global
 statusline, separator and command line all fall outside it. Resize and scroll
 events recalculate it.
 
-**Invariant.** The scratch buffer holds real spaces — one line per placement row,
+**Invariant.** The active preview buffer holds real spaces — one line per placement row,
 each as wide as the placement (`preview.surface_size`, re-asserted by
 `preview.reset_surface` before every frame) — not empty lines plus `virtualedit`.
 Virtual space lets the cursor push `leftcol` past zero, and `screenpos()` reports
@@ -470,18 +481,16 @@ frame and the selection-preview frame that follows it are two separate
 `interact` round trips, so the selection frame always resolves against the
 page's post-scroll position.
 
-**Preview history.** Following a local link retargets the preview
-(`controller.retarget`), and `preview.pinned` stops the preview following an
-ordinary buffer switch — so without history the reader could reach a document but
-not return to the one they came from as anything but text. Each session carries
-the documents it has been retargeted through and an index into them.
-**Invariant:** `:MdViewerBack`/`:MdViewerForward` walk the index without
-appending — appending makes "back" oscillate between the last two entries — and a
-`BufEnter` in the session's source window follows the preview to a buffer
-*already in that list*, which is what makes `<C-o>` work without weakening
-`pinned` for anything else. Entries hold a buffer and a path, so one whose buffer
-has been wiped still reopens its file; navigating from the middle truncates the
-forward branch, as a browser does.
+**Preview panes, documents, and history.** A pane owns its preview window, tab
+order, active document, activation epoch, source-window memory, and history.
+Each Markdown document owns a stable preview buffer and all logical render,
+scroll, caret, selection, and search state. `controller.retarget` now means
+create-or-reuse that pane's document and activate it; it never re-keys the old
+document or changes the source window. `:MdViewerBack`/`:MdViewerForward` walk
+the pane history without appending, while `[b`/`]b` change tabs without changing
+history. Entries hold a source buffer, path, and scroll target, so returning to
+a closed tab recreates its preview buffer and view. Navigating from the middle
+truncates the forward branch, as a browser does.
 
 **Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`) separates
 `http`/`https`/`mailto`/fragment/local-file candidates from anything unsafe
@@ -493,11 +502,23 @@ symlink-resolved check image loading uses. Ctrl/Cmd-click is the only gesture th
 can activate a link. [SECURITY.md](../SECURITY.md) states the policy these
 mechanics enforce.
 
-An activated local Markdown link opens in Neovim and the preview follows:
-`controller.retarget` re-keys the existing session onto the new buffer and
-re-derives its `document_id`, reusing the preview window instead of rebuilding the
-split. The serial bump is what makes that safe — responses still in flight for the
-old document fail their staleness check rather than being applied to the new one.
+Obsidian mode adds one renderer-owned, sanitizer-allowlisted metadata scheme.
+It is only emitted by the opt-in wikilink parser and classifies to an
+`obsidian` action; it is not a filesystem grant. `lua/md-viewer/obsidian.lua`
+rescans the configured vault on activation, resolves explicit paths from its
+root or bare names by case-insensitive Markdown stem, and runs the same lexical
+plus realpath boundary before loading a buffer. Heading hierarchy and exact
+block-id scrolling are a typed `obsidian_scroll` interaction against the active
+DOM. Cross-document anchors are stored on the destination session until its
+first render, preserving pane tabs, history, and source-window isolation.
+
+An activated local Markdown link uses `bufadd()`/`bufload()` to create or reuse a
+normal source buffer without displaying it, then activates its stable preview
+buffer in the pane. Deactivation advances the old document's request serial and
+the pane activation epoch, clears heavy terminal resources, and retains logical
+navigation state. Late render and interaction responses must match both active
+document and epoch. Closing sends the renderer a `forget` request, releasing
+browser, interaction, lane, replica, and local-surface caches immediately.
 
 **Lua-side dispatch.** `mouse.lua` installs its mappings only once a graphical
 (non-`cells`) session exists, saving and restoring whatever was mapped there
@@ -513,23 +534,100 @@ matters because a release with no matching capture would otherwise leave
 `session.pointer` stuck "pressed". A plain click places the caret and clears
 an active selection, but never moves the source cursor.
 
+<a id="render-location"></a>
+## Render location
+
+`render.location` decides where frames are rasterized and presented, and
+nothing else about the model: revisions, lanes, staleness, placement math and
+the interaction envelope are identical in both locations because they are the
+same code.
+
+- **`"current"`** (default): everything above — render beside Neovim, ship
+  PNG bytes to the terminal.
+- **`"local"`** (opt-in): the operator launches ssh through
+  `renderer/src/local-main.js` on the machine the terminal runs on. The
+  helper probes the terminal (the one moment queries are safe — it
+  exclusively owns the tty before ssh exists), listens on a 0600 unix socket
+  in a 0700 directory, and adds an `ssh -R` forward so the remote plugin can
+  reach it. The VM keeps markdown parsing and the whole security pipeline
+  (`prepare`: markdown → sanitized html with content-addressed `md-asset:`
+  refs); the helper runs the browser (`render_prepared`) beside the terminal
+  and resolves frames from its own surface cache.
+
+The presentation seam is `kitty_raw`'s presenter: every terminal transaction
+the direct path would write is instead serialized as one authenticated marker
+APC — token, monotonic sequence, document, surface references where pixels
+would be, and the *literal* placement/deletion escapes the Lua builders
+produced, base64ed. The helper's filter (the sole writer to the tty) swallows
+markers, materializes their uploads from the replica, and injects whole
+transactions at tokenizer-safe boundaries.
+
+The invariants the marker transaction path keeps, each pinned by a test:
+
+- **Single terminal writer.** ssh owns stdin untouched; the filter owns
+  stdout; injected transactions are one uninterrupted write at a safe
+  boundary (tokenizer ground state, no split UTF-8, no open `m=1` chunk
+  train).
+- **Newest wins, deletions never lost.** A superseded marker's placements are
+  dropped, its deletions carried into the next injected transaction —
+  ghost-frame prevention (`local-injector.test.js`).
+- **No raster in the remote stream.** Zero PNG payloads and zero upload
+  commands in any `nvim_ui_send` write during a local session
+  (`controller_local.lua`'s byte-flow sweep), and the filter counts remote
+  graphics commands so `:MdViewerHealth` can prove it live.
+- **No response-gated frames.** The frame marker is emitted in the same tick
+  as the render request; responses settle geometry and clamps only. A scroll
+  is one marker, no request — the serialized-RTT failure of the removed
+  experiment (docs/local-render-design.md) has no path back in. Backpressure
+  belongs to the replica (one capture want per document, newest wins, a
+  superseded want never dispatched), never to the link: an acknowledgement
+  gate on the emit side costs a round trip per frame and buys what the
+  replica already provides.
+- **Nothing addresses a surface id before its upload is acknowledged.** In
+  local mode an image id becomes live the instant its marker is sent, a
+  reference that still has to cross the link before any pixels exist for it —
+  never true of the direct path, which ships bytes synchronously. Placement
+  reconcile and the caret overlay therefore wait for `presented` before
+  addressing the current id; an unknown id draws nothing under Kitty's `q=2`,
+  so addressing one early paints a partial frame that only an unrelated later
+  frame repairs.
+- **Scroll scale is a wire economy, so local mode never applies it.** Only a
+  ~0.3–1 KB marker crosses the link regardless of capture resolution, so
+  moving frames are captured at full device scale; `render.scroll_scale`
+  still overrides that if a laptop's own capture time becomes the constraint.
+- **A helper session outlives the Neovim that opened it, so it must be
+  retired.** Per-document helper state is keyed by a `documentId` a fresh
+  Neovim regenerates identically, so a disconnect that the OS closes rather
+  than the plugin leaves an elevated epoch counter that silently refuses the
+  next session's frames. `VimLeavePre` closes the control socket for real,
+  and the helper's `onClientChange(false)` retires the outgoing session's
+  placements and clears the replica's per-document state.
+- **Fallback is a state, never a silence.** Socket death restores the direct
+  presenter and stdio renderer, notifies once, and records the reason where
+  health and debug report it.
+
+Trust boundary and threat model: [SECURITY.md](../SECURITY.md). Reference
+environment and validation: [aws-ssm.md](aws-ssm.md).
+
 ## Lifecycle
 
-Text events debounce, resize events coalesce, focus stays in the source window,
-and tab/suspend events remove graphical placements. Close, wipe and exit
+Text events debounce, resize events coalesce, and tab/suspend events remove
+graphical placements. Inactive edits mark that document dirty without painting.
+Close, wipe and exit
 invalidate outstanding serials, stop timers, delete only owned images, remove
 files, and shut the shared renderer down when the last session closes. The
-startup spinner float's timer is owned by the buffer session and closed on every
+startup spinner float's timer is owned by the active document and closed on every
 shutdown path.
 
-With `preview.pinned = true`, hiding the source buffer does not end its session:
-the source split can display another file while the preview retains its image and
-source-labeled winbar. Wiping the source, replacing or wiping the preview buffer,
-closing the preview, or exiting Neovim still performs full cleanup.
+With `preview.pinned = true`, hiding a source buffer does not end its pane. A
+plugin-owned final tab closes the preview split; an adopted user split restores
+its original buffer, view, dimensions, and window options. Wiping one preview
+buffer closes that document tab, while closing the pane or exiting Neovim still
+performs full cleanup.
 
 ## Design references
 
-The pinned document identity, labeled preview surface, retained renderer state,
+The pane/document identities, clickable winbar tabs, retained renderer state,
 stale-response guards and manual-scroll precedence take focused inspiration from
 [Markdown Preview Enhanced's preview provider](https://github.com/shd101wyy/vscode-markdown-preview-enhanced/blob/master/src/preview-provider.ts)
 and its documented locked-preview workflow. md-viewer does not copy its webview,

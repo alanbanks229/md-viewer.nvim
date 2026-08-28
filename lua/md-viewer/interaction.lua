@@ -3,6 +3,7 @@ local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
+local obsidian = require("md-viewer.obsidian")
 local preview = require("md-viewer.preview")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
@@ -28,11 +29,29 @@ function M.captured_session() return captured end
 ---two-arg `(result, err)` shape; only this wrapper looks at process.request's
 ---third `meta` argument.
 local function interact_request(session, params, callback)
+  if not state.is_active(session) then return end
+  local activation_epoch = session.activation_epoch
   session.interaction_request_count = (session.interaction_request_count or 0) + 1
+  if require("md-viewer.localrender").active() then
+    -- The no-PNG envelope: in local mode a mutation is displayed by a frame
+    -- marker against the bumped visual epoch, so the same-operation capture
+    -- would render bytes nobody reads, and sheet PNGs are synthesized beside
+    -- the terminal from a reference. The replica enforces both ends of this
+    -- too; stating it in the envelope keeps the request honest about what it
+    -- wants.
+    params.capture = false
+    params.overlaySheet = nil
+  end
   process.request("interact", params, function(result, err, meta)
+    if not state.is_active(session) or session.activation_epoch ~= activation_epoch then return end
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1
     end
+    -- Local mode: a mutating interact bumps the helper's visual epoch, and
+    -- every frame reference after it must carry the new value or the helper
+    -- will (correctly) refuse to resolve the frame against a DOM it knows
+    -- has changed. Recorded at the one funnel every interact crosses.
+    if result and type(result.visualEpoch) == "number" then session.visual_epoch = result.visualEpoch end
     -- `meta` is passed on as a third argument so a caller can tell a lost race
     -- (routine, and not worth telling the user about) from a real failure.
     -- Callers that only take two arguments are unaffected.
@@ -366,6 +385,16 @@ function M.request_selection(session, anchor, focus, capture_scale, is_commit, c
     -- Ask it to reuse the live DOM anchor in that case. Always a boolean, never
     -- nil: the wire-encoding discipline the `modifiers` table follows.
     anchorPinned = opts.anchor_scroll_y ~= nil and math.abs(scroll_y - opts.anchor_scroll_y) > 0.5,
+    -- Which character each point already names, so the renderer resolves the
+    -- exact character instead of re-hit-testing a coordinate that sits at a
+    -- glyph's own centre -- see resolveSelectionInPage's comment on why that
+    -- centre is an unresolvable tie on some glyphs (measured live: "##
+    -- Changelog" anchored at v selected as "hangelog", 2026-08-27). Absent
+    -- once either point has nothing live to carry one from (a click's own
+    -- point, or a re-render invalidating what was tracked), which resolves
+    -- exactly as it did before either index existed.
+    anchorIndex = anchor.index,
+    focusIndex = focus.index,
     cellWidthPx = focus.cellWidthPx,
     cellHeightPx = focus.cellHeightPx,
     viewportWidthPx = session.viewport_width_px,
@@ -387,9 +416,16 @@ end
 ---and let that preview's own completion callback pick it up. `settle_ms`
 ---debounces the request itself, mirroring `scroll_settle_ms`'s role in
 ---`controller.schedule_scroll`.
-function M.settle_selection(session, pointer, anchor, point)
+---
+---`on_settled`, when given, runs once the settle this call started has fully
+---resolved -- including any later position a coalesced `pending_settle`
+---superseded it with, so a caller waiting to act on "the selection is now
+---exactly what the reader last saw" (`visual_stop` clearing the highlight
+---once leaving Visual mode has committed it) never fires early against a
+---settle that was about to move again.
+function M.settle_selection(session, pointer, anchor, point, on_settled)
   if pointer.selection_request_in_flight then
-    pointer.pending_settle = { anchor = anchor, point = point }
+    pointer.pending_settle = { anchor = anchor, point = point, on_settled = on_settled }
     return
   end
   pointer.selection_request_in_flight = true
@@ -413,7 +449,9 @@ function M.settle_selection(session, pointer, anchor, point)
       if pointer.pending_settle then
         local pending = pointer.pending_settle
         pointer.pending_settle = nil
-        M.settle_selection(session, pointer, pending.anchor, pending.point)
+        M.settle_selection(session, pointer, pending.anchor, pending.point, pending.on_settled)
+      elseif on_settled then
+        on_settled()
       end
     end, settle_opts)
   end)
@@ -466,9 +504,13 @@ function M.visual_start(session, linewise)
   -- Line-wise anchors at the page's own left edge rather than at the caret,
   -- which is what makes `V` cover the whole rendered line and not the tail of
   -- it. The renderer slides an endpoint that lands off content onto the nearest
-  -- block (`nearestBlockPoint`), so the margin resolves to the line's start.
+  -- block (`nearestBlockPoint`), so the margin resolves to the line's start --
+  -- unambiguously, since a margin point is never at a glyph's own tie. Only
+  -- the character-wise anchor sits exactly on one (the caret's own glyph
+  -- centre) and needs `index` to resolve it as the character it names rather
+  -- than re-guess from that centre point.
   local anchor = linewise and { x = 0, y = rect.y + rect.height / 2 }
-    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   session.visual_active = true
   session.visual_linewise = linewise == true
   session.pointer = {
@@ -498,7 +540,7 @@ function M.visual_update(session)
   local rect = caret.rect(session)
   if not rect then return end
   local point = session.visual_linewise and { x = (session.viewport_width_px or 1) - 1, y = rect.y + rect.height / 2 }
-    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+    or { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   pointer.newest_pending_focus_point = point
   M.schedule_selection_preview(session)
 end
@@ -515,28 +557,46 @@ function M.visual_swap(session)
   local anchor = pointer and pointer.anchor_point
   local rect = caret.rect(session)
   if not (anchor and rect) then return false end
-  pointer.anchor_point = { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
+  pointer.anchor_point = { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2, index = caret.index(session) }
   pointer.anchor_scroll_y = session.applied_scroll_y or 0
   -- Place the caret on the old anchor by snapping it there; the motion's own
-  -- completion re-sends the selection with the two ends now exchanged. No index
-  -- goes with the box, deliberately: the anchor is a coordinate, so the snap
-  -- below has to resolve it as one rather than resume from wherever the caret
-  -- last was.
+  -- completion re-sends the selection with the two ends now exchanged. No
+  -- index goes with the box passed to set_rect: the anchor being swapped to is
+  -- a coordinate the caret has never occupied (the *old* anchor, not the
+  -- caret's own last position), so the "none" snap below has to resolve it as
+  -- a point rather than resume from an index that would name the wrong
+  -- character.
   caret.set_rect(session, { x = anchor.x, y = anchor.y, width = rect.width, height = rect.height })
   M.caret_motion(session, "none", "forward", 1)
   return true
 end
 
----Leave visual mode. `settle` lands the final sharp frame; the highlight
----itself stays up, and the next `<Esc>` clears it through the ordinary
----precedence in `M.escape`.
+---Leave visual mode. Matches real Vim's own `<Esc>`-from-Visual behaviour:
+---the highlight clears the instant the mode is left, not on a second press.
+---`settle` lands the final sharp frame first (and runs copy_on_select, if
+---configured) so a fast `v`...`<Esc>` still copies exactly what was last
+---shown before the highlight disappears; the clear is deferred to
+---`settle_selection`'s own completion so it never races a settle that was
+---about to move the selection again (`pointer.pending_settle`).
 function M.visual_stop(session, settle)
   if not M.visual_active(session) then return false end
   session.visual_active = false
   session.visual_linewise = false
   local pointer = session.pointer
   if settle and pointer and pointer.anchor_point and pointer.newest_pending_focus_point then
-    M.settle_selection(session, pointer, pointer.anchor_point, pointer.newest_pending_focus_point)
+    M.settle_selection(
+      session,
+      pointer,
+      pointer.anchor_point,
+      pointer.newest_pending_focus_point,
+      function() M.clear_selection(session) end
+    )
+  else
+    -- No settle to wait on (a plain click replacing the gesture outright, or
+    -- nothing was ever extended to) -- nothing displayed needs preserving, so
+    -- the highlight goes now rather than waiting on a round trip that was
+    -- never going to happen.
+    M.clear_selection(session)
   end
   preview.update_title(session)
   return true
@@ -556,18 +616,20 @@ end
 ---(or, with no caret yet, the top-left of the image) onto the nearest real
 ---character. That is how the caret is first placed, and how a click re-places
 ---it.
-function M.caret_motion(session, granularity, direction, count, from)
-  if not config.get().interaction.enabled then return end
-  if not session.renderer_revision then return end
-  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
-  if not session.last_placement then return end
+---`caret_motion`'s actual request, unconditional -- the gate below decides
+---when this runs. Split out so the gate can flush an accumulated repeat
+---through the exact same path a single keypress uses.
+local function send_caret_motion(session, granularity, direction, count, from, on_done)
   -- `from` is a click: start the motion from where the pointer landed rather
   -- than from wherever the caret happened to be. Otherwise this is the caret's
   -- own position as a point, which the renderer uses only when it has no index
   -- to resume from (`caretIndex` below) -- the caret's first placement, and the
   -- first motion after a re-render.
   local point = from or caret.origin(session)
-  if not point then return end
+  if not point then
+    if on_done then on_done() end
+    return
+  end
   -- The caret's tint is its own, so it needs its own sheet -- once, then the
   -- backend's upload cache serves every later frame. Asked for whenever the
   -- backend says it has nothing that would serve, which before the first caret
@@ -632,7 +694,10 @@ function M.caret_motion(session, granularity, direction, count, from)
     viewportHeightPx = session.viewport_height_render_px,
     scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
-    if err or not result or result.ok ~= true or type(result.rect) ~= "table" then return end
+    if err or not result or result.ok ~= true or type(result.rect) ~= "table" then
+      if on_done then on_done() end
+      return
+    end
     local controller = require("md-viewer.controller")
     -- A motion past the edge of the viewport scrolls the page in-page, the same
     -- way a find step does. Nothing captures a frame for a read-only action, so
@@ -649,6 +714,11 @@ function M.caret_motion(session, granularity, direction, count, from)
     -- in-page scroll is the position above, not the one this request was sent
     -- with.
     caret.set_rect(session, result.rect, session.applied_scroll_y or 0, result.index)
+    -- A caret motion owns the reader's position even when keeping that caret in
+    -- view also scrolled the page. Scroll-only controls switch the basis back
+    -- to the viewport in controller.scroll_to.
+    preview.set_progress_basis(session, "caret")
+    preview.update_line_numbers(session)
     -- Any motion that is not a line motion re-seeds the sticky column, so the
     -- next `j` aims at where *this* motion left the caret. `$` is the one
     -- exception and matches Vim: it parks the column past every line's end, so
@@ -678,6 +748,60 @@ function M.caret_motion(session, granularity, direction, count, from)
       controller.display_caret_overlay(session, result.selectionTint, sheet_png)
     end
     M.visual_update(session)
+    if on_done then on_done() end
+  end)
+end
+
+---A caret motion is a renderer round trip: it answers with a glyph box the
+---renderer alone computed, so it cannot be a marker like a scroll is. Held-key
+---repeat fires far faster than that round trip returns (measured on aide-spock
+---2026-08-27: an `interact` request crosses the same AWS SSM tunnel a scroll
+---marker does, ~85-120ms each way), and nothing paced it -- every keystroke
+---queued its own request, so held-`j` visibly lagged behind release by as many
+---round trips as keys were pressed while one was already in flight.
+---
+---`caret_move` already takes a `count` (renderer/src/interact.js steps it in a
+---loop), so a repeat of the *same* motion that arrives while one is still in
+---flight is not sent on its own: it accumulates into a pending count, flushed
+---as a single follow-up request the moment the in-flight one resolves. The
+---first press of a run still goes out immediately, so a single `j` costs
+---exactly what it always did.
+---
+---A *different* motion arriving mid-flight (`w` then `l` before `w` answers)
+---is not held back: it fires at once. The interact lane (`lanes.js`) already
+---supersedes an older in-flight request for the same document when a newer one
+---is admitted, so `w`'s answer, if it lands after being superseded, resolves
+---as `STALE_INTERACTION` and `send_caret_motion` drops it -- exactly the
+---existing behaviour for two racing interacts, unrelated to this change.
+function M.caret_motion(session, granularity, direction, count, from)
+  if not config.get().interaction.enabled then return end
+  if not session.renderer_revision then return end
+  if not (session.viewport_width_px and session.viewport_height_render_px) then return end
+  if not session.last_placement then return end
+  count = math.max(1, math.floor(count or 1))
+  local inflight = session.caret_motion_inflight
+  -- A click (`from`) or a snap ("none") always fires on its own: both name a
+  -- specific point on screen, which an accumulated count cannot represent, and
+  -- neither is what key-repeat produces -- so neither is tracked as batchable.
+  local batchable = not from and granularity ~= "none"
+  if batchable and inflight and inflight.granularity == granularity and inflight.direction == direction then
+    inflight.pending_count = (inflight.pending_count or 0) + count
+    return
+  end
+  local slot = nil
+  if batchable then
+    slot = { granularity = granularity, direction = direction }
+    session.caret_motion_inflight = slot
+  end
+  send_caret_motion(session, granularity, direction, count, from, function()
+    -- Compared by identity, not by (granularity, direction): a different
+    -- motion may have started and finished while this one was in flight,
+    -- installing and clearing its own slot in between, and a same-named
+    -- repeat of *this* motion after that would look identical by field
+    -- comparison alone while belonging to a completely different request.
+    if not slot or session.caret_motion_inflight ~= slot then return end
+    session.caret_motion_inflight = nil
+    if slot.pending_count then M.caret_motion(session, granularity, direction, slot.pending_count) end
   end)
 end
 
@@ -957,11 +1081,23 @@ function M.open_local_file(session, href)
   M.edit_in_source_window(session, resolved, filetype)
 end
 
----Open `path` in the session's *source* window, never the preview one, and
----never by making the preview current -- focus discipline is the same as every
----other gesture's. The jump list is pushed first so `<C-o>` returns to the
----document the link was clicked in.
+---Route an editable local file. Markdown becomes a pane-scoped preview source
+---without changing either visible window; other text filetypes retain the
+---existing behavior of opening in the remembered source window.
 function M.edit_in_source_window(session, path, filetype)
+  -- Markdown navigation belongs to the preview pane. Load a normal listed
+  -- source buffer so edits and :MdViewerRevealSource have a real document to
+  -- reveal, but do not display it in (or focus) the editable source pane.
+  if filetype == "markdown" then
+    local new_buf = vim.fn.bufadd(path)
+    if new_buf == 0 then
+      vim.notify("md-viewer: failed to load link: " .. path, vim.log.levels.ERROR)
+      return
+    end
+    vim.fn.bufload(new_buf)
+    require("md-viewer.controller").retarget(session, new_buf)
+    return
+  end
   local win = session.source_win
   if not (win and vim.api.nvim_win_is_valid(win)) then
     M.open_external(path)
@@ -975,12 +1111,6 @@ function M.edit_in_source_window(session, path, filetype)
     vim.notify("md-viewer: failed to open link: " .. tostring(err), vim.log.levels.ERROR)
     return
   end
-  -- Only Markdown is worth following with the preview; re-pointing it at a
-  -- `.lua` file would render its source as prose.
-  if filetype ~= "markdown" then return end
-  local new_buf = vim.api.nvim_win_get_buf(win)
-  if new_buf == session.source_buf then return end
-  require("md-viewer.controller").retarget(session, new_buf)
 end
 
 ---Dispatch one classified link to whatever opens it. `result` is a full
@@ -999,9 +1129,80 @@ function M.activate_link(session, result)
     M.open_external(link.href)
   elseif link.type == "local_file" then
     M.open_local_file(session, link.href)
+  elseif link.type == "obsidian" then
+    if not config.get().obsidian.enabled then
+      vim.notify("md-viewer: Obsidian wikilink navigation is disabled", vim.log.levels.WARN)
+      return
+    end
+    if link.target == "" then
+      if link.anchor then M.scroll_obsidian_anchor(session, link.anchor) end
+      return
+    end
+    obsidian.resolve(session, link.target, function(path, reason)
+      if not path then
+        if reason then
+          local message = reason == "outside_root" and "vault does not contain the current document"
+            or reason == "missing_root" and "vault root does not exist"
+            or reason == "missing" and ("note does not exist: " .. link.target)
+            or ("could not resolve note: " .. link.target)
+          vim.notify("md-viewer: Obsidian " .. message, vim.log.levels.WARN)
+        end
+        return
+      end
+      local current = vim.uv.fs_realpath(vim.api.nvim_buf_get_name(session.source_buf))
+      if current == path then
+        if link.anchor then M.scroll_obsidian_anchor(session, link.anchor) end
+        return
+      end
+      local new_buf = vim.fn.bufadd(path)
+      if new_buf == 0 then
+        vim.notify("md-viewer: failed to load Obsidian note: " .. path, vim.log.levels.ERROR)
+        return
+      end
+      vim.fn.bufload(new_buf)
+      require("md-viewer.controller").retarget(session, new_buf, true, link.anchor and 0 or nil, link.anchor)
+    end)
   else
     vim.notify("md-viewer: refused to activate unsafe link: " .. tostring(link.href), vim.log.levels.WARN)
   end
+end
+
+---Scroll the current rendered document to an Obsidian heading path or block
+---id. A miss deliberately leaves the page at the top and reports it.
+function M.scroll_obsidian_anchor(session, anchor)
+  if not (session and anchor and session.renderer_revision) then return false end
+  session.scroll_y = 0
+  interact_request(session, {
+    documentId = session.document_id,
+    contentRevision = session.renderer_revision,
+    action = "obsidian_scroll",
+    obsidianAnchor = anchor,
+    viewportWidthPx = session.viewport_width_px or 0,
+    viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = 0,
+  }, function(result, err, meta)
+    if err or not result then
+      if not (meta and meta.code == "STALE_INTERACTION") then
+        vim.notify("md-viewer: could not resolve Obsidian anchor: " .. tostring(err), vim.log.levels.WARN)
+      end
+      return
+    end
+    session.scroll_y = type(result.scrollY) == "number" and result.scrollY or 0
+    session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+    require("md-viewer.controller").schedule_scroll(session)
+    if not result.found then
+      local label = anchor.kind == "block" and ("^" .. anchor.value) or table.concat(anchor.segments, "#")
+      vim.notify("md-viewer: Obsidian anchor not found: " .. label, vim.log.levels.WARN)
+    end
+  end)
+  return true
+end
+
+function M.resolve_pending_obsidian_anchor(session)
+  local anchor = session and session.pending_obsidian_anchor
+  if not anchor then return false end
+  session.pending_obsidian_anchor = nil
+  return M.scroll_obsidian_anchor(session, anchor)
 end
 
 ---Resolve `point` against the `interact` transport. Always uses

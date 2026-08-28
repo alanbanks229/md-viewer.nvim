@@ -44,6 +44,63 @@ local function at(placement, sequence)
   return ("\27[s\27[%d;%dH%s\27[u"):format(placement.row + 1, placement.col + 1, sequence)
 end
 
+---The complete upload transmission for one image id. Named because it is a
+---cross-language contract, not just a convenience: the local-render helper
+---re-implements exactly this function in JS (`renderer/src/local/
+---kitty-writer.js`) to materialize uploads on the terminal's machine, and
+---`scripts/local/dump-upload-golden.lua` dumps this one's output so the two
+---can be compared byte-for-byte.
+local function upload_sequence(id, image_bytes)
+  return chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+end
+
+-- ---------------------------------------------------------------------------
+-- The presenter seam. Every operation below builds a *transaction* -- uploads
+-- (bytes, or a surface reference when the pixels live beside the terminal),
+-- placement escapes, deletion escapes -- and one presenter turns it into one
+-- terminal write. The default presenter serializes exactly the bytes this
+-- backend always sent, in the same per-call boundaries the golden tests pin;
+-- md-viewer.localrender installs `backends/kitty_marker`'s instead, which
+-- serializes the same transaction into a ~0.3-1 KB marker APC for the local
+-- helper's filter to materialize. Placement math, ids, layers, occlusion
+-- cut-outs and deletion discipline are identical either way, because they
+-- happen before the seam.
+--
+-- A transaction: { image_id?, doc?, kill?, delete_first?, uploads = { {id,
+-- png = bytes} | {id, ref = descriptor} , ... }, place = escapes, delete =
+-- escapes }. `kill` marks content removal (hide/retire/clear), which the
+-- marker path must propagate so a pending frame dies with the content it
+-- belonged to. `delete_first` preserves the non-double-buffered ordering; the
+-- marker path always double-buffers and says so in kitty_marker.
+-- ---------------------------------------------------------------------------
+
+local function direct_present(tx)
+  local parts = {}
+  local delete = tx.delete or ""
+  if tx.delete_first and delete ~= "" then parts[#parts + 1] = delete end
+  for _, upload in ipairs(tx.uploads or {}) do
+    if upload.png then parts[#parts + 1] = upload_sequence(upload.id, upload.png) end
+    -- A ref here means a demotion raced an in-flight local-mode operation:
+    -- there are no pixels on this machine to materialize. The placements
+    -- still go out (an unknown id draws nothing under q=2) and the fallback
+    -- re-render that every demotion triggers replaces them within a frame --
+    -- degraded and visible in counters, never a crash mid-gesture.
+  end
+  parts[#parts + 1] = tx.place or ""
+  if not tx.delete_first then parts[#parts + 1] = delete end
+  local payload = table.concat(parts)
+  if payload ~= "" then send(payload) end
+end
+
+local presenter = direct_present
+
+---Install a presenter (md-viewer.localrender's marker path) or restore the
+---default with nil. Global, like the backend itself: `render.location` is
+---global config, so every session presents the same way.
+function M.set_presenter(value) presenter = value or direct_present end
+
+local function present(tx) return presenter(tx) end
+
 local function active_profile()
   local capability = terminal.detect()
   return terminal.profiles[capability.profile_id] or terminal.profiles.unknown, capability.profile_id
@@ -329,26 +386,22 @@ end
 ---so `M.update` can pack it into the same write as the image superseding it.
 local function deletion_command(image_id) return command(("a=d,d=I,q=2,i=%d"):format(image_id)) end
 
----Allocate an image id, register it as owned, and build (but do not send) the
----upload and the placements for it. Returns the id and one sequence.
----
----`M.show` is this plus a `send`. It is split so `M.update` can concatenate the
----replacement with the deletion of what it replaces -- see there.
-local function build_show(image_bytes, placement)
+---Allocate an image id, register it as owned, and build (but do not send)
+---its placements. The upload itself is the presenter's job -- for the direct
+---path that means `upload_sequence` over the PNG bytes; for the marker path
+---it means a surface reference, because the pixels exist on the terminal's
+---machine and were never here. Placement math is identical either way, and
+---cropped placements are what let passive floating UI punch out only its own
+---cells instead of blanking the complete preview.
+local function register_item(width_px, height_px, placement)
   next_id = next_id + 1
   local id = next_id
-  local width_px, height_px = png_dimensions(image_bytes)
-  if not width_px then error("md-viewer: raw Kitty backend received an invalid PNG") end
-  local encoded = vim.base64.encode(image_bytes)
   local item = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
   owned[id] = item
-  -- Upload once, then use cropped placements so passive floating UI can punch
-  -- out only its own cells instead of blanking the complete preview.
-  local upload = chunks(encoded, ("a=t,f=100,t=d,q=2,i=%d"):format(id))
   local sequence, ids = placement_sequences(item, placement)
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
-  return id, upload .. sequence
+  return id, sequence
 end
 
 -- ---------------------------------------------------------------------------
@@ -627,18 +680,59 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   local key = tint_key(tint, margin)
   local sheet = sheet_for(tint, margin, need_w, need_h)
   if not sheet then
-    if type(sheet_png) ~= "string" then return nil, "need_sheet" end
-    local width_px, height_px = png_dimensions(sheet_png)
-    if not width_px then return nil, "overlay sheet is not a valid PNG" end
-    if width_px < need_w or height_px < need_h then
-      return nil,
-        ("overlay sheet %dx%d is smaller than the %dx%d it must cover"):format(width_px, height_px, need_w, need_h)
+    -- Two ways to satisfy a missing sheet: PNG bytes from the renderer (the
+    -- current-host path), or a table reference (the local path, where the
+    -- helper synthesizes the identical sheet from the tint and dimensions --
+    -- overlay-sheet.js is the same code on both machines). Either way the
+    -- upload is one presenter transaction of its own, preserving the write
+    -- boundary the golden pins.
+    local upload
+    if type(sheet_png) == "string" then
+      local width_px, height_px = png_dimensions(sheet_png)
+      if not width_px then return nil, "overlay sheet is not a valid PNG" end
+      if width_px < need_w or height_px < need_h then
+        return nil,
+          ("overlay sheet %dx%d is smaller than the %dx%d it must cover"):format(width_px, height_px, need_w, need_h)
+      end
+      upload = { png = sheet_png, width_px = width_px, height_px = height_px }
+    elseif type(sheet_png) == "table" and sheet_png.ref then
+      -- The reference is completed here rather than by the caller because the
+      -- required size and this terminal's margin are knowledge this function
+      -- owns; the caller only says "synthesize, don't ship bytes". The tint
+      -- travels as rrggbbaa so the helper's overlay-sheet.js builds the
+      -- byte-identical sheet the direct path would have been handed.
+      local alpha = math.max(0, math.min(255, math.floor((tonumber(tint and tint.a) or 0) * 255 + 0.5)))
+      local function channel(value) return math.max(0, math.min(255, math.floor(tonumber(value) or 0))) end
+      upload = {
+        ref = {
+          kind = "sheet",
+          tint = ("%02x%02x%02x%02x"):format(
+            channel(tint and tint.r),
+            channel(tint and tint.g),
+            channel(tint and tint.b),
+            alpha
+          ),
+          -- Ceiled: the marker grammar carries integers, and a sheet may
+          -- only ever round up -- it has to cover the box, not fit it.
+          widthPx = math.ceil(need_w),
+          heightPx = math.ceil(need_h),
+          marginX = margin and margin.x or 0,
+          marginY = margin and margin.y or 0,
+        },
+        width_px = math.ceil(need_w),
+        height_px = math.ceil(need_h),
+      }
+    else
+      return nil, "need_sheet"
     end
     local previous = sheets[key]
     next_sheet_id = next_sheet_id + 1
-    sheet = { id = next_sheet_id, width_px = width_px, height_px = height_px }
+    sheet = { id = next_sheet_id, width_px = upload.width_px, height_px = upload.height_px }
     sheets[key] = sheet
-    send(chunks(vim.base64.encode(sheet_png), ("a=t,f=100,t=d,q=2,i=%d"):format(sheet.id)))
+    present({
+      image_id = base_image_id,
+      uploads = { { id = sheet.id, png = upload.png, ref = upload.ref } },
+    })
     -- A smaller predecessor for the same color is fully replaced: any set
     -- still holding placements of it keeps them until its own next apply.
     if previous and previous.id ~= sheet.id then
@@ -646,7 +740,9 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
       for _, set in pairs(overlays) do
         if set.sheet_id == previous.id and next(set.placements) ~= nil then still_used = true end
       end
-      if not still_used then send(command(("a=d,d=I,q=2,i=%d"):format(previous.id))) end
+      if not still_used then
+        present({ image_id = base_image_id, delete = command(("a=d,d=I,q=2,i=%d"):format(previous.id)) })
+      end
     end
   end
 
@@ -659,11 +755,12 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   if not set then
     next_overlay_set = next_overlay_set + 1
     local previous_set = set_id and overlays[set_id] or nil
-    set = { sheet_id = sheet.id, placements = {}, superseded = previous_set }
+    set = { sheet_id = sheet.id, placements = {}, superseded = previous_set, base_image_id = base_image_id }
     if set_id then overlays[set_id] = nil end
     set_id = next_overlay_set
     overlays[set_id] = set
   end
+  set.base_image_id = base_image_id or set.base_image_id
 
   -- The base image is placed with c/r keys, so the terminal scales it to fill
   -- exactly placement.width x placement.height cells. Overlay crops carry no
@@ -798,8 +895,8 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   -- New rectangles first, then every deletion, one write: deleting first
   -- leaves the terminal a frame with the highlight missing, which reads as
   -- flicker (the M.move hazard, and probe check 5 ran this exact order).
+  present({ image_id = base_image_id, place = table.concat(additions), delete = table.concat(deletions) })
   local payload = table.concat(additions) .. table.concat(deletions)
-  if payload ~= "" then send(payload) end
   set.placements = fresh
 
   local kept, placed = 0, #additions
@@ -1222,7 +1319,7 @@ function M.overlay_clear(set_id)
   for _, pid in ipairs(ordered_pids(set.placements)) do
     deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(set.sheet_id, pid))
   end
-  if #deletions > 0 then send(table.concat(deletions)) end
+  if #deletions > 0 then present({ image_id = set.base_image_id, delete = table.concat(deletions) }) end
   overlays[set_id] = nil
   return true
 end
@@ -1245,8 +1342,28 @@ function M.detect()
 end
 
 function M.show(image_bytes, placement)
-  local id, sequence = build_show(image_bytes, placement)
-  send(sequence)
+  local width_px, height_px = png_dimensions(image_bytes)
+  if not width_px then error("md-viewer: raw Kitty backend received an invalid PNG") end
+  local id, sequence = register_item(width_px, height_px, placement)
+  present({ image_id = id, uploads = { { id = id, png = image_bytes } }, place = sequence })
+  return id
+end
+
+---`M.show` for a surface that exists only beside the terminal: `descriptor`
+---carries the image's pixel dimensions (viewport CSS x device scale -- the
+---same numbers a capture here would have had) for the placement math, and
+---`descriptor.ref` is the surface identity the local helper resolves pixels
+---from. Everything downstream -- move, hide, occlusion re-placement --
+---treats the returned id exactly like a shown frame's, which is what makes
+---the reconcile discipline work unchanged in local mode.
+function M.show_surface(descriptor, placement)
+  local id, sequence = register_item(descriptor.width_px, descriptor.height_px, placement)
+  present({
+    image_id = id,
+    doc = descriptor.ref and descriptor.ref.doc or nil,
+    uploads = { { id = id, ref = descriptor.ref } },
+    place = sequence,
+  })
   return id
 end
 
@@ -1272,8 +1389,37 @@ function M.update(image_id, image_bytes, placement)
     removal = deletion_command(image_id)
     owned[image_id] = nil
   end
-  local new_id, addition = build_show(image_bytes, placement)
-  send(double_buffer and (addition .. removal) or (removal .. addition))
+  local width_px, height_px = png_dimensions(image_bytes)
+  if not width_px then error("md-viewer: raw Kitty backend received an invalid PNG") end
+  local new_id, sequence = register_item(width_px, height_px, placement)
+  present({
+    image_id = new_id,
+    uploads = { { id = new_id, png = image_bytes } },
+    place = sequence,
+    delete = removal,
+    delete_first = not double_buffer,
+  })
+  return new_id
+end
+
+---`M.update` for a locally rendered surface; same double-buffer discipline,
+---same single write, pixels by reference.
+function M.update_surface(image_id, descriptor, placement)
+  local double_buffer = resolve_double_buffer()
+  local removal = ""
+  if image_id and owned[image_id] then
+    removal = deletion_command(image_id)
+    owned[image_id] = nil
+  end
+  local new_id, sequence = register_item(descriptor.width_px, descriptor.height_px, placement)
+  present({
+    image_id = new_id,
+    doc = descriptor.ref and descriptor.ref.doc or nil,
+    uploads = { { id = new_id, ref = descriptor.ref } },
+    place = sequence,
+    delete = removal,
+    delete_first = not double_buffer,
+  })
   return new_id
 end
 
@@ -1293,7 +1439,7 @@ function M.move(image_id, placement)
   local superseded = item.placement_ids or {}
   local sequence, ids = placement_sequences(item, placement)
   local removal = deletion_sequences(item.id, superseded)
-  if sequence ~= "" or removal ~= "" then send(sequence .. removal) end
+  present({ image_id = image_id, place = sequence, delete = removal })
   item.placement_ids = ids
   item.placement = vim.deepcopy(placement)
   return image_id
@@ -1445,7 +1591,7 @@ function M.hide(image_id)
   local item = owned[image_id]
   if not item then return false end
   local removal = deletion_sequences(item.id, item.placement_ids or {})
-  if removal ~= "" then send(removal) end
+  present({ image_id = image_id, delete = removal, kill = true })
   item.placement_ids = {}
   composed[image_id] = nil
   return true
@@ -1454,15 +1600,17 @@ end
 ---Free the pixels of several images in one write.
 function M.retire(image_ids)
   local sequences, freed = {}, 0
+  local first_id
   for _, id in ipairs(image_ids or {}) do
     if owned[id] then
+      first_id = first_id or id
       sequences[#sequences + 1] = deletion_command(id)
       owned[id] = nil
       composed[id] = nil
       freed = freed + 1
     end
   end
-  if #sequences > 0 then send(table.concat(sequences)) end
+  if #sequences > 0 then present({ image_id = first_id, delete = table.concat(sequences), kill = true }) end
   return freed
 end
 
@@ -1481,7 +1629,7 @@ end
 
 function M.clear(image_id)
   if not owned[image_id] then return false end
-  send(deletion_command(image_id))
+  present({ image_id = image_id, delete = deletion_command(image_id), kill = true })
   owned[image_id] = nil
   composed[image_id] = nil
   return true
@@ -1597,5 +1745,15 @@ end
 -- guard to a no-op and re-running the suite is what surfaced that; asserting
 -- them directly is what fixed it.
 M._preconditions = { cell_is_placeable = cell_is_placeable, crop_within = crop_within }
+
+-- Exported for `scripts/local/dump-upload-golden.lua` only: the upload
+-- chunker is the one escape builder the local-render helper reimplements in
+-- JS, and the dump is what pins the two implementations to the same bytes.
+M._upload_sequence = upload_sequence
+
+-- Exported for `backends/kitty_marker`'s mode-race fallback only: when a
+-- transaction cannot be expressed as a marker (bytes arrived after a
+-- demotion switch), it is presented directly rather than dropped.
+M._direct_present = direct_present
 
 return M

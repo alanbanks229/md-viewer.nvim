@@ -155,6 +155,28 @@ export function spanOf(token) {
   return spans.get(token) ?? null;
 }
 
+/// Give a plugin-created token an exact span in the inline source.
+///
+/// Plugins that replace syntax with rendered text cannot rely on the generic
+/// StateInline instrumentation: the token it sees necessarily spans the whole
+/// construct, while the text may come from only its alias or destination. The
+/// caller must name a literal, contiguous slice; render-time reconciliation
+/// still verifies that the emitted text is exactly that slice before claiming
+/// provenance.
+export function assignSpan(token, src, start, end) {
+  if (
+    !token
+    || typeof src !== "string"
+    || !Number.isInteger(start)
+    || !Number.isInteger(end)
+    || start < 0
+    || end < start
+    || end > src.length
+  ) return false;
+  spans.set(token, { src, start, end });
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Replacements for the two rules that merge text tokens
 // ---------------------------------------------------------------------------

@@ -403,11 +403,17 @@ return function(t)
   end
 
   -- ---------------------------------------------------------------------
-  -- VS Code-style click-to-deselect, end to end: extend a keyboard selection
-  -- to a real commit, then a separate, later plain click clears it. A click
-  -- never navigates to source -- that fallback was removed because it fought
-  -- this exact gesture (dismissing a highlight used to also relocate the
-  -- cursor).
+  -- Leaving Visual mode clears the highlight immediately -- real Vim's own
+  -- `<Esc>`-from-Visual behaviour, not a second press. The settle still
+  -- lands first (so copy_on_select, if configured, copies exactly what was
+  -- last shown) and the clear rides its completion, never a race against a
+  -- settle a coalesced pending_settle was about to re-target.
+  --
+  -- A click never navigates to source -- that fallback was removed because
+  -- it fought this exact gesture (dismissing a highlight used to also
+  -- relocate the cursor) -- and since every selection in this plugin is
+  -- reached through Visual mode (no mouse-drag path exists), a click has
+  -- nothing left to clear once Visual mode's own <Esc> already did.
   -- ---------------------------------------------------------------------
   do
     local session = fake_session()
@@ -425,20 +431,17 @@ return function(t)
     interaction.visual_update(session)
     vim.wait(200, function() return #requests >= 2 end, 5)
     interaction.visual_stop(session, true)
-    vim.wait(200, function() return #requests >= 3 end, 5)
-    t.eq(true, session.selection_active, "the keyboard extension committed a real selection")
-    t.eq("selection_commit", requests[#requests].params.action, "sanity: leaving visual mode ended in a commit")
+    vim.wait(200, function() return #requests >= 4 end, 5)
+    t.eq("selection_commit", requests[3].params.action, "leaving visual mode settles the final commit first")
+    t.eq("selection_clear", requests[4].params.action, "and clears the highlight right after, in the same gesture")
+    t.eq(false, session.selection_active, "the selection is inactive the instant Visual mode is left")
 
-    -- A later, separate press/release with no keyboard extension is a plain
-    -- click. It must clear the selection via selection_clear, never
-    -- re-navigate to source (there is no source-navigating action left to
-    -- send at all).
+    -- A later, separate click has nothing left to clear: on_release only
+    -- calls clear_selection while selection_active, so this sends nothing.
     local before = #requests
     interaction.on_press(session, point(20, 20), { x = 300, y = 300 })
     interaction.on_release(session, point(20, 20))
-    t.eq(before + 1, #requests, "the plain click issued exactly one more request")
-    t.eq("selection_clear", requests[#requests].params.action, "a plain click clears the selection, not activate_at")
-    t.eq(false, session.selection_active, "the selection is inactive once the click clears it")
+    t.eq(before, #requests, "a click on an already-cleared selection sends nothing further")
 
     process.request = original_request
   end

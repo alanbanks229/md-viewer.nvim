@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { collectAnimationGeometry, collectBlockGeometry } from "./source-map.js";
+import { collectAnimationGeometry, collectBlockGeometry, collectLineGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
 import { buildOverlaySheetPng } from "./overlay-sheet.js";
@@ -29,6 +29,7 @@ import {
   normalizeHit,
   readSelectionTextInPage,
   resolveSelectionInPage,
+  scrollObsidianAnchorInPage,
   setFindInPage,
   stepFindInPage,
 } from "./interact.js";
@@ -274,6 +275,7 @@ export class BrowserRenderer {
     await this.page.setContent(documentHtml, { waitUntil: "domcontentloaded" });
     const documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
     const blocks = await collectBlockGeometry(this.page);
+    const lines = await collectLineGeometry(this.page);
     // Measured here, with the layout, because that is the only moment the rects
     // are known to match the document that produced them. A document with no
     // animated images pays one empty-set check and no round trip.
@@ -283,9 +285,9 @@ export class BrowserRenderer {
     // is the least likely moment in the document's life for every data-URI
     // image to have an intrinsic size yet.
     const { rects: animations, complete } = await collectAnimationGeometry(this.page, animationIds ?? []);
-    this.layout = { key: layoutKey, documentHeight, blocks, animations, animationsComplete: complete };
+    this.layout = { key: layoutKey, documentHeight, blocks, lines, animations, animationsComplete: complete };
     this.active = { documentId, contentRevision, layoutKey, token, width, height, scrollY: 0 };
-    return { token, documentHeight, blocks, animations };
+    return { token, documentHeight, blocks, lines, animations };
   }
 
   async applyScroll(documentHeight, height, requested) {
@@ -631,6 +633,7 @@ export class BrowserRenderer {
       scrollY,
       documentHeight,
       blocks: this.layout.blocks,
+      lines: this.layout.lines,
       animations: this.layout.animations,
       animationIds: params.animationIds,
     });
@@ -641,6 +644,7 @@ export class BrowserRenderer {
       viewportHeightPx: height,
       scrollY,
       blocks: this.layout.blocks,
+      lines: this.layout.lines,
       // Document-coordinate rects only. Frames are materialized off this path
       // (service.js's `animation` method): decoding a large GIF is seconds of CPU
       // and this is the queue every scroll and keystroke waits behind.
@@ -749,6 +753,7 @@ export class BrowserRenderer {
     record.token = loaded.token;
     record.documentHeight = loaded.documentHeight;
     record.blocks = loaded.blocks;
+    record.lines = loaded.lines;
     record.animations = loaded.animations;
     const scrollY = await this.applyScroll(loaded.documentHeight, record.height, envelope.scrollY ?? record.scrollY);
     return { rehydrated: true, record, scrollY, documentHeight: loaded.documentHeight };
@@ -791,6 +796,7 @@ export class BrowserRenderer {
       return this.page.evaluate(resolveSelectionInPage, {
         token, anchor: envelope.anchorCoordinates, focus: envelope.coordinates,
         anchorPinned: envelope.anchorPinned,
+        anchorIndex: envelope.anchorIndex, focusIndex: envelope.focusIndex,
         cellWidthPx: envelope.cellWidthPx, strategy: envelope.strategy,
         maxRects: MAX_SELECTION_RECTS,
       });
@@ -820,6 +826,9 @@ export class BrowserRenderer {
       });
     }
     if (action === "find_clear") return this.page.evaluate(clearFindInPage, { token });
+    if (action === "obsidian_scroll") {
+      return this.page.evaluate(scrollObsidianAnchorInPage, { token, anchor: envelope.obsidianAnchor });
+    }
     return this.page.evaluate(hitTestInPage, {
       token, x: envelope.coordinates.x, y: envelope.coordinates.y,
       cellWidthPx: envelope.cellWidthPx, cellHeightPx: envelope.cellHeightPx,
@@ -842,6 +851,9 @@ export class BrowserRenderer {
     if (action === "find_set") return { result: buildFindResult(raw, cached?.sourceMap, envelope.query), hit: null };
     if (action === "find_next" || action === "find_previous") {
       return { result: buildFindStepResult(raw, cached?.findState), hit: null };
+    }
+    if (action === "obsidian_scroll") {
+      return { result: { kind: "obsidian_anchor", found: raw.found === true, scrollY: raw.scrollY }, hit: null };
     }
     return { result: buildFindClearResult(), hit: null };
   }
@@ -930,7 +942,11 @@ export class BrowserRenderer {
 
   async health(options) {
     const executable = this.resolveExecutable(options);
-    await this.ensure(options, 1);
+    // Reuse whatever scale a live session is already rendering at: forcing 1
+    // here mismatches `ensure`'s scale guard against an active render at
+    // scale 2 (the default), tearing down the context and losing `this.active`
+    // -- so a health check while a preview is open blanked the preview.
+    await this.ensure(options, this.deviceScaleFactor ?? 1);
     return {
       chromiumLaunch: "succeeded", executable, persistentPage: Boolean(this.page),
       discoveryReason: this.discoveryReason,
