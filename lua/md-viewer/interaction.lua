@@ -705,6 +705,8 @@ local function send_caret_motion(session, granularity, direction, count, from, o
       session.scroll_y = result.scrollY
       session.applied_scroll_y = result.scrollY
       session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+      preview.update_statusline(session)
+      preview.update_line_markers(session)
     end
     -- Recorded against the scroll the renderer measured it at, which after an
     -- in-page scroll is the position above, not the one this request was sent

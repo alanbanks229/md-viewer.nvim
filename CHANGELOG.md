@@ -122,6 +122,34 @@ All notable changes to this project will be documented here. The project uses
   supersession (`lanes.js`) drops a stale answer if the interrupted request's
   reply lands late.
 
+- **The preview pane's scroll-position indicator did not track the document.**
+  Nothing in md-viewer sets `'statusline'`/`'ruler'` for the preview window,
+  so Neovim's own default statusline showed through, embedding `%P` --
+  computed from `cursor_line / total_lines_in_buffer`. Both of those numbers
+  describe one screenful of the *window*, not the document: the preview
+  buffer's line count is pinned to the window's terminal-cell height
+  (`preview.surface_size`), and the shadow cursor's row is the caret's
+  position within the *current on-screen screenshot*
+  (`coordinates.css_to_cell`, scaled by `viewport_height_render_px`), never
+  against `document_height_px`. So `%P` cycled 0-100% every scroll of one
+  viewport -- reported live: 7% through the document in the source buffer
+  read as 96% in the preview, then `BOT`, then 74%, from scrolling within a
+  single screenful. The preview window now sets its own `'statusline'`,
+  computed from `session.applied_scroll_y` against `document_height_px`
+  (`Top`/`Bot`/`All`/`NN%`, the same semantics Vim's own ruler documents for
+  a file-scoped percentage), so it moves only when the document actually
+  scrolls, not when the caret does.
+
+### Added
+
+- **`:MdViewerToggleLineMarkers`** overlays a sequential number on each
+  rendered content block currently on screen, for navigating the preview
+  with Vim motions without a click-and-drag path. Deliberately not the
+  source buffer's line numbers -- those would claim a correspondence this
+  pane cannot keep. Off by default (`preview.line_markers = false`); affects
+  every open preview at once, since it is a reading preference rather than a
+  per-document setting.
+
 ### Changed
 
 - **Leaving Visual mode (`<Esc>`) now clears the preview's highlight

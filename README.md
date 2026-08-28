@@ -260,6 +260,7 @@ by hand when that happens.
 | `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
 | `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
+| `:MdViewerToggleLineMarkers` | Number each rendered block for quick navigation |
 | `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
 | `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |

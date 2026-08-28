@@ -7,6 +7,11 @@ M.defaults = {
     winbar = true,
     loading = true,
     loading_interval_ms = 80,
+    -- Off by default: a sequential number over each rendered block is a new
+    -- overlay on the preview surface, not a correctness fix, and it does not
+    -- correspond to the source buffer's line numbers -- showing it
+    -- unconditionally would read as a claim it does.
+    line_markers = false,
   },
   render = {
     debounce_ms = 200,
@@ -431,6 +436,7 @@ local function validate(cfg)
     type(cfg.preview.loading_interval_ms) == "number" and cfg.preview.loading_interval_ms > 0,
     "md-viewer: preview.loading_interval_ms must be positive"
   )
+  assert(type(cfg.preview.line_markers) == "boolean", "md-viewer: preview.line_markers must be boolean")
   assert(
     terminal_profiles[cfg.terminal.profile],
     "md-viewer: terminal.profile must be one of auto, iterm2, kitty, wezterm, ghostty, warp, "

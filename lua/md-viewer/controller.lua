@@ -816,6 +816,12 @@ function M.refresh(session, render_options)
     -- can go on, and a failure caches as a failure, so this stops on its own.
     session.remote_images_pending = meta.remoteImagesPending == true
     if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
+    -- Both branches below have by now set document_height_px, viewport_height_px,
+    -- applied_scroll_y, and viewport_height_render_px -- everything the scroll
+    -- ruler and the block markers are computed from -- so one call here covers
+    -- the local-render early return just as well as the direct-render tail.
+    preview.update_statusline(session)
+    preview.update_line_markers(session)
     if meta.local_render then
       -- The frame itself went up when its marker was emitted, back in the
       -- tick that issued this request; this response only settles what the
@@ -1605,6 +1611,15 @@ function M.toggle(position)
   else
     M.open(position)
   end
+end
+
+---Flip the block-number overlay on or off for every open preview at once.
+---A global flag, not a per-session one: it is a reading preference, not
+---something one document needs and another does not.
+function M.toggle_line_markers()
+  local cfg = config.get()
+  cfg.preview.line_markers = not cfg.preview.line_markers
+  each_session(function(session) preview.update_line_markers(session) end)
 end
 
 ---The furthest the document can be scrolled: everything below scrolls within
