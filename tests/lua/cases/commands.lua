@@ -16,6 +16,10 @@ return function(t)
     "MdViewerFindPrevious",
     "MdViewerBack",
     "MdViewerForward",
+    "MdViewerTabNext",
+    "MdViewerTabPrevious",
+    "MdViewerTabClose",
+    "MdViewerRevealSource",
     "MdViewerMeasureLink",
   }) do
     t.ok(exists(name), ("%s is registered"):format(name))
@@ -99,7 +103,18 @@ return function(t)
   -- The functions behind them stay reachable from Lua: removing a command is a
   -- decision about the command surface, not about what the plugin can do.
   local controller = require("md-viewer.controller")
-  for _, fn in ipairs({ "open", "close", "refresh", "clear_selection", "find_clear", "find_prompt" }) do
+  for _, fn in ipairs({
+    "open",
+    "close",
+    "refresh",
+    "clear_selection",
+    "find_clear",
+    "find_prompt",
+    "tab_next",
+    "tab_previous",
+    "tab_close",
+    "reveal_source",
+  }) do
     t.eq("function", type(controller[fn]), ("controller.%s remains callable from Lua"):format(fn))
   end
 

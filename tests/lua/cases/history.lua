@@ -1,8 +1,5 @@
--- Preview history: following a link must not strand the reader on the document
--- it led to. `preview.pinned` deliberately stops the preview following an
--- ordinary buffer switch, so without this the rendered view has no way back to
--- where the reader started -- the source window's jump list moves the text and
--- leaves the picture behind.
+-- Pane-scoped preview history is independent of both the editable source
+-- window and the set of currently open preview tabs.
 return function(t)
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
@@ -20,162 +17,101 @@ return function(t)
 
   require("md-viewer").setup({})
   vim.cmd.edit(vim.fn.fnameescape(project .. "/a.md"))
-  local session = assert(controller.open("right"))
-  local source_win = session.source_win
-  local buf_a = session.source_buf
-
-  -- A graphical backend, because retargeting is refused for `cells` (there is
-  -- no image to move), and a stubbed refresh, because the renderer subprocess
-  -- is not what this file is about.
-  session.backend = {
+  local document_a = assert(controller.open("right"))
+  local pane, source_win = document_a.pane, document_a.source_win
+  local source_buf = vim.api.nvim_win_get_buf(source_win)
+  local backend = {
     name = "kitty_raw",
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
   }
+  document_a.backend = backend
   local original_refresh = controller.refresh
   controller.refresh = function() end
 
-  local function source_path() return vim.fs.normalize(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(source_win))) end
+  interaction.activate_link(document_a, { link = { type = "local_file", href = "b.md" } })
+  local document_b = pane.active
+  interaction.activate_link(document_b, { link = { type = "local_file", href = "c.md" } })
+  local document_c = pane.active
 
-  t.eq(1, #session.history, "a fresh preview has exactly one document in its history")
-  t.eq(1, session.history_index, "and sits on it")
-  t.eq(project .. "/a.md", session.history[1].path, "the first entry is the document the preview opened on")
-
-  -- Follow two links, through the real activation path.
-  interaction.activate_link(session, { link = { type = "local_file", href = "b.md" } })
-  local buf_b = session.source_buf
-  t.eq(project .. "/b.md", source_path(), "activating a link edits the target in the source window")
-  t.eq(2, #session.history, "and appends it to the preview history")
-  t.eq(2, session.history_index, "leaving the preview on the newest document")
-
-  interaction.activate_link(session, { link = { type = "local_file", href = "c.md" } })
-  local buf_c = session.source_buf
-  t.eq(3, #session.history, "a second link appends again")
-  t.eq(project .. "/c.md", source_path())
-
-  -- Back, twice, then forward. The source window follows the preview, for the
-  -- same reason activating a link moves it.
-  controller.history_back()
-  t.eq(buf_b, session.source_buf, "back returns the preview to the previous document")
-  t.eq(2, session.history_index, "and moves the index rather than the list")
-  t.eq(3, #session.history, "back never discards the forward branch")
-  t.eq(project .. "/b.md", source_path(), "the source window follows the preview back")
+  t.eq(3, #pane.documents, "linked Markdown files get distinct pane documents")
+  t.ok(document_a.preview_buf ~= document_b.preview_buf, "each document has a stable preview buffer")
+  t.ok(document_b.preview_buf ~= document_c.preview_buf, "a third document has a third buffer")
+  t.eq(source_buf, vim.api.nvim_win_get_buf(source_win), "link navigation never replaces the editable source")
+  t.eq(3, #pane.history, "link navigation appends pane history")
+  t.eq(3, pane.history_index, "history points at the linked destination")
 
   controller.history_back()
-  t.eq(buf_a, session.source_buf, "back again reaches the document the preview opened on")
-  t.eq(1, session.history_index)
+  t.eq(document_b, pane.active, "history back activates the prior preview document")
+  t.eq(source_buf, vim.api.nvim_win_get_buf(source_win), "history back leaves the source pane untouched")
+  controller.history_forward(document_b)
+  t.eq(document_c, pane.active, "history forward restores the next preview document")
 
-  controller.history_forward()
-  t.eq(buf_b, session.source_buf, "forward retraces the same path")
-  t.eq(2, session.history_index)
+  controller.activate_document(document_a)
+  t.eq(1, pane.history_index, "tab selection aligns to that document's most recent history entry")
+  controller.activate_document(document_c)
+  t.eq(3, pane.history_index, "tab selection does not append history")
+  t.eq(3, #pane.history, "tab selection leaves history length unchanged")
 
-  -- Walking off either end is reported, and changes nothing.
-  local original_notify, notified = vim.notify, {}
-  vim.notify = function(message) notified[#notified + 1] = message end
-  controller.history_back()
-  notified = {}
-  controller.history_back()
-  t.eq(1, session.history_index, "back at the oldest document stays there")
-  t.eq(buf_a, session.source_buf, "and does not move the source window either")
-  t.ok(notified[1] and notified[1]:find("no previous document", 1, true) ~= nil, "and says why nothing happened")
+  local closed_b_buf, closed_b_source = document_b.preview_buf, document_b.source_buf
+  controller.tab_close(document_b)
+  t.eq(nil, state.from_preview(closed_b_buf), "closing an inactive tab removes its preview document")
+  t.eq(3, #pane.history, "closing a tab preserves its history entry")
+  controller.history_back(document_c)
+  local recreated_b = pane.active
+  t.eq(closed_b_source, recreated_b.source_buf, "history recreates a closed preview document")
+  t.ok(recreated_b.preview_buf ~= closed_b_buf, "the recreated document receives a fresh real buffer")
+  t.eq(source_buf, vim.api.nvim_win_get_buf(source_win), "history recreation still isolates the source pane")
 
-  controller.history_forward()
-  controller.history_forward()
-  t.eq(3, session.history_index, "forward reaches the newest document")
-  notified = {}
-  controller.history_forward()
-  t.eq(3, session.history_index, "forward at the newest document stays there")
-  t.ok(notified[1] and notified[1]:find("no next document", 1, true) ~= nil, "and says why")
-  vim.notify = original_notify
+  local before_count, before_buf = #pane.documents, recreated_b.preview_buf
+  interaction.activate_link(recreated_b, { link = { type = "local_file", href = "c.md" } })
+  t.eq(before_count, #pane.documents, "a repeated link reuses an existing preview document")
+  controller.history_back(pane.active)
+  t.eq(before_buf, pane.active.preview_buf, "the reused document keeps its stable preview buffer")
 
-  -- Navigating from the middle abandons the forward branch, exactly as a
-  -- browser does: interleaving the two would make "forward" mean nothing.
-  controller.history_back()
-  t.eq(buf_b, session.source_buf)
-  interaction.activate_link(session, { link = { type = "local_file", href = "a.md" } })
-  t.eq(buf_a, session.source_buf, "a link from the middle of the history navigates normally")
-  t.eq(3, #session.history, "and truncates whatever was ahead of it")
-  t.eq(3, session.history_index)
-  t.eq(project .. "/a.md", session.history[3].path, "leaving the new document as the newest entry")
-  t.eq(nil, state.get(buf_c), "the abandoned document no longer owns a session")
-
-  -- Re-activating the document already on screen is not a new entry: a
-  -- fragment link, or a link back to where the reader just came from, must
-  -- not grow the list without adding anywhere to go.
-  interaction.activate_link(session, { link = { type = "local_file", href = "a.md" } })
-  t.eq(3, #session.history, "re-opening the current document adds no history entry")
-
-  -- The bound is real, not advisory.
-  do
-    config.reset()
-    config.setup({ interaction = { history_limit = 2 } })
-    local bounded = { source_buf = 1, history = nil, history_index = 0 }
-    controller.history_init(bounded)
-    for buf = 2, 6 do
-      controller.history_push(bounded, buf)
-    end
-    t.eq(2, #bounded.history, "history is capped at interaction.history_limit")
-    t.eq(6, bounded.history[2].buf, "keeping the newest entries")
-    t.eq(2, bounded.history_index, "with the index still on the newest")
-    config.reset()
-    config.setup({})
+  config.reset()
+  config.setup({ interaction = { history_limit = 2 } })
+  local bounded = { source_buf = 1, history = nil, history_index = 0 }
+  controller.history_init(bounded)
+  for buf = 2, 6 do
+    controller.history_push(bounded, buf)
   end
+  t.eq(2, #bounded.history, "history is capped at interaction.history_limit")
+  t.eq(6, bounded.history[2].buf, "the bounded history retains the newest entry")
+  config.reset()
+  config.setup({})
 
-  -- `<C-o>` back into a document this preview navigated through takes the
-  -- preview with it. Narrow on purpose: only history members qualify, so
-  -- `preview.pinned` still holds for every other buffer switch.
-  do
-    t.eq(buf_a, session.source_buf)
-    controller.history_back()
-    t.eq(buf_b, session.source_buf, "positioned on b, with a ahead of it")
-    vim.api.nvim_win_set_buf(source_win, buf_a)
-    vim.api.nvim_set_current_win(source_win)
-    vim.api.nvim_exec_autocmds("BufEnter", { buffer = buf_a })
-    vim.wait(200, function() return session.source_buf == buf_a end)
-    t.eq(buf_a, session.source_buf, "the preview follows the source window back to a history document")
-    -- `a` sits at both ends of this history (the reader linked back to it), so
-    -- the position taken is the one nearest where the preview already was,
-    -- preferring backwards -- the direction `<C-o>` means.
-    t.eq(1, session.history_index, "and takes the nearest matching history position with it")
+  vim.fn.mkdir(project .. "/one", "p")
+  vim.fn.mkdir(project .. "/two", "p")
+  vim.fn.writefile({ "# One" }, project .. "/one/readme.md")
+  vim.fn.writefile({ "# Two" }, project .. "/two/readme.md")
+  local one = vim.fn.bufadd(project .. "/one/readme.md")
+  local two = vim.fn.bufadd(project .. "/two/readme.md")
+  vim.fn.bufload(one)
+  vim.fn.bufload(two)
+  controller.retarget(pane.active, one)
+  controller.retarget(pane.active, two)
+  local winbar = vim.wo[pane.preview_win].winbar
+  t.ok(winbar:find("one/readme.md", 1, true) ~= nil, "duplicate filenames gain a shortest unique path label")
+  t.ok(winbar:find("two/readme.md", 1, true) ~= nil, "both duplicate labels are unambiguous")
 
-    -- An unrelated buffer does not drag the preview along.
-    local stranger = vim.api.nvim_create_buf(true, false)
-    vim.bo[stranger].filetype = "markdown"
-    vim.api.nvim_win_set_buf(source_win, stranger)
-    vim.api.nvim_exec_autocmds("BufEnter", { buffer = stranger })
-    vim.wait(120, function() return session.source_buf == stranger end)
-    t.eq(buf_a, session.source_buf, "a buffer outside the history leaves the pinned preview alone")
-    vim.api.nvim_win_set_buf(source_win, buf_a)
-    vim.api.nvim_buf_delete(stranger, { force = true })
-  end
+  local first_click = tonumber(winbar:match("%%(%d+)@v:lua%.MdViewerWinbarClick@"))
+  local first_document = pane.documents[1]
+  _G.MdViewerWinbarClick(first_click, 1, "l", "")
+  t.eq(first_document, pane.active, "left-clicking a winbar tab activates its stable preview buffer")
+  t.eq(source_buf, vim.api.nvim_win_get_buf(source_win), "winbar tab clicks leave the editable source untouched")
+  first_click = tonumber(vim.wo[pane.preview_win].winbar:match("%%(%d+)@v:lua%.MdViewerWinbarClick@"))
+  _G.MdViewerWinbarClick(first_click, 1, "m", "")
+  t.eq(true, first_document.closed, "middle-clicking a winbar tab closes that preview document")
 
-  -- The preview-local H/L keys, driven the way a keypress would drive them.
-  -- `controller.open` skips navigation.attach for the cells backend a headless
-  -- test starts on, so it is attached here explicitly.
-  do
-    require("md-viewer.navigation").attach(session, controller.navigate)
-    local function press(lhs)
-      local mapping = vim.api.nvim_buf_call(
-        session.preview_buf,
-        function() return vim.fn.maparg(lhs, "n", false, true) end
-      )
-      assert(mapping.callback, lhs .. " has no preview-local mapping to press")
-      mapping.callback()
-    end
-
-    -- The `<C-o>` case above left the preview at the oldest entry, so forward
-    -- is the move with somewhere to go.
-    t.eq(1, session.history_index, "starting at the oldest document")
-    t.eq(buf_a, session.source_buf)
-    press("L")
-    t.eq(buf_b, session.source_buf, "L moves the preview forward a document")
-    press("H")
-    t.eq(buf_a, session.source_buf, "H moves it back again")
-  end
+  local revealed = pane.active.source_buf
+  controller.reveal_source(pane.active)
+  t.eq(revealed, vim.api.nvim_win_get_buf(source_win), "source reveal is the explicit path that replaces source")
+  t.eq(source_win, vim.api.nvim_get_current_win(), "source reveal deliberately focuses the editable pane")
 
   controller.refresh = original_refresh
-  controller.close(session.source_buf)
+  controller.close(pane.active.source_buf)
   vim.cmd("enew!")
 end

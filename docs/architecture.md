@@ -105,13 +105,17 @@ still frame always underneath.
 
 ## Preview surface and coordinates
 
-`preview.lua` creates a read-only `nofile` scratch buffer, never a terminal.
+`preview.lua` creates one stable, read-only `nofile` buffer per preview
+document, never a terminal. The buffers are unlisted and use `bufhidden=hide`,
+so they are real Neovim buffers without entering a global bufferline. A pane's
+window is temporarily `winfixbuf`; plugin tab activation unlocks it only for
+the controlled buffer swap.
 `coordinates.lua` derives the placement rectangle from `screenpos(win, topline, 1)`
 plus the window's width and height, so a winbar, statusline, tabline, global
 statusline, separator and command line all fall outside it. Resize and scroll
 events recalculate it.
 
-**Invariant.** The scratch buffer holds real spaces — one line per placement row,
+**Invariant.** The active preview buffer holds real spaces — one line per placement row,
 each as wide as the placement (`preview.surface_size`, re-asserted by
 `preview.reset_surface` before every frame) — not empty lines plus `virtualedit`.
 Virtual space lets the cursor push `leftcol` past zero, and `screenpos()` reports
@@ -474,18 +478,16 @@ frame and the selection-preview frame that follows it are two separate
 `interact` round trips, so the selection frame always resolves against the
 page's post-scroll position.
 
-**Preview history.** Following a local link retargets the preview
-(`controller.retarget`), and `preview.pinned` stops the preview following an
-ordinary buffer switch — so without history the reader could reach a document but
-not return to the one they came from as anything but text. Each session carries
-the documents it has been retargeted through and an index into them.
-**Invariant:** `:MdViewerBack`/`:MdViewerForward` walk the index without
-appending — appending makes "back" oscillate between the last two entries — and a
-`BufEnter` in the session's source window follows the preview to a buffer
-*already in that list*, which is what makes `<C-o>` work without weakening
-`pinned` for anything else. Entries hold a buffer and a path, so one whose buffer
-has been wiped still reopens its file; navigating from the middle truncates the
-forward branch, as a browser does.
+**Preview panes, documents, and history.** A pane owns its preview window, tab
+order, active document, activation epoch, source-window memory, and history.
+Each Markdown document owns a stable preview buffer and all logical render,
+scroll, caret, selection, and search state. `controller.retarget` now means
+create-or-reuse that pane's document and activate it; it never re-keys the old
+document or changes the source window. `:MdViewerBack`/`:MdViewerForward` walk
+the pane history without appending, while `[b`/`]b` change tabs without changing
+history. Entries hold a source buffer, path, and scroll target, so returning to
+a closed tab recreates its preview buffer and view. Navigating from the middle
+truncates the forward branch, as a browser does.
 
 **Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`) separates
 `http`/`https`/`mailto`/fragment/local-file candidates from anything unsafe
@@ -497,11 +499,23 @@ symlink-resolved check image loading uses. Ctrl/Cmd-click is the only gesture th
 can activate a link. [SECURITY.md](../SECURITY.md) states the policy these
 mechanics enforce.
 
-An activated local Markdown link opens in Neovim and the preview follows:
-`controller.retarget` re-keys the existing session onto the new buffer and
-re-derives its `document_id`, reusing the preview window instead of rebuilding the
-split. The serial bump is what makes that safe — responses still in flight for the
-old document fail their staleness check rather than being applied to the new one.
+Obsidian mode adds one renderer-owned, sanitizer-allowlisted metadata scheme.
+It is only emitted by the opt-in wikilink parser and classifies to an
+`obsidian` action; it is not a filesystem grant. `lua/md-viewer/obsidian.lua`
+rescans the configured vault on activation, resolves explicit paths from its
+root or bare names by case-insensitive Markdown stem, and runs the same lexical
+plus realpath boundary before loading a buffer. Heading hierarchy and exact
+block-id scrolling are a typed `obsidian_scroll` interaction against the active
+DOM. Cross-document anchors are stored on the destination session until its
+first render, preserving pane tabs, history, and source-window isolation.
+
+An activated local Markdown link uses `bufadd()`/`bufload()` to create or reuse a
+normal source buffer without displaying it, then activates its stable preview
+buffer in the pane. Deactivation advances the old document's request serial and
+the pane activation epoch, clears heavy terminal resources, and retains logical
+navigation state. Late render and interaction responses must match both active
+document and epoch. Closing sends the renderer a `forget` request, releasing
+browser, interaction, lane, replica, and local-surface caches immediately.
 
 **Lua-side dispatch.** `mouse.lua` installs its mappings only once a graphical
 (non-`cells`) session exists, saving and restoring whatever was mapped there
@@ -571,21 +585,23 @@ environment and validation: [aws-ssm.md](aws-ssm.md).
 
 ## Lifecycle
 
-Text events debounce, resize events coalesce, focus stays in the source window,
-and tab/suspend events remove graphical placements. Close, wipe and exit
+Text events debounce, resize events coalesce, and tab/suspend events remove
+graphical placements. Inactive edits mark that document dirty without painting.
+Close, wipe and exit
 invalidate outstanding serials, stop timers, delete only owned images, remove
 files, and shut the shared renderer down when the last session closes. The
-startup spinner float's timer is owned by the buffer session and closed on every
+startup spinner float's timer is owned by the active document and closed on every
 shutdown path.
 
-With `preview.pinned = true`, hiding the source buffer does not end its session:
-the source split can display another file while the preview retains its image and
-source-labeled winbar. Wiping the source, replacing or wiping the preview buffer,
-closing the preview, or exiting Neovim still performs full cleanup.
+With `preview.pinned = true`, hiding a source buffer does not end its pane. A
+plugin-owned final tab closes the preview split; an adopted user split restores
+its original buffer, view, dimensions, and window options. Wiping one preview
+buffer closes that document tab, while closing the pane or exiting Neovim still
+performs full cleanup.
 
 ## Design references
 
-The pinned document identity, labeled preview surface, retained renderer state,
+The pane/document identities, clickable winbar tabs, retained renderer state,
 stale-response guards and manual-scroll precedence take focused inspiration from
 [Markdown Preview Enhanced's preview provider](https://github.com/shd101wyy/vscode-markdown-preview-enhanced/blob/master/src/preview-provider.ts)
 and its documented locked-preview workflow. md-viewer does not copy its webview,

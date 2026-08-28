@@ -127,11 +127,11 @@ not tell you.
 | Escape precedence | `v`, motion, `<Esc>`, `<Esc>` | First leaves visual mode keeping the highlight; second clears it |
 | Multibyte columns | Ctrl/Cmd-click `café`, `日本語`, an emoji in `provenance-comprehensive.md` | `:MdViewerDebug` reports an exact byte column landing inside the line it names |
 | External link | Ctrl/Cmd-click an `http(s)` link | Opens in the system browser, or says why it did not |
-| Local Markdown link | Ctrl/Cmd-click a relative `.md` link | Opens in Neovim in the source window; the preview follows |
+| Local Markdown link | Ctrl/Cmd-click a relative `.md` link | Opens or reuses a preview tab; the editable source window and focus stay unchanged |
 | Repo-relative link | Follow `../README.md` from a subdirectory | Resolves; not refused as outside the document root |
 | Missing target | Ctrl/Cmd-click a link to a nonexistent file | Reports *does not exist* — not *outside the document root* |
 | Small target | Ctrl/Cmd-click a one-word link at the start of a line, at the default font size | Activates. This is the case that used to be unreachable at some cell alignments |
-| History | `H`/`:MdViewerBack`, `L`/`:MdViewerForward`, then `<C-o>` | Preview and source move together; `<C-o>` brings the preview back on its own |
+| Tabs and history | Follow links, use `[b`/`]b`, then `H`/`L`, close a tab, and go back to it | Tabs affect only the preview; history is independent and recreates the closed document |
 
 ### Selection-highlight overlay
 

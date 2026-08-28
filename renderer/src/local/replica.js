@@ -338,6 +338,22 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
       if (method === "render") return handleRender(params);
       if (method === "asset") return handleAsset(params);
       if (method === "interact") return handleInteract(params);
+      if (method === "forget") {
+        const documentId = params.documentId;
+        if (typeof documentId !== "string" || documentId.length === 0) {
+          throw new Error("forget requires documentId");
+        }
+        docs.delete(documentId);
+        const prefix = `${documentId}\0`;
+        for (const key of surfaces.keys()) {
+          if (key.startsWith(prefix)) surfaces.delete(key);
+        }
+        for (const key of missingNotified) {
+          if (key.startsWith(prefix)) missingNotified.delete(key);
+        }
+        await dispatch("forget", { documentId });
+        return { forgotten: true };
+      }
       if (method === "health") {
         const health = await dispatch("health", params);
         return { ...health, replica: statsSnapshot() };

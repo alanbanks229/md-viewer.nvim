@@ -249,6 +249,31 @@ function M.collect(renderer_result, renderer_error)
     chromium_cached_documents = renderer_result and renderer_result.cachedDocuments or "not queried",
     chromium_lane_documents = renderer_result and renderer_result.laneDocuments or "not queried",
     chromium_interaction_documents = renderer_result and renderer_result.interactionDocuments or "not queried",
+    preview_pane_count = vim.tbl_count(state.panes()),
+    preview_document_count = (function()
+      local count = 0
+      for _, pane in pairs(state.panes()) do
+        count = count + #pane.documents
+      end
+      return count
+    end)(),
+    preview_inactive_dirty_count = (function()
+      local count = 0
+      for _, pane in pairs(state.panes()) do
+        for _, document in ipairs(pane.documents) do
+          if document ~= pane.active and document.dirty then count = count + 1 end
+        end
+      end
+      return count
+    end)(),
+    preview_active_documents = (function()
+      local active = {}
+      for _, pane in pairs(state.panes()) do
+        if pane.active then active[#active + 1] = pane.active.document_id end
+      end
+      table.sort(active)
+      return #active > 0 and table.concat(active, ", ") or "none"
+    end)(),
     -- Where frames render and present, and the evidence trail behind it.
     -- The counters exist so "is this session actually locally rendered, or
     -- are PNG bytes still crossing the remote link?" is answered by numbers,
@@ -467,13 +492,22 @@ local function verbose_security(report)
 end
 
 local function verbose_chromium(report)
+  local pane_rows = {
+    { "preview panes / documents", ("%s / %s"):format(report.preview_pane_count, report.preview_document_count) },
+    { "active preview documents", report.preview_active_documents },
+    { "inactive dirty documents", report.preview_inactive_dirty_count },
+  }
   -- Collapsed while nothing is loaded: five counters reading "none" and "0"
   -- say only "no preview is open", and say it five times.
   if report.chromium_active_document == "not queried" then
-    return { { "session", "not queried (:checkhealth does not round-trip to the renderer)" } }
+    pane_rows[#pane_rows + 1] = { "session", "not queried (:checkhealth does not round-trip to the renderer)" }
+    return pane_rows
   end
-  if report.chromium_active_document == "none" then return { { "session", "no document loaded" } } end
-  return {
+  if report.chromium_active_document == "none" then
+    pane_rows[#pane_rows + 1] = { "session", "no document loaded" }
+    return pane_rows
+  end
+  vim.list_extend(pane_rows, {
     { "active document", report.chromium_active_document },
     { "cached frames", report.chromium_cached_document_frames },
     { "cached documents", report.chromium_cached_documents },
@@ -481,7 +515,8 @@ local function verbose_chromium(report)
       "lane / interaction",
       ("%s / %s"):format(report.chromium_lane_documents, report.chromium_interaction_documents),
     },
-  }
+  })
+  return pane_rows
 end
 
 ---The full environment dump, rendered for `:MdViewerDebug`. It lives here

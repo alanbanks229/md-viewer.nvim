@@ -20,13 +20,14 @@ CONTENTS                                                  *md-viewer-contents*
       Keyboard selection ................. |md-viewer-visual|
 6.  Mouse interaction .................... |md-viewer-interaction|
 7.  Preview history ...................... |md-viewer-history|
-8.  Terminal support ..................... |md-viewer-terminals|
+8.  Obsidian wikilinks ................... |md-viewer-obsidian|
+9.  Terminal support ..................... |md-viewer-terminals|
       Remote sessions over SSH ........... |md-viewer-ssh|
       Whole-document resident mode ....... |md-viewer-resident|
       Why AWS SSM is 0.80 MB/s ........... |md-viewer-ssm-throughput|
       Local rendering .................... |md-viewer-local|
-9.  Security ............................. |md-viewer-security|
-10. Health and diagnostics ............... |md-viewer-health|
+10. Security ............................. |md-viewer-security|
+11. Health and diagnostics ............... |md-viewer-health|
 
 =============================================================================
 INTRODUCTION                                                       *md-viewer*
@@ -93,6 +94,7 @@ Options are grouped:
     image       Graphical or cell backend and placement behavior
     sync        Source-following and preview navigation
     security    Local document root and raw HTML sanitization
+    obsidian    Optional native Obsidian wikilink navigation
     terminal    Terminal profile detection and capability overrides
     interaction Mouse/keyboard interaction: selection, search, links, caret
 
@@ -111,7 +113,7 @@ split ~
 preview ~
     pinned                       true       keep the preview when the source
                                             window shows another file
-    winbar                       true       label the preview with its source
+    winbar                       true       pane-scoped document tabs/notices
     loading                      true       startup spinner
     loading_interval_ms          80         spinner tick
     line_numbers                 "off"      off, absolute, relative; rendered
@@ -192,6 +194,13 @@ security ~
     document_root                nil        nil is the project enclosing the
                                             document, per
                                             |md-viewer-document-root|
+
+obsidian ~
+    enabled                      false      parse and navigate Obsidian
+                                            wikilinks
+    vault_root                   nil        nil uses the document/security
+                                            root; explicit paths resolve from
+                                            this root
 
 interaction ~
     enabled                      true       the whole gesture surface
@@ -481,12 +490,32 @@ COMMANDS                                                  *md-viewer-commands*
                                                                *:MdViewerBack*
 :MdViewerBack
         Return the preview to the previous document in its history, moving
-        the source window with it. See |md-viewer-history|.
+        only the preview pane. See |md-viewer-history|.
 
                                                             *:MdViewerForward*
 :MdViewerForward
         Move the preview to the next document in its history, after going
         back.
+
+                                                            *:MdViewerTabNext*
+:MdViewerTabNext
+        Activate the next document tab in the preview pane. Also `]b` with
+        the preview focused.
+
+                                                        *:MdViewerTabPrevious*
+:MdViewerTabPrevious
+        Activate the previous document tab in the preview pane. Also `[b`.
+
+                                                           *:MdViewerTabClose*
+:MdViewerTabClose
+        Close the active preview document. The pane remains open while any
+        document tabs remain; closing the last one tears the pane down.
+
+                                                        *:MdViewerRevealSource*
+:MdViewerRevealSource
+        Display the active preview document in the remembered source pane and
+        focus it. Also `gf` with the preview focused. If that pane no longer
+        exists, create an adjacent normal source split.
 
                                            *:MdViewerToggleAbsoluteLineNumbers*
 :MdViewerToggleAbsoluteLineNumbers
@@ -581,6 +610,8 @@ wearing a count:
     gg, G                    Start or end of the document (counts ignored)
     H, L                     Back/forward through the preview history
                              (|md-viewer-history|)
+    [b, ]b                   Previous/next document tab in this preview pane
+    gf                       Reveal the active document in the source pane
     v, V                     Start a selection at the caret, extended by
                              any motion above; V is line-wise
     o                        Swap which end of the selection the caret
@@ -656,17 +687,20 @@ touching the others.
                             anything was selected
     CTRL-click / CMD-click  Activates a link under the pointer: opens
                             http(s)/mailto externally, opens an in-root
-                            local file, or scrolls to a same-document
+                            local file, follows an enabled Obsidian wikilink,
+                            or scrolls to a same-document
                             fragment. Refuses an unsafe scheme or a
                             document-root escape, with a notification. Does
                             nothing over non-link text. (`interaction.links`)
     Scroll wheel            Scrolls the preview when the pointer is over
                             its split (`sync.mouse_scroll`)
 
-A local Markdown link opens in Neovim, in the source window, and the preview
-follows it; CTRL-O returns. Files Neovim has no filetype for, and PDFs, still
-go to the system handler via |vim.ui.open()|. A link is never handed to that
-handler when the target is something the OS would run rather than display
+A local Markdown link loads a normal source buffer without displaying it,
+creates or reuses its pane-scoped preview tab, and leaves the editable source
+window untouched. Use `gf` or :MdViewerRevealSource when you deliberately want
+to display and focus that source. Files Neovim has no filetype for, and PDFs,
+still go to the system handler via |vim.ui.open()|. A link is never handed to
+that handler when the target is something the OS would run rather than display
 (|md-viewer-security|), and the root it is checked against is described under
 |md-viewer-document-root|.
 
@@ -682,29 +716,69 @@ is sent; the global 'mousemoveevent' is left alone.
 =============================================================================
 PREVIEW HISTORY                                            *md-viewer-history*
 
-Following a link retargets the preview, and `preview.pinned` deliberately
-stops the preview following an ordinary buffer switch -- so without a way
-back, the document the reader came from is only recoverable as text, never as
-a rendered view.
+Following a Markdown link opens a stable document buffer and tab in the
+preview pane without replacing or focusing the editable source pane. History
+is separate from tab order, so a closed document remains reachable and is
+recreated when history returns to it.
 
     H  / :MdViewerBack       Previous document in this preview's history
     L  / :MdViewerForward    Next document, after going back
 
 H and L are preview-local, installed beside the keys the preview already owns
 (`y`, `/`, `n`, `N`, `gg`, `G`), and shadow "top/bottom of screen" -- which
-addresses nothing in a scratch buffer holding no text. They are gated on
-`interaction.links`. Both commands work from either window, and both move the
-source window as well.
-
-CTRL-O works on its own too: when the source window returns to a document
-this preview has already shown, the preview follows it back. Deliberately
-narrow -- only documents in this preview's own history qualify, so
-`preview.pinned` still holds for every other buffer switch.
+addresses nothing in a preview buffer holding no document text. They are gated on
+`interaction.links`. Both commands work from either window and change only the
+preview pane. `[b` and `]b` cycle open tabs without extending history; `gf` is
+the explicit operation that reveals and focuses the active source document.
 
 Navigating from the middle abandons the forward branch, as a browser does.
 The list is capped at `interaction.history_limit` (default 32) and records a
 buffer and a path per entry, so an entry whose buffer has been wiped still
 reopens its file.
+
+=============================================================================
+OBSIDIAN WIKILINKS                                       *md-viewer-obsidian*
+
+Native Obsidian syntax is optional and has no obsidian.nvim dependency: >lua
+
+    require("md-viewer").setup({
+      obsidian = {
+        enabled = true,
+        vault_root = vim.g.obsidian_vault_root,
+      },
+    })
+<
+When `vault_root` is nil, |md-viewer-document-root| is the vault boundary.
+Explicit paths resolve from that root. Bare note names match Markdown filename
+stems case-insensitively; ambiguous names use |vim.ui.select()| with
+vault-relative paths. The vault is scanned when a link is activated, so an add
+or rename cannot leave a stale filename index. Cancellation changes nothing,
+and a missing target warns without creating a note.
+
+Supported forms:
+
+    [[Note]]                   bare note
+    [[path/to/Note]]           vault-root-relative note path
+    [[path/to/Note.md]]        optional .md suffix
+    [[Note|Label]]             display alias
+    [[#Heading]]               heading in this document
+    [[Note#Heading]]           heading in another note
+    [[Note#Parent#Child]]      case-insensitive heading hierarchy
+    [[Note#^block-id]]         exact block id
+
+Escaped syntax, malformed links, code spans/fences, non-Markdown targets, and
+`![[embeds]]` stay literal. Embeds/transclusion, frontmatter aliases, note
+creation, and backlink maintenance are outside this feature.
+
+Same-document anchors scroll in place. Cross-document anchors create or reuse
+the pane-scoped preview tab, then scroll after its first render. A missing
+anchor leaves the target at the top and warns. Source panes, history entries,
+and restored scroll positions otherwise follow |md-viewer-history| unchanged.
+
+obsidian.nvim may be installed separately for editor completion, LSP
+navigation, backlinks, rename, and note operations. Md-Viewer does not install,
+load, unload, configure, or call it. The Obsidian desktop app may use the same
+files and `.obsidian` settings and need not be running for Md-Viewer.
 
 =============================================================================
 TERMINAL SUPPORT                                         *md-viewer-terminals*
@@ -1001,12 +1075,13 @@ a redirect hop (|md-viewer-remote-images|). Local images and local links are
 confined to a canonical document root (|md-viewer-document-root|). Initial
 npm ci installation may contact the configured npm registry.
 
-Mouse and keyboard interaction adds no new attack surface: every gesture
-resolves against the same already-sanitized document (nothing re-parses
-Markdown or re-touches the filesystem on a click or a selection), local-file link
-activation re-checks the document root the same way image loading does
+Mouse and keyboard interaction resolves against the same already-sanitized
+document. Local-file link activation re-checks the document root the same way image loading does
 (symlinks included), and search and selection text is always handled as plain
-text, never interpreted as markup.
+text, never interpreted as markup. With |md-viewer-obsidian| enabled, a
+wikilink activation scans Markdown filenames within the vault and re-checks
+both lexical and realpath containment before loading one; missing notes are
+never created.
 
 A local link is never handed to the operating system when the target is
 something it would execute rather than display: macOS bundles and scripts,

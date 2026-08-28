@@ -41,6 +41,11 @@ Fixes are provided for `main` and the latest tagged release.
   `realpath`, so neither `../` nor a symlink escapes. The lexical check runs
   before the filesystem is consulted, so "does not exist" and "outside the
   document root" cannot be told apart to probe for files.
+- Native Obsidian navigation is off by default. When enabled, explicit note
+  paths resolve from `obsidian.vault_root` (or the document root when unset),
+  and bare-name lookup scans only Markdown files under that boundary. Every
+  result is checked against `realpath`, including symlinks, before a buffer is
+  loaded. Missing notes are never created; embeds are never expanded.
 - Animated images are decoded in a second browser context, never the render
   context. That context does enable JavaScript, because WebCodecs requires a
   page, but its boundary is explicit (`renderer/src/decode-context.js`): one

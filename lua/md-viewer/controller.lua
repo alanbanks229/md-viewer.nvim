@@ -26,12 +26,14 @@ local each_session
 local function valid(session)
   return session
     and not session.closed
+    and state.is_active(session)
     and type(session.source_buf) == "number"
     and type(session.preview_buf) == "number"
     and type(session.preview_win) == "number"
     and vim.api.nvim_buf_is_valid(session.source_buf)
     and vim.api.nvim_buf_is_valid(session.preview_buf)
     and vim.api.nvim_win_is_valid(session.preview_win)
+    and vim.api.nvim_win_get_buf(session.preview_win) == session.preview_buf
 end
 
 local function markdown(session) return table.concat(vim.api.nvim_buf_get_lines(session.source_buf, 0, -1, false), "\n") end
@@ -40,10 +42,11 @@ local function notify_error(message) vim.notify("md-viewer: " .. tostring(messag
 
 local function current_session(buf)
   buf = buf or vim.api.nvim_get_current_buf()
-  return state.get(buf)
+  local session = state.get(buf)
     or state.from_preview(buf)
     or state.from_source_win(vim.api.nvim_get_current_win())
     or state.visible_in_tab()
+  return session and session.pane and session.pane.active or session
 end
 
 ---Remove the selection overlay rectangles, if any are on screen. Cheap
@@ -666,6 +669,7 @@ function M.refresh(session, render_options)
   if explicit then session.render_epoch = (session.render_epoch or 0) + 1 end
   if session.backend.name == "cells" then
     session.backend.render(session.preview_buf, markdown(session))
+    session.dirty = false
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
@@ -741,6 +745,7 @@ function M.refresh(session, render_options)
       return
     end
     local meta = result.metadata
+    session.dirty = false
     -- A selection captured against older content must never be displayed or
     -- reused against newer content -- that would be silent corruption in a
     -- copy operation. renderer.lua has already updated session.renderer_revision
@@ -841,6 +846,9 @@ function M.refresh(session, render_options)
       -- the position on glass, not this one's.
       if not newer_scroll_pending and type(meta.scrollY) == "number" then session.frame_scroll_y = meta.scrollY end
       session.frame_revision = session.renderer_revision
+      vim.schedule(function()
+        if valid(session) then interaction.resolve_pending_obsidian_anchor(session) end
+      end)
       finish()
       return
     end
@@ -878,6 +886,9 @@ function M.refresh(session, render_options)
     if session.render_path == "resident" and not render_options_is_chunk(render_options) then
       M.begin_resident(session, meta)
     end
+    vim.schedule(function()
+      if valid(session) then interaction.resolve_pending_obsidian_anchor(session) end
+    end)
     finish()
   end)
 end
@@ -1308,7 +1319,13 @@ end
 -- `stop_opts` is forwarded to `process.stop` for the one call that actually
 -- stops the renderer -- closing the last session -- so that `close_all` at
 -- VimLeavePre can ask for the blocking teardown. Nil for every ordinary close.
-local function close_session(session, stop_opts)
+local function delete_preview_buffer(session)
+  if session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf) then
+    pcall(vim.api.nvim_buf_delete, session.preview_buf, { force = true })
+  end
+end
+
+local function release_document(session, forget_renderer, keep_buffer)
   if not session or session.closed then return end
   session.closed = true
   session.request_serial = session.request_serial + 1
@@ -1335,14 +1352,41 @@ local function close_session(session, stop_opts)
   clear_image(session)
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
-  state.remove(session.source_buf)
-  if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
-    pcall(vim.api.nvim_win_close, session.preview_win, true)
-  end
-  if not next(state.all()) then process.stop(stop_opts) end
   interaction.forget(session)
   interaction.forget_selection(session)
   animation.forget(session)
+  if forget_renderer then renderer.forget(session) end
+  state.remove_document(session)
+  if not keep_buffer then delete_preview_buffer(session) end
+end
+
+local function close_session(session, stop_opts)
+  if not session then return end
+  local pane = session.pane
+  if not pane or pane.closed then return end
+  local documents = vim.list_slice(pane.documents)
+  -- The active document owns every heavy placement, so release it first while
+  -- its window/buffer association is still intact.
+  table.sort(documents, function(a) return a == pane.active end)
+  for _, document in ipairs(documents) do
+    -- Deleting the buffer currently displayed in an adopted window can make
+    -- Neovim close that window before its original buffer is restored.
+    release_document(document, true, true)
+  end
+  preview.restore_cursor()
+  if pane.owned then
+    if pane.preview_win and vim.api.nvim_win_is_valid(pane.preview_win) then
+      pcall(vim.api.nvim_win_close, pane.preview_win, true)
+    end
+  else
+    preview.restore_adopted(pane)
+  end
+  for _, document in ipairs(documents) do
+    delete_preview_buffer(document)
+  end
+  preview.clear_clicks(pane)
+  state.remove_pane(pane)
+  if not next(state.panes()) then process.stop(stop_opts) end
   mouse.detach_if_unused()
 end
 
@@ -1353,8 +1397,8 @@ end
 
 function M.close_all(opts)
   local copy = {}
-  for _, session in pairs(state.all()) do
-    copy[#copy + 1] = session
+  for _, pane in pairs(state.panes()) do
+    copy[#copy + 1] = pane.active
   end
   for _, session in ipairs(copy) do
     close_session(session, opts)
@@ -1389,7 +1433,19 @@ function M.open(position)
   -- preview that switches rendering model mid-scroll is one whose behaviour
   -- nobody can reproduce; the only later move is a one-way demotion.
   session.render_path, session.render_path_reason = resident_session.select_path(session)
-  session.preview_buf, session.preview_win = preview.open(position, session)
+  session.preview_buf = preview.create_buffer(session)
+  local adopt_win
+  local siblings = {}
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    if win ~= source_win and vim.api.nvim_win_get_buf(win) == source_buf then siblings[#siblings + 1] = win end
+  end
+  if #siblings == 1 and not vim.wo[source_win].winfixbuf then
+    adopt_win = source_win
+    source_win = siblings[1]
+    session.source_win = source_win
+    session.pane.source_win = source_win
+  end
+  session.preview_buf, session.preview_win = preview.open(position, session, adopt_win)
   -- Size the caret surface now that the split has been created and resized;
   -- `preview.open` cannot do it itself, since the placement it measures needs
   -- the window handle this line is what assigns.
@@ -1399,7 +1455,7 @@ function M.open(position)
     navigation.attach(session, M.navigate)
     mouse.attach(M.navigate)
   end
-  vim.api.nvim_set_current_win(source_win)
+  if not adopt_win then vim.api.nvim_set_current_win(source_win) end
   if localrender.enabled() and backend.name == "kitty_raw" and not localrender.active() then
     -- The first render waits for the attach to settle rather than racing it:
     -- losing the race would spawn this host's Chromium and ship one full PNG
@@ -1425,53 +1481,186 @@ function M.open(position)
   return session
 end
 
----Point an existing preview at a different source buffer, reusing its window.
----Used when a local link is activated: the source window edits the new file and
----the preview follows it, which `close_session` + `M.open` would also achieve
----but with a visible split teardown and rebuild in between.
----
----Everything below is per-document and must not survive the move. The serial
----bump is what makes that safe: any render or interact response still in flight
----for the old document fails `renderer.is_stale` and is discarded rather than
----being applied to the new one.
+---Create or reuse a stable preview document for `new_buf`, then activate it in
+---this pane without displaying it in the editable source window.
 ---
 ---`record` (default true) appends the destination to this preview's history.
 ---The back/forward commands pass false: they are *moving through* the history,
 ---not extending it, and appending there would make "back" unable to ever leave
 ---the last two documents.
-function M.retarget(session, new_buf, record)
-  if not valid(session) or not session.backend or session.backend.name == "cells" then return false end
-  if not state.retarget(session, new_buf) then return false end
+function M.retarget(session, new_buf, record, restore_scroll, pending_obsidian_anchor)
+  if not valid(session) or not session.backend then return false end
+  local pane = session.pane
+  local target = state.document(pane, new_buf)
+  if not target then
+    target = state.create_document(pane, new_buf)
+    target.backend, target.backend_reason = session.backend, session.backend_reason
+    target.render_path, target.render_path_reason = session.render_path, session.render_path_reason
+    target.preview_buf = preview.create_buffer(target)
+    if target.backend.name ~= "cells" then navigation.attach(target, M.navigate) end
+  end
+  if type(restore_scroll) == "number" then
+    target.scroll_y = restore_scroll
+    target.applied_scroll_y = restore_scroll
+  end
+  target.pending_obsidian_anchor = pending_obsidian_anchor
+  if record ~= false then M.history_push(session, new_buf) end
+  return M.activate_document(target, { align_history = record == false })
+end
+
+local function deactivate_document(session)
+  if not session or session.closed then return end
+  -- Every callback already carries request_serial; advancing it is the pane
+  -- activation epoch at the document boundary and makes late frames stale.
   session.request_serial = session.request_serial + 1
-  session.render_epoch = (session.render_epoch or 0) + 1
+  for _, name in ipairs({
+    "render_timer",
+    "resize_timer",
+    "scroll_settle_timer",
+    "cursor_scroll_timer",
+    "animation_geometry_timer",
+    "remote_image_timer",
+    "ui_poll_timer",
+    "selection_debounce_timer",
+    "selection_settle_timer",
+    "selection_idle_settle_timer",
+  }) do
+    debounce.close(session, name)
+  end
+  preview.stop_loading(session)
   interaction.forget(session)
-  interaction.forget_selection(session)
-  session.renderer_revision = nil
-  session.latest_blocks = {}
-  session.latest_lines = {}
-  session.document_height_px = 0
-  session.scroll_y, session.applied_scroll_y = 0, 0
-  session.progress_basis = "viewport"
-  session.last_progress_text = nil
-  session.last_source_block = nil
+  resident_session.release(session)
+  clear_image(session)
+  animation.forget(session)
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
-  session.manual_scroll_until = 0
-  session.refresh_deferred = false
-  if record ~= false then M.history_push(session, new_buf) end
+  session.last_png_bytes = nil
+  session.content_render_in_flight = false
+  session.scroll_render_in_flight = false
+  session.scroll_render_pending = false
+  session.active = false
+end
+
+---Activate one stable preview document without touching the source window.
+function M.activate_document(session, opts)
+  opts = opts or {}
+  if not session or session.closed or not session.pane or session.pane.closed then return false end
+  local pane = session.pane
+  if pane.active == session and valid(session) then
+    preview.update_title(session)
+    return true
+  end
+  local old = pane.active
+  if old and old ~= session then deactivate_document(old) end
+  state.activate(session)
+  session.backend = session.backend or (old and old.backend)
+  session.backend_reason = session.backend_reason or (old and old.backend_reason)
+  session.render_path = session.render_path or (old and old.render_path)
+  session.render_path_reason = session.render_path_reason or (old and old.render_path_reason)
+  session.preview_win = pane.preview_win
+  session.source_win = pane.source_win
+  session.history = pane.history
+  session.history_index = pane.history_index
+  if not preview.show_document(session) then return false end
+  if opts.align_history ~= false and pane.history then
+    for index = #pane.history, 1, -1 do
+      if pane.history[index].buf == session.source_buf then
+        pane.history_index = index
+        break
+      end
+    end
+    session.history_index = pane.history_index
+  end
+  preview.reset_surface(session)
   preview.update_title(session)
+  if session.backend and session.backend.name ~= "cells" then preview.start_loading(session) end
   M.refresh(session)
+  if start_ui_poll then start_ui_poll(session) end
+  return true
+end
+
+local function pane_session(session)
+  session = session or current_session()
+  return session and session.pane and session.pane.active or nil
+end
+
+function M.tab_next(session)
+  session = pane_session(session)
+  if not session then return false end
+  local docs, current = session.pane.documents, 1
+  for index, document in ipairs(docs) do
+    if document == session then current = index end
+  end
+  return M.activate_document(docs[(current % #docs) + 1])
+end
+
+function M.tab_previous(session)
+  session = pane_session(session)
+  if not session then return false end
+  local docs, current = session.pane.documents, 1
+  for index, document in ipairs(docs) do
+    if document == session then current = index end
+  end
+  return M.activate_document(docs[((current - 2) % #docs) + 1])
+end
+
+function M.tab_close(session)
+  session = session or current_session()
+  if not session or session.closed or not session.pane then return false end
+  local pane = session.pane
+  if #pane.documents == 1 then
+    close_session(session)
+    return true
+  end
+  local index = 1
+  for candidate, document in ipairs(pane.documents) do
+    if document == session then index = candidate end
+  end
+  local was_active = pane.active == session
+  if was_active then deactivate_document(session) end
+  release_document(session, true, was_active)
+  if was_active then
+    local target = pane.documents[math.min(index, #pane.documents)]
+    local activated = M.activate_document(target)
+    delete_preview_buffer(session)
+    return activated
+  end
+  preview.update_title(pane.active)
+  return true
+end
+
+function M.reveal_source(session)
+  session = pane_session(session)
+  if not session then
+    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
+    return false
+  end
+  local pane, win = session.pane, session.pane.source_win
+  if not (win and vim.api.nvim_win_is_valid(win)) then
+    local preview_win = pane.preview_win
+    if not (preview_win and vim.api.nvim_win_is_valid(preview_win)) then return false end
+    win = vim.api.nvim_open_win(session.source_buf, true, { split = "left", win = preview_win })
+    vim.wo[win].winfixbuf = false
+    pane.source_win = win
+  end
+  if vim.wo[win].winfixbuf then
+    vim.notify("md-viewer: source window has 'winfixbuf' set", vim.log.levels.WARN)
+    return false
+  end
+  vim.api.nvim_win_set_buf(win, session.source_buf)
+  pane.source_win = win
+  for _, document in ipairs(pane.documents) do
+    document.source_win = win
+  end
+  vim.api.nvim_set_current_win(win)
   return true
 end
 
 -- ---------------------------------------------------------------------------
 -- Preview history.
 --
--- Following a link retargets the preview, and without this the document it came
--- from is simply gone: the source window's jump list can bring the *text* back
--- (`edit_in_source_window` pushes it), but `preview.pinned` deliberately stops
--- the preview from following an ordinary buffer switch, so the rendered view
--- stays on the document the reader has already left.
+-- Following a link activates a document tab, while history retains the route
+-- independently of which tabs remain open.
 --
 -- The list is per session and holds a buffer *and* the file path. The buffer is
 -- what makes returning cheap and exact; the path is the fallback for an entry
@@ -1481,12 +1670,16 @@ end
 
 local function history_entry(buf)
   local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil }
+  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil, scroll_y = 0 }
 end
 
 function M.history_init(session)
-  session.history = { history_entry(session.source_buf) }
-  session.history_index = 1
+  local pane = session.pane
+  local history = { history_entry(session.source_buf) }
+  if pane then
+    pane.history, pane.history_index = history, 1
+  end
+  session.history, session.history_index = history, 1
 end
 
 ---Append `buf` as the newest entry, discarding anything ahead of the current
@@ -1494,20 +1687,24 @@ end
 ---middle of the history abandons the forward branch rather than interleaving
 ---with it.
 function M.history_push(session, buf)
-  if not session.history then M.history_init(session) end
-  local history = session.history
-  for index = #history, session.history_index + 1, -1 do
+  local pane = session.pane
+  if not (pane and pane.history) and not session.history then M.history_init(session) end
+  local history = pane and pane.history or session.history
+  local history_index = pane and pane.history_index or session.history_index
+  if history[history_index] then history[history_index].scroll_y = session.scroll_y or 0 end
+  for index = #history, history_index + 1, -1 do
     history[index] = nil
   end
   -- Re-entering the document that is already current is not a new entry:
   -- otherwise a fragment link, or a link back to where the reader just came
   -- from, would grow the list without adding anywhere to go.
-  if history[session.history_index] and history[session.history_index].buf == buf then return end
+  if history[history_index] and history[history_index].buf == buf then return end
   history[#history + 1] = history_entry(buf)
   local limit = config.get().interaction.history_limit
   while #history > limit do
     table.remove(history, 1)
   end
+  if pane then pane.history_index = #history end
   session.history_index = #history
 end
 
@@ -1524,16 +1721,19 @@ local function history_buf(entry)
   return buf
 end
 
----Move the preview (and the source window with it) `step` entries through the
----history. Dead entries are stepped over rather than reported: a wiped buffer
+---Move only the preview `step` entries through history. Dead entries are
+---stepped over rather than reported: a wiped buffer
 ---whose file is also gone is not something the reader can act on.
 local function history_go(session, step, direction)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  if not session.history then M.history_init(session) end
-  local index = session.history_index
+  if not valid(session) then return false end
+  local pane = session.pane
+  if not (pane and pane.history) then M.history_init(session) end
+  local history = pane and pane.history or session.history
+  local index = pane and pane.history_index or session.history_index
+  if history[index] then history[index].scroll_y = session.scroll_y or 0 end
   while true do
     index = index + step
-    local entry = session.history[index]
+    local entry = history[index]
     if not entry then
       vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
       return false
@@ -1541,24 +1741,13 @@ local function history_go(session, step, direction)
     local buf = history_buf(entry)
     if buf then
       if buf == session.source_buf then
+        if pane then pane.history_index = index end
         session.history_index = index
+        session.scroll_y = entry.scroll_y or session.scroll_y
+        M.schedule(session, 0)
         return true
       end
-      -- The source window follows, for the same reason activating a link moves
-      -- it: the preview and the text below the cursor describing the same
-      -- document is the whole point of the split.
-      local win = session.source_win
-      if win and vim.api.nvim_win_is_valid(win) then
-        local ok, err = pcall(vim.api.nvim_win_call, win, function()
-          vim.cmd("normal! m'")
-          vim.api.nvim_win_set_buf(win, buf)
-        end)
-        if not ok then
-          notify_error(err)
-          return false
-        end
-      end
-      if not M.retarget(session, buf, false) then
+      if not M.retarget(session, buf, false, entry.scroll_y) then
         -- The only way this refuses is another preview already owning that
         -- document. The source window has moved by now, so saying nothing
         -- would leave the two panes describing different files with no
@@ -1566,7 +1755,10 @@ local function history_go(session, step, direction)
         vim.notify("md-viewer: another preview already owns that document", vim.log.levels.WARN)
         return false
       end
-      session.history_index = index
+      local active = pane.active
+      pane.history_index = index
+      active.history, active.history_index = history, index
+      active.scroll_y = entry.scroll_y or active.scroll_y or 0
       return true
     end
   end
@@ -1600,18 +1792,23 @@ end
 ---itself navigated through is followed, and the move never appends, so the
 ---forward branch survives to be walked back up.
 local function follow_history_buffer(session, buf)
-  if not session.history or buf == session.source_buf then return end
+  local pane = session.pane
+  local history = pane and pane.history or session.history
+  local history_index = pane and pane.history_index or session.history_index
+  if not history or buf == session.source_buf then return end
   -- One document can legitimately appear at more than one position (a link
   -- back to where the reader came from puts it there twice), so search outward
   -- from where the preview currently is rather than from the start -- landing
   -- at the far end of the list would make the next `<C-o>` jump somewhere the
   -- reader has never been. Backwards wins a tie, because the gesture this
   -- exists for is the backwards one.
-  local history = session.history
   for distance = 0, #history do
-    for _, index in ipairs({ session.history_index - distance, session.history_index + distance }) do
+    for _, index in ipairs({ history_index - distance, history_index + distance }) do
       if history[index] and history[index].buf == buf then
-        if M.retarget(session, buf, false) then session.history_index = index end
+        if M.retarget(session, buf, false) then
+          if pane then pane.history_index = index end
+          pane.active.history_index = index
+        end
         return
       end
     end
@@ -1687,7 +1884,7 @@ function M.navigate(session, action, count)
 end
 
 each_session = function(fn)
-  for _, session in pairs(state.all()) do
+  for _, session in pairs(state.active_documents()) do
     if valid(session) then fn(session) end
   end
 end
@@ -2015,8 +2212,13 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
     group = group,
     callback = function(args)
-      local session = state.get(args.buf)
-      if session then M.schedule(session) end
+      for _, session in ipairs(state.documents_for_source(args.buf)) do
+        if state.is_active(session) then
+          M.schedule(session)
+        else
+          session.dirty = true
+        end
+      end
     end,
   })
   -- Neovim's own Visual mode is not usable inside a graphical preview, and
@@ -2137,7 +2339,7 @@ function M.setup_autocmds()
       vim.schedule(function()
         local source_session = state.get(buf)
         if source_session and vim.api.nvim_get_current_buf() == buf then
-          source_session.source_win = vim.api.nvim_get_current_win()
+          state.set_source_window(source_session, vim.api.nvim_get_current_win())
         end
         -- The source window arriving back at a document this preview has
         -- already shown (`<C-o>` after following a link) takes the preview
@@ -2198,8 +2400,9 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,
     callback = function(args)
-      local session = state.get(args.buf)
-      if session then preview.update_title(session) end
+      for _, session in ipairs(state.documents_for_source(args.buf)) do
+        preview.update_title(session)
+      end
     end,
   })
   vim.api.nvim_create_autocmd("WinLeave", {
@@ -2292,16 +2495,38 @@ function M.setup_autocmds()
   vim.api.nvim_create_autocmd("BufHidden", {
     group = group,
     callback = function(args)
-      local session = state.from_preview(args.buf)
-      if not session and not config.get().preview.pinned then session = state.get(args.buf) end
+      -- Preview buffers use bufhidden=hide specifically so switching pane tabs
+      -- is not lifecycle. Only the optional unpinned source behavior remains.
+      local session
+      if not state.from_preview(args.buf) and not config.get().preview.pinned then session = state.get(args.buf) end
       if session then close_session(session) end
     end,
   })
   vim.api.nvim_create_autocmd("BufWipeout", {
     group = group,
     callback = function(args)
-      local session = state.get(args.buf) or state.from_preview(args.buf)
-      if session then close_session(session) end
+      local preview_document = state.from_preview(args.buf)
+      if preview_document then
+        M.tab_close(preview_document)
+        return
+      end
+      for _, session in ipairs(state.documents_for_source(args.buf)) do
+        M.tab_close(session)
+      end
+    end,
+  })
+  vim.api.nvim_create_autocmd("WinClosed", {
+    group = group,
+    callback = function(args)
+      local closed = tonumber(args.match)
+      for _, pane in pairs(state.panes()) do
+        if pane.preview_win == closed and not pane.closed then
+          -- The window is already invalid; teardown skips closing/restoring it
+          -- and still releases every document and renderer cache.
+          close_session(pane.active)
+          break
+        end
+      end
     end,
   })
   vim.api.nvim_create_autocmd({ "TabLeave", "VimSuspend" }, {

@@ -5,6 +5,27 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+### Added
+
+- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders note,
+  path, alias, heading-hierarchy, and block-id links and follows them through
+  pane-scoped preview tabs. Vault lookup is case-insensitive for bare stems,
+  duplicate-aware, rescanned on activation, and confined against traversal and
+  symlink escapes. No obsidian.nvim runtime dependency is introduced.
+- **Real pane-scoped preview document buffers and tabs.** Every followed
+  Markdown document now owns a stable, unlisted `md-viewer://preview/...`
+  buffer. Clickable winbar tabs, `[b`/`]b`, and the new
+  `:MdViewerTabNext`/`:MdViewerTabPrevious`/`:MdViewerTabClose` commands switch
+  only the preview pane; `gf` and `:MdViewerRevealSource` explicitly reveal a
+  document in the editable source pane. Preview history is independent of tab
+  order and recreates closed documents with their saved scroll target.
+- **Manual split adoption.** Running `:MdViewerToggle` in one of exactly two
+  splits showing the same Markdown adopts the current split as the preview and
+  restores its original buffer, view, dimensions, and window options on close.
+  Ambiguous or fixed layouts fall back to a plugin-owned preview split.
+- Closing a preview document now sends a renderer `forget` request, promptly
+  releasing its browser, interaction, lane, replica, and local-surface caches.
+
 ### Fixed
 
 - **A fresh preview could show a patchwork of resolved and unresolved

@@ -194,6 +194,11 @@ test("replica: pending on missing assets, metrics after the push, surfaces resol
   assert.ok(sheet && sheet.subarray(1, 4).equals(Buffer.from("PNG")), "the tint sheet is synthesized, not shipped");
 
   await assert.rejects(() => replica.handle("prepare", {}), (error) => error.code === "UNSUPPORTED_METHOD");
+  assert.equal(replica.stats().documents, 1, "the open document is retained before tab close");
+  assert.ok(replica.stats().surfaces >= 2, "the open document owns resident local surfaces");
+  assert.deepEqual(await replica.handle("forget", { documentId: "doc-local" }), { forgotten: true });
+  assert.equal(replica.stats().documents, 0, "forget releases the local replica document record");
+  assert.equal(replica.stats().surfaces, 0, "forget releases every local surface for that document");
   await docService.close();
 });
 

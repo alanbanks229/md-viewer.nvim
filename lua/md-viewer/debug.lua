@@ -206,6 +206,24 @@ function M.snapshot()
   -- to wonder which copy is stale.
   return {
     sessions = sessions,
+    panes = (function()
+      local result = {}
+      for id, pane in pairs(state.panes()) do
+        local inactive_dirty = 0
+        for _, document in ipairs(pane.documents) do
+          if document ~= pane.active and document.dirty then inactive_dirty = inactive_dirty + 1 end
+        end
+        result[tostring(id)] = {
+          preview_win = pane.preview_win,
+          source_win = pane.source_win,
+          owned = pane.owned,
+          document_count = #pane.documents,
+          active_document = pane.active and pane.active.document_id,
+          inactive_dirty_documents = inactive_dirty,
+        }
+      end
+      return result
+    end)(),
     -- The last link md-viewer handed to the operating system, and what came
     -- back. This is the difference between "the click never reached the
     -- plugin" and "the plugin ran the handler and the OS declined".

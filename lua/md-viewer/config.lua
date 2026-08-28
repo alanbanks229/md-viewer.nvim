@@ -218,6 +218,13 @@ M.defaults = {
     document_root_markers = { ".git", ".hg", ".svn" },
     document_root = nil,
   },
+  obsidian = {
+    -- Native wikilink navigation for an Obsidian vault. This is semantic
+    -- compatibility only; md-viewer never loads or calls obsidian.nvim.
+    enabled = false,
+    -- nil uses the same detected/configured root as local-link security.
+    vault_root = nil,
+  },
   interaction = {
     enabled = true,
     links = true,
@@ -449,6 +456,11 @@ local function validate(cfg)
   local animation_modes = { auto = true, native = true, frames = true, off = true }
   assert(animation_modes[cfg.terminal.animation], "md-viewer: terminal.animation must be auto, native, frames, or off")
   assert(type(cfg.security.raw_html) == "boolean", "md-viewer: security.raw_html must be boolean")
+  assert(type(cfg.obsidian.enabled) == "boolean", "md-viewer: obsidian.enabled must be boolean")
+  assert(
+    cfg.obsidian.vault_root == nil or (type(cfg.obsidian.vault_root) == "string" and cfg.obsidian.vault_root ~= ""),
+    "md-viewer: obsidian.vault_root must be a non-empty path or nil"
+  )
   assert(
     vim.islist(cfg.security.document_root_markers),
     "md-viewer: security.document_root_markers must be a list of marker names"

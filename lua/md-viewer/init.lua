@@ -25,6 +25,10 @@ function M.open(position) return require("md-viewer.controller").open(position) 
 function M.close() return require("md-viewer.controller").close() end
 function M.toggle(position) return require("md-viewer.controller").toggle(position) end
 function M.refresh() return require("md-viewer.controller").refresh() end
+function M.tab_next() return require("md-viewer.controller").tab_next() end
+function M.tab_previous() return require("md-viewer.controller").tab_previous() end
+function M.tab_close() return require("md-viewer.controller").tab_close() end
+function M.reveal_source() return require("md-viewer.controller").reveal_source() end
 function M.statusline_progress() return require("md-viewer.preview").statusline_progress() end
 
 return M

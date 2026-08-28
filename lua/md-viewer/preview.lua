@@ -7,12 +7,34 @@ local state = require("md-viewer.state")
 
 local M = {}
 
-local split_commands = {
-  right = "rightbelow vsplit",
-  left = "leftabove vsplit",
-  below = "rightbelow split",
-  above = "leftabove split",
-}
+local click_actions = {}
+local next_click_id = 0
+
+local function click_id(pane, action)
+  next_click_id = next_click_id + 1
+  click_actions[next_click_id] = action
+  pane.winbar_click_ids = pane.winbar_click_ids or {}
+  pane.winbar_click_ids[#pane.winbar_click_ids + 1] = next_click_id
+  return next_click_id
+end
+
+function M.clear_clicks(pane)
+  for _, id in ipairs(pane and pane.winbar_click_ids or {}) do
+    click_actions[id] = nil
+  end
+  if pane then pane.winbar_click_ids = nil end
+end
+
+_G.MdViewerWinbarClick = function(minwid, _, button)
+  local action = click_actions[tonumber(minwid)]
+  if not action then return end
+  local controller = require("md-viewer.controller")
+  if button == "m" or action.close then
+    controller.tab_close(action.session)
+  elseif button == "l" then
+    controller.activate_document(action.session)
+  end
+end
 
 local loading_frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 
@@ -119,6 +141,46 @@ local function source_title(source_buf)
   return filename:gsub("%%", "%%%%")
 end
 
+local function escaped(value) return tostring(value):gsub("%%", "%%%%") end
+
+local function path_parts(path)
+  local parts = {}
+  for part in path:gmatch("[^/\\]+") do
+    parts[#parts + 1] = part
+  end
+  return parts
+end
+
+---Shortest path suffixes that distinguish every document in a pane. Untitled
+---buffers fall back to their buffer number, which is stable for the session.
+local function tab_labels(pane)
+  local parts, labels = {}, {}
+  for index, document in ipairs(pane.documents) do
+    local path = vim.api.nvim_buf_get_name(document.source_buf)
+    parts[index] = path ~= "" and path_parts(vim.fs.normalize(path)) or { "[No Name " .. document.source_buf .. "]" }
+  end
+  for index, own in ipairs(parts) do
+    local depth = 1
+    while depth < #own do
+      local suffix = table.concat(own, "/", math.max(1, #own - depth + 1))
+      local unique = true
+      for other, candidate in ipairs(parts) do
+        if other ~= index then
+          local theirs = table.concat(candidate, "/", math.max(1, #candidate - depth + 1))
+          if suffix == theirs then
+            unique = false
+            break
+          end
+        end
+      end
+      if unique then break end
+      depth = depth + 1
+    end
+    labels[index] = table.concat(own, "/", math.max(1, #own - depth + 1))
+  end
+  return labels
+end
+
 ---When `image.backend = "auto"` picked the text-cell fallback because no
 ---graphical backend was available (e.g. macOS Terminal.app, or any terminal
 ---with no Kitty-graphics evidence), surface that in the preview title instead
@@ -177,7 +239,27 @@ local function warmup_notice(session)
 end
 
 local function title_text(session)
-  local text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  local pane = session.pane
+  local text = ""
+  if pane and #pane.documents > 0 then
+    M.clear_clicks(pane)
+    local labels = tab_labels(pane)
+    for index, document in ipairs(pane.documents) do
+      local active = document == pane.active
+      local tab_action = click_id(pane, { session = document })
+      local close_action = click_id(pane, { session = document, close = true })
+      text = text
+        .. (active and "%#MdViewerTabActive#" or "%#MdViewerTabInactive#")
+        .. ("%%%d@v:lua.MdViewerWinbarClick@"):format(tab_action)
+        .. " "
+        .. escaped(labels[index])
+        .. " %T"
+        .. ("%%%d@v:lua.MdViewerWinbarClick@"):format(close_action)
+        .. "×%T%* "
+    end
+  else
+    text = "  %#Title#  " .. source_title(session.source_buf) .. "%*"
+  end
   -- The one piece of modal state the preview has, and the winbar is the only
   -- place it can be said: Neovim's own mode indicator reports normal mode,
   -- because as far as Neovim is concerned that is what this is.
@@ -199,7 +281,10 @@ function M.update_title(session)
   then
     return
   end
-  vim.wo[session.preview_win].winbar = title_text(session)
+  local active = session.pane and session.pane.active or session
+  vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
+  vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+  vim.wo[session.preview_win].winbar = title_text(active)
 end
 
 local line_number_ns = vim.api.nvim_create_namespace("md-viewer_line_numbers")
@@ -363,23 +448,54 @@ function M.update_line_numbers(session)
   end
 end
 
-function M.open(position, session)
-  local cfg = config.get()
-  position = position or cfg.split.position
-  vim.cmd(split_commands[position])
-  local win = vim.api.nvim_get_current_win()
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_win_set_buf(win, buf)
+local window_options = {
+  "number",
+  "relativenumber",
+  "signcolumn",
+  "foldcolumn",
+  "wrap",
+  "cursorline",
+  "spell",
+  "scrolloff",
+  "sidescrolloff",
+  "winhighlight",
+  "winbar",
+  "winfixbuf",
+}
 
+local function snapshot_window(win)
+  local snapshot = {
+    buf = vim.api.nvim_win_get_buf(win),
+    view = vim.api.nvim_win_call(win, vim.fn.winsaveview),
+    width = vim.api.nvim_win_get_width(win),
+    height = vim.api.nvim_win_get_height(win),
+    options = {},
+  }
+  for _, name in ipairs(window_options) do
+    local ok, value = pcall(vim.api.nvim_get_option_value, name, { win = win })
+    if ok then snapshot.options[name] = value end
+  end
+  return snapshot
+end
+
+function M.create_buffer(session)
+  local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "nofile"
-  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].bufhidden = "hide"
+  vim.bo[buf].buflisted = false
   vim.bo[buf].swapfile = false
   vim.bo[buf].filetype = "md-viewer"
-  vim.api.nvim_buf_set_name(buf, "md-viewer://preview/" .. buf)
+  local pane_id = session.pane and session.pane.id or 0
+  vim.api.nvim_buf_set_name(buf, ("md-viewer://preview/%d/%d"):format(pane_id, buf))
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
   vim.bo[buf].modifiable = false
   vim.bo[buf].readonly = true
+  session.preview_buf = buf
+  return buf
+end
 
+local function configure_window(win, session)
+  local cfg = config.get()
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = "no"
@@ -407,18 +523,71 @@ function M.open(position, session)
   vim.api.nvim_set_hl(0, "MdViewerInertVisual", { blend = 100, nocombine = true })
   vim.wo[win].winhighlight = "Visual:MdViewerInertVisual,VisualNOS:MdViewerInertVisual"
 
-  if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
+  if cfg.preview.winbar then
+    vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
+    vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+    vim.wo[win].winbar = title_text(session)
+  end
   if session.backend and session.backend.name == "cells" then
     vim.wo[win].number = cfg.preview.line_numbers ~= "off"
     vim.wo[win].relativenumber = cfg.preview.line_numbers == "relative"
   end
+end
 
-  if position == "right" or position == "left" then
-    vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))
+function M.open(position, session, adopt_win)
+  local cfg = config.get()
+  position = position or cfg.split.position
+  local buf = session.preview_buf or M.create_buffer(session)
+  local win
+  if adopt_win then
+    win = adopt_win
+    session.pane.owned = false
+    session.pane.original = snapshot_window(win)
+    vim.wo[win].winfixbuf = false
+    vim.api.nvim_win_set_buf(win, buf)
   else
+    -- The destination buffer exists before the split: no observable frame can
+    -- show a second copy of the source and be mistaken for another source pane.
+    win = vim.api.nvim_open_win(buf, true, { split = position, win = -1 })
+  end
+  session.preview_win = win
+  session.pane.preview_win = win
+  configure_window(win, session)
+  vim.wo[win].winfixbuf = true
+
+  if not adopt_win and (position == "right" or position == "left") then
+    vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))
+  elseif not adopt_win then
     vim.api.nvim_win_set_height(win, math.max(8, math.floor(vim.o.lines * cfg.split.width)))
   end
   return buf, win
+end
+
+function M.show_document(session)
+  local pane, win = session.pane, session.pane and session.pane.preview_win
+  if not (win and vim.api.nvim_win_is_valid(win)) then return false end
+  vim.wo[win].winfixbuf = false
+  local ok = pcall(vim.api.nvim_win_set_buf, win, session.preview_buf)
+  if ok then
+    session.preview_win = win
+    configure_window(win, session)
+  end
+  vim.wo[win].winfixbuf = true
+  return ok
+end
+
+function M.restore_adopted(pane)
+  local win, original = pane and pane.preview_win, pane and pane.original
+  if not (original and win and vim.api.nvim_win_is_valid(win)) then return false end
+  vim.wo[win].winfixbuf = false
+  if vim.api.nvim_buf_is_valid(original.buf) then pcall(vim.api.nvim_win_set_buf, win, original.buf) end
+  for name, value in pairs(original.options) do
+    pcall(vim.api.nvim_set_option_value, name, value, { win = win })
+  end
+  pcall(vim.api.nvim_win_set_width, win, original.width)
+  pcall(vim.api.nvim_win_set_height, win, original.height)
+  pcall(vim.api.nvim_win_call, win, function() vim.fn.winrestview(original.view) end)
+  return true
 end
 
 -- The reader's real `guicursor`, held while the preview is focused and the

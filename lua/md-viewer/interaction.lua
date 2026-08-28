@@ -3,6 +3,7 @@ local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
+local obsidian = require("md-viewer.obsidian")
 local preview = require("md-viewer.preview")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
@@ -28,6 +29,8 @@ function M.captured_session() return captured end
 ---two-arg `(result, err)` shape; only this wrapper looks at process.request's
 ---third `meta` argument.
 local function interact_request(session, params, callback)
+  if not state.is_active(session) then return end
+  local activation_epoch = session.activation_epoch
   session.interaction_request_count = (session.interaction_request_count or 0) + 1
   if require("md-viewer.localrender").active() then
     -- The no-PNG envelope: in local mode a mutation is displayed by a frame
@@ -40,6 +43,7 @@ local function interact_request(session, params, callback)
     params.overlaySheet = nil
   end
   process.request("interact", params, function(result, err, meta)
+    if not state.is_active(session) or session.activation_epoch ~= activation_epoch then return end
     if err and meta and meta.code == "STALE_INTERACTION" then
       session.interaction_stale_count = (session.interaction_stale_count or 0) + 1
     end
@@ -1077,11 +1081,23 @@ function M.open_local_file(session, href)
   M.edit_in_source_window(session, resolved, filetype)
 end
 
----Open `path` in the session's *source* window, never the preview one, and
----never by making the preview current -- focus discipline is the same as every
----other gesture's. The jump list is pushed first so `<C-o>` returns to the
----document the link was clicked in.
+---Route an editable local file. Markdown becomes a pane-scoped preview source
+---without changing either visible window; other text filetypes retain the
+---existing behavior of opening in the remembered source window.
 function M.edit_in_source_window(session, path, filetype)
+  -- Markdown navigation belongs to the preview pane. Load a normal listed
+  -- source buffer so edits and :MdViewerRevealSource have a real document to
+  -- reveal, but do not display it in (or focus) the editable source pane.
+  if filetype == "markdown" then
+    local new_buf = vim.fn.bufadd(path)
+    if new_buf == 0 then
+      vim.notify("md-viewer: failed to load link: " .. path, vim.log.levels.ERROR)
+      return
+    end
+    vim.fn.bufload(new_buf)
+    require("md-viewer.controller").retarget(session, new_buf)
+    return
+  end
   local win = session.source_win
   if not (win and vim.api.nvim_win_is_valid(win)) then
     M.open_external(path)
@@ -1095,12 +1111,6 @@ function M.edit_in_source_window(session, path, filetype)
     vim.notify("md-viewer: failed to open link: " .. tostring(err), vim.log.levels.ERROR)
     return
   end
-  -- Only Markdown is worth following with the preview; re-pointing it at a
-  -- `.lua` file would render its source as prose.
-  if filetype ~= "markdown" then return end
-  local new_buf = vim.api.nvim_win_get_buf(win)
-  if new_buf == session.source_buf then return end
-  require("md-viewer.controller").retarget(session, new_buf)
 end
 
 ---Dispatch one classified link to whatever opens it. `result` is a full
@@ -1119,9 +1129,80 @@ function M.activate_link(session, result)
     M.open_external(link.href)
   elseif link.type == "local_file" then
     M.open_local_file(session, link.href)
+  elseif link.type == "obsidian" then
+    if not config.get().obsidian.enabled then
+      vim.notify("md-viewer: Obsidian wikilink navigation is disabled", vim.log.levels.WARN)
+      return
+    end
+    if link.target == "" then
+      if link.anchor then M.scroll_obsidian_anchor(session, link.anchor) end
+      return
+    end
+    obsidian.resolve(session, link.target, function(path, reason)
+      if not path then
+        if reason then
+          local message = reason == "outside_root" and "vault does not contain the current document"
+            or reason == "missing_root" and "vault root does not exist"
+            or reason == "missing" and ("note does not exist: " .. link.target)
+            or ("could not resolve note: " .. link.target)
+          vim.notify("md-viewer: Obsidian " .. message, vim.log.levels.WARN)
+        end
+        return
+      end
+      local current = vim.uv.fs_realpath(vim.api.nvim_buf_get_name(session.source_buf))
+      if current == path then
+        if link.anchor then M.scroll_obsidian_anchor(session, link.anchor) end
+        return
+      end
+      local new_buf = vim.fn.bufadd(path)
+      if new_buf == 0 then
+        vim.notify("md-viewer: failed to load Obsidian note: " .. path, vim.log.levels.ERROR)
+        return
+      end
+      vim.fn.bufload(new_buf)
+      require("md-viewer.controller").retarget(session, new_buf, true, link.anchor and 0 or nil, link.anchor)
+    end)
   else
     vim.notify("md-viewer: refused to activate unsafe link: " .. tostring(link.href), vim.log.levels.WARN)
   end
+end
+
+---Scroll the current rendered document to an Obsidian heading path or block
+---id. A miss deliberately leaves the page at the top and reports it.
+function M.scroll_obsidian_anchor(session, anchor)
+  if not (session and anchor and session.renderer_revision) then return false end
+  session.scroll_y = 0
+  interact_request(session, {
+    documentId = session.document_id,
+    contentRevision = session.renderer_revision,
+    action = "obsidian_scroll",
+    obsidianAnchor = anchor,
+    viewportWidthPx = session.viewport_width_px or 0,
+    viewportHeightPx = session.viewport_height_render_px or 0,
+    scrollY = 0,
+  }, function(result, err, meta)
+    if err or not result then
+      if not (meta and meta.code == "STALE_INTERACTION") then
+        vim.notify("md-viewer: could not resolve Obsidian anchor: " .. tostring(err), vim.log.levels.WARN)
+      end
+      return
+    end
+    session.scroll_y = type(result.scrollY) == "number" and result.scrollY or 0
+    session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+    require("md-viewer.controller").schedule_scroll(session)
+    if not result.found then
+      local label = anchor.kind == "block" and ("^" .. anchor.value) or table.concat(anchor.segments, "#")
+      vim.notify("md-viewer: Obsidian anchor not found: " .. label, vim.log.levels.WARN)
+    end
+  end)
+  return true
+end
+
+function M.resolve_pending_obsidian_anchor(session)
+  local anchor = session and session.pending_obsidian_anchor
+  if not anchor then return false end
+  session.pending_obsidian_anchor = nil
+  return M.scroll_obsidian_anchor(session, anchor)
 end
 
 ---Resolve `point` against the `interact` transport. Always uses

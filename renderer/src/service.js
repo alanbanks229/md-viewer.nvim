@@ -232,6 +232,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
           // of this key: resizing the window must re-encode frames, not re-parse
           // the document.
           params.animate === true,
+          params.obsidianEnabled === true,
         ]);
         // Markup rendered while an image was still being fetched is not final,
         // whatever the content revision says. Reusing it would cache the
@@ -251,6 +252,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
             baseDir: params.baseDir,
             documentRoot: params.documentRoot,
             animationStore: params.animate === true ? animations : null,
+            obsidianEnabled: params.obsidianEnabled === true,
           });
           html = rendered.html;
           rememberMarkdown(params.documentId, {
@@ -401,6 +403,7 @@ export function createService({ assetsDir, onShutdown } = {}) {
         // keeps it structurally off.
         animationStore: null,
         assetStore: documentAssets,
+        obsidianEnabled: params.obsidianEnabled === true,
       });
       const after = lanes.isStale(ticket);
       if (after) throw lanes.staleError(ticket, after);
@@ -482,6 +485,15 @@ export function createService({ assetsDir, onShutdown } = {}) {
       return { shutdown: true };
     }
     if (request.method === "ping") return { pong: true };
+    if (request.method === "forget") {
+      const documentId = request.params?.documentId;
+      if (typeof documentId !== "string" || documentId.length === 0) {
+        throw new Error("forget requires documentId");
+      }
+      lanes.forget(documentId);
+      forgetDocument(documentId);
+      return { forgotten: true };
+    }
     if (request.method === "health") {
       const result = await browser.health(request.params?.browser ?? {});
       return {

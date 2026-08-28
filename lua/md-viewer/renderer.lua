@@ -6,7 +6,19 @@ local security = require("md-viewer.security")
 
 local M = {}
 
-function M.is_stale(session, serial) return session.closed or serial ~= session.request_serial end
+function M.is_stale(session, serial)
+  return session.closed or not require("md-viewer.state").is_active(session) or serial ~= session.request_serial
+end
+
+---Promptly release all renderer-side state for a preview document. Fire and
+---forget: closure must never wait on Chromium, and an already-dead renderer is
+---equivalent to a successful eviction.
+function M.forget(session)
+  if not session or not session.document_id then return end
+  local params = { documentId = session.document_id }
+  if process.status().running then process.request_stdio("forget", params, function() end) end
+  if process.active_transport() then process.request("forget", params, function() end) end
+end
 
 ---The revision every request, cache key and frame reference names. Exported
 ---because local mode's frame marker is emitted by the controller in the same
@@ -109,6 +121,7 @@ local function request_local(session, markdown, options, callback, ctx)
     rawHtml = cfg.security.raw_html,
     localImages = cfg.render.local_images,
     maxLocalImageBytes = cfg.render.max_local_image_bytes,
+    obsidianEnabled = cfg.obsidian.enabled,
   }, function(prepared, prepare_err)
     if M.is_stale(session, serial) then return callback(nil, nil, true) end
     if prepare_err then return callback(nil, prepare_err, false) end
@@ -237,6 +250,7 @@ function M.request(session, markdown, options, callback)
     -- markup -- an animated image carries an opaque animation id or it does
     -- not -- and the renderer's markdown cache keys on it.
     animate = cfg.render.animate == true,
+    obsidianEnabled = cfg.obsidian.enabled,
     browser = cfg.browser,
   }
   if not capture_only then params.markdown = markdown end

@@ -29,6 +29,7 @@ import {
   normalizeHit,
   readSelectionTextInPage,
   resolveSelectionInPage,
+  scrollObsidianAnchorInPage,
   setFindInPage,
   stepFindInPage,
 } from "./interact.js";
@@ -825,6 +826,9 @@ export class BrowserRenderer {
       });
     }
     if (action === "find_clear") return this.page.evaluate(clearFindInPage, { token });
+    if (action === "obsidian_scroll") {
+      return this.page.evaluate(scrollObsidianAnchorInPage, { token, anchor: envelope.obsidianAnchor });
+    }
     return this.page.evaluate(hitTestInPage, {
       token, x: envelope.coordinates.x, y: envelope.coordinates.y,
       cellWidthPx: envelope.cellWidthPx, cellHeightPx: envelope.cellHeightPx,
@@ -847,6 +851,9 @@ export class BrowserRenderer {
     if (action === "find_set") return { result: buildFindResult(raw, cached?.sourceMap, envelope.query), hit: null };
     if (action === "find_next" || action === "find_previous") {
       return { result: buildFindStepResult(raw, cached?.findState), hit: null };
+    }
+    if (action === "obsidian_scroll") {
+      return { result: { kind: "obsidian_anchor", found: raw.found === true, scrollY: raw.scrollY }, hit: null };
     }
     return { result: buildFindClearResult(), hit: null };
   }

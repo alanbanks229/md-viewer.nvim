@@ -170,7 +170,7 @@ return function(t)
   local frames = marker_writes()
   t.eq(1, #frames, "exactly one frame marker, emitted in the request's own tick")
   t.ok(frames[1]:find("t=" .. TOKEN, 1, true), "the marker carries the session token")
-  t.ok(frames[1]:find("d=buffer%-" .. source), "the marker names its document")
+  t.ok(frames[1]:find("d=" .. session.document_id, 1, true), "the marker names its pane-scoped document")
   t.ok(frames[1]:find("r=" .. rev1 .. ",y=0,", 1, true), "the reference is this revision at scroll 0")
 
   -- -- unconfirmed image_id: reconcile and the caret hold off ----------------

@@ -1,5 +1,27 @@
 local M = {}
 local sessions = {}
+local panes = {}
+local next_pane_id = 0
+
+local function index_session(session)
+  sessions[session.source_buf] = sessions[session.source_buf] or {}
+  sessions[session.source_buf][session] = true
+end
+
+local function unindex_session(session, source_buf)
+  local bucket = sessions[source_buf or session.source_buf]
+  if not bucket then return end
+  bucket[session] = nil
+  if not next(bucket) then sessions[source_buf or session.source_buf] = nil end
+end
+
+local function first_session(bucket)
+  if not bucket then return nil end
+  for session in pairs(bucket) do
+    if session.pane and session.pane.active == session then return session end
+  end
+  return next(bucket)
+end
 
 function M.create(source_buf, source_win)
   local session = {
@@ -107,11 +129,61 @@ function M.create(source_buf, source_win)
     interaction_stale_count = 0,
     coalesced_preview_events = 0,
   }
-  sessions[source_buf] = session
+  next_pane_id = next_pane_id + 1
+  local pane = {
+    id = next_pane_id,
+    source_win = source_win,
+    preview_win = nil,
+    documents = { session },
+    active = session,
+    history = nil,
+    history_index = 0,
+    activation_epoch = 0,
+    owned = true,
+    closed = false,
+  }
+  session.pane = pane
+  session.document_id = ("pane-%d-buffer-%d"):format(pane.id, source_buf)
+  session.active = true
+  panes[pane.id] = pane
+  index_session(session)
   return session
 end
 
-function M.get(source_buf) return sessions[source_buf] end
+function M.get(source_buf) return first_session(sessions[source_buf]) end
+
+function M.documents_for_source(source_buf)
+  local result = {}
+  for session in pairs(sessions[source_buf] or {}) do
+    result[#result + 1] = session
+  end
+  return result
+end
+
+---Return the document for `source_buf` in `pane`, if it is already open there.
+function M.document(pane, source_buf)
+  if not pane then return nil end
+  for _, session in ipairs(pane.documents) do
+    if session.source_buf == source_buf and not session.closed then return session end
+  end
+end
+
+---Add a document-shaped session to an existing pane. The rendering fields are
+---created by the same constructor as the first document, then the throwaway
+---pane produced by that constructor is discarded.
+function M.create_document(pane, source_buf)
+  local session = M.create(source_buf, pane.source_win)
+  panes[session.pane.id] = nil
+  unindex_session(session)
+  session.pane = pane
+  session.document_id = ("pane-%d-buffer-%d"):format(pane.id, source_buf)
+  session.active = false
+  session.preview_win = pane.preview_win
+  session.source_win = pane.source_win
+  pane.documents[#pane.documents + 1] = session
+  index_session(session)
+  return session
+end
 
 ---Is there a rendered screen on this pane right now, under either rendering
 ---model?
@@ -133,20 +205,32 @@ function M.screen_up(session)
 end
 
 function M.from_preview(buf)
-  for _, session in pairs(sessions) do
-    if session.preview_buf == buf then return session end
+  for _, pane in pairs(panes) do
+    for _, session in ipairs(pane.documents) do
+      if session.preview_buf == buf then return session end
+    end
   end
 end
 
 function M.from_preview_win(win)
-  for _, session in pairs(sessions) do
-    if session.preview_win == win then return session end
+  for _, pane in pairs(panes) do
+    if pane.preview_win == win then return pane.active end
   end
 end
 
 function M.from_source_win(win)
-  for _, session in pairs(sessions) do
-    if session.source_win == win then return session end
+  for _, pane in pairs(panes) do
+    if pane.source_win == win then return pane.active end
+  end
+end
+
+function M.set_source_window(session, win)
+  if not session then return end
+  session.source_win = win
+  if not session.pane then return end
+  session.pane.source_win = win
+  for _, document in ipairs(session.pane.documents) do
+    document.source_win = win
   end
 end
 
@@ -187,13 +271,14 @@ function M.source_window(session)
       found = candidate
     end
   end
-  if found then session.source_win = found end
+  if found then M.set_source_window(session, found) end
   return found
 end
 
 function M.visible_in_tab(tab)
   tab = tab or vim.api.nvim_get_current_tabpage()
-  for _, session in pairs(sessions) do
+  for _, pane in pairs(panes) do
+    local session = pane.active
     if
       session.preview_win
       and vim.api.nvim_win_is_valid(session.preview_win)
@@ -214,20 +299,84 @@ end
 ---sessions believing they render the same document.
 function M.retarget(session, new_buf)
   if not session or new_buf == session.source_buf then return nil end
-  if sessions[new_buf] then return nil end
-  sessions[session.source_buf] = nil
+  if M.document(session.pane, new_buf) then return nil end
+  unindex_session(session)
   session.source_buf = new_buf
-  session.document_id = "buffer-" .. new_buf
-  sessions[new_buf] = session
+  session.document_id = ("pane-%d-buffer-%d"):format(session.pane and session.pane.id or 0, new_buf)
+  index_session(session)
   return session
 end
 
 function M.remove(source_buf)
-  local value = sessions[source_buf]
-  sessions[source_buf] = nil
+  local value = M.get(source_buf)
+  if value then
+    M.remove_document(value)
+    if value.pane and #value.pane.documents == 0 then M.remove_pane(value.pane) end
+  end
   return value
 end
 
-function M.all() return sessions end
+function M.remove_document(session)
+  if not session then return end
+  unindex_session(session)
+  local pane = session.pane
+  if pane then
+    for index, candidate in ipairs(pane.documents) do
+      if candidate == session then
+        table.remove(pane.documents, index)
+        break
+      end
+    end
+  end
+  return session
+end
+
+function M.remove_pane(pane)
+  if not pane then return end
+  panes[pane.id] = nil
+  pane.closed = true
+end
+
+function M.is_active(session)
+  -- Pane-less document tables remain supported for the public low-level APIs
+  -- and their focused tests; every real controller-created document has a
+  -- pane and therefore takes the strict branch.
+  return session and (not session.pane or (not session.pane.closed and session.pane.active == session))
+end
+
+function M.activate(session)
+  local pane = session and session.pane
+  if not pane or pane.closed then return nil end
+  if pane.active then pane.active.active = false end
+  pane.activation_epoch = pane.activation_epoch + 1
+  pane.active = session
+  session.active = true
+  session.activation_epoch = pane.activation_epoch
+  session.preview_win = pane.preview_win
+  session.source_win = pane.source_win
+  return session
+end
+
+function M.panes() return panes end
+
+---Compatibility view used by the rendering loops and diagnostics: one entry
+---per open document, keyed by its stable preview buffer when available.
+function M.all()
+  local all = {}
+  for _, pane in pairs(panes) do
+    for _, session in ipairs(pane.documents) do
+      all[session.preview_buf or session.source_buf] = session
+    end
+  end
+  return all
+end
+
+function M.active_documents()
+  local active = {}
+  for id, pane in pairs(panes) do
+    if pane.active and not pane.closed then active[id] = pane.active end
+  end
+  return active
+end
 
 return M

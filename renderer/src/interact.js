@@ -7,6 +7,7 @@
 // document is loaded.
 
 import { resolveRegionPosition } from "./provenance.js";
+import { OBSIDIAN_SCHEME } from "./obsidian.js";
 
 export const CARET_STRATEGIES = Object.freeze(["auto", "caret-position", "caret-range", "element-only"]);
 
@@ -34,6 +35,7 @@ export const INTERACT_ACTIONS = Object.freeze({
   find_next: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
   find_previous: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
   find_clear: Object.freeze({ mutatesVisibleState: true, requiresCoordinates: false }),
+  obsidian_scroll: Object.freeze({ mutatesVisibleState: false, requiresCoordinates: false, requiresObsidianAnchor: true }),
 });
 
 // Kept empty rather than removed: it is what keeps validateEnvelope's
@@ -97,6 +99,26 @@ export function classifyLink(href) {
   const trimmed = href.trim();
   if (trimmed === "") return { href: "", type: "unsafe" };
   if (trimmed.startsWith("#")) return { href: trimmed, type: "fragment" };
+  if (trimmed.startsWith(OBSIDIAN_SCHEME)) {
+    try {
+      const parsed = JSON.parse(decodeURIComponent(trimmed.slice(OBSIDIAN_SCHEME.length)));
+      const validTarget = parsed && typeof parsed.target === "string";
+      const validBlock = parsed?.anchor?.kind === "block"
+        && typeof parsed.anchor.value === "string"
+        && /^[A-Za-z0-9-]+$/u.test(parsed.anchor.value);
+      const validHeading = parsed?.anchor?.kind === "heading"
+        && Array.isArray(parsed.anchor.segments)
+        && parsed.anchor.segments.length > 0
+        && parsed.anchor.segments.every((part) => typeof part === "string" && part !== "");
+      if (validTarget && (parsed.anchor === null || validBlock || validHeading)) {
+        return { href: trimmed, type: "obsidian", target: parsed.target, anchor: parsed.anchor };
+      }
+    } catch {
+      // Invalid renderer-owned metadata is unsafe, exactly like an unknown
+      // scheme. It is never treated as a local path.
+    }
+    return { href: trimmed, type: "unsafe" };
+  }
   // Protocol-relative: inherits the page scheme, so it is a network fetch
   // wearing a relative path's clothes.
   if (trimmed.startsWith("//")) return { href: trimmed, type: "unsafe" };
@@ -331,6 +353,27 @@ export function validateEnvelope(params) {
     query = envelope.query.trim();
   }
 
+  let obsidianAnchor = null;
+  if (action.requiresObsidianAnchor) {
+    const value = envelope.obsidianAnchor;
+    const validBlock = value?.kind === "block"
+      && typeof value.value === "string"
+      && /^[A-Za-z0-9-]+$/u.test(value.value);
+    const validHeading = value?.kind === "heading"
+      && Array.isArray(value.segments)
+      && value.segments.length > 0
+      && value.segments.every((part) => typeof part === "string" && part.trim() !== "");
+    if (!validBlock && !validHeading) {
+      throw createInteractError(
+        "INVALID_INTERACTION",
+        "obsidian_scroll requires a block id or non-empty heading path"
+      );
+    }
+    obsidianAnchor = validBlock
+      ? { kind: "block", value: value.value }
+      : { kind: "heading", segments: value.segments.map((part) => part.trim()) };
+  }
+
   const strategy = envelope.strategy ?? "auto";
   if (!CARET_STRATEGIES.includes(strategy)) {
     throw createInteractError(
@@ -418,6 +461,7 @@ export function validateEnvelope(params) {
     desiredX,
     caretIndex,
     query,
+    obsidianAnchor,
     modifiers: {
       ctrl: modifiers.ctrl === true,
       shift: modifiers.shift === true,
@@ -447,6 +491,53 @@ export function validateEnvelope(params) {
     // only; anything that doesn't explicitly ask for it renders sharp.
     captureScale: envelope.captureScale === "css" ? "css" : "device",
   };
+}
+
+/// Scroll to an Obsidian heading path or exact block id in the active page.
+/// Heading paths are resolved as a hierarchy: every later segment must occur
+/// below the previous heading and before its section ends.
+export function scrollObsidianAnchorInPage(input) {
+  const root = document.documentElement;
+  if (root.getAttribute("data-md-viewer-doc") !== input.token) {
+    return { error: "DOCUMENT_MISMATCH", expected: input.token, actual: root.getAttribute("data-md-viewer-doc") };
+  }
+  const anchor = input.anchor;
+  let target = null;
+  if (anchor.kind === "block") {
+    target = [...document.querySelectorAll("[data-md-obsidian-block-id]")]
+      .find((element) => element.getAttribute("data-md-obsidian-block-id") === anchor.value) ?? null;
+  } else {
+    const headings = [...document.querySelectorAll("h1,h2,h3,h4,h5,h6")];
+    const wanted = anchor.segments.map((part) => part.trim().toLowerCase());
+    const label = (element) => (element.textContent || "").trim().toLowerCase();
+    const level = (element) => Number(element.tagName.slice(1));
+    for (let start = 0; start < headings.length && target === null; start += 1) {
+      if (label(headings[start]) !== wanted[0]) continue;
+      let current = headings[start];
+      let currentIndex = start;
+      let matched = true;
+      for (let segment = 1; segment < wanted.length; segment += 1) {
+        let next = null;
+        for (let index = currentIndex + 1; index < headings.length; index += 1) {
+          if (level(headings[index]) <= level(current)) break;
+          if (label(headings[index]) === wanted[segment]) {
+            next = headings[index];
+            currentIndex = index;
+            break;
+          }
+        }
+        if (!next) {
+          matched = false;
+          break;
+        }
+        current = next;
+      }
+      if (matched) target = current;
+    }
+  }
+  if (!target) return { ok: true, found: false, scrollY: window.scrollY };
+  target.scrollIntoView({ block: "start" });
+  return { ok: true, found: true, scrollY: window.scrollY };
 }
 
 /// The `page.evaluate` body. Serialized into the page, so it must be entirely

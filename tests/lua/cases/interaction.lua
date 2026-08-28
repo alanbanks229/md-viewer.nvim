@@ -306,7 +306,8 @@ return function(t)
     local source_buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(source_buf, root .. "/sub/doc.md")
     interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = "note.md" } })
-    t.eq({ inside_file }, opened, "an in-root local_file link opens the resolved path")
+    t.eq({}, opened, "an in-root Markdown link is not handed to the OS")
+    t.eq(1, vim.fn.bufloaded(inside_file), "an in-root Markdown link loads a normal source buffer")
 
     opened, notified = {}, {}
     interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = outside_file } })
@@ -580,8 +581,8 @@ return function(t)
     local original_notify, notified = vim.notify, {}
     vim.notify = function(message) notified[#notified + 1] = message end
 
-    -- A real window and a real file-backed buffer: `:edit` is exercised, not
-    -- stubbed, so the jump-list push and the buffer swap are the real ones.
+    -- A real window and real file-backed buffers: the target is loaded for the
+    -- preview but the editable source pane is deliberately left alone.
     vim.cmd.edit(vim.fn.fnameescape(project .. "/doc.md"))
     local source_win = vim.api.nvim_get_current_win()
     local source_buf = vim.api.nvim_get_current_buf()
@@ -590,10 +591,11 @@ return function(t)
     interaction.activate_link(session, { link = { type = "local_file", href = "target.md" } })
     t.eq({}, opened, "a markdown link is not handed to the OS handler")
     t.eq(
-      project .. "/target.md",
+      project .. "/doc.md",
       vim.fs.normalize(vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(source_win))),
-      "a markdown link is edited in the source window"
+      "a markdown link does not replace the editable source window"
     )
+    t.eq(1, vim.fn.bufloaded(project .. "/target.md"), "the Markdown target is loaded without being displayed")
 
     opened, notified = {}, {}
     interaction.activate_link(session, { link = { type = "local_file", href = "picture.png" } })
@@ -722,18 +724,19 @@ return function(t)
 
     t.eq(session, state.retarget(session, 7002), "retarget moves the session onto the new buffer")
     t.eq(7002, session.source_buf, "retarget updates the session's source buffer")
-    t.eq("buffer-7002", session.document_id, "retarget re-derives the document id")
+    t.eq(("pane-%d-buffer-7002"):format(session.pane.id), session.document_id, "retarget re-derives the document id")
     t.eq(nil, state.get(7001), "retarget releases the old buffer's key")
     t.eq(session, state.get(7002), "retarget registers the new buffer's key")
 
-    -- A second session already owning the target must not be stolen.
+    -- Ownership is pane-scoped: another pane may preview the same source
+    -- buffer without either pane stealing the other's document object.
     local other = state.create(7003, 1)
-    t.eq(nil, state.retarget(session, 7003), "retarget refuses a buffer another session already owns")
-    t.eq(7002, session.source_buf, "a refused retarget leaves the session where it was")
-    t.eq(other, state.get(7003), "a refused retarget leaves the other session intact")
+    t.eq(session, state.retarget(session, 7003), "retarget permits the same source in a different pane")
+    t.eq(7003, session.source_buf, "the first pane moves to its own target document")
+    t.eq(other, state.document(other.pane, 7003), "the other pane retains its independent document")
     t.eq(serial_before, session.request_serial, "state.retarget alone does not bump the serial")
 
-    state.remove(7002)
+    state.remove(7003)
     state.remove(7003)
   end
 
