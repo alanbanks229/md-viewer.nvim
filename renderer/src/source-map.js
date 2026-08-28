@@ -124,3 +124,56 @@ export async function collectBlockGeometry(page) {
     return [...unique.values()].sort((a, b) => a.sourceStart - b.sourceStart || a.sourceEnd - b.sourceEnd);
   });
 }
+
+/// Every rendered *visual* line's vertical band, in document coordinates --
+/// one entry per line a `granularity: "line"` caret motion (interact.js's
+/// `lineStep`) can land on, unlike collectBlockGeometry's one-per-block
+/// (heading/paragraph) granularity. A count like `5j` moves five of *these*,
+/// not five blocks, so a navigation overlay meant to match what a count
+/// lands on has to be numbered this densely.
+///
+/// Walks the same source-mapped blocks moveCaretInPage does, but collects
+/// each text node's whole-node `Range.getClientRects()` instead of
+/// per-character boxes: confined to one text node, that API reports one
+/// quad per visual line the node wraps across (the same fact the selection
+/// overlay's quad collector already relies on), which is far cheaper than a
+/// per-character walk over a whole document. Quads are then banded by top
+/// (tops within 2px are one rendered line) exactly as the selection
+/// painter's own quad-to-band clustering does, run here over the whole
+/// document instead of just a selected range.
+export async function collectLineGeometry(page) {
+  return page.evaluate(() => {
+    const quads = [];
+    const seen = new Set();
+    for (const block of document.querySelectorAll("[data-source-start][data-source-end]")) {
+      const blockRect = block.getBoundingClientRect();
+      if (!(blockRect.width > 0 && blockRect.height > 0)) continue;
+      const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+      let node = walker.nextNode();
+      while (node !== null) {
+        if (node.nodeValue.length > 0 && !seen.has(node)) {
+          seen.add(node);
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          for (const quad of range.getClientRects()) {
+            if (quad.height >= 0.5) quads.push({ top: quad.top, bottom: quad.bottom });
+          }
+        }
+        node = walker.nextNode();
+      }
+    }
+    quads.sort((a, b) => a.top - b.top);
+    const lines = [];
+    let band = null;
+    for (const quad of quads) {
+      if (band === null || quad.top > band.anchor + 2) {
+        band = { anchor: quad.top, top: quad.top, bottom: quad.bottom };
+        lines.push(band);
+      } else {
+        band.top = Math.min(band.top, quad.top);
+        band.bottom = Math.max(band.bottom, quad.bottom);
+      }
+    }
+    return lines.map((line) => ({ topPx: line.top + window.scrollY, bottomPx: line.bottom + window.scrollY }));
+  });
+}

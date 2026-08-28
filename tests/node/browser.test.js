@@ -41,6 +41,11 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   const result = await renderer.render(params, html, 42);
   assert.equal(result.viewportHeightPx, 480);
   assert.ok(result.blocks.length >= 2);
+  // One line per rendered visual line, not one per block: a `5j`-style count
+  // motion counts these, and a heading plus a one-line paragraph is exactly
+  // two of both here, but a wrapped multi-line paragraph (below) is where
+  // the two diverge.
+  assert.equal(result.lines.length, 2);
   const devicePng = fs.readFileSync(result.pngPath);
   assert.deepEqual(devicePng.subarray(0, 8), Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
   assert.equal(devicePng.readUInt32BE(16), 1280);
@@ -84,6 +89,40 @@ test("uses approved Chromium, captures one viewport, and cleans temporary files"
   const tempDir = renderer.tempDir;
   await renderer.close();
   assert.equal(fs.existsSync(tempDir), false);
+});
+
+test("line geometry is one entry per rendered visual line, denser than block geometry", async (t) => {
+  const executable = findRealChromium();
+  if (!executable) {
+    t.skip("no approved Chrome, Chromium, or Edge executable found on this platform");
+    return;
+  }
+  const renderer = new BrowserRenderer({ assetsDir });
+  t.after(() => renderer.close());
+  const params = {
+    documentId: "line-geometry-doc", contentRevision: 1,
+    viewport: { widthPx: 200, heightPx: 600, deviceScaleFactor: 1 },
+    browser: { executable_path: executable }, theme: "dark", scrollY: 0,
+    captureScale: "device", scrollPastEnd: true, scrollPastEndOffsetPx: 22,
+  };
+  // Narrow enough that this one paragraph wraps across several visual
+  // lines -- the case a per-block marker (one per <p>) undercounts what a
+  // `5j`-style count motion actually moves through.
+  const html =
+    '<h1 data-source-start="0" data-source-end="1">Heading</h1>'
+    + '<p data-source-start="1" data-source-end="2">one two three four five six seven eight nine ten</p>';
+  const result = await renderer.render(params, html, "line-geometry");
+  assert.equal(result.blocks.length, 2, "one block per element: the heading and the paragraph");
+  assert.ok(
+    result.lines.length > result.blocks.length,
+    `a wrapped paragraph should produce more lines (${result.lines.length}) than blocks (${result.blocks.length})`
+  );
+  // Every line is a real, ordered, non-overlapping band: each starts no
+  // higher than the previous one ended, matching document reading order.
+  for (let i = 1; i < result.lines.length; i += 1) {
+    assert.ok(result.lines[i].topPx >= result.lines[i - 1].topPx, "lines are reported in document order");
+    assert.ok(result.lines[i].bottomPx > result.lines[i].topPx, "each line has a positive height");
+  }
 });
 
 test("a health check while a document is active does not blank it", async (t) => {

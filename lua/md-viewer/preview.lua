@@ -201,45 +201,61 @@ function M.update_title(session)
   vim.wo[session.preview_win].winbar = title_text(session)
 end
 
----How far down the *document* the reader has scrolled, not where the caret
----sits within the current screenful. Neovim's own default statusline embeds
----`%P`, computed from cursor_line/buffer_line_count -- both of which describe
----one screenful here (the preview buffer's line count is the window's cell
----height, and the shadow cursor's row is the caret's position within the
----current viewport screenshot; see M.surface_size and caret.shadow_cursor).
----That makes %P cycle 0-100% every scroll of one viewport, which is the
----"96% -> BOT -> 74%" disorientation this replaces.
-local function scroll_ruler_text(session)
-  local max_scroll = math.max(0, (session.document_height_px or 0) - (session.viewport_height_px or 0))
-  if max_scroll <= 0 then return "All" end
-  local y = session.applied_scroll_y or 0
+---How far down the *document* the caret sits, mirroring how the source
+---buffer's own ruler reports the cursor's line as a fraction of the file --
+---not how far the viewport has scrolled. Neovim's own default statusline
+---embeds `%P`, computed from cursor_line/buffer_line_count, but both of
+---those describe one screenful here (the preview buffer's line count is the
+---window's cell height, and the shadow cursor's row is the caret's position
+---within the current viewport screenshot; see M.surface_size and
+---caret.shadow_cursor) -- not the caret's place in the whole document.
+---
+---`session.caret_rect.y` is viewport-relative at `session.caret_scroll_y`
+---(see caret.lua's module doc), so the caret's *absolute* document position
+---is that scroll plus that y -- the same arithmetic caret.rect() does in
+---reverse to re-place the caret locally after an ordinary scroll. Before any
+---caret has been placed, this falls back to the scroll position, which is
+---the only position known yet.
+local function caret_ruler_text(session)
+  local document_height = session.document_height_px or 0
+  local viewport_height = session.viewport_height_px or 0
+  if document_height <= viewport_height then return "All" end
+  local rect = session.caret_rect
+  local y = rect and ((session.caret_scroll_y or 0) + rect.y) or (session.applied_scroll_y or 0)
   if y <= 0 then return "Top" end
-  if y >= max_scroll - 0.5 then return "Bot" end
-  return string.format("%d%%", math.floor((y / max_scroll) * 100))
+  if y >= document_height - 1 then return "Bot" end
+  return string.format("%d%%", math.floor((y / document_height) * 100))
 end
 
 ---Replace Neovim's default per-window statusline (and the inaccurate %P
----inside it) with the document-wide scroll position. `applied_scroll_y`, not
----`scroll_y`: it is what the last completed render/capture put on screen,
----which is what a percentage next to it should describe.
+---inside it) with the caret's position in the whole document. A no-op for
+---the `cells` backend: that buffer holds the real document as real text, so
+---Neovim's own ruler is already correct and must not be overridden.
 ---
 ---`'statusline'` treats `%` as its own escape character, so a literal one --
 ---the whole point of "NN%" -- has to be doubled or Neovim reads it as the
 ---start of an item and refuses the string outright (E539).
 function M.update_statusline(session)
+  if session.backend and session.backend.name == "cells" then return end
   if not (session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)) then return end
-  local text = scroll_ruler_text(session):gsub("%%", "%%%%")
+  local text = caret_ruler_text(session):gsub("%%", "%%%%")
   vim.wo[session.preview_win].statusline = "%=" .. text .. " "
 end
 
 local line_marker_ns = vim.api.nvim_create_namespace("md-viewer_line_markers")
 
----A sequential number over each rendered content block currently on screen,
----for readers who want a rough spatial index to navigate the preview with
----Vim motions. Deliberately not the source buffer's line numbers -- those
----would claim a correspondence this pane cannot keep -- just block 1, 2, 3...
----in document order, positioned by the same viewport-relative pixel-to-cell
----math caret.shadow_cursor uses for the caret itself.
+---A sequential number over each rendered *visual line* currently on screen,
+---for readers who want to navigate the preview with a count -- `5j` from
+---the top of the screen lands on whichever line is marked "5", because a
+---line motion and this overlay now count the same unit. Numbering by
+---content block instead (heading/paragraph) undercounted this: a `5j` that
+---crossed several lines of one paragraph still landed well past the fifth
+---*block* mark, which is what made the numbers look wrong rather than just
+---coarse. Deliberately still not the source buffer's line numbers -- those
+---would claim a correspondence this pane cannot keep.
+---
+---Positioned by the same viewport-relative pixel-to-cell math
+---caret.shadow_cursor uses for the caret itself.
 function M.update_line_markers(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
   vim.api.nvim_buf_clear_namespace(session.preview_buf, line_marker_ns, 0, -1)
@@ -250,8 +266,8 @@ function M.update_line_markers(session)
   local viewport_height = session.viewport_height_render_px or 0
   if viewport_height <= 0 then return end
   local scroll_y = session.applied_scroll_y or 0
-  for index, block in ipairs(session.latest_blocks or {}) do
-    local row = math.floor(((block.topPx - scroll_y) / viewport_height) * rows)
+  for index, line in ipairs(session.latest_lines or {}) do
+    local row = math.floor(((line.topPx - scroll_y) / viewport_height) * rows)
     if row >= 0 and row < rows then
       pcall(vim.api.nvim_buf_set_extmark, session.preview_buf, line_marker_ns, row, 0, {
         virt_text = { { tostring(index), "MdViewerLineMarker" } },
@@ -306,7 +322,12 @@ function M.open(position, session)
   vim.wo[win].winhighlight = "Visual:MdViewerInertVisual,VisualNOS:MdViewerInertVisual"
 
   if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
-  vim.wo[win].statusline = "%=" .. scroll_ruler_text(session) .. " "
+  -- Not `M.update_statusline(session)`: `session.preview_win` is only
+  -- assigned by the caller once this function returns, and that function
+  -- reads it to know which window to set the option on.
+  if not (session.backend and session.backend.name == "cells") then
+    vim.wo[win].statusline = "%=" .. caret_ruler_text(session) .. " "
+  end
 
   if position == "right" or position == "left" then
     vim.api.nvim_win_set_width(win, math.max(cfg.split.min_width, math.floor(vim.o.columns * cfg.split.width)))

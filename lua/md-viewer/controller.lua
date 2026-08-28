@@ -750,6 +750,7 @@ function M.refresh(session, render_options)
       newer_scroll_pending = math.abs((session.scroll_y or 0) - (meta.requestedScrollY or 0)) > 0.5
     end
     session.latest_blocks = meta.blocks
+    session.latest_lines = meta.lines
     session.document_height_px = meta.documentHeightPx
     session.viewport_height_px = meta.viewportHeightPx
     -- Preserve a newer requested position while showing this completed frame.
@@ -816,10 +817,12 @@ function M.refresh(session, render_options)
     -- can go on, and a failure caches as a failure, so this stops on its own.
     session.remote_images_pending = meta.remoteImagesPending == true
     if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
-    -- Both branches below have by now set document_height_px, viewport_height_px,
-    -- applied_scroll_y, and viewport_height_render_px -- everything the scroll
-    -- ruler and the block markers are computed from -- so one call here covers
-    -- the local-render early return just as well as the direct-render tail.
+    -- A render changes the ruler's denominator (document_height_px) and the
+    -- line markers' geometry (latest_lines) even when the caret itself has
+    -- not moved -- an edit can shrink or grow the document out from under a
+    -- caret sitting exactly where it was. Both branches below have by now set
+    -- every field either update reads, so one call here covers the
+    -- local-render early return just as well as the direct-render tail.
     preview.update_statusline(session)
     preview.update_line_markers(session)
     if meta.local_render then
@@ -1437,6 +1440,7 @@ function M.retarget(session, new_buf, record)
   interaction.forget_selection(session)
   session.renderer_revision = nil
   session.latest_blocks = {}
+  session.latest_lines = {}
   session.document_height_px = 0
   session.scroll_y, session.applied_scroll_y = 0, 0
   session.last_source_block = nil

@@ -24,6 +24,7 @@ function M.create(source_buf, source_win)
     render_epoch = 0,
     renderer_revision = nil,
     latest_blocks = {},
+    latest_lines = {},
     document_height_px = 0,
     viewport_height_px = 0,
     scroll_y = 0,

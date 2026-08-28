@@ -147,6 +147,7 @@ test("replica: pending on missing assets, metrics after the push, surfaces resol
   assert.equal(metrics.rev, "7:0");
   assert.ok(metrics.documentHeightPx > 0);
   assert.ok(Array.isArray(metrics.blocks) && metrics.blocks.length > 0, "block geometry rides the metrics");
+  assert.ok(Array.isArray(metrics.lines) && metrics.lines.length > 0, "line geometry rides the metrics too");
 
   // The frame surface for the rendered state resolves immediately.
   const frameRef = { kind: "frame", id: 9, rev: "7:0", scrollY: 0, epoch: 0, widthPx: 640, heightPx: 480, scale: 1 };

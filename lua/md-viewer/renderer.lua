@@ -126,6 +126,7 @@ local function request_local(session, markdown, options, callback, ctx)
           local_render = true,
           requestedScrollY = requested_scroll,
           blocks = metrics.blocks or {},
+          lines = metrics.lines or {},
           documentHeightPx = metrics.documentHeightPx,
           viewportHeightPx = metrics.viewportHeightPx,
           scrollY = metrics.scrollY,

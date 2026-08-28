@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { chromium } from "playwright";
-import { collectAnimationGeometry, collectBlockGeometry } from "./source-map.js";
+import { collectAnimationGeometry, collectBlockGeometry, collectLineGeometry } from "./source-map.js";
 import { csp, installNetworkPolicy } from "./security.js";
 import { discoverChromium } from "./browser-discovery.js";
 import { buildOverlaySheetPng } from "./overlay-sheet.js";
@@ -274,6 +274,7 @@ export class BrowserRenderer {
     await this.page.setContent(documentHtml, { waitUntil: "domcontentloaded" });
     const documentHeight = await this.page.evaluate(() => document.documentElement.scrollHeight);
     const blocks = await collectBlockGeometry(this.page);
+    const lines = await collectLineGeometry(this.page);
     // Measured here, with the layout, because that is the only moment the rects
     // are known to match the document that produced them. A document with no
     // animated images pays one empty-set check and no round trip.
@@ -283,9 +284,9 @@ export class BrowserRenderer {
     // is the least likely moment in the document's life for every data-URI
     // image to have an intrinsic size yet.
     const { rects: animations, complete } = await collectAnimationGeometry(this.page, animationIds ?? []);
-    this.layout = { key: layoutKey, documentHeight, blocks, animations, animationsComplete: complete };
+    this.layout = { key: layoutKey, documentHeight, blocks, lines, animations, animationsComplete: complete };
     this.active = { documentId, contentRevision, layoutKey, token, width, height, scrollY: 0 };
-    return { token, documentHeight, blocks, animations };
+    return { token, documentHeight, blocks, lines, animations };
   }
 
   async applyScroll(documentHeight, height, requested) {
@@ -631,6 +632,7 @@ export class BrowserRenderer {
       scrollY,
       documentHeight,
       blocks: this.layout.blocks,
+      lines: this.layout.lines,
       animations: this.layout.animations,
       animationIds: params.animationIds,
     });
@@ -641,6 +643,7 @@ export class BrowserRenderer {
       viewportHeightPx: height,
       scrollY,
       blocks: this.layout.blocks,
+      lines: this.layout.lines,
       // Document-coordinate rects only. Frames are materialized off this path
       // (service.js's `animation` method): decoding a large GIF is seconds of CPU
       // and this is the queue every scroll and keystroke waits behind.
@@ -749,6 +752,7 @@ export class BrowserRenderer {
     record.token = loaded.token;
     record.documentHeight = loaded.documentHeight;
     record.blocks = loaded.blocks;
+    record.lines = loaded.lines;
     record.animations = loaded.animations;
     const scrollY = await this.applyScroll(loaded.documentHeight, record.height, envelope.scrollY ?? record.scrollY);
     return { rehydrated: true, record, scrollY, documentHeight: loaded.documentHeight };

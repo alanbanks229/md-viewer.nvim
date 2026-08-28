@@ -705,13 +705,16 @@ local function send_caret_motion(session, granularity, direction, count, from, o
       session.scroll_y = result.scrollY
       session.applied_scroll_y = result.scrollY
       session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
-      preview.update_statusline(session)
-      preview.update_line_markers(session)
     end
     -- Recorded against the scroll the renderer measured it at, which after an
     -- in-page scroll is the position above, not the one this request was sent
     -- with.
     caret.set_rect(session, result.rect, session.applied_scroll_y or 0, result.index)
+    -- After caret_rect/caret_scroll_y above: the ruler is the caret's own
+    -- position in the document, not the viewport's, so it has to run after
+    -- the caret actually lands rather than only when the motion scrolled.
+    preview.update_statusline(session)
+    preview.update_line_markers(session)
     -- Any motion that is not a line motion re-seeds the sticky column, so the
     -- next `j` aims at where *this* motion left the caret. `$` is the one
     -- exception and matches Vim: it parks the column past every line's end, so

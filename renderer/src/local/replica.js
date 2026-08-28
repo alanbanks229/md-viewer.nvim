@@ -138,6 +138,7 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
       documentHeightPx: result.documentHeightPx,
       viewportHeightPx: result.viewportHeightPx,
       blocks: result.blocks,
+      lines: result.lines,
       scrollY: result.scrollY,
       visualEpoch: record.epoch,
     };
