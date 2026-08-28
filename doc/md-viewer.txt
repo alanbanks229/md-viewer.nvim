@@ -114,8 +114,8 @@ preview ~
     winbar                       true       label the preview with its source
     loading                      true       startup spinner
     loading_interval_ms          80         spinner tick
-    line_markers                 false      number each rendered block; see
-                                            :MdViewerToggleLineMarkers
+    line_numbers                 "off"      off, absolute, relative; rendered
+                                            visual lines, not source lines
 
 render ~
     debounce_ms                  200        after an edit, before a render
@@ -488,13 +488,19 @@ COMMANDS                                                  *md-viewer-commands*
         Move the preview to the next document in its history, after going
         back.
 
-                                                  *:MdViewerToggleLineMarkers*
-:MdViewerToggleLineMarkers
-        Toggle a sequential number over each rendered content block, for
-        navigating the preview with Vim motions. Not the source buffer's
-        line numbers -- just block 1, 2, 3... in document order. Affects
-        every open preview at once (`preview.line_markers` is a reading
-        preference, not a per-document setting).
+                                           *:MdViewerToggleAbsoluteLineNumbers*
+:MdViewerToggleAbsoluteLineNumbers
+        Show absolute numbers for rendered visual lines. Repeating the command
+        while absolute numbers are visible turns numbering off; invoking it
+        from relative mode switches directly to absolute mode.
+
+                                           *:MdViewerToggleRelativeLineNumbers*
+:MdViewerToggleRelativeLineNumbers
+        Show distances from the caret's rendered visual line, matching
+        Neovim with both 'number' and 'relativenumber': the caret line keeps
+        its absolute number. Repeating the command while relative numbers are
+        visible turns numbering off; invoking it from absolute mode switches
+        directly to relative mode. Both commands affect every open preview.
 
                                                              *:MdViewerHealth*
 :MdViewerHealth
@@ -533,6 +539,17 @@ COMMANDS                                                  *md-viewer-commands*
         is "auto". Nothing is written to your configuration.
 
         See |md-viewer-resident| for what the number is used for.
+
+STATUSLINE INTEGRATION ~
+
+`require("md-viewer").statusline_progress()` returns `All`, `Top`, `Bot`, or
+`NN%` while a graphical preview buffer is current, and nil for every other
+buffer (including the text-cell fallback). It never changes 'statusline'.
+
+The `User MdViewerProgressChanged` event fires only when the displayed label
+changes. `event.data` contains `buf`, `win`, and the raw `progress` string; a
+statusline plugin can refresh that window while keeping ownership of its full
+layout.
 
 =============================================================================
 PREVIEW NAVIGATION                                      *md-viewer-navigation*

@@ -3,6 +3,7 @@ local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
 local linkrate = require("md-viewer.linkrate")
 local resident = require("md-viewer.resident")
+local state = require("md-viewer.state")
 
 local M = {}
 
@@ -201,79 +202,164 @@ function M.update_title(session)
   vim.wo[session.preview_win].winbar = title_text(session)
 end
 
----How far down the *document* the caret sits, mirroring how the source
----buffer's own ruler reports the cursor's line as a fraction of the file --
----not how far the viewport has scrolled. Neovim's own default statusline
----embeds `%P`, computed from cursor_line/buffer_line_count, but both of
----those describe one screenful here (the preview buffer's line count is the
----window's cell height, and the shadow cursor's row is the caret's position
----within the current viewport screenshot; see M.surface_size and
----caret.shadow_cursor) -- not the caret's place in the whole document.
----
----`session.caret_rect.y` is viewport-relative at `session.caret_scroll_y`
----(see caret.lua's module doc), so the caret's *absolute* document position
----is that scroll plus that y -- the same arithmetic caret.rect() does in
----reverse to re-place the caret locally after an ordinary scroll. Before any
----caret has been placed, this falls back to the scroll position, which is
----the only position known yet.
-local function caret_ruler_text(session)
+local line_number_ns = vim.api.nvim_create_namespace("md-viewer_line_numbers")
+
+local function line_center(line) return (line.topPx + line.bottomPx) / 2 end
+
+---The rendered visual line nearest document-coordinate `y`. Geometry is
+---ordered, so two neighbours around the binary-search insertion point are the
+---only candidates whose centres can win.
+local function nearest_line_index(lines, y)
+  if not (lines and lines[1]) then return nil end
+  local low, high = 1, #lines
+  while low <= high do
+    local middle = math.floor((low + high) / 2)
+    if line_center(lines[middle]) < y then
+      low = middle + 1
+    else
+      high = middle - 1
+    end
+  end
+  local after = math.max(1, math.min(#lines, low))
+  local before = math.max(1, after - 1)
+  if math.abs(line_center(lines[before]) - y) <= math.abs(line_center(lines[after]) - y) then return before end
+  return after
+end
+
+local function caret_line_index(session)
+  local rect = session.caret_rect
+  if not rect then return nil end
+  local y = (session.caret_scroll_y or 0) + rect.y + rect.height / 2
+  return nearest_line_index(session.latest_lines, y)
+end
+
+local function viewport_line_index(session)
+  local height = session.viewport_height_render_px or session.viewport_height_px or 0
+  return nearest_line_index(session.latest_lines, (session.applied_scroll_y or 0) + height / 2)
+end
+
+local function progress_text(session)
   local document_height = session.document_height_px or 0
   local viewport_height = session.viewport_height_px or 0
   if document_height <= viewport_height then return "All" end
-  local rect = session.caret_rect
-  local y = rect and ((session.caret_scroll_y or 0) + rect.y) or (session.applied_scroll_y or 0)
+
+  local lines = session.latest_lines or {}
+  local total = #lines
+  local basis = session.progress_basis == "caret" and "caret" or "viewport"
+  local index = basis == "caret" and caret_line_index(session) or viewport_line_index(session)
+  if total > 0 and index then
+    if basis == "caret" then
+      if index == 1 then return "Top" end
+      if index == total then return "Bot" end
+    else
+      local maximum = math.max(0, document_height - viewport_height)
+      local scroll = session.applied_scroll_y or 0
+      if scroll <= 0 then return "Top" end
+      if scroll >= maximum - 0.5 then return "Bot" end
+    end
+    return string.format("%d%%", math.max(1, math.min(99, math.floor((index / total) * 100))))
+  end
+
+  -- Before the first render has delivered visual-line geometry, retain an
+  -- honest pixel fallback rather than exposing the viewport-sized shadow
+  -- buffer's native percentage.
+  local y
+  if basis == "caret" and session.caret_rect then
+    y = (session.caret_scroll_y or 0) + session.caret_rect.y + session.caret_rect.height / 2
+  else
+    y = (session.applied_scroll_y or 0) + viewport_height / 2
+  end
   if y <= 0 then return "Top" end
   if y >= document_height - 1 then return "Bot" end
-  return string.format("%d%%", math.floor((y / document_height) * 100))
+  return string.format("%d%%", math.max(1, math.min(99, math.floor((y / document_height) * 100))))
 end
 
----Replace Neovim's default per-window statusline (and the inaccurate %P
----inside it) with the caret's position in the whole document. A no-op for
----the `cells` backend: that buffer holds the real document as real text, so
----Neovim's own ruler is already correct and must not be overridden.
----
----`'statusline'` treats `%` as its own escape character, so a literal one --
----the whole point of "NN%" -- has to be doubled or Neovim reads it as the
----start of an item and refuses the string outright (E539).
-function M.update_statusline(session)
-  if session.backend and session.backend.name == "cells" then return end
-  if not (session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)) then return end
-  local text = caret_ruler_text(session):gsub("%%", "%%%%")
-  vim.wo[session.preview_win].statusline = "%=" .. text .. " "
+---A raw, human-readable progress label for statusline integrations. nil means
+---the current buffer is not a graphical md-viewer preview and the caller should
+---fall back to its ordinary component.
+function M.statusline_progress(buf)
+  local session = state.from_preview(buf or vim.api.nvim_get_current_buf())
+  if not session or not session.backend or session.backend.name == "cells" then return nil end
+  return progress_text(session)
 end
 
-local line_marker_ns = vim.api.nvim_create_namespace("md-viewer_line_markers")
+---Publish progress without taking ownership of 'statusline'. The last label is
+---cached so a run of motions within one percentage does not churn a global
+---statusline renderer such as Lualine.
+function M.update_progress(session)
+  if not session or not session.backend or session.backend.name == "cells" then return end
+  local text = progress_text(session)
+  if text == session.last_progress_text then return end
+  session.last_progress_text = text
+  vim.api.nvim_exec_autocmds("User", {
+    pattern = "MdViewerProgressChanged",
+    modeline = false,
+    data = { buf = session.preview_buf, win = session.preview_win, progress = text },
+  })
+end
 
----A sequential number over each rendered *visual line* currently on screen,
----for readers who want to navigate the preview with a count -- `5j` from
----the top of the screen lands on whichever line is marked "5", because a
----line motion and this overlay now count the same unit. Numbering by
----content block instead (heading/paragraph) undercounted this: a `5j` that
----crossed several lines of one paragraph still landed well past the fifth
----*block* mark, which is what made the numbers look wrong rather than just
----coarse. Deliberately still not the source buffer's line numbers -- those
----would claim a correspondence this pane cannot keep.
----
----Positioned by the same viewport-relative pixel-to-cell math
----caret.shadow_cursor uses for the caret itself.
-function M.update_line_markers(session)
+function M.set_progress_basis(session, basis)
+  assert(basis == "caret" or basis == "viewport", "progress basis must be caret or viewport")
+  session.progress_basis = basis
+  M.update_progress(session)
+end
+
+---Draw absolute or caret-relative rendered visual-line numbers. The browser's
+---line boxes vary in height, so their vertical centres go through the same
+---CSS-pixel-to-terminal-cell conversion as the caret. Using top edges was the
+---one-row-up bias visible on headings and other tall lines.
+function M.update_line_numbers(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
-  vim.api.nvim_buf_clear_namespace(session.preview_buf, line_marker_ns, 0, -1)
-  if not config.get().preview.line_markers then return end
-  vim.api.nvim_set_hl(0, "MdViewerLineMarker", { link = "LineNr", default = true })
-  local rows = M.surface_size(session)
-  if not rows then return end
+  vim.api.nvim_buf_clear_namespace(session.preview_buf, line_number_ns, 0, -1)
+  local mode = config.get().preview.line_numbers
+  if session.backend and session.backend.name == "cells" then
+    if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
+      vim.wo[session.preview_win].number = mode ~= "off"
+      vim.wo[session.preview_win].relativenumber = mode == "relative"
+    end
+    return
+  end
+  if mode == "off" then return end
+  vim.api.nvim_set_hl(0, "MdViewerLineNumber", { link = "LineNr", default = true })
+  vim.api.nvim_set_hl(0, "MdViewerCurrentLineNumber", { link = "CursorLineNr", default = true })
+  local placement = session.last_placement
+  if not placement and session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
+    placement = M.placement(session.preview_win, session.backend and session.backend.name)
+  end
+  if not placement or placement.height <= 0 then return end
   local viewport_height = session.viewport_height_render_px or 0
   if viewport_height <= 0 then return end
   local scroll_y = session.applied_scroll_y or 0
+  local current = mode == "relative" and caret_line_index(session) or nil
+  local by_row = {}
   for index, line in ipairs(session.latest_lines or {}) do
-    local row = math.floor(((line.topPx - scroll_y) / viewport_height) * rows)
-    if row >= 0 and row < rows then
-      pcall(vim.api.nvim_buf_set_extmark, session.preview_buf, line_marker_ns, row, 0, {
-        virt_text = { { tostring(index), "MdViewerLineMarker" } },
-        virt_text_pos = "overlay",
-      })
+    if line.bottomPx > scroll_y and line.topPx < scroll_y + viewport_height then
+      local relative_y = line_center(line) - scroll_y
+      local row = coordinates.css_to_cell(
+        { x = 0, y = relative_y },
+        placement,
+        { widthPx = session.viewport_width_px or 1, heightPx = viewport_height }
+      )
+      if row then
+        local row_center = ((row - 0.5) / placement.height) * viewport_height
+        local distance = math.abs(relative_y - row_center)
+        if not by_row[row] or distance < by_row[row].distance then
+          local value = index
+          if current and index ~= current then value = math.abs(index - current) end
+          by_row[row] = {
+            distance = distance,
+            value = value,
+            highlight = current == index and "MdViewerCurrentLineNumber" or "MdViewerLineNumber",
+          }
+        end
+      end
     end
+  end
+  for row, number in pairs(by_row) do
+    pcall(vim.api.nvim_buf_set_extmark, session.preview_buf, line_number_ns, row - 1, 0, {
+      virt_text = { { tostring(number.value), number.highlight } },
+      virt_text_pos = "overlay",
+    })
   end
 end
 
@@ -322,11 +408,9 @@ function M.open(position, session)
   vim.wo[win].winhighlight = "Visual:MdViewerInertVisual,VisualNOS:MdViewerInertVisual"
 
   if cfg.preview.winbar then vim.wo[win].winbar = title_text(session) end
-  -- Not `M.update_statusline(session)`: `session.preview_win` is only
-  -- assigned by the caller once this function returns, and that function
-  -- reads it to know which window to set the option on.
-  if not (session.backend and session.backend.name == "cells") then
-    vim.wo[win].statusline = "%=" .. caret_ruler_text(session) .. " "
+  if session.backend and session.backend.name == "cells" then
+    vim.wo[win].number = cfg.preview.line_numbers ~= "off"
+    vim.wo[win].relativenumber = cfg.preview.line_numbers == "relative"
   end
 
   if position == "right" or position == "left" then

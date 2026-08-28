@@ -122,51 +122,30 @@ All notable changes to this project will be documented here. The project uses
   supersession (`lanes.js`) drops a stale answer if the interrupted request's
   reply lands late.
 
-- **The preview pane's scroll-position indicator did not track the document,
-  and did not move at all while scrolling in local-render mode.** Nothing in
-  md-viewer sets `'statusline'`/`'ruler'` for the preview window, so
-  Neovim's own default statusline showed through, embedding `%P` --
-  computed from `cursor_line / total_lines_in_buffer`. Both of those numbers
-  describe one screenful of the *window*, not the document: the preview
-  buffer's line count is pinned to the window's terminal-cell height
-  (`preview.surface_size`), and the shadow cursor's row is the caret's
-  position within the *current on-screen screenshot*
-  (`coordinates.css_to_cell`, scaled by `viewport_height_render_px`), never
-  against `document_height_px`. So `%P` cycled 0-100% every scroll of one
-  viewport -- reported live: 7% through the document in the source buffer
-  read as 96% in the preview, then `BOT`, then 74%, from scrolling within a
-  single screenful. A first fix keyed the ruler off scroll position instead,
-  but local-render scrolling (`apply_surface`, a marker with no round trip)
-  never runs the render-completion callback that fix depended on, so the
-  ruler simply never updated on scroll in that mode -- reported live
-  (2026-08-27). The preview window now sets its own `'statusline'`,
-  computed from the *caret's* own absolute position in the document
-  (`session.caret_scroll_y + session.caret_rect.y`, against
-  `document_height_px`; `Top`/`Bot`/`All`/`NN%`, the same semantics Vim's
-  own ruler documents for a file-scoped percentage) and updates from the one
-  place every caret motion converges on (`interaction.caret_motion`'s
-  result callback), which local-mode scrolling reaches exactly as the
-  direct path does. Left untouched for the `cells` backend, whose buffer
-  holds the real document as real text and whose own ruler is already
-  correct.
+- **Preview motion made the global Lualine bar blink and still reported the
+  wrong percentage.** md-viewer and Lualine alternately replaced the preview
+  window's `'statusline'`: md-viewer briefly wrote a bare ruler, then Lualine
+  restored the complete bar and recomputed progress from the viewport-sized
+  shadow buffer (`3/56`, the `5%` visible in the report) rather than from the
+  rendered document. md-viewer no longer writes `'statusline'` at all. Its
+  `statusline_progress()` API reports `All`/`Top`/`Bot`/`NN%` from the same
+  full-document visual-line geometry navigation uses, following the caret
+  after caret motion and the viewport midpoint after scroll-only motion. A
+  deduplicated `MdViewerProgressChanged` User event lets the configured
+  statusline refresh without two renderers fighting over one option.
 
 ### Added
 
-- **`:MdViewerToggleLineMarkers`** overlays a sequential number on each
-  rendered *visual line* currently on screen, for navigating the preview
-  with a count -- `5j` from the top of the screen lands on whichever line is
-  marked "5", because the overlay and a line motion (`renderer/src/interact.js`'s
-  `lineStep`) now count the same unit. An earlier version numbered by
-  content block (one mark per paragraph/heading) instead; reported live
-  (2026-08-27) that `5j` landed well past the fifth mark, since a single
-  wrapped paragraph is several lines but one block. `renderer/src/source-map.js`'s
-  new `collectLineGeometry` bands the same per-text-node `getClientRects()`
-  quads the selection overlay already collects into visual lines, one entry
-  per line a repeated `j` can land on. Deliberately still not the source
-  buffer's line numbers -- those would claim a correspondence this pane
-  cannot keep. Off by default (`preview.line_markers = false`); affects
-  every open preview at once, since it is a reading preference rather than a
-  per-document setting.
+- **Absolute and relative rendered line numbers.**
+  `:MdViewerToggleAbsoluteLineNumbers` and
+  `:MdViewerToggleRelativeLineNumbers` select one three-state preference
+  (`preview.line_numbers = "off" | "absolute" | "relative"`). Repeating the
+  active mode turns numbering off; invoking the other command switches modes
+  directly. Relative mode shows distance around the caret while retaining the
+  caret line's absolute visual-line index. Numbers now use each browser line
+  box's vertical midpoint through the caret's pixel-to-cell transform instead
+  of its top edge, removing the upward bias visible beside headings and tall
+  lines. The cells backend uses Neovim's native number options.
 
 ### Changed
 

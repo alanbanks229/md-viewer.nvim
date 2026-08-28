@@ -229,6 +229,8 @@ local function apply_image(session, image_bytes, capture_scale, png_bytes, captu
   -- there was nothing to place one on until now.
   M.clear_caret_overlay(session)
   M.place_caret(session)
+  preview.update_progress(session)
+  preview.update_line_numbers(session)
   -- After the caret, because both draw over the base that has just landed and
   -- the animation is the lower of the two layers. `adopt` re-places the current
   -- step in this same tick, so a scroll frame does not drop the animation for
@@ -322,6 +324,8 @@ local function apply_surface(session, revision, scroll_y, viewport, opts)
   clear_selection_overlay(session)
   M.clear_caret_overlay(session)
   M.place_caret(session)
+  preview.update_progress(session)
+  preview.update_line_numbers(session)
   return true
 end
 
@@ -539,6 +543,7 @@ function M.display_interact_result(session, result)
     -- forces the capture beside the terminal.
     if result.contentRevision and result.contentRevision ~= session.renderer_revision then return end
     if type(result.scrollY) == "number" then
+      if math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then session.progress_basis = "viewport" end
       session.applied_scroll_y = result.scrollY
       session.scroll_y = result.scrollY
     end
@@ -567,6 +572,7 @@ function M.display_interact_result(session, result)
   -- back before hit-testing -- a click after a search resolved against a
   -- different position than the image on screen showed.
   if type(result.scrollY) == "number" then
+    if math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then session.progress_basis = "viewport" end
     session.applied_scroll_y = result.scrollY
     session.scroll_y = result.scrollY
   end
@@ -626,6 +632,7 @@ local function show_cached(session)
   end
   session.image_id = image_id
   session.last_placement = placement
+  preview.update_line_numbers(session)
   -- Unknown, and said so. `last_image_bytes` carries no record of the position
   -- it was captured at, and the page may well have scrolled since, so nothing
   -- here can vouch for this frame the way `apply_image` vouches for its own.
@@ -817,14 +824,13 @@ function M.refresh(session, render_options)
     -- can go on, and a failure caches as a failure, so this stops on its own.
     session.remote_images_pending = meta.remoteImagesPending == true
     if session.remote_images_pending then M.schedule(session, 400, "remote_image_timer") end
-    -- A render changes the ruler's denominator (document_height_px) and the
-    -- line markers' geometry (latest_lines) even when the caret itself has
-    -- not moved -- an edit can shrink or grow the document out from under a
-    -- caret sitting exactly where it was. Both branches below have by now set
-    -- every field either update reads, so one call here covers the
-    -- local-render early return just as well as the direct-render tail.
-    preview.update_statusline(session)
-    preview.update_line_markers(session)
+    -- A render changes progress's denominator and the line-number geometry
+    -- even when the caret itself has not moved -- an edit can shrink or grow
+    -- the document out from under a caret sitting exactly where it was. Both
+    -- branches below have by now set every field either update reads, so one
+    -- call here covers the local-render early return and direct-render tail.
+    preview.update_progress(session)
+    preview.update_line_numbers(session)
     if meta.local_render then
       -- The frame itself went up when its marker was emitted, back in the
       -- tick that issued this request; this response only settles what the
@@ -1067,6 +1073,8 @@ function M.draw_resident(session)
     clear_selection_overlay(session)
     M.clear_caret_overlay(session)
     M.place_caret(session)
+    preview.update_progress(session)
+    preview.update_line_numbers(session)
     preview.update_title(session)
     return
   end
@@ -1443,6 +1451,8 @@ function M.retarget(session, new_buf, record)
   session.latest_lines = {}
   session.document_height_px = 0
   session.scroll_y, session.applied_scroll_y = 0, 0
+  session.progress_basis = "viewport"
+  session.last_progress_text = nil
   session.last_source_block = nil
   session.last_image_bytes = nil
   session.clean_image_bytes = nil
@@ -1617,13 +1627,14 @@ function M.toggle(position)
   end
 end
 
----Flip the block-number overlay on or off for every open preview at once.
----A global flag, not a per-session one: it is a reading preference, not
----something one document needs and another does not.
-function M.toggle_line_markers()
+---Switch every preview into the requested line-number mode. Repeating the
+---already-active mode turns numbering off; invoking the other named command
+---switches modes without passing through off.
+function M.toggle_line_numbers(mode)
+  assert(mode == "absolute" or mode == "relative", "line-number mode must be absolute or relative")
   local cfg = config.get()
-  cfg.preview.line_markers = not cfg.preview.line_markers
-  each_session(function(session) preview.update_line_markers(session) end)
+  cfg.preview.line_numbers = cfg.preview.line_numbers == mode and "off" or mode
+  each_session(function(session) preview.update_line_numbers(session) end)
 end
 
 ---The furthest the document can be scrolled: everything below scrolls within
@@ -1643,6 +1654,7 @@ function M.scroll_to(session, next_scroll)
   next_scroll = math.max(0, math.min(scroll_maximum(session), next_scroll))
   if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return false end
   session.scroll_y = next_scroll
+  session.progress_basis = "viewport"
   session.manual_scroll_until = vim.uv.now() + cfg.sync.manual_scroll_hold_ms
   if cfg.sync.preview_to_source then sync.update_source_from_scroll(session, next_scroll) end
   M.schedule_scroll(session)
@@ -1770,6 +1782,7 @@ local function reconcile_placement(session, force)
   -- window around the command line -- would otherwise leave the caret able to
   -- sit on a row the image no longer covers, which resolves to nothing.
   preview.reset_surface(session)
+  preview.update_line_numbers(session)
 end
 
 ---The resident model's `reconcile_placement`. A viewport frame follows a

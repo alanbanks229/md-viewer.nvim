@@ -80,6 +80,11 @@ function M.create(source_buf, source_win)
     -- caret is drawn; this is where it is.
     caret_index = nil,
     caret_index_revision = nil,
+    -- Which interaction last established the reader's position. Caret motions
+    -- report the caret's visual line; scroll-only motions report the viewport
+    -- midpoint until the caret is deliberately moved again.
+    progress_basis = "viewport",
+    last_progress_text = nil,
     selection_render_in_flight = false,
     selection_render_pending = false,
     selection_debounce_timer = nil,

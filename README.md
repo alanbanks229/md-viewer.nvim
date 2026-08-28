@@ -260,11 +260,18 @@ by hand when that happens.
 | `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
 | `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
-| `:MdViewerToggleLineMarkers` | Number each rendered block for quick navigation |
+| `:MdViewerToggleAbsoluteLineNumbers` | Show absolute rendered visual-line numbers; repeat to turn them off |
+| `:MdViewerToggleRelativeLineNumbers` | Show caret-relative visual-line numbers; repeat to turn them off |
 | `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
 | `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
 | `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |
 | `:checkhealth md-viewer` | Run Neovim health checks |
+
+Statusline integrations can call `require("md-viewer").statusline_progress()`.
+It returns `All`, `Top`, `Bot`, or `NN%` for the active graphical preview and
+`nil` elsewhere, so the statusline can fall back to its normal progress
+component. The `User MdViewerProgressChanged` event fires only when that label
+changes.
 
 ### Keys, with the preview focused
 

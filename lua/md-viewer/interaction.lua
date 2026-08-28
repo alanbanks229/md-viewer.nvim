@@ -710,11 +710,11 @@ local function send_caret_motion(session, granularity, direction, count, from, o
     -- in-page scroll is the position above, not the one this request was sent
     -- with.
     caret.set_rect(session, result.rect, session.applied_scroll_y or 0, result.index)
-    -- After caret_rect/caret_scroll_y above: the ruler is the caret's own
-    -- position in the document, not the viewport's, so it has to run after
-    -- the caret actually lands rather than only when the motion scrolled.
-    preview.update_statusline(session)
-    preview.update_line_markers(session)
+    -- A caret motion owns the reader's position even when keeping that caret in
+    -- view also scrolled the page. Scroll-only controls switch the basis back
+    -- to the viewport in controller.scroll_to.
+    preview.set_progress_basis(session, "caret")
+    preview.update_line_numbers(session)
     -- Any motion that is not a line motion re-seeds the sticky column, so the
     -- next `j` aims at where *this* motion left the caret. `$` is the one
     -- exception and matches Vim: it parks the column past every line's end, so

@@ -37,7 +37,16 @@ function M.setup()
   vim.api.nvim_create_user_command("MdViewerFindPrevious", function() controller.find_previous() end, {})
   vim.api.nvim_create_user_command("MdViewerBack", function() controller.history_back() end, {})
   vim.api.nvim_create_user_command("MdViewerForward", function() controller.history_forward() end, {})
-  vim.api.nvim_create_user_command("MdViewerToggleLineMarkers", function() controller.toggle_line_markers() end, {})
+  vim.api.nvim_create_user_command(
+    "MdViewerToggleAbsoluteLineNumbers",
+    function() controller.toggle_line_numbers("absolute") end,
+    {}
+  )
+  vim.api.nvim_create_user_command(
+    "MdViewerToggleRelativeLineNumbers",
+    function() controller.toggle_line_numbers("relative") end,
+    {}
+  )
 end
 
 return M

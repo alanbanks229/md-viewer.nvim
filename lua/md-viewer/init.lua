@@ -25,5 +25,6 @@ function M.open(position) return require("md-viewer.controller").open(position) 
 function M.close() return require("md-viewer.controller").close() end
 function M.toggle(position) return require("md-viewer.controller").toggle(position) end
 function M.refresh() return require("md-viewer.controller").refresh() end
+function M.statusline_progress() return require("md-viewer.preview").statusline_progress() end
 
 return M
