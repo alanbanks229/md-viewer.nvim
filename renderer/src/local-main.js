@@ -279,6 +279,24 @@ if (!flags.echoTest) {
   });
   injector.onInjected = (tx) =>
     service.notify("presented", { seq: tx.seq, doc: tx.doc, scrollY: tx.uploads[0]?.scrollY ?? null });
+  // The one client slot this service fronts (its own file header: "a second
+  // nvim silently sharing a document cache with the first would be a
+  // correctness bug wearing a convenience feature's clothes") is not the
+  // same guarantee as "one Neovim process ever attaches" -- an operator
+  // wraps one long-lived ssh session in this helper and restarts Neovim
+  // inside it many times, each one a fresh socket connection reusing the
+  // same documentId (a fresh Neovim's buffer numbers start over). Nothing
+  // upstream distinguishes that from the same session reconnecting, so on
+  // disconnect this retires the outgoing session's placements for real (the
+  // terminal this socket forwarded to is still live -- only the remote
+  // Neovim died) and drops every per-document counter that could otherwise
+  // silently refuse the next session's first frames as stale.
+  service.onClientChange = (connected) => {
+    if (connected) return;
+    const bytes = injector.teardown();
+    if (bytes.length > 0) write(bytes);
+    replica.reset();
+  };
   service.setStatusProvider(() => ({
     parser: { ...parser.stats },
     injector: injector ? { ...injector.stats, timing: injector.timingSnapshot() } : null,

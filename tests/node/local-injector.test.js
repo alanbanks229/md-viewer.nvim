@@ -227,6 +227,25 @@ test("teardown returns carried deletions plus a targeted delete for every upload
   assert.ok(!bytes.includes(Buffer.from(deleteImage(11), "latin1")), "never-uploaded ids have nothing to delete");
 });
 
+test("teardown clears the per-document seq floor, so a reused documentId does not refuse a fresh session's first frames", () => {
+  // The scenario a client disconnect reproduces: one Neovim session pushes a
+  // document's seq high, quits, and a second Neovim session -- reusing the
+  // same documentId, since a fresh process's buffer numbers start over --
+  // attaches and starts marking again from seq=1. Without clearing
+  // lastSurfaceSeq, tryInject's staleness floor (the same one "a surface
+  // transaction older than one already injected is refused" above pins)
+  // would refuse every one of the new session's early frames as though they
+  // were stale repeats of the outgoing session's.
+  const { injector, writes } = harness({ resolve: () => Buffer.from("png") });
+  injector.acceptMarker(payload({ seq: 40, doc: "buffer-1", uploads: [frameUpload(6)], placements: Buffer.from("OLD") }));
+  assert.equal(writes.length, 1);
+  injector.teardown();
+  injector.acceptMarker(payload({ seq: 1, doc: "buffer-1", uploads: [frameUpload(7)], placements: Buffer.from("NEW") }));
+  assert.equal(writes.length, 2, "the new session's low-seq frame was not refused as stale");
+  assert.ok(writes[1].includes(Buffer.from("NEW")));
+  assert.equal(injector.stats.refusedStaleSurface, 0);
+});
+
 test("malformed payloads and token mismatches are counted and dropped, never guessed at", () => {
   const { injector, writes } = harness();
   injector.acceptMarker("v=1;t=beef;s=nope");

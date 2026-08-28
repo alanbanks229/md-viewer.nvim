@@ -7,6 +7,26 @@ All notable changes to this project will be documented here. The project uses
 
 ### Fixed
 
+- **A preview could render solid black after reopening Neovim inside the same
+  local-render helper session.** The operator's workflow -- one laptop-side
+  helper process (`node renderer/src/local-main.js -- ssh <host>`) wrapping
+  one long-lived ssh session, with Neovim itself quit and reopened many times
+  inside it -- left the control-socket connection to die from the OS on
+  `:qa` (an unhandled EOF) rather than a real close the helper could react
+  to. The helper's per-document state (`replica.js`'s `docs` map, epoch and
+  laid-out revision included; `injector.js`'s `lastSurfaceSeq`) is keyed only
+  by `documentId`, which a fresh Neovim process regenerates identically for
+  the same file (e.g. "buffer-1") -- so it persisted across every restart,
+  and a fresh session's first frame reference (epoch 0, per a fresh Lua
+  session's own state) could be silently refused forever by
+  `scheduleSurface`'s epoch guard against a counter the outgoing session left
+  elevated. Measured live (2026-08-27). `VimLeavePre` now calls
+  `localrender.detach()` when attached, closing the control-socket pipe for
+  real; the helper's socket server answers with a real `onClientChange(false)`
+  handler that retires the outgoing session's terminal placements
+  (`injector.teardown()`, reused from the helper's own process-exit path) and
+  clears the replica's per-document state (`replica.reset()`), so the next
+  session's `docRecord` starts fresh.
 - **A character-wise preview selection could lose its first or last
   character.** `visual_start`/`visual_update` anchor and extend a selection at
   the caret's own glyph *centre* -- exactly the tie `caretRangeFromPoint`

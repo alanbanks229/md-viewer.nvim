@@ -235,6 +235,78 @@ test("a surface is never captured from another revision's markup", { timeout: 12
   assert.ok(bytes, "the reference resolves once the revision it names has been laid out");
 });
 
+test("reset forgets every document, so a documentId a new session reuses starts at epoch 0 again", { timeout: 120000 }, async (t) => {
+  // The scenario a control-socket client disconnect reproduces: one Neovim
+  // process renders "buffer-1", mutates it (bumping the epoch), and quits;
+  // a second Neovim process -- reusing the same documentId, since a fresh
+  // process's buffer numbers start over -- attaches and renders "buffer-1"
+  // again, with its own fresh epoch of 0. Without reset() clearing the
+  // outgoing session's record, scheduleSurface's epoch guard
+  // (`record.epoch !== upload.epoch`) would silently refuse to ever
+  // schedule a capture for the new session's frame reference -- a preview
+  // that renders solid black on reopen, measured live (2026-08-27).
+  const executable = realChromium();
+  if (!executable) {
+    t.skip("no approved Chrome/Chromium/Edge on this machine");
+    return;
+  }
+  const replica = createReplica({ assetsDir });
+  t.after(() => replica.close());
+  const base = {
+    documentId: "buffer-1",
+    contentRevision: "1:0",
+    viewport: { widthPx: 640, heightPx: 480, deviceScaleFactor: 1 },
+    scrollY: 0,
+    theme: "dark",
+    fontSizePx: 14,
+    browser: { executable_path: executable, launch_timeout_ms: 20000 },
+  };
+  await replica.handle("render", { ...base, html: "<main><h1>first session</h1></main>" });
+  const bumped = await replica.handle("interact", {
+    documentId: "buffer-1",
+    contentRevision: "1:0",
+    action: "find_set",
+    query: "session",
+    viewportWidthPx: 640,
+    viewportHeightPx: 480,
+    cellWidthPx: 8,
+    cellHeightPx: 16,
+  });
+  assert.equal(bumped.visualEpoch, 1, "the outgoing session's own mutation bumped its epoch");
+
+  replica.reset();
+
+  // A second session's render for the SAME documentId, at a revision that
+  // could just as easily repeat too (a fresh buffer's changedtick starts
+  // low) -- the point under test is the epoch, not the revision string.
+  await replica.handle("render", { ...base, contentRevision: "1:0", html: "<main><h1>second session</h1></main>" });
+  // Read `record.epoch` through a second mutating interact rather than
+  // through `resolveUpload`: the first session already stored a surface at
+  // epoch=0/scrollY=0 (its own very first render, before the mutation that
+  // bumped it to 1), so an epoch-0 frame reference at scrollY=0 would
+  // resolve against that stale leftover PNG regardless of whether reset()
+  // ran -- proving nothing about whether the record itself was cleared.
+  // `visualEpoch` in the interact response is `docRecord(documentId).epoch`
+  // directly (replica.js's own `result.visualEpoch = record.epoch`), so it
+  // is unambiguous evidence either way.
+  const secondSessionMutation = await replica.handle("interact", {
+    documentId: "buffer-1",
+    contentRevision: "1:0",
+    action: "find_set",
+    query: "second",
+    viewportWidthPx: 640,
+    viewportHeightPx: 480,
+    cellWidthPx: 8,
+    cellHeightPx: 16,
+  });
+  assert.equal(
+    secondSessionMutation.visualEpoch,
+    1,
+    "the new session's own first mutation bumped epoch 0->1 -- if reset() had not run, the outgoing " +
+      "session's leftover epoch of 1 would have bumped to 2 instead"
+  );
+});
+
 test("render_prepared refuses cached markup that was prepared mid-image-fetch", { timeout: 120000 }, async (t) => {
   const executable = realChromium();
   if (!executable) {

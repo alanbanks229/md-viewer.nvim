@@ -380,6 +380,25 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
 
     stats: statsSnapshot,
 
+    /// Forget every document this replica knows about. Called when the
+    /// control-socket client disconnects: `docs` is keyed only by
+    /// documentId (e.g. "buffer-1"), which the next Neovim process to
+    /// attach will regenerate identically for the same file, and nothing
+    /// else distinguishes "the same session, still live" from "a new
+    /// session that happens to reuse the same id." Without this, a fresh
+    /// session's first frame reference (epoch 0, per a fresh Lua session's
+    /// own state) could be compared against a stale `record.epoch` the
+    /// outgoing session left elevated -- `scheduleSurface`'s epoch guard
+    /// then silently refuses to ever schedule a capture for it. Surfaces
+    /// are dropped too: an evicted document's cached PNGs can never resolve
+    /// a live marker again once its own record is gone, and keeping them
+    /// around only wastes the LRU's slots.
+    reset() {
+      docs.clear();
+      surfaces.clear();
+      missingNotified.clear();
+    },
+
     close() {
       return service.close();
     },

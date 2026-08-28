@@ -2255,7 +2255,22 @@ function M.setup_autocmds()
   -- table as its first argument, which `close_all` now reads as `opts`.
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group,
-    callback = function() M.close_all({ blocking = true }) end,
+    callback = function()
+      -- Detach before tearing down sessions: this closes the control-socket
+      -- pipe, which the helper's socket server sees as a real `close` event
+      -- on its next tick -- concrete and immediate, unlike the marker-based
+      -- image deletions below it, which only reach the helper if a captured
+      -- frame happens to carry them before the process exits. Without this,
+      -- the operator's own workflow (one helper process wrapping many
+      -- Neovim restarts in the same ssh session) leaves every per-document
+      -- epoch/seq counter on the helper (replica.js's `docs`, injector.js's
+      -- `lastSurfaceSeq`) sitting at whatever the outgoing session left it
+      -- at, so the next Neovim session's first frame reference can be
+      -- silently refused as stale -- a preview that renders solid black on
+      -- reopen, measured live (2026-08-27).
+      if localrender.active() then localrender.detach() end
+      M.close_all({ blocking = true })
+    end,
   })
 end
 

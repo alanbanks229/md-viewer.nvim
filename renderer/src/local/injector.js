@@ -212,10 +212,23 @@ export class Injector {
     this.stats.carriedDeletionBuffers += 1;
   }
 
-  /// Everything that must reach the terminal before this filter dies:
-  /// deletions still being carried, plus a targeted delete for every image id
-  /// this injector ever put up. The caller writes it during teardown, when it
-  /// still owns the tty.
+  /// Everything that must reach the terminal to retire this injector's
+  /// placements: deletions still being carried, plus a targeted delete for
+  /// every image id it ever put up. Named for the helper's own process exit,
+  /// its original caller -- writing the return value there, while the
+  /// process still owns the tty -- but reused verbatim on a control-socket
+  /// client disconnect: the same placements a dying process would clean up
+  /// are exactly the ones an outgoing Neovim session leaves behind when a
+  /// new one is about to attach to the same terminal, and a second call
+  /// after the first (whichever ran first) is a safe no-op over already
+  /// -emptied sets.
+  ///
+  /// `lastSurfaceSeq` is cleared here too: it is the per-document seq floor
+  /// that refuses an "older" frame once a newer one has landed
+  /// (`tryInject`'s `refusedStaleSurface` check), and a fresh Neovim
+  /// session's markers restart near seq=1 -- left at the outgoing session's
+  /// high-water mark, they would refuse every one of the new session's early
+  /// frames as stale.
   teardown() {
     const parts = [...this.carriedDeletions];
     for (const id of this.uploadedIds) parts.push(Buffer.from(deleteImage(id), "latin1"));
@@ -223,6 +236,7 @@ export class Injector {
     this.uploadedIds.clear();
     this.pendingByDoc.clear();
     this.immediateQueue = [];
+    this.lastSurfaceSeq.clear();
     return Buffer.concat(parts);
   }
 }
