@@ -143,6 +143,7 @@ not tell you.
 | Click places the caret | Click on a word | The caret snaps to the nearest real character there |
 | Copy | `y` or `:MdViewerCopy` | Unnamed register, and the system clipboard where available. Nothing is copied automatically |
 | Search | `/` or `:MdViewerFind`, then `n`/`N`, then `/` dismissed with Escape | Matches highlight, stepping wraps, dismissing the empty prompt removes them |
+| Search moves the caret | `/query<CR>`, then `v`/`y` with no other motion first | The selection starts from the match, not from wherever the caret was before the search |
 | Visual mode | `v`, `3j`, `y`; then `V`, `j`; then `v`, `3j`, `o`, `k` | The highlight follows; the winbar shows `-- VISUAL --` / `-- VISUAL LINE --`; `o` swaps ends; `y` copies and leaves |
 | Multi-paragraph | `v`, motions across a block boundary | The selection spans both |
 | Word / block | `v`/`V` plus `w`/`b`/`e`, `{`/`}` | Extends by word, then by block, matching the motion's own semantics |

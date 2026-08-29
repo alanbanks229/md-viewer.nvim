@@ -111,6 +111,14 @@ test("find: creation, counting, wrapping, clearing, scroll-into-view", async (t)
     assert.equal(response.result.matchCount, 4);
     assert.equal(response.result.activeIndex, 0);
     assert.ok(response.result.activeSourcePosition, "the active match should carry a source position");
+    // So Lua can place the caret on the match, the same way a caret_move
+    // response does -- see buildCaretMoveResult's identical rect shape.
+    const rect = response.result.activeRect;
+    assert.ok(rect, "the active match should carry its on-screen rect");
+    for (const key of ["x", "y", "width", "height"]) {
+      assert.equal(typeof rect[key], "number", `activeRect.${key} should be a number`);
+    }
+    assert.ok(rect.width > 0 && rect.height > 0, "the active match's rect should have real dimensions");
     assert.equal(response.result.captureScale, "device", "find_set must default to the sharp capture scale");
   });
 
@@ -124,9 +132,11 @@ test("find: creation, counting, wrapping, clearing, scroll-into-view", async (t)
       indices.push(last.result.activeIndex);
     }
     assert.deepEqual(indices, [1, 2, 3, 0], "find_next should wrap from the last match to the first");
+    assert.ok(last.result.activeRect, "find_next should carry the new active match's rect too");
 
     const back = await find(renderer, "find-doc", "1:0", "find_previous");
     assert.equal(back.result.activeIndex, 3, "find_previous from the first match should wrap to the last");
+    assert.ok(back.result.activeRect, "find_previous should carry the new active match's rect too");
   });
 
   await t.test("find_clear removes the match set and resets state", async () => {
@@ -198,6 +208,7 @@ test("find: a query containing HTML is matched literally and injects nothing int
   });
   assert.equal(response.ok, true, response.error);
   assert.equal(response.result.matchCount, 0, "the literal HTML string does not appear in the rendered text");
+  assert.equal(response.result.activeRect, null, "no match means no rect to place a caret on");
 
   // Prove it directly: hit-test across the whole paragraph and confirm no
   // img/script element was ever created by the "query".

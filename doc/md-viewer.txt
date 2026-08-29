@@ -482,7 +482,8 @@ COMMANDS                                                  *md-viewer-commands*
 :MdViewerFind [query]
         Search the rendered preview for `query`. Prompts for one via
         |vim.ui.input()| when none is given, also bound to `/` with the
-        preview focused.
+        preview focused. Moves the caret onto the match, so a following
+        `v`, `y`, or motion key acts from there, the same as Vim's own `/`.
 
         The prompt always opens empty -- the previous query is never
         prefilled -- and dismissing it without a query clears both the
@@ -491,11 +492,13 @@ COMMANDS                                                  *md-viewer-commands*
 
                                                            *:MdViewerFindNext*
 :MdViewerFindNext
-        Jump to the next search match. Also `n` with the preview focused.
+        Jump to the next search match and move the caret onto it. Also `n`
+        with the preview focused.
 
                                                        *:MdViewerFindPrevious*
 :MdViewerFindPrevious
-        Jump to the previous search match. Also `N`.
+        Jump to the previous search match and move the caret onto it. Also
+        `N`.
 
                                                                *:MdViewerBack*
 :MdViewerBack
@@ -636,8 +639,9 @@ wearing a count:
                              leaving visual mode
     <Esc>                    Clear the search, then the selection; a third
                              press is an ordinary <Esc>
-    /                        Prompt and search (:MdViewerFind)
-    n, N                     Next/previous search match
+    /                        Prompt and search (:MdViewerFind), moving the
+                             caret onto the match
+    n, N                     Next/previous search match, moving the caret
 
 The view scrolls whenever a motion would take the caret out of it, so holding
 j scrolls as it always did. CTRL-D and friends are line motions with a count,

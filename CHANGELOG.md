@@ -173,6 +173,11 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   longer stacks notifications.** Only the first call past that end reports
   "no previous/next document in the preview history"; further repeats are
   silent until the preview actually moves, and moving re-arms it.
+- **`/`, `n`, and `N` left the caret wherever it already was.** A search
+  scrolled to and highlighted the match but never moved the caret onto it, so
+  a following `v`/`y`/motion acted from the caret's old position instead of
+  the match, unlike Vim's own `/`. Each now places the caret on the active
+  match the same way a click does.
 
 ### Security
 

@@ -476,6 +476,17 @@ not the page, which `setContent` destroys on every document switch) and is
 **replaced, never migrated**, across a content-revision change. Applying an old
 selection to new content would be silent corruption in a copy.
 
+`find_set`/`find_next`/`find_previous` move the caret onto the active match,
+the same way Vim's own `/` leaves the cursor on the hit: `setFindInPage` and
+`stepFindInPage` (`renderer/src/interact.js`) measure the mark's
+`getBoundingClientRect()` after `scrollIntoView` and return it as
+`activeRect`, and `interaction.lua`'s `move_caret_to_match` feeds that straight
+into `caret.set_rect` with no character index — the same nil-index case a
+mouse click leaves for the next real motion to resolve. A find never asks the
+renderer for a fresh caret tint (that only ever rides on a `caret_move` or
+selection response), so this relies on `M.place_caret` having already seeded
+one on the session's first render.
+
 **Invariant.** A selection that scrolls pins its anchor to the live DOM node
 (`anchorPinned` on the `interact` envelope), not to viewport coordinates. Viewport
 coordinates move under a scrolling page: the anchor drifts onto whatever text

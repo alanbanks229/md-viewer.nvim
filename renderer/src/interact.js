@@ -2082,15 +2082,28 @@ export function setFindInPage(input) {
     matches.push(inline);
   }
 
+  let activeRect = null;
   if (marks.length > 0) {
     marks[0].setAttribute("data-active", "");
     marks[0].scrollIntoView({ block: "center" });
+    // Measured after the scroll, in the same viewport CSS pixels
+    // moveCaretInPage's own rect uses -- so Lua can place the caret on the
+    // match exactly the way it places one from a caret_move response.
+    const rect = marks[0].getBoundingClientRect();
+    activeRect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
   }
 
   // scrollIntoView mutates the page's own scroll position; report it back so
   // the caller's stale pre-scroll value (from ensureDocumentActive, computed
   // before this function ran) is not what gets returned to Lua.
-  return { ok: true, matchCount: marks.length, activeIndex: marks.length > 0 ? 0 : null, matches, scrollY: window.scrollY };
+  return {
+    ok: true,
+    matchCount: marks.length,
+    activeIndex: marks.length > 0 ? 0 : null,
+    matches,
+    scrollY: window.scrollY,
+    activeRect,
+  };
 }
 
 /// `find_next` / `find_previous`. Moves the `data-active` marker with
@@ -2112,11 +2125,14 @@ export function stepFindInPage(input) {
   const delta = input.direction === "previous" ? -1 : 1;
   const nextIndex = ((activeIndex + delta) % matchCount + matchCount) % matchCount;
   const next = marks[nextIndex];
+  let activeRect = null;
   if (next) {
     next.setAttribute("data-active", "");
     next.scrollIntoView({ block: "center" });
+    const rect = next.getBoundingClientRect();
+    activeRect = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
   }
-  return { ok: true, activeIndex: nextIndex, scrollY: window.scrollY };
+  return { ok: true, activeIndex: nextIndex, scrollY: window.scrollY, activeRect };
 }
 
 /// `find_clear`.
@@ -2222,6 +2238,9 @@ export function buildFindResult(raw, sourceMap, query) {
     matchCount: raw.matchCount ?? 0,
     activeIndex,
     activeSourcePosition,
+    // The active match's on-screen box, so Lua can place the caret on it the
+    // same way a caret_move response does -- see buildCaretMoveResult.
+    activeRect: raw.activeRect ?? null,
     // Internal only: service.js reads this to populate per-document find state for
     // find_next/find_previous, then strips it before the result reaches Lua --
     // a document with thousands of matches must not serialize thousands of
@@ -2243,6 +2262,7 @@ export function buildFindStepResult(raw, findState) {
     matchCount: findState?.matchCount ?? 0,
     activeIndex,
     activeSourcePosition,
+    activeRect: raw.activeRect ?? null,
     matches,
   };
 }

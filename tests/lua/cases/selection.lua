@@ -647,6 +647,7 @@ return function(t)
         matchCount = 3,
         activeIndex = 0,
         activeSourcePosition = { line = 2, byteColumn = 0, precision = "line" },
+        activeRect = { x = 10, y = 20, width = 30, height = 40 },
       }, nil)
     end
     interaction.find_set(session, "hello")
@@ -658,16 +659,26 @@ return function(t)
     t.eq("hello", session.find_query)
     t.eq(3, session.find_match_count)
     t.eq(0, session.find_active_index)
+    -- A find match moves the caret onto it, the same as a click does: no
+    -- index recorded, so the next real motion resolves fresh from the rect.
+    t.eq({ x = 10, y = 20, width = 30, height = 40 }, session.caret_rect, "find_set places the caret on the match")
+    t.eq(nil, session.caret_index, "the caret placed by a find has no character index yet")
+    t.eq("caret", session.progress_basis, "a found match hands progress reporting to the caret")
 
     -- find_next now that a search is active.
     process.request = function(method, params, callback)
       requests[#requests + 1] = params
-      callback({ kind = "find", activeIndex = 1 }, nil)
+      callback({ kind = "find", activeIndex = 1, activeRect = { x = 50, y = 60, width = 70, height = 80 } }, nil)
     end
     interaction.find_next(session)
     t.eq("find_next", requests[2].action)
     t.eq(session.applied_scroll_y, requests[2].scrollY, "find_next carries the session's current scrollY")
     t.eq(1, session.find_active_index)
+    t.eq(
+      { x = 50, y = 60, width = 70, height = 80 },
+      session.caret_rect,
+      "find_next moves the caret onto the new active match"
+    )
 
     -- find_clear.
     process.request = function(method, params, callback)

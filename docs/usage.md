@@ -7,8 +7,8 @@ inside Neovim, with the full semantics of each.
 |---|---|
 | `:MdViewerToggle [position]` | Open or close the preview (`right`, `left`, `below`, `above`) |
 | `:MdViewerCopy` | Copy the current selection |
-| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
-| `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
+| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given. Moves the caret onto the match |
+| `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches, moving the caret onto each one |
 | `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
 | `:MdViewerTabNext` / `:MdViewerTabPrevious` | Cycle document tabs in the preview pane |
 | `:MdViewerTabClose` | Close the active preview document tab |
@@ -82,7 +82,7 @@ the size of the glyph it is on.
 | `o` | Swap the ends of a selection |
 | `y` | Copy the selection |
 | `Esc` | Clear the search, then the selection |
-| `/` `n` `N` | Search, next match, previous match |
+| `/` `n` `N` | Search, next match, previous match. Each moves the caret onto the match, so `v`/`y`/a motion key acts from there |
 | `H` `L` `[b` `]b` | Previous / next document tab in the preview pane. `H`/`L` are configurable (`interaction.keymaps`); `[b`/`]b` are always mapped |
 | `gf` | Reveal this preview document in the editable source pane |
 
