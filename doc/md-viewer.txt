@@ -117,6 +117,8 @@ preview ~
     pinned                       true       keep the preview when the source
                                             window shows another file
     winbar                       true       pane-scoped document tabs/notices
+    tab_accent                   "#61afef"  active-tab underline color, or
+                                            false for none
     loading                      true       startup spinner
     loading_interval_ms          80         spinner tick
     line_numbers                 "off"      off, absolute, relative; rendered

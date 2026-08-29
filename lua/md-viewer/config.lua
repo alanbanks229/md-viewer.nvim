@@ -5,6 +5,11 @@ M.defaults = {
   preview = {
     pinned = true,
     winbar = true,
+    -- The active tab's winbar underline, so it doesn't rely on TabLineSel
+    -- and TabLine being distinguishable colors -- some colorschemes render
+    -- them nearly identically. "#rrggbb", or `false` for the plain
+    -- TabLineSel/TabLine link with no underline added.
+    tab_accent = "#61afef",
     loading = true,
     loading_interval_ms = 80,
     -- Rendered visual lines, not Markdown source lines. `relative` mirrors
@@ -486,6 +491,11 @@ local function validate(cfg)
   assert(
     line_number_modes[cfg.preview.line_numbers],
     "md-viewer: preview.line_numbers must be off, absolute, or relative"
+  )
+  assert(
+    cfg.preview.tab_accent == false
+      or (type(cfg.preview.tab_accent) == "string" and cfg.preview.tab_accent:match("^#%x%x%x%x%x%x$") ~= nil),
+    'md-viewer: preview.tab_accent must be a "#rrggbb" color or false'
   )
   assert(
     terminal_profiles[cfg.terminal.profile],

@@ -4,6 +4,7 @@ return function(t)
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local interaction = require("md-viewer.interaction")
+  local preview = require("md-viewer.preview")
   local state = require("md-viewer.state")
 
   local project = vim.uv.fs_realpath((function()
@@ -121,6 +122,24 @@ return function(t)
   local winbar = vim.wo[pane.preview_win].winbar
   t.ok(winbar:find("one/readme.md", 1, true) ~= nil, "duplicate filenames gain a shortest unique path label")
   t.ok(winbar:find("two/readme.md", 1, true) ~= nil, "both duplicate labels are unambiguous")
+
+  -- The active tab's underline is what makes it distinguishable from an
+  -- inactive one when a colorscheme renders TabLineSel and TabLine alike.
+  local active_hl = vim.api.nvim_get_hl(0, { name = "MdViewerTabActive" })
+  t.eq(true, active_hl.underline, "the active tab gets an underline by default")
+  t.eq(tonumber("61afef", 16), active_hl.sp, "the underline uses the default preview.tab_accent color")
+
+  config.reset()
+  config.setup({ preview = { tab_accent = false } })
+  preview.update_title(pane.active)
+  local disabled_hl = vim.api.nvim_get_hl(0, { name = "MdViewerTabActive" })
+  t.eq("TabLineSel", disabled_hl.link, "preview.tab_accent = false falls back to a plain TabLineSel link")
+  config.reset()
+  config.setup({})
+  preview.update_title(pane.active)
+  -- update_title regenerates the winbar's click ids each call, so the ids
+  -- captured above are now stale -- re-read it before using them.
+  winbar = vim.wo[pane.preview_win].winbar
 
   local first_click = tonumber(winbar:match("%%(%d+)@v:lua%.MdViewerWinbarClick@"))
   local first_document = pane.documents[1]

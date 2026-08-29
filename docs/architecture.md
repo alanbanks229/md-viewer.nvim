@@ -502,6 +502,16 @@ last direction it reported a dead end for (`pane.history_boundary`) so
 repeating `:MdViewerBack`/`:MdViewerForward` at either end of the list notifies
 once, not on every call; any successful move re-arms it.
 
+**Winbar tab highlights.** `MdViewerTabActive`/`MdViewerTabInactive` are plain
+highlight groups set from `preview.lua`'s `apply_tab_highlights`, but only
+`MdViewerTabInactive` stays `default = true` -- once `preview.tab_accent` is
+truthy, `MdViewerTabActive` is resolved fresh against the live `TabLineSel`
+(`nvim_get_hl(0, { name = "TabLineSel", link = false })`) plus an
+`underline`/`sp` of that color, and `apply_tab_highlights` sets both branches
+unconditionally so toggling `tab_accent` back to `false` can actually undo a
+previous underline rather than losing to `default`'s "already defined, skip"
+rule.
+
 **Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`) separates
 `http`/`https`/`mailto`/fragment/local-file candidates from anything unsafe
 (`javascript:`, `data:`, `vbscript:`, protocol-relative, malformed) before Lua

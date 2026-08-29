@@ -104,6 +104,10 @@ memory so scrolling sends nothing, or stop sending pixels at all.
 - **`interaction.keymaps` configures the tab-cycle keys.** `tab_previous` and
   `tab_next` default to `"H"`/`"L"`; set either to a different key, or to
   `false` to leave it unmapped.
+- **`preview.tab_accent` underlines the active winbar tab.** Default
+  `"#61afef"`; some colorschemes render `TabLineSel` and `TabLine` almost
+  identically, which made the active tab hard to pick out. Set to `false`
+  for the plain link with no underline.
 
 ### Changed
 
