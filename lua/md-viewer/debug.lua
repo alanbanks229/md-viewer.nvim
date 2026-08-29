@@ -94,7 +94,7 @@ function M.snapshot()
         or nil,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
-      retina_image_update_ms = session.retina_image_update_ms,
+      retina_ui_handoff_ms = session.retina_image_update_ms,
       retina_frame_count = session.retina_frame_count or 0,
       retina_bytes_total = session.retina_bytes_total or 0,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
