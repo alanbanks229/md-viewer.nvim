@@ -28,7 +28,7 @@ jobs:
           rm stylua.zip
 
       - name: Check Lua formatting
-        run: stylua --check lua/ plugin/ tests/lua/
+        run: stylua --check build.lua lua/ plugin/ tests/lua/
 
   test:
     strategy:

@@ -48,7 +48,7 @@ can take it and give the exact command to run there.
 ## Tests
 
 `make test` is Lua (`nvim --headless`) plus the renderer's node suite. Both must
-be green before anything is called done. `stylua --check lua/ plugin/ tests/lua/`
+be green before anything is called done. `stylua --check build.lua lua/ plugin/ tests/lua/`
 is what CI runs on formatting.
 
 Do not weaken a test to make a change pass. Several tests in
