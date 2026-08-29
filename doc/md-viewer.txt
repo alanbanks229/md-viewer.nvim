@@ -171,8 +171,9 @@ image ~
     raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
-    resident                     "off"      experimental; "auto" opts in
+    resident                     "off"      "off"|"auto"|"on"; experimental
                                             (|md-viewer-resident|)
+    resident_below_bytes_per_sec 4000000    the link speed "auto" opts in below
     resident_chunk_viewports     2          1..8; viewports per document chunk
     resident_memory_mb           512        heuristic terminal-memory budget
     resident_max_chunks          24         hard bound on resident chunks
@@ -615,12 +616,20 @@ wearing a count:
                              (|md-viewer-history|)
     [b, ]b                   Previous/next document tab in this preview pane
     gf                       Reveal the active document in the source pane
-    v, V                     Start a selection at the caret, extended by
-                             any motion above; V is line-wise
+    v, V                     Start a selection at the caret, or end one;
+                             extended by any motion above; V is line-wise
+    CTRL-V                   The same as v. Neovim's own blockwise Visual
+                             is mapped away here because it would paint a
+                             rectangle of blank cells across the picture
+    gv                       Reserved, and does nothing. Neovim's visual
+                             mode is not usable over the preview surface,
+                             so there is no previous selection to restore
     o                        Swap which end of the selection the caret
                              holds
     y                        Copy the current selection (:MdViewerCopy),
                              leaving visual mode
+    <Esc>                    Clear the search, then the selection; a third
+                             press is an ordinary <Esc>
     /                        Prompt and search (:MdViewerFind)
     n, N                     Next/previous search match
 
@@ -830,11 +839,21 @@ produces a PNG which Neovim then writes to your terminal as Kitty graphics
 escape sequences, travelling down the SSH connection.
 
 The part that needs care is terminal identification, because SSH does not
-forward TERM_PROGRAM. It does forward LC_* by default, and iTerm2 and WezTerm
-both export LC_TERMINAL for exactly that reason, so those two are recognized
-automatically -- provided the remote sshd accepts the variable. Nearly every
-distribution ships `AcceptEnv LANG LC_*` already; check with `echo
-$LC_TERMINAL` on the remote host.
+forward TERM_PROGRAM. iTerm2 and WezTerm export LC_TERMINAL for exactly that
+reason, so those two can be recognized automatically -- but the variable has
+to be allowed through at both ends, and neither end is guaranteed.
+
+Client, in ~/.ssh/config: >
+    Host *
+      SendEnv LC_TERMINAL LC_TERMINAL_VERSION
+<
+Upstream OpenSSH sends nothing by default. Most distributions add `SendEnv
+LANG LC_*` in /etc/ssh/ssh_config, but a `Host *` block of your own can
+override it; `ssh -G <host> | grep sendenv` shows what will actually be sent.
+
+Server, in /etc/ssh/sshd_config: `AcceptEnv LANG LC_*`, which nearly every
+distribution ships already. Confirm the whole path with `echo $LC_TERMINAL`
+on the remote host.
 
 Kitty, Ghostty and Warp export no forwardable identity, so name the profile on
 the remote host: >sh
@@ -853,8 +872,8 @@ them -- the backlog is the lag, not the render.
 
 That ceiling is SSM's, not SSH's. It is the SSM agent pacing its output at one
 kilobyte per millisecond, which AWS has said they will not raise
-(aws/amazon-ssm-agent#664); an ordinary SSH session goes nowhere near that code
-and measures 16-23 MB/s to a host on the same network. So "remote" is not a
+(aws/amazon-ssm-agent#664); an ordinary SSH session goes nowhere near that code,
+and its raw channel to a host on the same network measures 16-23 MB/s. So "remote" is not a
 useful predictor of any of this, and the two adjustments below are applied to
 every SSH session only because Neovim cannot tell an SSM tunnel from a LAN hop
 -- both arrive as an ordinary SSH session. On a fast link they cost a little
@@ -926,12 +945,40 @@ entirely on the link, and by more than most people expect: >
     plain SSH, host on the LAN      ~19ms       no -- you would only notice
                                                 the warm-up
 <
-Twenty times apart, so "it is remote" predicts nothing. Measure yours before
-turning this on -- |:MdViewerMeasureLink| once per machine, and see
-`render.ssh_link_bytes_per_sec` below -- and read `render_path` in
-|:MdViewerDebug| to confirm which model a preview actually chose. A measured
-link also puts an estimate on the warm-up: the winbar reads `warming 3/12 ~14s`
-rather than `warming 3/12`.
+Twenty times apart, so "it is remote" predicts nothing -- which is why `"auto"`
+asks about the link and not about the terminal:
+
+    "off"   the ordinary per-scroll path everywhere. The default.
+    "auto"  the terminal supports it AND this machine has measured a link
+            under `image.resident_below_bytes_per_sec` (4 MB/s).
+    "on"    the terminal supports it. The link is not consulted.
+
+`"auto"` measures nothing on its own. It reads what |:MdViewerMeasureLink| left
+behind on this machine, so on a machine nobody has measured it stays off -- an
+unmeasured link is not a slow link, it is an unknown one, and a warm-up nobody
+asked for is the wrong way to find out. Run the command once per machine and
+`"auto"` starts answering; `render.ssh_link_bytes_per_sec` and
+`$MD_VIEWER_SSH_LINK_BYTES_PER_SEC` are the other two ways to supply the number.
+
+4 MB/s is a gap, not a measurement. The two reference links sit an order of
+magnitude either side of it -- 0.77-1.06 MB/s through an AWS SSM tunnel,
+14.7 MB/s to a LAN host -- and nothing in between has been measured, so raising
+`image.resident_below_bytes_per_sec` turns the mode on for links no evidence
+covers.
+
+`"on"` is that gate removed rather than a firmer `"auto"`: it is how you exercise
+the path deliberately on a machine that will not benefit from it -- a fast desk
+machine, a bug report, `scripts/resident/drive.lua`.
+
+`render_path` in |:MdViewerDebug| reports which model a preview chose and, when
+the link is the reason, the rate it compared. A measured link also puts an
+estimate on the warm-up: the winbar reads `warming 3/12 ~14s` rather than
+`warming 3/12`.
+
+The winbar shows `warming N/N` on every resident session, on any link --
+nothing here is gated on speed. What speed changes is how long it stays up:
+on a fast link the whole warm-up can finish in well under a second, so it is
+easy to blink and miss.
 
 Selected once per preview, when it opens, and reported by |:MdViewerDebug| as
 `render_path`. It is never re-decided mid-scroll: a preview that switched
@@ -1026,8 +1073,10 @@ instance"), where a reporter on a 27.5 MB/s connection measures the same thing
 after ruling out instance type from t3.micro to m7i.8xlarge.
 
 It has nothing to do with SSH. A plain SSH session touches none of that code:
-measured 2026-08-25, 8 MB through a pty to a host on the same network took
-0.47-0.54 seconds, or 16-18 MB/s. See docs/local-render-design.md for the full
+measured on the LAN reference host 2026-08-25, 64 MB of base64 through a pty to a host on the
+same network ran at 14.7 MB/s, and 21.8-23.0 MB/s on the raw channel. Those
+two figures measure the same link; docs/development.md says why a pty figure
+and a channel figure differ, and docs/ssh.md has the full
 working.
 
                                                              *md-viewer-local*
@@ -1039,13 +1088,29 @@ machine your terminal runs on, launch ssh through the helper: >sh
 
     node <md-viewer>/renderer/src/local-main.js -- ssh <host>
 <
-and set `render = { location = "local" }` in the remote Neovim. The remote
-keeps Markdown parsing and the whole security pipeline; the helper renders
-frames beside the terminal and injects them into the session's own byte
-stream. What crosses the link is prepared markup, each asset's bytes once,
-and a ~0.3-1 KB marker per frame -- no PNG in either direction, and no frame
-ever waits on a round trip. Scrolling in particular sends one marker and
-nothing else.
+and set `render = { location = "local" }` in the remote Neovim.
+
+One `~/.config/nvim` usually reaches machines that are not all behind a
+helper, and there is no autodetection (`"auto"` is deliberately refused --
+|md-viewer-options|). Gate it on a variable of your own instead, and export
+that variable only in the sessions you launch through the helper: >lua
+
+    render = {
+      location = vim.env.MD_VIEWER_LOCAL and "local" or "current",
+    }
+<
+    vm$ MD_VIEWER_LOCAL=1 nvim notes.md
+
+`MD_VIEWER_LOCAL` is your variable, not md-viewer's: the plugin reads
+`render.location` and nothing else here. Do not confuse it with
+`$MD_VIEWER_LOCAL_SOCKET` below, which pins the control-socket path.
+
+The remote keeps Markdown parsing and the whole security pipeline; the
+helper renders frames beside the terminal and injects them into the
+session's own byte stream. What crosses the link is prepared markup, each
+asset's bytes once, and a ~0.3-1 KB marker per frame -- no PNG in either
+direction, and no frame ever waits on a round trip. Scrolling in particular
+sends one marker and nothing else.
 
 Requirements and behavior:
 
@@ -1066,9 +1131,8 @@ Requirements and behavior:
   `parser.remoteGraphicsCommands` counts graphics from every program in the
   wrapped session, so a nonzero value there proves nothing by itself.
 
-The full manual -- topology, trust boundary, per-environment validation
-status, and the procedure for validating a new environment -- is
-docs/aws-ssm.md, with the design record in docs/local-render-design.md.
+The full reference -- measuring a link, where the SSM ceiling comes from,
+setup, and the trust boundary -- is docs/ssh.md.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*

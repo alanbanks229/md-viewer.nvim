@@ -24,7 +24,7 @@
 #                                          will not raise it. The difference is
 #                                          the compressor, and it is real --
 #                                          see the payload note below and
-#                                          docs/local-render-design.md
+#                                          docs/ssh.md
 #     plain SSH, LAN host ~14,700,000      no compression, plain TCP/22
 #
 # Fourteen times apart, so "it is remote" tells you nothing useful and this is

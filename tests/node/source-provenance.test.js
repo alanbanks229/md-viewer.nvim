@@ -297,12 +297,15 @@ test("an auto-linkified bare URL degrades, and only it degrades", () => {
   assert.deepEqual(fallback, { line: 48, byteColumn: 0, precision: "line" });
 });
 
-test("a task-list item's text degrades because the plugin re-emits it as raw HTML", () => {
-  // markdown-it-task-lists with `labelAfter` discards the item's text token and
-  // rebuilds the text inside a raw `html_inline` <label>, so there is no text
-  // token left to carry a span. Reported honestly rather than approximated.
-  assert.match(FIXTURE_HTML, /<label class="task-list-item-label"> Task apple item<\/label>/);
-  assert.equal([...FIXTURE_RUNS.values()].filter((text) => text.includes("Task apple item")).length, 0);
+test("a task-list item's text is ordinary content, not re-emitted Markdown source", () => {
+  // This pins the reason `labelAfter` is not passed to markdown-it-task-lists
+  // (see createMarkdown). Under it the item's last inline child was popped and
+  // the item's Markdown *source* was appended as a raw html_inline <label>, so
+  // the text was drawn twice, inline constructs broke, and no text token was
+  // left to carry a span. Wrapping instead leaves the children alone.
+  assert.doesNotMatch(FIXTURE_HTML, /class="task-list-item-label"/);
+  assert.match(FIXTURE_HTML, /<label><input class="task-list-item-checkbox"[^>]*\/><span data-md-source-id="s\d+"> Task apple item<\/span><\/label>/);
+  assert.equal([...FIXTURE_RUNS.values()].filter((text) => text.includes("Task apple item")).length, 1);
 });
 
 test("a region hit without a caret offset reports its line, never a guessed column", () => {

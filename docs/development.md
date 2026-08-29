@@ -14,11 +14,13 @@
 - `renderer/assets/`: bundled preview themes and syntax colors
 - `tests/lua/`, `tests/node/`: headless suites
 - `tests/fixtures/`: Markdown documents both suites and the manual checklist use
-- `scripts/overlay/`: harnesses needing a real browser or a real terminal window
-  — see [../scripts/README.md](../scripts/README.md)
+- `scripts/`: harnesses needing a real browser, a real terminal window, or a
+  real remote host — `overlay/`, `resident/`, `animation/`, `scroll-scale/`,
+  `remote-images/`, `rig/`, `local/`, and `ssh-link-speed.sh`. None of it runs
+  in CI; see [../scripts/README.md](../scripts/README.md)
 - `doc/md-viewer.txt`: `:help md-viewer`
-- `docs/`: architecture, terminal support, troubleshooting, development, and
-  one rejected-design record
+- `docs/`: architecture, terminal support, troubleshooting, development, the
+  and slow links
 
 ## Bootstrap
 
@@ -34,14 +36,28 @@ configured npm registry; runtime rendering does not.
 ## Automated tests
 
 ```sh
+make test            # both suites
 stylua --check lua/ plugin/ tests/lua/
-NVIM_APPNAME=md-viewer-tests nvim --headless -u NONE -i NONE -l tests/lua/run.lua
-npm test --prefix renderer
 ```
 
-CI runs all three on macOS and Ubuntu for every push and pull request. The
-browser suites require an existing Chrome or Chromium installation; no test
-downloads a Playwright-managed browser.
+`make test` is the two suites; `stylua` is a third check with no `make` target.
+CI runs all three on macOS and Ubuntu for every push and pull request, with
+Neovim pinned to `v0.12.4` and stylua to `v2.5.2` (`.github/workflows/ci.yml`) —
+match those locally or expect spurious diffs. The Lua suite needs Neovim 0.12+
+for the same reason the plugin does. The browser suites require an existing
+Chrome or Chromium installation; no test downloads a Playwright-managed browser.
+
+To run less than everything:
+
+```sh
+make test-lua                                   # the Lua suite alone
+make test-node                                  # the Node suite alone
+node --test tests/node/hitbox.test.js           # one Node case
+```
+
+**There is no single-case runner for the Lua suite.** `tests/lua/run.lua` globs
+`tests/lua/cases/*.lua` and runs all of them, with no filter argument and no
+environment variable — run the suite.
 
 The headless suites prove the request/response plumbing, staleness handling,
 sanitization, hit-test geometry, source provenance, selection and search
@@ -88,7 +104,7 @@ not tell you.
 | Scrolling | `j`/`k`, `Ctrl-d`/`u`, `Ctrl-f`/`b`, `gg`/`G`, wheel over the preview | Smooth, no flicker, no stray image. The wheel does nothing when the pointer is outside the preview |
 | Resize and font size | Resize the window, then change the terminal's font size | Re-renders at the new geometry and stays aligned |
 | Scroll scale, locally | Wheel-scroll, then `:MdViewerDebug` | `scroll_scale = nil`, source `local session`. Nothing about a local preview may change: this is the byte-identical path |
-| Scroll scale, over SSH | The same from an SSH session | `scroll_scale = 0.5`, source naming `ssh_scroll_scale`, and `fast_png_bytes` roughly 2.5× below what the same pane reports locally |
+| Scroll scale, over SSH | The same from an SSH session | `scroll_scale = 0.5`, source naming `ssh_scroll_scale`, and `fast_png_bytes` 2.6x to 3x below what the same pane reports locally |
 | Settle sharpness | Scroll hard over SSH, then stop and look | The moving frame may be visibly soft; the frame that lands after `render.ssh_scroll_settle_ms` (400 ms, against 160 locally) is sharp. A preview that stays soft at rest is the failure this option can cause |
 
 ### The preview caret
@@ -160,6 +176,12 @@ or `off -- <reason>`.
 | Repeated open/close | Open and close several times | No stray placements accumulate |
 | Teardown | `:qa` | No image left on the terminal, and no Node or Chromium process still running |
 
+## For maintainers
+
+Everything below this line needs hardware, a terminal, or a remote host that a
+contributor is not expected to have. A pull request is not held to it; a
+release is.
+
 ## Qualifying a terminal
 
 Status labels and their evidence bar are defined in
@@ -222,7 +244,7 @@ option's shape afterwards is a breaking config change.**
 `:MdViewerMeasureLink`'s cache key includes terminal identity
 (`terminal_id()` in `lua/md-viewer/linkrate.lua`) because on a fast link the
 terminal emulator, not the network, dominates the measured throughput.
-Measured on `ichigo` (2026-08-26), same script, same day, three drains of the
+Measured on the LAN reference host (2026-08-26), same script, same day, three drains of the
 identical link:
 
 | drain | rate |
@@ -237,10 +259,10 @@ emulator, which is why the same host reached from two different terminals can
 measure two different rates, and why the cache key has to include which
 terminal is asking.
 
-**Open:** ichigo's own link rate under a real iTerm2 drain has never been
+**Open:** the LAN reference host's own link rate under a real iTerm2 drain has never been
 measured — only the `/dev/null`-drain figures above exist. An agent has no
 terminal emulator to drain into. Run `:MdViewerMeasureLink` from inside a real
-iTerm2 session on `ichigo` and record the result here.
+iTerm2 session on the LAN reference host and record the result here.
 
 ## The local-render helper
 
@@ -262,7 +284,7 @@ under `scripts/local/`: `topology-check.sh` proves the wrapped-ssh topology
 (raw mode, resize, `~.`) against a real host, and `marker-echo-emit.sh` is
 the remote half of the echo test. Two hard-won facts to preserve when
 touching it: the helper must never read `process.stdin` (the tty probe opens
-its own `/dev/tty` — see the header in `local/tty-probe.js` for the measured
+its own `/dev/tty` — see the header in `renderer/src/local/tty-probe.js` for the measured
 failure), and remote forward paths must be absolute and short
 (`sshd` refuses relative streamlocal binds; `sun_path` caps at ~104 bytes).
 
@@ -271,14 +293,6 @@ failure), and remote forward paths must be absolute and short
 The project follows [Semantic Versioning](https://semver.org/). While the major
 version is `0`, a breaking change is allowed in a MINOR bump; that carve-out ends
 at `1.0.0`.
-
-**Release candidates may be tagged on an unmerged feature branch** when the
-point of the RC is validation in an environment this machine cannot reach —
-tags are fetchable regardless of branch, so a lazy.nvim `version` pin works
-either way. `v0.3.0-rc9` set the precedent: the branch merges after the
-remote evidence comes back, not before. Everything else in the checklist
-applies unchanged, and the release notes must say what validation is still
-pending.
 
 1. Run all three automated suites from a clean checkout.
 2. Work through [Manual verification](#manual-verification) on at least one
@@ -349,6 +363,6 @@ change. A grep for `KEEP_IN_MIND` should always find every such site.
 Do not delete code just because it currently has no live caller -- that is
 what the comment is for. If a path should be removed outright rather than left
 dormant (the feature it serves is being dropped, not just currently
-unexercised on this fleet), that is a product decision: raise it with the
-operator/orchestrator before deleting it. Once a real host exercises the path
-again, delete the comment along with it -- it has done its job.
+unexercised), that is a product decision -- open an issue rather than deleting
+it in a pull request. Once a real host exercises the path again, delete the
+comment along with it: it has done its job.

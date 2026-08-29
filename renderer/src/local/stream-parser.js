@@ -119,7 +119,7 @@ export class StreamParser {
       // direction: raster that is *not* md-viewer-shaped belongs to some
       // other program in the wrapped session, and is not this plugin's to
       // explain. (rc9's 1.7 MB on a healthy local session was exactly this
-      // ambiguity, measured on the work laptop 2026-08-27.)
+      // ambiguity, measured on the laptop 2026-08-27.)
       remoteMdvGraphicsCommands: 0,
       remoteMdvRasterBytes: 0,
     };

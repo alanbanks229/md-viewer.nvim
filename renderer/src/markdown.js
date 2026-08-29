@@ -63,7 +63,19 @@ function headingAnchorPlugin(md) {
 
 function createMarkdown(options) {
   const md = new MarkdownIt({ html: Boolean(options.rawHtml), linkify: true, typographer: false, breaks: false });
-  md.use(taskLists, { enabled: false, label: true, labelAfter: true });
+  // `labelAfter` is deliberately absent and must not be added back. In that
+  // mode markdown-it-task-lists pops the item's last inline child and appends a
+  // raw `html_inline` <label> built from the token's *Markdown source*. On a
+  // plain-text item that reads as a harmless swap; on an item containing any
+  // inline construct it is not one. `- [ ] see [a link](url)` popped the
+  // link_close and re-emitted the whole item as literal text inside the still
+  // open anchor; `- [ ] with **bold**` popped the strong_close; a code span
+  // vanished and came back as backticks. Every such item rendered its own
+  // Markdown a second time, on screen.
+  // Wrapping instead (`label` alone) moves nothing and drops nothing, so the
+  // children survive -- which is also what gives a task item exact source
+  // provenance, where before no text token was left to carry a span.
+  md.use(taskLists, { enabled: false, label: true });
   md.use(alertPlugin);
   md.use(headingAnchorPlugin);
   if (options.obsidianEnabled) md.use(obsidianPlugin);

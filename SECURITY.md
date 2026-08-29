@@ -25,6 +25,12 @@ Fixes are provided for `main` and the latest tagged release.
   Remote images pass the same checks and are fetched over HTTPS by the renderer
   process, never the browser. Anything that fails renders as a visible
   placeholder naming the reason instead of disappearing.
+- A link to a non-Markdown file is handed to the operating system's opener, but
+  never if the target is executable: macOS bundles and scripts, Windows
+  executables, `.desktop`/`.AppImage`/`.jar`, disk images, or any file carrying
+  an execute bit are refused with a notification rather than launched. Markdown
+  targets open as a preview tab and never leave Neovim. Both checks happen after
+  the document-root and symlink containment above, not instead of it.
 - Remote fetches only ever reach public addresses. Loopback, RFC1918 and other
   private ranges, link-local addresses (including `169.254.0.0/16`, where cloud
   metadata services live), and multicast/reserved ranges are refused — on the

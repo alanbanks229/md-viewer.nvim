@@ -6,6 +6,57 @@ buffer — the environment field by field, then what each open preview is actual
 doing — and is what to attach to a bug report. Every field name quoted below is
 printed by `:MdViewerDebug` unless it says otherwise.
 
+## Find your symptom
+
+**Nothing is drawn**
+
+- [The preview shows styled text instead of an image](#the-preview-shows-styled-text-instead-of-an-image)
+- [An explicit backend reports unavailable](#an-explicit-backend-reports-unavailable)
+- [The renderer exits, or Playwright is missing](#the-renderer-exits-or-playwright-is-missing)
+- [The preview falls back to text over SSH](#the-preview-falls-back-to-text-over-ssh)
+- [The wrong terminal profile was detected](#the-wrong-terminal-profile-was-detected)
+
+**It draws, but wrong**
+
+- [The image is stretched or soft, or the text is about twice the size it should be](#the-image-is-stretched-or-soft-or-the-text-is-about-twice-the-size-it-should-be)
+- [The caret or the selection highlight is a huge grey block](#the-caret-or-the-selection-highlight-is-a-huge-grey-block)
+- [The preview blinks to a blank pane if you drag the mouse](#the-preview-blinks-to-a-blank-pane-if-you-drag-the-mouse)
+- [A resident preview jumps to the wrong position, or shows torn content](#a-resident-preview-jumps-to-the-wrong-position-or-shows-torn-content)
+- [A notification over the preview shows Markdown through its background](#a-notification-over-the-preview-shows-markdown-through-its-background)
+- [A gap or overhang appears beside a notification](#a-gap-or-overhang-appears-beside-a-notification)
+- [The image overlaps other UI, or survives closing](#the-image-overlaps-other-ui-or-survives-closing)
+
+**Images**
+
+- [An image shows a placeholder instead of the picture](#an-image-shows-a-placeholder-instead-of-the-picture)
+- [Remote images never load, and the network needs a proxy](#remote-images-never-load-and-the-network-needs-a-proxy)
+- [An animated image is not moving](#an-animated-image-is-not-moving)
+
+**Interaction**
+
+- [The mouse wheel does not scroll the preview](#the-mouse-wheel-does-not-scroll-the-preview)
+- [Clicking, extending a selection, searching, or copying does nothing](#clicking-extending-a-selection-searching-or-copying-does-nothing)
+- [A `v`/`V` selection does not extend](#a-vv-selection-does-not-extend)
+- [A click lands on the wrong character](#a-click-lands-on-the-wrong-character)
+- [The mouse pointer never changes shape over the preview](#the-mouse-pointer-never-changes-shape-over-the-preview)
+
+**Links**
+
+- [A link to another document refuses to open](#a-link-to-another-document-refuses-to-open)
+- [Ctrl-click or Cmd-click does not activate a link](#ctrl-click-or-cmd-click-does-not-activate-a-link)
+- [A Ctrl-clicked external link does nothing](#a-ctrl-clicked-external-link-does-nothing)
+
+**Speed, and remote sessions**
+
+- [Scrolling feels slow](#scrolling-feels-slow)
+- [Local rendering says "local rendering unavailable" on open](#local-rendering-says-local-rendering-unavailable-on-open)
+- [Local rendering attaches but "pairing probe unanswered"](#local-rendering-attaches-but-pairing-probe-unanswered)
+- [The preview works, but is it actually rendering locally?](#the-preview-works-but-is-it-actually-rendering-locally?)
+- [Local rendering demoted mid-session ("rendering on this host instead")](#local-rendering-demoted-mid-session-rendering-on-this-host-instead)
+- [Resident mode is configured, but `render_path` says `viewport`](#resident-mode-is-configured-but-render_path-says-viewport)
+
+---
+
 ## The preview shows styled text instead of an image
 
 `auto` landed on the `cells` fallback, which happens only when *neither*
@@ -65,29 +116,19 @@ the other.
   pixel geometry, and neither does a Neovim without LuaJIT; the render is sized
   from a guess the terminal then scales.
 
-The reported number is *supposed* to be device pixels, in which case the CSS
-cell is that divided by `render.device_scale_factor`. Not every terminal means
-that, and not every display matches the configured scale, so md-viewer tries
-both divisors and keeps whichever yields a cell a font could plausibly have —
-roughly 5–30 CSS px wide and 10–60 tall. `cell unit` names the divisor it
-settled on and whether the choice was the default or a repair. If neither works,
-`:MdViewerHealth` says so as a warning rather than picking one silently.
+md-viewer tries both divisors and keeps whichever yields a cell a font could
+plausibly have. `cell unit` names the one it settled on; if neither works,
+`:MdViewerHealth` warns rather than picking silently.
 
-**Doubled glyphs specifically.** The CSS viewport is the preview's cell
-rectangle times the CSS cell size, the page is captured at
-`render.device_scale_factor`, and the terminal scales the result back into those
-same cells. A CSS cell that comes out half its true size therefore halves the
-viewport while the terminal magnifies the PNG to fill the cells anyway — so the
-glyphs double and the layout stays put. Two things get it there, and md-viewer
-detects both:
+**Doubled glyphs specifically** mean the CSS cell came out half size, so the
+terminal magnifies the PNG to fill the cells anyway. Two causes:
 
 - The terminal fills `ws_xpixel`/`ws_ypixel` with **logical points** rather than
-  device pixels, so dividing by the device scale divides a second time. Warp
-  does this.
-- The display is **1x** while `render.device_scale_factor` is left at its
-  default of `2`. No terminal bug required; setting `render.device_scale_factor
-  = 1` is the direct fix, and it also stops the renderer capturing four times
-  the pixels it needs.
+  device pixels, so the device scale divides a second time. Warp does this, and
+  md-viewer detects it.
+- The display is **1x** while `render.device_scale_factor` is left at its default
+  of `2`. Set `render.device_scale_factor = 1` — it also stops the renderer
+  capturing four times the pixels it needs.
 
 **Overriding the measurement.** Give the cell size in **CSS** pixels — the
 measured size divided by `device_scale_factor`, so a 2x display measuring 14×32
@@ -176,66 +217,42 @@ placeholder in place, and the picture appears on its own once the bytes land.
 network where the only route out is a proxy every `https` image fails to its
 placeholder. Nothing is misconfigured and there is no setting that changes it.
 
-The reason is the SSRF defence. `buildRequestOptions` in
-`renderer/src/remote-images.js` resolves the hostname, validates every returned
-address against the blocklist, and then **pins** the connection to the address
-it validated, with `agent: false` so no keep-alive pool or shared agent object
-can quietly reconnect somewhere else. Pinning the resolved address is what
-closes the gap between the check and the connection — without it, a hostname
-can answer with a public address for the check and a private one for the fetch.
-A proxy makes pinning impossible: the connection goes to the proxy, and where
-it goes after that is the proxy's decision, not something this process can
-verify. Reaching remote images through a proxy while keeping the guarantee that
-makes the check meaningful is **an open design question, not an oversight**.
+The reason is the SSRF defence: the fetcher resolves the hostname, validates the
+address, and then **pins** the connection to the address it validated. Without
+that pin a hostname can answer with a public address for the check and a private
+one for the fetch. A proxy makes pinning impossible — where the connection goes
+after the proxy is the proxy's decision. Keeping both is an open design question,
+not an oversight.
 
-This costs you that one picture and nothing else. The render does not wait for
-a fetch: the placeholder is drawn immediately, and a later render picks the
-image up if it ever lands. On a proxied network it will not, so what you get is
-the placeholder, at once.
-
-Local images and links are unaffected: they never touch the network.
-
-A GitHub attachment URL — `https://github.com/user-attachments/…`, the form
-GitHub produces when you paste an image into an issue, and what this
-project's own README uses — 302-redirects to a signed S3 URL. That and
-similar redirect chains resolve with no configuration; the renderer follows
-up to three hops, and the destination check above applies to each hop, not
-just the URL as written. The placeholder always names the reason and, for a
-non-public destination, the address it resolved to, so there is nothing to
-look up if a redirect target ever changes.
+It costs that one picture and nothing else. The placeholder draws immediately
+rather than the render waiting on a fetch, and local images and links never touch
+the network. Redirects are fine — up to three hops, each checked — so ordinary
+GitHub attachment URLs resolve with no configuration.
 
 ## An animated image is not moving
 
-**Animation is off by default.** `:MdViewerDebug` reports
-`animation: off -- render.animate=false`; turn it on with
-`render.animate = true`. Nothing is broken in the meantime: the preview is a
-browser-rendered PNG surface, so an animated image is a still frame until the
-terminal is given the frames to draw itself, and that still frame is the
-picture you are already looking at.
+**Animation is off by default** — set `render.animate = true`. Until then you see
+the still frame, which is the picture you are already looking at.
 
-With it on, `:MdViewerDebug` reports `animation` with the strategy in use —
-`native (terminal-driven)` or `frames (client-driven)` — or off with the reason.
-
-Off is normal in several other cases, and none of them lose the picture: only
-the `kitty_raw` backend can place frames, so `cells` and `nvim_img` cannot
-animate at all; the terminal's pixel cell size has to be measurable (the same
-precondition as the selection-highlight overlay); and only iTerm2, Kitty and Ghostty
-are qualified for it. WezTerm is deliberately excluded — see
+With it on, `:MdViewerDebug`'s `animation` line names the strategy in use or the
+reason it is off. Off is also normal on the `cells` and `nvim_img` backends
+(neither can place frames), where the terminal's pixel cell size is not
+measurable, and on any terminal but iTerm2, Kitty and Ghostty — see
 [terminal support](terminal-support.md).
 
-On, but still not moving, is usually one of three things. Decoding runs in the
-renderer's Chromium and a long retina-scale recording can take a few seconds
-to start; `:MdViewerDebug` lists each animation as `materializing`,
-`uploading`, `playing`, or with a per-frame count once frames are in. Animation
-is suspended while a click or visual selection is in progress, while the preview
-is occluded by a floating window, and while the completion popup is up —
-`animation_suppressed_reason` names whichever applies. And an image the renderer
-*refused* — a still, one past the size or frame caps, or one whose drawn size
-leaves no frame budget — stays a still frame with the refusal recorded in the
-same list.
+On but still not moving is usually one of three things, all visible in
+`:MdViewerDebug`:
 
-A non-looping GIF that has finished is not stuck: it froze on its last frame,
-exactly as a browser leaves it.
+- **Still decoding.** A long retina-scale recording takes a few seconds; each
+  animation lists as `materializing`, `uploading` or `playing`.
+- **Suspended.** Animation pauses during a click or selection, under a floating
+  window, and while the completion popup is up. `animation_suppressed_reason`
+  names which.
+- **Refused.** Past the size or frame caps, or drawn at a size that leaves no
+  frame budget. The refusal is recorded in the same list.
+
+A non-looping GIF that has finished is not stuck — it froze on its last frame,
+as a browser leaves it.
 
 Set `render.animate = false` to turn animation back off, `render.animate_fps`
 to cap the client-driven swap rate (frames are skipped under the cap, never
@@ -327,26 +344,37 @@ launched through the helper; a helper that died takes its ssh session with
 it, so this normally means starting a fresh session rather than repairing
 the old one.
 
+## Resident mode is configured, but `render_path` says `viewport`
+
+Run `:MdViewerDebug` and read `render_path_reason` — it names the one condition
+that was not met, and there are four:
+
+| `render_path_reason` | What to do |
+|---|---|
+| `link speed unknown — :MdViewerMeasureLink measures this machine…` | Run `:MdViewerMeasureLink` once on this machine. `"auto"` never measures on its own, and an unmeasured link is treated as unknown rather than slow. |
+| `link measures 14.70 MB/s, at or above the 4.00 MB/s cutoff…` | Working as intended: this link is fast enough that the warm-up is the only thing you would notice. Set `image.resident = "on"` if you want it anyway, or raise `image.resident_below_bytes_per_sec`. |
+| `wezterm#7953…`, or any terminal reason | Your terminal refuses resident placements. No link speed changes this — see [terminal-support.md](terminal-support.md). |
+| `local render owns scrolling` | Local rendering is attached, and it already scrolls without sending pixels. The two are mutually exclusive by design and local rendering wins. |
+
+`image.resident = "off"` reports itself as `image.resident = off`, which means
+`setup()` never received what you thought it did — check for a second `setup()`
+call or a plugin-manager `opts` table overriding the first.
+
 ## A resident preview jumps to the wrong position, or shows torn content
 
-Resident mode (`image.resident = "auto"`, opt-in and off by default) holds a
-document's chunks in the terminal's own image memory and scrolls by asking the
-terminal to re-crop them in place, instead of re-rendering per scroll. On
-iTerm2 3.6.11, that re-crop was measured to be unreliable over a real slow link
-(an AWS SSM tunnel, ~1 MB/s): a chunk's first placement could show content from
-a different position than the one requested, and re-cropping an already-shown
-chunk to a new position could leave the old crop on screen instead. In both
-cases the escape sequence md-viewer sent was confirmed byte-correct — the
-defect is in the terminal applying it, not in what was asked for.
+Resident mode (`image.resident = "auto"` plus a measured link under 4 MB/s, off
+by default) scrolls by asking the
+terminal to re-crop chunks already in its image memory. iTerm2 3.6.11 applies
+that re-crop unreliably over a slow link — measured, with the escape sequences
+confirmed byte-correct, so the defect is in the terminal rather than in what was
+sent. iTerm2's profile therefore sets `resident_pan = false` and falls back to
+the viewport model, which re-renders per scroll and re-crops nothing.
 
-iTerm2's profile now carries `resident_pan = false`
-(`lua/md-viewer/terminal.lua`), so `resident_session.select_path` refuses the
-resident path there and falls back to the viewport model, which re-renders on
-every scroll and does not re-crop anything. `:MdViewerDebug`'s `render_path`
-reports which model a given preview actually chose; `render_path_reason` says
-why. If a preview that should be on viewport model is instead warming chunks,
-check `terminal.profile` (config) and `MD_VIEWER_TERMINAL_PROFILE` (env) for an
-override that is pinning a profile other than `iterm2`.
+`:MdViewerDebug`'s `render_path` says which model a preview chose and
+`render_path_reason` says why. If one that should be on the viewport model is
+warming chunks instead, check `terminal.profile` and
+`MD_VIEWER_TERMINAL_PROFILE` for an override pinning a profile other than
+`iterm2`.
 
 ## A notification over the preview shows Markdown through its background
 
@@ -387,13 +415,10 @@ creates windows with `noautocmd = true`, confirm `:MdViewerDebug` reports
 `ui_polling: true` — the poll discovers them without provider-specific hooks,
 on the interval `image.ui_poll_ms` sets (default 50 ms; `0` disables it).
 
-If a stray image persists over another plugin's windows while `tabpage_hidden` is
-`false`, that plugin most likely resized or repositioned the preview split
-without md-viewer noticing. `WinNew`/`WinResized` should catch any new or resized
-window, not only floating ones — if they don't, that is a real regression worth
-reporting. If the image is visible on a *different* tabpage than the preview's
-own, `refresh_deferred` should read `true` until you return to the preview's
-tabpage.
+A stray image persisting over another plugin's windows while `tabpage_hidden` is
+`false` usually means that plugin resized or moved the preview split without
+md-viewer noticing — `WinNew`/`WinResized` should catch that, and a case where
+they don't is worth reporting.
 
 Close the preview with `:MdViewerToggle`; md-viewer deletes only the image IDs it
 owns. Do not use global image deletion — it can damage unrelated plugins.
@@ -515,43 +540,46 @@ identified by:            none
 selected backend:         cells
 ```
 
-This is a terminal-identification failure, not a renderer failure. If the
-`Renderer Process` section reports `chromium launch: succeeded` and
-`process: running`, the renderer is fine and is not the thing to investigate —
-it only produces a PNG. Painting that PNG is Neovim's job, and Neovim declines
-to emit graphics escape sequences at a terminal it cannot identify.
+This is terminal identification, not the renderer — if `chromium launch:
+succeeded`, the renderer is fine and only produces a PNG. Neovim declines to
+emit graphics at a terminal it cannot identify, and SSH does not forward
+`TERM_PROGRAM`. Fixes, best first:
 
-The cause is that SSH does not forward `TERM_PROGRAM`, which is how iTerm2,
-Warp and others are normally recognised. Fixes, best first:
+1. **Let `LC_TERMINAL` through** — iTerm2 and WezTerm export it so identity
+   survives SSH, but it has to be allowed at both ends. Run `echo $LC_TERMINAL`
+   on the remote host; if it prints, this is not your problem. If it is empty:
+   - **Client.** `ssh -G <host> | grep sendenv` shows what is actually sent.
+     Nothing, or no `LC_*`? Add to `~/.ssh/config`:
+     ```
+     Host *
+       SendEnv LC_TERMINAL LC_TERMINAL_VERSION
+     ```
+     Upstream OpenSSH sends nothing by default; distributions usually add
+     `SendEnv LANG LC_*`, and a `Host *` block of your own can override it.
+   - **Server.** `AcceptEnv LANG LC_*` in `/etc/ssh/sshd_config`, then reload
+     `sshd`. Nearly every distribution ships this already.
 
-1. **Let `LC_TERMINAL` through.** iTerm2 and WezTerm export `LC_TERMINAL` (and
-   `LC_TERMINAL_VERSION`) precisely so identity survives SSH, and OpenSSH
-   forwards `LC_*` by default. Run `echo $LC_TERMINAL` on the remote host. If it
-   is empty, the remote `sshd` is dropping it: add `AcceptEnv LANG LC_*` to
-   `/etc/ssh/sshd_config` and reload `sshd`. Nothing else is needed — detection
-   is automatic once the variable arrives, and `identified by` will read
-   `LC_TERMINAL=iTerm2; LC_TERMINAL_VERSION=3.6.11`.
+   Detection is automatic once the variable arrives.
 2. **Name the profile in the environment**, for terminals that export no
-   forwardable identity of their own (Kitty, Ghostty, Warp):
-   `export MD_VIEWER_TERMINAL_PROFILE=kitty` on the remote host. This is
-   preferable to the config option when one `~/.config/nvim` is shared across
-   hosts and reached from different terminals: the variable travels with the
-   session, a hardcoded profile does not. A value that is not a known profile is
-   ignored and reported in `identified by`, so check there for typos.
-3. **Set `terminal.profile`** in the remote Neovim config, if that config is
-   only ever used from one terminal.
+   forwardable identity (Kitty, Ghostty, Warp):
+   `export MD_VIEWER_TERMINAL_PROFILE=kitty` on the remote host. Prefer this to
+   the config option when one `~/.config/nvim` is shared across hosts — the
+   variable travels with the session, a hardcoded profile does not. An unknown
+   value is ignored and reported in `identified by`, so check there for typos.
+3. **Set `terminal.profile`** in the remote config, if it is only ever used from
+   one terminal.
 
 Two things that will not help, both common first guesses:
 
 - **Pointing at a local browser.** `browser.executable_path` names a binary on
   the machine running Neovim; it cannot reach across the SSH connection, and the
   renderer that reads it opens no port and speaks to nothing over the network.
-- **Forcing `image.backend = "kitty_raw"`.** Backend selection still calls the
-  backend's `detect()`, which fails for the same reason `auto` did, so this
-  converts the fallback into a hard error without changing the outcome.
-  `terminal.kitty_graphics = "on"` is the switch that actually moves this,
-  though naming the profile is better — it also gets the right z-index,
-  double-buffer and overlay defaults.
+- **Forcing `image.backend = "kitty_raw"`.** Selection still calls the backend's
+  `detect()`, which fails for the same reason `auto` did — it turns the fallback
+  into a hard error without changing the outcome.
+  `terminal.kitty_graphics = "on"` is the switch that moves this, but naming the
+  profile is better: it also gets the right z-index, double-buffer and overlay
+  defaults.
 
 A preview that renders but feels *sluggish* is a different problem — bandwidth
 rather than detection — and is covered under

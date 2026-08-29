@@ -28,8 +28,8 @@ const repoRoot = path.resolve(here, "..", "..");
 const assetsDir = path.join(repoRoot, "renderer", "assets");
 const outDir = path.join(repoRoot, "tmp", "resident", "registration");
 
-// The viewport every number in docs/local-render-design.md was measured
-// against, so what this prints is comparable to what is already on record.
+// The viewport the figures further down this file's own header were measured
+// against, so what this prints is comparable to them.
 const VIEWPORT_W = 990;
 const VIEWPORT_H = 1020;
 const DEVICE_SCALE = 2;

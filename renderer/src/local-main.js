@@ -7,8 +7,8 @@
 // Topology, and why it is this one: stdin is inherited, so ssh itself owns
 // the real terminal for input -- raw mode, window-size changes, `~` escapes
 // all belong to ssh exactly as they do without the helper, and the two
-// alternatives `docs/local-render-design.md` records as impossible (a second
-// tty writer; owning stdin) stay untouched. Only stdout is piped: every byte
+// alternatives -- a second tty writer, or owning stdin -- are both
+// unworkable and stay untouched. Only stdout is piped: every byte
 // ssh produces passes through the stream parser, which deletes matched
 // marker APCs and reports the safe boundaries where the injector may write a
 // graphics transaction. stderr is piped too, and forwarded only at safe

@@ -2,8 +2,6 @@
 
 **Browser-quality Markdown previews inside terminal Neovim.**
 
-<img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" />
-
 `md-viewer.nvim` opens a read-only split beside your Markdown source. A headless
 Chromium page renders the unsaved buffer to viewport-sized PNGs, which Neovim
 draws in the split through the Kitty graphics protocol. The source stays a
@@ -11,12 +9,34 @@ normal, editable Neovim buffer.
 
 Mouse and keyboard gestures over the preview are forwarded to that live Chromium
 DOM, which does the hit-testing, search and link resolution before the viewport
-is recaptured. Text highlighting works the same way, but only through vim-like
-motions (`v`/`V` and the usual motion keys) — there is no click-and-drag
-selection. You get browser behaviour — but the preview is a PNG surface,
-**NOT** native terminal text and not an embedded webview.
+is recaptured. You get browser behaviour — but the preview is a PNG surface,
+**NOT** native terminal text and not an embedded webview. The renderer opens no
+window, starts no HTTP server, and listens on no port.
 
-The renderer opens no window, starts no HTTP server, and listens on no port.
+<!-- <img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" /> -->
+
+## Features
+
+| Feature | Notes |
+|---|---|
+| **Live preview of what you are typing** | Unsaved changes re-render as you edit, and the preview follows your cursor, so the picture and the buffer never drift apart |
+| **Cursor/Caret - driven by Vim motions** | `hjkl`, `w`, `}`, `gg`, `G` and counts move a caret that lives in the rendered document; `v`/`V` extend a selection from it, and `y` copies to the unnamed register and the system clipboard. There is no click-and-drag selection — this is the only way to highlight text here |
+| **Search with `/`, `n` and `N`** | Runs against the rendered page rather than the source |
+| **A tab per document** | Scoped to the preview pane. Ctrl/Cmd-click a Markdown link to open one without disturbing your editable split; `[b`/`]b` cycle tabs, `H`/`L` walk history, and `gf` reveals the active document back in the source pane. Tabs are clickable in the winbar |
+| **Obsidian wikilinks** — optional | `[[Note]]`, aliases, heading paths and block IDs resolve through those same tabs, with no obsidian.nvim runtime dependency |
+| **Animated GIF and WebP** | Actually animate, drawn by the terminal over the still frame the screenshot captured. Off by default: `render.animate = true` |
+| **Local rendering** — *experimental* | One answer to a slow SSH link: move the browser to your side of the connection entirely. `render.location = "local"` (`:help md-viewer-local`) |
+| **Whole-document resident mode** — *experimental* | The other answer: hold the document in the terminal's image memory, so a scroll sends 196 bytes instead of a frame. `image.resident = "auto"` (`:help md-viewer-resident`) |
+| **A text-only fallback** | Where no graphical backend is available — with diagnostics that name the backend you got and why |
+
+> ### ⓘ Usage
+>
+> See **[docs/usage.md](docs/usage.md)** or `:help md-viewer` for more details on usage.
+> 
+> To start off, open a markdown file buffer, focus the pane and run `:MdViewerToggle`.
+> 
+> If the preview does not appear `:MdViewerHealth` says why.
+
 
 ## Requirements
 
@@ -25,116 +45,20 @@ The renderer opens no window, starts no HTTP server, and listens on no port.
   path at all, so the plugin refuses to load.
 - **Node.js 22.12+**, for the renderer process.
 - **An existing Google Chrome, Chromium, or Microsoft Edge installation**, on
-  whichever machine Neovim itself runs on — see
-  [Remote sessions over SSH](#remote-sessions-over-ssh). md-viewer never
-  downloads a browser: Playwright's browser download is disabled in the install
-  hook and no test or runtime path re-enables it.
+  whichever machine Neovim itself runs on. md-viewer never downloads a browser:
+  Playwright's browser download is disabled in the install hook and no test or
+  runtime path re-enables it.
 - **A terminal that speaks the Kitty graphics protocol, used directly** — see
-  [Terminal support](#terminal-support). Kitty.app and the `kitty`/`kitten`
-  executables are not required; any terminal implementing the protocol works.
+  [Terminal support](#terminal-support).
 - **macOS or Linux.** CI runs the full suites on both. Windows has code paths but
   no test coverage, and terminal cell measurement has no Windows implementation.
 
-Installing needs npm registry access unless the locked packages are already
-cached. Rendering is entirely local — the browser makes no network requests under
-any configuration.
 
-## Terminal support
-
-| Terminal | Status |
-|---|---|
-| iTerm2 3.5+ | Supported — full markdown rendering and fast interactions |
-| Kitty | Supported — full markdown rendering and fast interactions |
-| Ghostty 1.3.1+ | Supported — full markdown rendering and fast interactions |
-| WezTerm | Supported — full markdown rendering with **slower interactions**; fast-path support is pending [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035) |
-| Warp | Experimental — markdown rendering works, but the selection highlight is buggy, animations are disabled, and visual selection may blank the rendered preview ([warp#7789](https://github.com/warpdotdev/Warp/issues/7789)) |
-| macOS Terminal.app | Limited — no Kitty graphics support; falls back to the text-only `cells` backend |
-
-**tmux and Zellij are not supported.** No escape-sequence passthrough is
-implemented for any of them, and they do not propagate the terminal's pixel
-geometry, which the preview is sized against.
-
-[docs/terminal-support.md](docs/terminal-support.md) holds the evidence behind
-each row — read it before reporting a graphical bug or claiming a terminal works.
-
-### Remote sessions over SSH
-
-md-viewer works over SSH, with one thing to install and one thing to know.
-
-**Node.js and Chrome/Chromium go on the remote host, not on your laptop.** The
-renderer runs wherever Neovim runs. It produces a PNG, and Neovim then writes
-that PNG to your terminal as Kitty graphics escape sequences, which travel down
-the SSH connection and are drawn by the terminal in front of you. A browser on
-the local machine is never consulted and cannot be substituted.
-
-**Terminal identification is the part that needs care.** md-viewer identifies
-your terminal from environment variables, and SSH does not forward
-`TERM_PROGRAM`. It does forward `LC_*` by default, so:
-
-| Terminal | Over SSH |
-|---|---|
-| iTerm2, WezTerm | Detected automatically — both export `LC_TERMINAL`, which is forwarded |
-| Kitty, Ghostty, Warp | Not detected — set the profile explicitly (below) |
-
-Automatic detection needs the remote `sshd` to accept the forwarded variable.
-Nearly every distribution ships `AcceptEnv LANG LC_*` in `/etc/ssh/sshd_config`
-already; if yours does not, add it and reload `sshd`. Confirm with
-`echo $LC_TERMINAL` on the remote host.
-
-For anything not auto-detected, name the profile on the remote host — as an
-environment variable, which travels with the session:
-
-```sh
-export MD_VIEWER_TERMINAL_PROFILE=kitty
-```
-
-or in the remote Neovim config, if that config is only ever used from one
-terminal:
-
-```lua
-opts = { terminal = { profile = "kitty" } }
-```
-
-`:MdViewerDebug` reports `ssh session`, the detected profile, and the evidence
-that produced it. If the profile is `unknown` on an SSH session it also prints a
-caveat naming these fixes.
-
-**Bandwidth.** Every refresh ships a full-page PNG down the connection as
-base64, so on a throttled link the picture arrives late and scrolling lags
-behind the wheel. md-viewer already does two things about this on an SSH
-session, neither of which needs configuring: it captures the moving frame of a
-scroll at half size (`render.ssh_scroll_scale`, 2.6× to 3× fewer bytes) and
-restores full sharpness the moment scrolling stops, and it waits longer before
-spending that sharp capture (`render.ssh_scroll_settle_ms`).
-
-How throttled the link actually is, md-viewer cannot see: `nvim_ui_send` appends
-to Neovim's own UI queue and returns, so timing a write measures the queue and
-not the wire. `:MdViewerMeasureLink`, run once on a machine, measures it from a
-subprocess and caches the answer there — which is per-machine on purpose, since
-one `~/.config/nvim` reaches hosts that measured fourteen times apart.
-
-Do **not** reach for `render.device_scale_factor = 1` here — it is a
-calibration divisor rather than a size knob, and lowering it makes the frame
-*larger*. `:help md-viewer-ssh` has the measurements, the tuning, and the rest
-of the reasoning.
-
-**Local rendering (experimental).** On a link too slow for pictures at all —
-the measured case is AWS SSM's ~0.8 MB/s — `render.location = "local"` moves
-the browser to your side of the connection instead of shrinking what crosses
-it. Launch ssh through the helper on the machine your terminal runs on:
-
-```sh
-node <md-viewer>/renderer/src/local-main.js -- ssh <host>
-```
-
-and set `render = { location = "local" }` in the remote Neovim's opts. Frames
-then render and display beside your terminal; the connection carries prepared
-markup, asset bytes once each, and ~0.3–1 KB frame markers — no PNGs in
-either direction. Both ends must run the same md-viewer version (the
-handshake refuses a mismatch and names the fix), and if the helper is absent
-the preview says so once and renders remotely as before.
-[docs/aws-ssm.md](docs/aws-ssm.md) is the full manual, including validation
-status per environment.
+> ### ⓘ Installation Note:
+>
+> Installing needs npm registry access unless the locked packages are already cached.
+>
+> Rendering is entirely local — the browser makes no network requests under any configuration.
 
 ## Installation
 
@@ -147,7 +71,7 @@ a browser.
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0-rc11",
+  version = "v0.3.0",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   build = function(plugin)
@@ -167,11 +91,11 @@ a browser.
 }
 ```
 
-### Native `vim.pack`
+Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
+`:MdViewerHealth` says why in one screen.
 
-> [!NOTE]
-> This path is untested by the author. If it does not work, please open an
-> issue.
+<details>
+<summary>Native <code>vim.pack</code> — untested by the author</summary>
 
 Register the build hook before the first `vim.pack.add()` call, so it also runs
 for a first-time installation:
@@ -199,7 +123,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 })
 
 vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0-rc11" },
+  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0" },
 })
 
 require("md-viewer").setup({})
@@ -212,223 +136,194 @@ repository's `renderer/` directory:
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 ```
 
-Then open a Markdown buffer and run `:MdViewerToggle`. If nothing appears,
-`:MdViewerHealth` says why in one screen.
+If it does not work, please open an issue.
 
-## Features
-
-- Live preview of unsaved changes, following your cursor through the document.
-- **Scrolling costs no screenshot** (experimental, off by default). Where the
-  terminal supports it, the whole document is captured once, kept in the
-  terminal's image memory, and scrolling becomes a placement command — measured
-  at 196 bytes per scroll against the ~80 KB frame the per-scroll path sends.
-  It trades a long warm-up for that, so it is worth turning on only where the
-  per-scroll capture is what you are actually waiting on:
-  `image = { resident = "auto" }`. See `:help md-viewer-resident`.
-- A real caret in the preview, with Vim motions, counts, and `v`/`V` selection
-  (iTerm2, Kitty and Ghostty only) — the only way to highlight text in the
-  preview, matching Vim rather than a browser; `y` copies to the unnamed
-  register and the system clipboard.
-- Markdown-preview search with `/`, `n` and `N`.
-- Real pane-scoped preview buffers with clickable winbar tabs. They are hidden
-  from global bufferlines, and a manually duplicated Markdown split is adopted
-  in place and restored when the preview is toggled off.
-- Ctrl/Cmd-click follows a link. A local Markdown link opens a pane-scoped
-  preview tab without disturbing the editable source split; `H`/`L` walk
-  preview history and `gf` explicitly reveals the active source document.
-- Optional native Obsidian wikilinks (`[[Note]]`, aliases, heading paths, and
-  block IDs) use the same preview tabs and history, with no obsidian.nvim
-  runtime dependency.
-- Animated GIF and WebP actually animate, drawn by the terminal over the still
-  frame the screenshot captured. Off by default; `render.animate = true` turns
-  it on.
-- The preview stays visible while the source split shows another file.
-- A text-only fallback where no graphical backend is available, and diagnostics
-  that say which backend you got and why.
+</details>
 
 ## Configuration
 
-md-viewer needs none. `:help md-viewer-options` lists every option with its
-default; **[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)** carries the
-reasoning behind each non-obvious one.
+`opts = {}` is a complete configuration. Everything that can be detected is
+detected: the terminal and its graphics protocol, the cell dimensions (measured
+from the operating system, not estimated), the theme, and the document root that
+bounds local links and images. `:help md-viewer-options` lists all 70 options
+with their defaults, and
+**[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)** carries the reasoning
+behind each non-obvious one.
 
-Terminal cell dimensions need no configuration either: `md-viewer` measures them
-from the operating system and sizes the render to match. `:help
-md-viewer-calibration` covers the two cases where it cannot — and what to set
-by hand when that happens.
+What `opts = {}` does *not* give you is the four features that cost something,
+each off until you say otherwise:
 
-### Obsidian wikilinks (optional)
+| Off by default | Because |
+|---|---|
+| `render.animate` | Animation is redrawn frames; motion costs a stream of placements |
+| `obsidian.enabled` | `[[Note]]` is not Markdown, and resolving it walks a vault |
+| `image.resident` | Trades a long warm-up and a document of terminal memory for free scrolling — worth it only on a slow link |
+| `render.location = "local"` | Needs a helper process running beside your terminal |
 
-Obsidian syntax is off by default. Enable it for a vault with:
+Two examples follow: what most people set, and what one config shared across a
+fast machine and a slow one looks like.
+
+### The handful most people set
 
 ```lua
 require("md-viewer").setup({
-  obsidian = {
-    enabled = true,
-    vault_root = vim.g.obsidian_vault_root, -- nil uses the document/security root
-  },
+  split = { position = "right" },   -- right | left | below | above
+  render = { animate = true },      -- animate GIF/WebP
+  obsidian = { enabled = true },    -- [[wikilinks]]
 })
 ```
 
-Md-Viewer then renders and follows `[[Note]]`, `[[path/to/Note]]`, optional
-`.md`, `[[Note|Label]]`, `[[#Heading]]`, `[[Note#Parent#Child]]`, and
-`[[Note#^block-id]]`. Bare note names are matched case-insensitively by filename
-stem; duplicate names open `vim.ui.select` with vault-relative paths. Targets
-are rescanned when a link is activated, missing notes are never created, and
-every path and symlink remains confined to the vault root. Embeds/transclusion
-(`![[...]]`) and frontmatter aliases are not implemented.
+That is a normal, complete setup. If your terminal is in the
+[support table](#terminal-support) and Node and Chrome are installed, nothing
+below is needed.
 
-[obsidian.nvim](https://github.com/obsidian-nvim/obsidian.nvim) is an optional
-editing companion, not a dependency. Its official stable-release Lazy pattern
-can point at the same vault:
+### One config across several machines
+
+The case the experimental options exist for: a single `~/.config/nvim` reaching
+a fast desk machine and a slow remote one, where the right answer differs per
+machine and the config file cannot know which it is on. Both machine-dependent
+decisions resolve at runtime rather than being written down here.
 
 ```lua
 {
-  "obsidian-nvim/obsidian.nvim",
-  version = "*",
+  "alanbanks229/md-viewer.nvim",
+  version = "v0.3.0",
+  ft = "markdown",
+  cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug", "MdViewerMeasureLink" },
+  build = build_renderer,   -- the Installation hook above, lifted to a local function
   opts = {
-    legacy_commands = false,
-    workspaces = {
-      { name = "vault", path = vim.g.obsidian_vault_root },
+    obsidian = { enabled = true },
+    render = {
+      animate = true,
+      -- Local rendering, when a helper is wrapping this ssh session. There is
+      -- deliberately no autodetection, so gate it on a variable of your own and
+      -- export it only in the sessions you launch through the helper:
+      --
+      --   laptop$ node <md-viewer>/renderer/src/local-main.js -- ssh <host>
+      --   host$   MD_VIEWER_LOCAL=1 nvim notes.md
+      --
+      -- MD_VIEWER_LOCAL is your variable, not md-viewer's. Without it, or
+      -- opened outside the wrapper, this reads "current" and nothing changes.
+      location = vim.env.MD_VIEWER_LOCAL and "local" or "current",
     },
+    image = {
+      -- Resident mode where it pays and nowhere else. "auto" is the link
+      -- question, not the terminal question: it turns on only where the
+      -- terminal supports it *and* this machine has measured a link under
+      -- image.resident_below_bytes_per_sec (4 MB/s). It never measures on its
+      -- own — run :MdViewerMeasureLink once per machine — so an unmeasured
+      -- machine keeps the ordinary path, which is the right default for one.
+      resident = "auto",
+      -- 512 MB held 3 of 6 chunks on a 364-line document, so every scroll past
+      -- a boundary cost a fresh capture. 1024 holds it whole. :MdViewerHealth
+      -- names the figure for whatever document is open.
+      resident_memory_mb = 1024,
+    },
+  },
+  keys = {
+    { "<leader>mp", "<cmd>MdViewerToggle<cr>", desc = "Markdown preview" },
+    { "<leader>mh", "<cmd>MdViewerHealth<cr>", desc = "Markdown preview health" },
   },
 }
 ```
 
-The responsibilities stay separate: Md-Viewer owns rendered previews and
-preview-tab wikilinks; obsidian.nvim provides editor completion, LSP
-navigation, backlinks, rename, and note operations. The Obsidian desktop app
-uses the same Markdown files and `.obsidian` settings and does not need to be
-running unless another helper explicitly depends on it.
+Nothing above needs a `config = function` or a per-host branch you maintain
+yourself. `:MdViewerDebug`'s `render_path` and `render_path_reason` say which
+rendering model a preview actually chose and why, in the same words as the
+options that decided it.
 
-## Usage
+One option is a trap in a config like that, and it is
+**`render.ssh_link_bytes_per_sec`**: leave it unset. The default, `"auto"`, reads
+a per-machine measurement, and a number written here outranks that on *every*
+machine the file reaches. The two hosts behind the config above are fourteen
+times apart — 0.77–1.06 MB/s through an AWS SSM tunnel against 14.7 MB/s to a
+LAN host, both measured 2026-08-25 — so no single value is honest, and erring
+high is the exact failure the option exists to correct.
 
-| Command | Action |
+### Obsidian wikilinks (optional)
+
+With `obsidian.enabled`, md-viewer renders and follows `[[Note]]`,
+`[[path/to/Note]]`, `[[Note|Label]]`, `[[#Heading]]`, `[[Note#Parent#Child]]`,
+and `[[Note#^block-id]]` through the same preview tabs. Bare note names match
+case-insensitively by filename stem; duplicates open `vim.ui.select`. Missing
+notes are never created, and every path and symlink stays confined to the vault
+root. Embeds (`![[...]]`) and frontmatter aliases are not implemented.
+
+`obsidian.vault_root` defaults to the same root local-link security uses — the
+nearest ancestor holding `.git`, `.hg` or `.svn` — which makes every git-rooted
+vault work. Setting it does not mean "the vault", it means "the only vault":
+md-viewer then requires the open file to sit inside it, and notes outside resolve
+`outside_root` with each wikilink refusing to follow. Set it only if you have
+exactly one vault and it has no marker of its own.
+
+[obsidian.nvim](https://github.com/obsidian-nvim/obsidian.nvim) is an optional
+editing companion, not a dependency, and can point at the same vault. The
+responsibilities stay separate: md-viewer owns rendered previews and preview-tab
+wikilinks; obsidian.nvim provides completion, LSP navigation, backlinks, rename,
+and note operations.
+
+Reference: `:help md-viewer-obsidian`.
+
+## Working over SSH
+
+To have this working you need Node.js and Chrome on the **remote** host.
+Your local terminal also needs to be identifiable when connecting — AFAIK, SSH does not forward `TERM_PROGRAM`. 
+- **[docs/ssh.md](docs/ssh.md)** has the
+`~/.ssh/config` sample, the profile override for terminals that export no identity, and what to do when it works but you have a slow ssh bandwidth.
+
+## Terminal support
+
+| Terminal | Status |
 |---|---|
-| `:MdViewerToggle [position]` | Open or close the preview (`right`, `left`, `below`, `above`) |
-| `:MdViewerCopy` | Copy the current selection |
-| `:MdViewerFind [query]` | Search the rendered preview; prompts if no query is given |
-| `:MdViewerFindNext` / `:MdViewerFindPrevious` | Step through matches |
-| `:MdViewerBack` / `:MdViewerForward` | Move through followed-link history |
-| `:MdViewerTabNext` / `:MdViewerTabPrevious` | Cycle document tabs in the preview pane |
-| `:MdViewerTabClose` | Close the active preview document tab |
-| `:MdViewerRevealSource` | Show the active preview document in the source pane and focus it |
-| `:MdViewerToggleAbsoluteLineNumbers` | Show absolute rendered visual-line numbers; repeat to turn them off |
-| `:MdViewerToggleRelativeLineNumbers` | Show caret-relative visual-line numbers; repeat to turn them off |
-| `:MdViewerHealth` | Short status: is this set up to work, and if not, why |
-| `:MdViewerDebug` | Full diagnostic — attach this to a bug report |
-| `:MdViewerMeasureLink` | Measure this SSH link's speed once, and cache it for this machine |
-| `:checkhealth md-viewer` | Run Neovim health checks |
+| iTerm2 3.5+ | Supported — full rendering, cursor navigation and highlighting. |
+| Kitty | Supported — full rendering, cursor navigation and highlighting. |
+| Ghostty 1.3.1+ | Supported — full rendering, cursor navigation and highlighting. |
+| WezTerm | Supported only for rendering; the selection overlay and animations are off, pending [wezterm#8035](https://github.com/wezterm/wezterm/pull/8035) |
+| Warp | Experimental — rendering works, but the selection overlay and animation are off and visual selection may blank the preview ([warp#7789](https://github.com/warpdotdev/Warp/issues/7789)) |
+| other... | Potentially Limited, if terminal has no Kitty graphics support. Will fall back to text-only `cells` backend |
 
-Statusline integrations can call `require("md-viewer").statusline_progress()`.
-It returns `All`, `Top`, `Bot`, or `NN%` for the active graphical preview and
-`nil` elsewhere, so the statusline can fall back to its normal progress
-component. The `User MdViewerProgressChanged` event fires only when that label
-changes.
+**tmux and Zellij are not supported for now...** No escape-sequence passthrough is implemented for either, more research needs to be looked into for this.
 
-### Keys, with the preview focused
+[docs/terminal-support.md](docs/terminal-support.md) holds the evidence behind each row — read it before reporting a graphical bug or claiming a terminal works.
 
-The preview has a real caret. It is a position in the rendered document rather
-than a terminal cell, so it only ever sits on an actual character and is drawn
-the size of the glyph it is on.
-
-| Key | Action |
-|---|---|
-| `h` `l` `j` `k`, arrows | One character; one rendered line, holding its column |
-| `0` `$` | Start and end of the rendered line |
-| `w` `b` `e` | Next word, previous word, end of word |
-| `{` `}` | Previous / next block |
-| `Ctrl-d` `Ctrl-u` `Ctrl-f` `Ctrl-b` | Half a page, a page |
-| `Ctrl-e` `Ctrl-y` | Scroll the view, leaving the caret where it is |
-| `gg` `G` | Start and end of the document |
-| `v` `V` `o` | Start a selection at the caret; line-wise; swap ends |
-| `y` | Copy the selection |
-| `/` `n` `N` | Search, next match, previous match |
-| `H` `L` | Back / forward through followed-link history |
-| `[b` `]b` | Previous / next document tab in the preview pane |
-| `gf` | Reveal this preview document in the editable source pane |
-
-Counts work on every motion except `gg`/`G` — `10j`, `5w`, `3l`.
-
-### Mouse
-
-The mouse never highlights text — only `v`/`V` and the motion keys above do
-that. What the mouse still does:
-
-| Gesture | Action |
-|---|---|
-| Plain click | Places the caret; clears an active selection; never moves the source cursor |
-| Ctrl-click / Cmd-click | Activates a link under the pointer |
-| Scroll wheel | Scrolls the preview |
-
-Copying is always manual — nothing reaches your clipboard on selection unless you
-ask for it.
-
-**`:help md-viewer` is the complete reference** for every command, key, gesture,
-and interaction semantic.
 
 ## Security
 
-Runtime browser requests are always blocked, JavaScript is disabled in the render
-context, and raw Markdown HTML is off. Remote images are fetched over https by
-the renderer process, validated, and inlined, so the browser still makes no
-requests; requests to loopback, private, link-local, and other non-public
-destinations are refused, on the initial URL and on every redirect hop — not
-something to configure, just how it works. Local images and local links are
-confined to a canonical document root — by default the project enclosing the
-document — with symlinks resolved. Ordinary interaction never re-parses
-Markdown. When Obsidian mode is enabled, a wikilink click scans Markdown
-filenames inside the configured vault, then re-applies lexical and realpath
-containment before loading a target; it never creates a missing note.
-Diagnostics report selection and search state as lengths and counts only.
+Runtime browser requests are always blocked, JavaScript is disabled in the render context, and raw Markdown HTML is off. Remote images are fetched over https by the renderer process, validated, and inlined, so the browser still makes no requests; loopback, private and other non-public destinations are refused on the initial URL and every redirect hop. Local images and links are confined to a
+canonical document root — by default the project enclosing the document — with symlinks resolved and executables refused.
 
-Both `![alt](url)` and a bare `<img src="url">` go through that same path; an
-`<img>` is parsed into an ordinary Markdown image whether or not
-`security.raw_html` is on, and carries only `src`, `alt`, `title`, and integer
-`width`/`height`. The screenshot at the top of this file is one, fetched from
-GitHub's attachment host with no setup required.
+A bare `<img src="url">` is parsed into an ordinary Markdown image whether or not
+`security.raw_html` is on, carrying only `src`, `alt`, `title` and integer
+`width`/`height`.
 
-Read [SECURITY.md](SECURITY.md) before enabling `security.raw_html`;
-`:MdViewerDebug` reports it as `overrides: SECURITY RELAXED` so a relaxed
-boundary is never something you have to infer from a config file.
+Read [SECURITY.md](SECURITY.md) before enabling `security.raw_html` and 
+reference: `:help md-viewer-security` for more information.
 
 ## Known limitations
 
 - The preview is a PNG surface, not an embedded webview, so a terminal
-  implementing the Kitty graphics protocol is the floor for seeing anything at
-  all.
-- Animated images are decoded by the same Chromium that renders the preview, at
-  the size they are actually drawn. Typical GIFs start moving in well under a
-  second; a very long retina-scale recording can take a few, and the still frame
-  shows throughout. Long recordings are thinned to a fixed pixel budget (duration
-  preserved, motion choppier) rather than allowed to grow terminal memory without
-  bound.
+  implementing the Kitty graphics protocol is the floor for seeing anything.
+- The first preview of a Neovim session waits for Chromium's one-off capture
+  warm-up — measured at 9,874–16,335 ms on Ubuntu 22.04 / Chrome 151, and well
+  under a second on macOS. Later previews in the same session do not pay it.
+- Whole-document resident mode and local rendering are both experimental and off
+  by default. Animated images do not animate under resident mode.
 - Graphical confirmation is partial: image rendering and the selection overlay
   have been watched on real hardware, but most placement and occlusion behavior
   is covered by headless tests only.
-- The selection-highlight overlay is off on WezTerm pending an upstream fix,
-  and animated images and whole-document resident mode are off there for the
-  same reason.
-- The first preview of a Neovim session waits for Chromium's one-off capture
-  warm-up, which is a fixed cost per renderer process and measured at 16-24
-  seconds on a modest Linux VM and well under a second on macOS. Later previews
-  in the same session do not pay it.
-- Whole-document resident mode is experimental and off by default. Animated
-  images do not animate under it, and the knobs below apply only once it is on.
-- `image.resident_memory_mb` is a heuristic rather than a guaranteed ceiling:
-  the bytes-per-resident-pixel figure it derives from is an iTerm2 measurement
-  that a sustained-RSS run disagreed with by 34x, and other terminals are
-  unmeasured. `image.resident_max_chunks` is the bound that holds regardless.
-- tmux, screen, and Zellij are not supported.
 - The `vim.ui.img` backend depends on an experimental Neovim API and is
   feature-tested at runtime.
+- tmux, screen, and Zellij are not supported.
 
 ## Documentation
 
 **Using it**
 
-- `:help md-viewer` — the complete command, key and configuration reference,
-  including every option and its default (`:help md-viewer-options`)
+- [Usage](docs/usage.md) — every command, key and mouse gesture
+- [Over SSH](docs/ssh.md) — terminal identification, measuring a throttled
+  link, local rendering, and resident mode
+- `:help md-viewer` — the same material inside Neovim, plus every option and its
+  default (`:help md-viewer-options`)
 - [Terminal support](docs/terminal-support.md) — per-terminal status, and the
   evidence behind each claim
 - [Troubleshooting](docs/troubleshooting.md) — symptom by symptom
@@ -440,8 +335,6 @@ boundary is never something you have to infer from a config file.
 - [Contributing](CONTRIBUTING.md) — how to open a change
 - [Development](docs/development.md) — tests, manual verification, releasing
 - [Architecture](docs/architecture.md) — how it works, and which invariants matter
-- [Rejected: client-side rendering](docs/local-render-design.md) — rendering
-  where the terminal is, measured on a throttled link and turned down
 - [Changelog](CHANGELOG.md)
 
 ## License

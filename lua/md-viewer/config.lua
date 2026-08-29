@@ -70,7 +70,7 @@ M.defaults = {
     -- render, is the lag. That ceiling is SSM's, not SSH's: it is the agent
     -- pacing its output at a kilobyte per millisecond, and an ordinary SSH
     -- session (measured: 16-23 MB/s to a LAN host) is twenty times faster. See
-    -- docs/local-render-design.md, "Where that ceiling comes from".
+    -- docs/ssh.md, "Where that ceiling comes from".
     --
     -- Still gated on SSH generally rather than on SSM, because the plugin
     -- cannot tell the two apart -- SSM arrives as an ordinary SSH session with
@@ -116,7 +116,7 @@ M.defaults = {
     animate = false,
     animate_fps = 5,
     -- Where the renderer runs. "current" is the only behavior that existed
-    -- before v0.3.0-rc9: Node and Chromium beside this Neovim. "local" runs
+    -- before 0.3.0: Node and Chromium beside this Neovim. "local" runs
     -- them beside the *terminal* instead -- for sessions where this Neovim is
     -- remote and the link is the whole cost (the reference case is an AWS SSM
     -- tunnel at ~0.8 MB/s) -- and requires the md-viewer-local helper to be
@@ -142,9 +142,12 @@ M.defaults = {
     raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
     -- Whole-document resident mode: capture the document once as chunks, hold
-    -- them in the terminal, and make scrolling a pure placement. "auto" uses it
-    -- where the terminal and the renderer both support it, "off" keeps the
-    -- per-scroll capture loop everywhere.
+    -- them in the terminal, and make scrolling a pure placement.
+    --
+    --   "off"   the per-scroll capture loop everywhere. The default.
+    --   "auto"  where the terminal supports it *and* this machine has measured
+    --           a link slower than `resident_below_bytes_per_sec`.
+    --   "on"    wherever the terminal supports it, whatever the link is.
     --
     -- Experimental, and off by default. What it trades is a long warm-up and a
     -- document's worth of terminal image memory for scrolling that sends no
@@ -156,11 +159,42 @@ M.defaults = {
     -- millisecond -- a settle frame is ~508ms of wire and this feature is the
     -- difference between usable and not. At 16-23 MB/s, which is what an
     -- ordinary SSH session to a LAN host measures, the same frame is ~20ms and
-    -- the warm-up is the only thing the reader will notice. Measure before
-    -- turning it on -- `:MdViewerMeasureLink`, once per machine -- and
-    -- `render_path` in :MdViewerDebug says which model a session actually
-    -- chose. A measured link also gives the warm-up an ETA in the winbar.
+    -- the warm-up is the only thing the reader will notice.
+    --
+    -- Which is why "auto" is the speed question and not the terminal question:
+    -- a terminal that *can* hold a document resident says nothing about whether
+    -- doing so helps. `resident_below_bytes_per_sec` is where that line sits and
+    -- `:MdViewerMeasureLink` is what puts this machine on one side of it; an
+    -- unmeasured link is not slow, it is unknown, and unknown stays off.
+    -- `render_path` in :MdViewerDebug says which model a session actually chose,
+    -- and names the rate when the rate is why.
+    --
+    -- "on" is that gate removed, not a stronger "auto": it is for exercising the
+    -- resident path deliberately -- a fast desk machine, a bug report, the
+    -- scripts under scripts/resident/ -- where waiting out a warm-up you gain
+    -- nothing from is the point rather than a regression.
     resident = "off",
+    -- The link speed `resident = "auto"` turns resident mode on *below*, in
+    -- bytes per second.
+    --
+    -- 4 MB/s, which is not a measurement -- it is a gap. Both reference hosts
+    -- sit an order of magnitude clear of it, one on each side: an AWS SSM tunnel
+    -- measured 0.77-1.06 MB/s (2026-08-25), where resident mode is the
+    -- difference between usable and not, and a LAN host measured 14.7 MB/s
+    -- through the pty, where it is warm-up and nothing else. Anywhere in between
+    -- would be a number pretending to know something about links nobody here has
+    -- measured.
+    --
+    -- What it means in frames: the settle capture measured at 304,666 bytes is
+    -- ~76ms of pure wire at 4 MB/s, which is about where waiting on bytes stops
+    -- being a detail of the render and starts being the thing you are waiting
+    -- for. Below that line the wait grows fast -- the same frame is ~508ms on
+    -- the SSM link.
+    --
+    -- Raising this turns resident mode on for faster links; there is no evidence
+    -- either way above 1.06 MB/s, because the next link anyone has measured is
+    -- fourteen times faster than that.
+    resident_below_bytes_per_sec = 4000000,
     -- How many viewports tall one chunk is.
     --
     -- Not a first-paint knob. Measured on Ubuntu 22.04 / Chrome 151, the first
@@ -417,9 +451,10 @@ local function validate(cfg)
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
   )
+  assert(tri_state[cfg.image.resident], 'md-viewer: image.resident must be "off", "auto" or "on"')
   assert(
-    cfg.image.resident == "auto" or cfg.image.resident == "off",
-    'md-viewer: image.resident must be "auto" or "off"'
+    type(cfg.image.resident_below_bytes_per_sec) == "number" and cfg.image.resident_below_bytes_per_sec > 0,
+    "md-viewer: image.resident_below_bytes_per_sec must be a positive number of bytes per second"
   )
   assert(
     type(cfg.image.resident_chunk_viewports) == "number"

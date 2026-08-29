@@ -18,7 +18,7 @@ Concretely:
   no action" is a complete answer. Silence reads as an unstated chore.
 - **A pending item names its owner and its exact next command.** Not "this needs
   a human in a terminal" — rather "run `:MdViewerMeasureLink` in iTerm2 on
-  ichigo; paste the notification back."
+  the LAN reference host; paste the notification back."
 
 ## What not to put in a report
 

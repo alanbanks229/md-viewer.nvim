@@ -754,7 +754,7 @@ end
 
 ---A caret motion is a renderer round trip: it answers with a glyph box the
 ---renderer alone computed, so it cannot be a marker like a scroll is. Held-key
----repeat fires far faster than that round trip returns (measured on aide-spock
+---repeat fires far faster than that round trip returns (measured on the SSM reference host
 ---2026-08-27: an `interact` request crosses the same AWS SSM tunnel a scroll
 ---marker does, ~85-120ms each way), and nothing paced it -- every keystroke
 ---queued its own request, so held-`j` visibly lagged behind release by as many

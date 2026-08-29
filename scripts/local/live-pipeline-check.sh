@@ -14,11 +14,11 @@
 # out at <remote-checkout-dir> on the host with renderer deps installed
 # (npm ci); a system Chrome/Chromium beside this script. tmux never renders
 # the injected graphics -- what this proves is the byte pipeline, not glass;
-# glass is the operator-driven iTerm2 run in docs/aws-ssm.md.
+# glass is the operator-driven iTerm2 run in docs/ssh.md.
 
 set -u
 
-host=${1:-ichigo}
+host=${1:-the LAN reference host}
 remote_repo=${2:-md-viewer.nvim}
 here=$(cd "$(dirname "$0")/../.." && pwd)
 session="mdv-live-$$"

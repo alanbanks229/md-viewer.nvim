@@ -439,7 +439,7 @@ return function(t)
   -- flight accumulates into the next request's count instead of sending its
   -- own round trip. Fixed 2026-08-27 -- an `interact` request crosses the
   -- same AWS SSM tunnel a scroll marker does (~85-120ms each way, measured
-  -- on aide-spock), and unbatched key-repeat queued one request per keystroke
+  -- on the SSM reference host), and unbatched key-repeat queued one request per keystroke
   -- behind it, which is why held-`j` visibly lagged behind release.
   -- ---------------------------------------------------------------------
   do

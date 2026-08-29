@@ -13,7 +13,7 @@
 -- controller. That is the whole of what a slow link does to this feature, and it
 -- is what the bootstrap bug needed to be visible: on a fast host the first chunk
 -- lands before anything can observe the pane, which is how a blank first paint
--- survived to rc5. 2000 is a good number -- it is roughly what a chunk costs on
+-- went unnoticed through several rounds of hand testing. 2000 is a good number -- it is roughly what a chunk costs on
 -- an AWS SSM link, and it makes the warm-up long enough to watch.
 --
 -- Needs Node and a Chrome/Chromium on this host. No display and no graphics
@@ -107,7 +107,11 @@ local ok, err = pcall(function()
       return real_request(method, params, callback)
     end
 
-    require("md-viewer").setup({ image = { backend = "kitty_raw", resident = "auto" } })
+    -- "on", not "auto": "auto" additionally wants a link measured under
+    -- image.resident_below_bytes_per_sec, and the whole point of this harness is
+    -- to exercise the resident path on a machine that has no such link. The
+    -- terminal half is stubbed above; this is the rate half.
+    require("md-viewer").setup({ image = { backend = "kitty_raw", resident = "on" } })
     vim.cmd("edit " .. vim.fn.fnameescape(document))
     require("md-viewer.controller").toggle()
   ]],

@@ -242,7 +242,7 @@ export function createReplica({ assetsDir, onNotify = () => {}, onSurfaceReady =
     const key = surfaceKey(documentId, upload.rev, upload.scrollY, upload.widthPx, upload.heightPx, upload.scale, upload.epoch);
     // One capture in flight per document, newest want wins. The alternative
     // -- dispatching every missed reference into the serial browser queue --
-    // is what rc9 shipped, and its arithmetic on the work laptop (2026-08-27)
+    // is what rc9 shipped, and its arithmetic on the laptop (2026-08-27)
     // was 517 captures for 206 surfaces served: each new scroll position
     // admitted a capture that superseded the one already *running*, so the
     // finished screenshot failed its post-work staleness check and was

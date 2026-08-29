@@ -306,7 +306,7 @@ return function(t)
   --
   -- Waiting for `presented` before emitting the next marker used to cap
   -- throughput at one AWS SSM round trip per frame (p50 116ms measured on
-  -- aide-spock 2026-08-27) regardless of how fast the helper could capture
+  -- the SSM reference host 2026-08-27) regardless of how fast the helper could capture
   -- (15-50ms, same session). The helper's own `scheduleSurface`/`pumpCapture`
   -- (replica.js) already hold one capture want per document and drop a
   -- superseded one before it starts, so the Lua side no longer needs to gate
@@ -324,7 +324,7 @@ return function(t)
   -- crossing SSH. Local mode never puts a captured frame on the wire at all
   -- (only a marker does, regardless of the frame's resolution), so applying
   -- it here bought no bytes and cost sharpness for nothing -- confirmed live
-  -- on aide-spock (2026-08-27): full-resolution local capture cost 31-52ms
+  -- on the SSM reference host (2026-08-27): full-resolution local capture cost 31-52ms
   -- against 15-34ms at half scale, a ~15-20ms difference dwarfed by the
   -- ~85-120ms AWS SSM round trip `schedule_scroll` no longer waits on above.
   local saved_ssh_env = {}

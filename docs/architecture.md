@@ -65,7 +65,7 @@ with the same `c`/`r` keys and the terminal scales it;
 `tests/lua/cases/scroll_scale.lua` asserts the two streams' cell geometry is
 identical. Why the obvious alternative is wrong, and what it would take to stop
 sending pixels altogether, is in
-[local-render-design.md](local-render-design.md).
+[ssh.md](ssh.md).
 
 **Image pipeline.** The page can only ever load `data:` URIs: the sanitizer
 allows no other scheme on `img`, the CSP is `img-src data:`, and a Playwright
@@ -312,19 +312,24 @@ restored after the last graphical preview closes.
 ## Whole-document resident mode
 
 Two models are implemented, and a session picks one when it opens. The resident
-model is experimental and off by default (`image.resident = "auto"` opts in):
-what it trades is a long warm-up and a document's worth of terminal memory for
-scrolling that sends nothing, and that only pays on a link where the per-scroll
-capture is what the reader is waiting on.
+model is experimental and off by default: what it trades is a long warm-up and a
+document's worth of terminal memory for scrolling that sends nothing, and that
+only pays on a link where the per-scroll capture is what the reader is waiting
+on. `image.resident = "auto"` is that condition rather than a plain opt-in — it
+takes the resident path only where the terminal permits it *and*
+`linkrate.resolve()` returns a rate under `image.resident_below_bytes_per_sec`,
+so an unmeasured machine keeps the viewport model. `"on"` drops the rate half for
+deliberate exercise; `resident_session.select_path` is the whole decision and
+reports it as `render_path_reason`.
 
 The **viewport** model is the original: every scroll position is a fresh
 screenshot of the reader's viewport. Simple, works everywhere, and costs bytes
 proportional to how far you scrolled — an ~80 KB moving frame and a ~305 KB
 settle frame. On the 0.80 MB/s AWS SSM tunnel this feature was built for that is
-~134 ms and ~508 ms of wire each; on an ordinary SSH session, measured at 16–23
-MB/s to a LAN host, it is ~5 ms and ~19 ms and none of this matters. The gap
+~134 ms and ~508 ms of wire each; on an ordinary SSH session, whose raw channel to a
+LAN host measures 16–23 MB/s, it is ~5 ms and ~19 ms and none of this matters. The gap
 between those two is why resident mode is opt-in rather than automatic — see
-[Where that ceiling comes from](local-render-design.md#ssm-ceiling) for why the
+[Where that ceiling comes from](ssh.md#ssm-ceiling) for why the
 SSM number is what it is and why it is not a general "over SSH" figure.
 
 The **resident** model captures the document once as N chunks, holds every chunk
@@ -380,7 +385,7 @@ image placed, captured against this content, and captured at this scroll? — an
 the frame stays up until the chunks can replace it. It is retired *after* the
 first compose, never before: deleting first is a blank pane for one write.
 
-Until 0.3.0-rc6 it was blanked immediately, and the viewport model's recovery
+An earlier revision blanked it immediately, and the viewport model's recovery
 machinery then restored a cached full-viewport frame into a pane the resident
 compositor believed it owned. The two placements shared a z layer, Kitty breaks
 a z tie by image id, and which one the reader saw came down to which integer was
@@ -577,8 +582,8 @@ The invariants the marker transaction path keeps, each pinned by a test:
   graphics commands so `:MdViewerHealth` can prove it live.
 - **No response-gated frames.** The frame marker is emitted in the same tick
   as the render request; responses settle geometry and clamps only. A scroll
-  is one marker, no request — the serialized-RTT failure of the removed
-  experiment (docs/local-render-design.md) has no path back in. Backpressure
+  is one marker, no request, so a serialized round trip per frame has no
+  path back in. Backpressure
   belongs to the replica (one capture want per document, newest wins, a
   superseded want never dispatched), never to the link: an acknowledgement
   gate on the emit side costs a round trip per frame and buys what the
@@ -607,7 +612,7 @@ The invariants the marker transaction path keeps, each pinned by a test:
   health and debug report it.
 
 Trust boundary and threat model: [SECURITY.md](../SECURITY.md). Reference
-environment and validation: [aws-ssm.md](aws-ssm.md).
+environment and validation: [ssh.md](ssh.md).
 
 ## Lifecycle
 

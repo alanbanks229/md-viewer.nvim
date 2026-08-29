@@ -46,14 +46,18 @@ return function(t)
   local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p")
   local root = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(here))))
   local doc = table.concat(vim.fn.readfile(root .. "/doc/md-viewer.txt"), "\n")
-  local readme = table.concat(vim.fn.readfile(root .. "/README.md"), "\n")
+  -- The command table lives in docs/usage.md; the README links to it and names
+  -- a few commands inline. Either counts as documented, so search both.
+  local prose = table.concat(vim.fn.readfile(root .. "/README.md"), "\n")
+    .. "\n"
+    .. table.concat(vim.fn.readfile(root .. "/docs/usage.md"), "\n")
   for name in pairs(vim.api.nvim_get_commands({})) do
     if name:match("^MdViewer") then
       t.ok(doc:find("*:" .. name .. "*", 1, true) ~= nil, ("%s has a help tag"):format(name))
-      t.ok(readme:find(":" .. name, 1, true) ~= nil, ("%s appears in the README"):format(name))
+      t.ok(prose:find(":" .. name, 1, true) ~= nil, ("%s appears in the user docs"):format(name))
     end
   end
-  -- Removed commands must lose their help *tag* and their row in the README
+  -- Removed commands must lose their help *tag* and their row in the
   -- command table -- the two things that make a name look live. Prose
   -- explaining where a command went is not only allowed but wanted, so this
   -- deliberately does not forbid the name appearing at all.
@@ -70,7 +74,7 @@ return function(t)
   }) do
     t.ok(not exists(gone), ("%s is no longer a command"):format(gone))
     t.ok(doc:find("*:" .. gone .. "*", 1, true) == nil, ("the help has no tag for %s"):format(gone))
-    t.ok(readme:find("| `:" .. gone .. "`", 1, true) == nil, ("the README command table omits %s"):format(gone))
+    t.ok(prose:find("| `:" .. gone .. "`", 1, true) == nil, ("the command table omits %s"):format(gone))
   end
 
   -- The manual harnesses in scripts/ drive the plugin through its real

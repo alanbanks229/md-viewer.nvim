@@ -9,6 +9,7 @@
 ---picture of the reader's viewport.
 local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
+local linkrate = require("md-viewer.linkrate")
 local preview = require("md-viewer.preview")
 local resident = require("md-viewer.resident")
 
@@ -16,10 +17,24 @@ local M = {}
 
 local function state(session) return session and session.resident end
 
+---How a link rate reads in a reason string. Megabytes rather than the grouped
+---bytes `linkrate.describe` prints, because this is a comparison against
+---another rate and two numbers are easier to compare with fewer digits.
+local function mbps(bytes_per_sec) return ("%.2f MB/s"):format(bytes_per_sec / 1000000) end
+
 ---Whether this session may use resident mode, decided once when it opens.
 ---
 ---Deliberately not re-decided per scroll: a session that oscillates between two
 ---rendering models is one whose behaviour nobody can reproduce.
+---
+---Two questions in order, and the order is the point. *Can* this terminal hold a
+---document resident is a fact about the terminal, and a refusal there is final
+----- no link rate makes iTerm2 pan chunks. *Should* it, under `"auto"`, is a
+---fact about the link, and is the question `image.resident` is really asking:
+---the warm-up and the terminal memory are paid on every link, and only a slow
+---one pays them back. Asking the terminal first also keeps the reason honest,
+---because "your terminal cannot do this" is what a reader on iTerm2 needs to
+---hear, not a rate that would have been irrelevant either way.
 function M.select_path(session)
   local cfg = config.get()
   if not session or not session.backend then return "cells", "no backend" end
@@ -36,7 +51,28 @@ function M.select_path(session)
   end
   local ok, reason = backend.resident_pan_supported()
   if not ok then return "viewport", reason or "terminal cannot pan resident chunks" end
-  return "resident", "terminal supports cropped placements"
+  if cfg.image.resident == "on" then return "resident", "terminal supports cropped placements (image.resident = on)" end
+  -- "auto" from here down. `linkrate.resolve` never measures anything and never
+  -- estimates: it reports the number an environment variable, this config, or a
+  -- `:MdViewerMeasureLink` run on this machine left behind, and nil when there
+  -- is none. nil is the ordinary state of a machine nobody has measured, and it
+  -- keeps the path that costs nothing up front -- guessing "probably slow"
+  -- would buy every unmeasured reader a warm-up on the strength of nothing.
+  local rate = linkrate.resolve()
+  if not rate then
+    return "viewport",
+      'link speed unknown -- :MdViewerMeasureLink measures this machine, image.resident = "on" skips the question'
+  end
+  local cutoff = cfg.image.resident_below_bytes_per_sec
+  if rate >= cutoff then
+    return "viewport",
+      ("link measures %s, at or above the %s cutoff (image.resident_below_bytes_per_sec)"):format(
+        mbps(rate),
+        mbps(cutoff)
+      )
+  end
+  return "resident",
+    ("terminal supports cropped placements, link measures %s (under %s)"):format(mbps(rate), mbps(cutoff))
 end
 
 ---Move a session off the resident path for good.
@@ -282,16 +318,17 @@ end
 ---place pixels that only just arrived" apart from "landed for later, draw
 ---does not touch it yet".
 ---
----KEEP_IN_MIND: dormant on every host this plugin runs on as of 2026-08-26.
+---KEEP_IN_MIND: dormant on every host this plugin runs on as of 2026-08-29.
 ---This function's only caller (`controller.pump_resident`'s settle-before-
 ---placing check) is reached only when a session is on the resident render
----path, which needs both a measured link under image.resident "auto"'s
----cutoff (~4 MB/s, see resident_mode() in the deployed
----~/.config/nvim/lua/plugins/md-viewer.lua) and a terminal profile that does
----not refuse resident_pan (kitty, ghostty, generic_kitty -- not iTerm2, which
----now refuses it in terminal.lua, and not WezTerm, which always has).
----aide-spock's link qualifies but runs iTerm2; ichigo's link does not
----qualify. Neither exercises this today.
+---path, which under the default `image.resident = "auto"` needs both a measured
+---link under `image.resident_below_bytes_per_sec` (4 MB/s; see `select_path`
+---above) and a terminal profile that does not refuse resident_pan (kitty,
+---ghostty, generic_kitty -- not iTerm2, which now refuses it in terminal.lua,
+---and not WezTerm, which always has). The SSM reference host's link qualifies
+---but runs iTerm2; the LAN reference host's link does not qualify. Neither
+---exercises this today. `image.resident = "on"` skips the rate half of that,
+---which is what the drive script below relies on.
 ---
 ---This is reachable in principle and covered by
 ---tests/lua/cases/resident_placement.lua -- it is not orphaned, just
@@ -323,7 +360,7 @@ end
 ---       reason = "forced for local testing",
 ---     }
 ---   end
----   require("md-viewer").setup({ image = { backend = "kitty_raw", resident = "auto" } })
+---   require("md-viewer").setup({ image = { backend = "kitty_raw", resident = "on" } })
 ---
 ---then open a markdown buffer and :MdViewerToggle; :MdViewerDebug's
 ---render_path should read "resident". A real link is still whatever it is --

@@ -990,10 +990,11 @@ function M.pump_resident(session)
     -- KEEP_IN_MIND: this branch (and is_needed itself) is currently
     -- unreached on every host this plugin runs on -- pump_resident only
     -- runs at all when session.render_path == "resident" (guarded at the
-    -- top of this function), which needs a measured link under
-    -- image.resident "auto"'s cutoff on a terminal profile that allows
-    -- resident_pan. See the fuller note on resident_session.is_needed in
-    -- resident_session.lua for why, and how to exercise this deliberately.
+    -- top of this function), which under `image.resident = "auto"` needs a
+    -- measured link under image.resident_below_bytes_per_sec on a terminal
+    -- profile that allows resident_pan. See the fuller note on
+    -- resident_session.is_needed in resident_session.lua for why, and how to
+    -- exercise this deliberately with `image.resident = "on"`.
     -- Unexercised, not orphaned -- do not delete for lack of a live caller;
     -- raise removing the path itself with the operator/orchestrator first.
     if resident_session.is_needed(session, session.scroll_y or 0, index) then
@@ -1162,7 +1163,7 @@ end
 ---trades sharpness for *wire bytes*, and local mode never puts a captured
 ---frame on the wire regardless of resolution -- only a ~0.3-1 KB marker
 ---crosses SSH either way. Reusing it here bought nothing and cost
----sharpness for free. Measured on aide-spock (2026-08-27): a full-resolution
+---sharpness for free. Measured on the SSM reference host (2026-08-27): a full-resolution
 ---local capture (device scale 2) costs 31-52ms against 15-34ms at half scale
 ---(`--status` -> `replica.timing.captureDuration`) -- a ~15-20ms difference,
 ---not the ~85-120ms AWS SSM round trip `schedule_scroll` no longer waits on.
@@ -1230,7 +1231,7 @@ function M.schedule_scroll(session)
     session.scroll_scale_source = scale_source
     -- Every scroll emits a marker immediately -- no gate on the `presented`
     -- ack. That ack crosses the same link a marker does: on AWS SSM
-    -- (~1 MB/s, ~100ms RTT measured on aide-spock 2026-08-27), waiting for it
+    -- (~1 MB/s, ~100ms RTT measured on the SSM reference host 2026-08-27), waiting for it
     -- capped throughput at one round trip per frame (p50 116ms, ~8-9
     -- frames/sec) regardless of capture cost (15-50ms measured on the same
     -- session's `--status`). The backpressure this used to buy is already

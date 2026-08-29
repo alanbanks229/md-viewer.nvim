@@ -374,7 +374,7 @@ test("scroll captures are latest-wins, one in flight, at the reference's own sca
 
   // Three scroll positions in one tick, the way a held key produces them.
   // rc9 dispatched three captures and discarded most of the work stale
-  // (517 captures for 206 surfaces on the work laptop, 2026-08-27); the pump
+  // (517 captures for 206 surfaces on the laptop, 2026-08-27); the pump
   // must capture the first, skip the middle, and finish on the newest.
   const a = { ...ref, scrollY: 100 };
   const b = { ...ref, scrollY: 200 };
