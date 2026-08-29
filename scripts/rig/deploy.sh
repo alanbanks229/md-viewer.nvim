@@ -7,7 +7,7 @@
 # for the window before a branch is pushed, or when the working tree has changes
 # that are not committed yet.
 #
-#   scripts/rig/deploy.sh the LAN reference host [remote-path]
+#   scripts/rig/deploy.sh <ssh-host> [remote-path]
 #
 # Then point lazy.nvim at the deployed copy on that machine only:
 #

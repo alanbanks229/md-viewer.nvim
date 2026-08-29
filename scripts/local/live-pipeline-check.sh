@@ -8,7 +8,7 @@
 # this terminal's byte stream), one scroll resolved by marker alone, zero
 # direct-byte fallbacks.
 #
-#   scripts/local/live-pipeline-check.sh [ssh-host] [remote-checkout-dir]
+#   scripts/local/live-pipeline-check.sh <ssh-host> [remote-checkout-dir]
 #
 # Needs: tmux locally; promptless key auth; the same md-viewer commit checked
 # out at <remote-checkout-dir> on the host with renderer deps installed
@@ -18,8 +18,12 @@
 
 set -u
 
-host=${1:-the LAN reference host}
+host=${1:-}
 remote_repo=${2:-md-viewer.nvim}
+if [ -z "$host" ]; then
+  echo "usage: scripts/local/live-pipeline-check.sh <ssh-host> [remote-checkout-dir]" >&2
+  exit 2
+fi
 here=$(cd "$(dirname "$0")/../.." && pwd)
 session="mdv-live-$$"
 
