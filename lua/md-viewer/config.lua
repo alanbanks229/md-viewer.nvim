@@ -551,9 +551,41 @@ local function invalidate_memoized()
   end
 end
 
+-- Removed in 0.3.0 along with mouse click-drag, double-click and triple-click
+-- selection. Checked against what the caller actually wrote rather than the
+-- merged table, because `vim.tbl_deep_extend` keeps keys nothing declares --
+-- which is exactly how these went on being silently accepted after the code
+-- reading them was deleted. A list rather than a set so the error names the
+-- same option on every run.
+local removed_interaction = {
+  "drag_threshold_cells",
+  "double_click",
+  "autoscroll",
+  "autoscroll_interval_ms",
+  "autoscroll_max_lines",
+  "word_select",
+  "paragraph_select",
+}
+
+-- `~= nil` rather than truthiness: `double_click = false` is still a setting
+-- carried over from a configuration written against 0.2, and reading it as
+-- "not set" would keep the exact silence this exists to end.
+local function reject_removed(opts)
+  if type(opts.interaction) ~= "table" then return end
+  for _, name in ipairs(removed_interaction) do
+    assert(
+      opts.interaction[name] == nil,
+      ("md-viewer: interaction.%s was removed in 0.3.0 with mouse selection. "):format(name)
+        .. "Highlighting is now v/V plus the preview motion keys -- see :help md-viewer-visual. "
+        .. "Remove this option."
+    )
+  end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
+  reject_removed(opts)
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_memoized()
