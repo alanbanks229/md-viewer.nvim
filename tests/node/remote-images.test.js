@@ -328,6 +328,63 @@ test("IPv4-mapped IPv6 cannot smuggle a blocked IPv4 destination past the check"
   }
 });
 
+test("IPv4-in-IPv6 transition forms cannot smuggle a blocked destination either", async () => {
+  // BlockList unwraps ::ffff:0:0/96 by itself and nothing else, so every other
+  // standardized way of carrying an IPv4 address inside an IPv6 one used to
+  // resolve to "not blocked" -- an IPv6 answer that a NAT64, 6to4 or Teredo
+  // network translates straight back to the IPv4 endpoint the list above
+  // refuses. Each entry embeds loopback, RFC1918 or the cloud-metadata address.
+  const smuggled = [
+    ["::7f00:1", "IPv4-compatible ::127.0.0.1"],
+    ["::a9fe:a9fe", "IPv4-compatible ::169.254.169.254"],
+    ["64:ff9b::7f00:1", "NAT64 well-known prefix carrying 127.0.0.1"],
+    ["64:ff9b::a9fe:a9fe", "NAT64 well-known prefix carrying the metadata service"],
+    ["64:ff9b:1::a9fe:a9fe", "NAT64 local-use prefix carrying the metadata service"],
+    ["2002:7f00:1::1", "6to4 embedding 127.0.0.1"],
+    ["2002:ac10:1::1", "6to4 embedding 172.16.0.1"],
+    ["2001:0:4136:e378:8000:63bf:3fff:fdd2", "Teredo"],
+  ];
+  for (const [address, why] of smuggled) {
+    const { urls, impl } = counting(async () => new Response(png, { status: 200 }));
+    const result = await resolveOne("https://transition.example/a.png", {
+      resolveHost: async () => [{ address, family: 6 }],
+      fetchImpl: impl,
+    });
+    assert.deepEqual([result.ok, result.kind], [false, "blocked"], why);
+    assert.deepEqual(urls, [], why);
+  }
+});
+
+test("blocking the transition prefixes does not cost ordinary public IPv6", async () => {
+  // The prefixes above sit inside ranges real hosts do use, so this is the half
+  // that has to keep working: public addresses from five networks that actually
+  // serve images, including 2001:4860:: which is one hextet away from Teredo.
+  for (const address of [
+    "2606:4700:4700::1111",
+    "2001:4860:4860::8888",
+    "2a00:1450:4009:81f::200e",
+    "2620:0:861:ed1a::1",
+    "2600:9000:2000::1",
+  ]) {
+    const result = await resolveOne("https://cdn.example/a.png", {
+      resolveHost: async () => [{ address, family: 6 }],
+      fetchImpl: async () => new Response(png, { status: 200 }),
+    });
+    assert.equal(result.ok, true, address);
+  }
+});
+
+test("a transition-form destination is refused on a redirect hop, not just the first URL", async () => {
+  const resolveHost = async (hostname) =>
+    hostname === "img.example" ? [{ address: "1.2.3.4", family: 4 }] : [{ address: "64:ff9b::a9fe:a9fe", family: 6 }];
+  const { urls, impl } = counting(async () =>
+    new Response(null, { status: 302, headers: { location: "https://nat64.internal/x" } })
+  );
+  const result = await resolveOne("https://img.example/a.png", { resolveHost, fetchImpl: impl });
+  assert.deepEqual([result.ok, result.kind], [false, "blocked"]);
+  assert.deepEqual(urls, ["https://img.example/a.png"], "the redirect target itself is never connected to");
+});
+
 test("URL credentials are refused before any DNS lookup or connection", async () => {
   const { hostnames, impl: resolveHost } = countingResolve(publicHost());
   const { urls, impl: fetchImpl } = counting(async () => new Response(png, { status: 200 }));
