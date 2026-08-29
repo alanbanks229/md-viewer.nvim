@@ -106,8 +106,10 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   `false` to leave it unmapped.
 - **`preview.tab_accent` underlines the active winbar tab.** Default
   `"#61afef"`; some colorschemes render `TabLineSel` and `TabLine` almost
-  identically, which made the active tab hard to pick out. Set to `false`
-  for the plain link with no underline.
+  identically, which made the active tab hard to pick out. Doubled rather
+  than single -- the closest a terminal-text underline gets to "thicker",
+  since there is no pixel stroke width to ask for. Set to `false` for the
+  plain link with no underline.
 
 ### Changed
 

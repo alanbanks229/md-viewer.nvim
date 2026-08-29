@@ -126,7 +126,7 @@ return function(t)
   -- The active tab's underline is what makes it distinguishable from an
   -- inactive one when a colorscheme renders TabLineSel and TabLine alike.
   local active_hl = vim.api.nvim_get_hl(0, { name = "MdViewerTabActive" })
-  t.eq(true, active_hl.underline, "the active tab gets an underline by default")
+  t.eq(true, active_hl.underdouble, "the active tab gets a doubled underline by default")
   t.eq(tonumber("61afef", 16), active_hl.sp, "the underline uses the default preview.tab_accent color")
 
   config.reset()

@@ -279,6 +279,11 @@ end
 ---depend on that contrast: resolved fresh against the *current* TabLineSel
 ---every call, so a colorscheme switch is picked up without needing its own
 ---autocmd, and set to `false` restores the plain link with no underline.
+---`underdouble` rather than a plain `underline`: Neovim's highlight API has no
+---pixel stroke width to ask for -- that is the terminal's own font
+---rendering -- so a second stacked line is the closest thing to "thicker"
+---available here, and terminals that do not support it fall back to a single
+---line on their own.
 ---
 ---MdViewerTabActive is fully config-owned once this runs, so both branches set
 ---it unconditionally rather than with `default = true`: a `default` write is a
@@ -293,7 +298,7 @@ local function apply_tab_highlights()
     return
   end
   local active_hl = vim.api.nvim_get_hl(0, { name = "TabLineSel", link = false })
-  active_hl.underline, active_hl.sp = true, accent
+  active_hl.underdouble, active_hl.sp = true, accent
   vim.api.nvim_set_hl(0, "MdViewerTabActive", active_hl)
 end
 
