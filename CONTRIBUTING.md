@@ -16,7 +16,7 @@ issues are upstream terminal defects rather than md-viewer's.
 
    ```sh
    make test                            # Lua suite + renderer's Node suite
-   stylua --check lua/ plugin/ tests/lua/
+   stylua --check build.lua lua/ plugin/ tests/lua/
    ```
 
    `make test-lua` and `make test-node` run one suite;
@@ -34,9 +34,9 @@ issues are upstream terminal defects rather than md-viewer's.
    [docs/terminal-support.md](docs/terminal-support.md) for per-terminal status.
 5. Provide a suggested CHANGELOG.md entry.
 6. **Do not delete code that appears to have no caller** without checking for a
-   `KEEP_IN_MIND:` comment at the site. Some paths are dormant on the current
-   fleet rather than dead, and the comment says what would have to be true for
-   them to run again. Removing one outright is a product decision — raise it
+   `KEEP_IN_MIND:` comment at the site. Some paths are dormant on the
+   configurations this project is currently validated against rather than dead,
+   and the comment says what would have to be true for them to run again. Removing one outright is a product decision — raise it
    first. See
    [docs/development.md](docs/development.md#code-with-no-live-caller-right-now).
 

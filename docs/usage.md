@@ -33,8 +33,8 @@ is always on; the other two are off by default and you turn them on yourself.
 | Mode | What it does | Turn it on with |
 |---|---|---|
 | **Normal** (the default) | Every time you scroll, it takes a fresh screenshot and sends that picture to your terminal. Simple, and what you get with no configuration. | Nothing — this is what you already have |
-| **Resident** — *experimental* | Screenshots the *whole document* once, up front (a short "warm-up"), then scrolling just tells the terminal "show a different part of the picture you already have" instead of taking a new screenshot each time. | `image.resident = "auto"` **plus** `:MdViewerMeasureLink` once on that machine — `:help md-viewer-resident` |
-| **Local rendering** — *experimental* | Runs the browser on your own laptop instead of the remote machine, so screenshots never have to travel over SSH at all. Requires an extra helper program running on your laptop. | `render.location = "local"` — `:help md-viewer-local` |
+| **Resident** — *experimental* | Screenshots the *whole document* once, up front (a short "warm-up"), then scrolling just tells the terminal "show a different part of the picture you already have" instead of taking a new screenshot each time. Not available on iTerm2 or WezTerm — see `:help md-viewer-resident`. | `image.resident = "auto"` **plus** `:MdViewerMeasureLink` once on that machine — `:help md-viewer-resident` |
+| **Local rendering** — *experimental* | Runs the browser on the machine your terminal is on instead of the remote one, so screenshots never travel over SSH at all. Requires a helper program running on that machine. | `render.location = "local"` — `:help md-viewer-local` |
 
 Both experimental modes exist to fix the same problem — a slow SSH/SSM
 connection making scrolling feel laggy — just in different ways. **You can
@@ -77,6 +77,8 @@ the size of the glyph it is on.
 | `Ctrl-e` `Ctrl-y` | Scroll the view, leaving the caret where it is |
 | `gg` `G` | Start and end of the document |
 | `v` `V` | Start a selection at the caret, or end one; line-wise |
+| `Ctrl-V` | The same as `v` — Neovim's blockwise Visual is mapped away, because over blank cells it would paint a rectangle across the picture |
+| `gv` | Reserved, and does nothing: there is no previous Neovim selection to restore here |
 | `o` | Swap the ends of a selection |
 | `y` | Copy the selection |
 | `Esc` | Clear the search, then the selection |
@@ -102,8 +104,9 @@ that. What the mouse still does:
 | Ctrl-click / Cmd-click | Activates a link under the pointer |
 | Scroll wheel | Scrolls the preview |
 
-Copying is always manual — nothing reaches your clipboard on selection unless you
-ask for it.
+Copying is manual by default — nothing reaches your clipboard on selection
+unless you ask for it with `y` or `:MdViewerCopy`. Set
+`interaction.copy_on_select = true` to copy on every selection change instead.
 
 **`:help md-viewer` is the complete reference** for every command, key, gesture,
 and interaction semantic.

@@ -41,8 +41,10 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   marker per frame instead of an ~80–305 KB PNG per frame. A scroll sends one
   marker and no request at all. The plugin adopts a helper only after a versioned
   hello *and* a probe marker through its own tty that only the helper filtering
-  that terminal can see, so the two ends cannot cross-wire and version skew is
-  refused with the fix in the message. No helper, a dead socket, or a mid-session
+  that terminal can see, so the two ends cannot cross-wire. The handshake
+  compares the control-socket protocol version rather than the tag — ordinary
+  checkout skew between two independently-updated ends is the steady state —
+  and an incompatible protocol is refused with the fix in the message. No helper, a dead socket, or a mid-session
   crash produces one warning and remote rendering exactly as before, with the
   reason in `:MdViewerHealth` and `:MdViewerDebug`. See `:help md-viewer-local`.
 - **Pane-scoped preview documents and tabs.** Every followed Markdown document
@@ -128,14 +130,13 @@ memory so scrolling sends nothing, or stop sending pixels at all.
 
 ### Fixed
 
-- **The first capture no longer costs a session its fast encoder.** The first
-  `Page.captureScreenshot` of a browser process costs 9,874–16,335 ms on Ubuntu
-  22.04 / Chrome 151 and every later one 116–373 ms, whatever its size — a fixed
-  per-process warm-up. That raced `CDP_CAPTURE_TIMEOUT_MS` at 10,000 ms on the
-  session's first frame, and `captureViewportPng` latched `cdpCaptureUnavailable`
-  on its first failure without ever retrying, so losing the race silently demoted
-  the whole renderer process to the Playwright encoder — which is also where
-  `render.scroll_scale` stops working. This one predates 0.3.0.
+- **The first capture no longer costs a session its fast encoder.** A browser
+  process pays a fixed one-off capture warm-up (9,874–16,335 ms on Ubuntu 22.04
+  / Chrome 151, against 116–373 ms for every later capture) that could outlast
+  the capture timeout on a session's very first frame; losing that race demoted
+  the whole renderer to the slower Playwright encoder for the rest of the
+  session, silently, and took `render.scroll_scale` with it. The demotion is no
+  longer permanent and the warm-up no longer races. Predates 0.3.0.
 - **A character-wise preview selection could lose its first or last character.**
   Selections anchored at a glyph's exact centre are the one tie browser
   hit-testing cannot break; `v` on a heading's first character selected
@@ -151,15 +152,13 @@ memory so scrolling sends nothing, or stop sending pixels at all.
 - **`:MdViewerDebug` and `:MdViewerHealth` blanked an open preview.** The health
   check forced its browser context to device-scale 1; the mismatch tore down the
   context and cleared the active document. Health now reuses the active scale.
-- **A task-list item containing any inline construct drew its own Markdown a
-  second time.** `markdown-it-task-lists` was configured with `labelAfter`, which
-  pops the item's last inline child and appends a raw `html_inline` `<label>`
-  built from the item's *source text*. On a plain-text item that reads as a
-  harmless swap; on a task item containing a link it popped the `link_close` and
-  re-emitted the whole item as literal text inside the still open anchor, and
-  `- [ ] with **bold**` lost its `strong_close`. The item's children are now
-  wrapped rather than rewritten, and a task item carries the same exact source
-  provenance every other list item has.
+- **A task-list item containing a link or any inline markup drew its own
+  Markdown a second time.** `- [ ] see [docs](x)` rendered the item's raw source
+  as literal text inside the still-open link, and `- [ ] with **bold**` lost its
+  emphasis — because the task-list plugin was rebuilding each item's label from
+  its source text instead of wrapping the children the parser had already
+  produced. Items are now wrapped rather than rewritten, and a task item carries
+  the same exact source provenance every other list item has.
 
 ### Security
 

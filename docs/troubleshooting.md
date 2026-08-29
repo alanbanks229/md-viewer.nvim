@@ -51,7 +51,7 @@ printed by `:MdViewerDebug` unless it says otherwise.
 - [Scrolling feels slow](#scrolling-feels-slow)
 - [Local rendering says "local rendering unavailable" on open](#local-rendering-says-local-rendering-unavailable-on-open)
 - [Local rendering attaches but "pairing probe unanswered"](#local-rendering-attaches-but-pairing-probe-unanswered)
-- [The preview works, but is it actually rendering locally?](#the-preview-works-but-is-it-actually-rendering-locally?)
+- [The preview works, but is it actually rendering locally?](#the-preview-works-but-is-it-actually-rendering-locally)
 - [Local rendering demoted mid-session ("rendering on this host instead")](#local-rendering-demoted-mid-session-rendering-on-this-host-instead)
 - [Resident mode is configured, but `render_path` says `viewport`](#resident-mode-is-configured-but-render_path-says-viewport)
 
@@ -271,7 +271,7 @@ events into preview motion. Keyboard navigation works regardless.
 
 Run `:MdViewerDebug` after a scroll and compare the `fast_*` and `retina_*`
 values, especially `fast_capture_ms`, `fast_png_bytes`, and
-`fast_image_update_ms`. `coalesced_scroll_events` shows how much repeated input
+`fast_ui_handoff_ms`. `coalesced_scroll_events` shows how much repeated input
 was collapsed to the newest position; completed frames are never deliberately
 discarded. If terminal transfer still dominates, lowering
 `render.scroll_scale` is the lever: it captures the moving frame at a fraction
@@ -302,8 +302,9 @@ per candidate socket. "no helper socket found" means no `ssh -R` forward
 landed (the helper prints a message at launch if it could not add one);
 "mode ... is looser than 0600" means the remote socket file failed the
 permission check; "hello refused (PROTOCOL_MISMATCH: ...)" means the two
-checkouts are on different md-viewer versions — pin both to the same tag,
-the refusal text says which side is older. `$MD_VIEWER_LOCAL_SOCKET` pins
+checkouts speak different control-socket protocol versions — pin both to the
+same tag. The handshake compares protocol numbers and cannot tell which side
+is older, so update both rather than guessing. `$MD_VIEWER_LOCAL_SOCKET` pins
 the socket path explicitly when the scan picks wrong.
 
 ## Local rendering attaches but "pairing probe unanswered"

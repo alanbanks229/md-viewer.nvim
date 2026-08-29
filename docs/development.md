@@ -7,6 +7,7 @@
 - `lua/md-viewer/backends/`: `vim.ui.img`, raw Kitty protocol, and text-cell
   display backends
 - `plugin/md-viewer.lua`: runtime entry point and default highlights
+- `build.lua`: the renderer install hook, run by plugin managers on install
 - `renderer/src/`: persistent Node.js renderer, Markdown pipeline, browser
   lifecycle, protocol, source maps, and security policy. `service.js` is what a
   request *means*; `main.js` is the stdin/stdout entrypoint that decides where
@@ -19,14 +20,18 @@
   `remote-images/`, `rig/`, `local/`, and `ssh-link-speed.sh`. None of it runs
   in CI; see [../scripts/README.md](../scripts/README.md)
 - `doc/md-viewer.txt`: `:help md-viewer`
-- `docs/`: architecture, terminal support, troubleshooting, development, the
-  and slow links
+- `docs/`: architecture, terminal support, troubleshooting, usage, development,
+  and remote operation over slow links
 
 ## Bootstrap
 
 ```sh
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
 ```
+
+`build.lua` at the repository root is the same command as a plugin-manager
+install hook — lazy.nvim finds and runs it with no `build` key in a user's spec,
+so that file and this line have to stay in step.
 
 Both the environment variable and `--ignore-scripts` are security measures, not
 conveniences: they prevent Playwright or dependency lifecycle scripts from
@@ -37,13 +42,15 @@ configured npm registry; runtime rendering does not.
 
 ```sh
 make test            # both suites
-stylua --check lua/ plugin/ tests/lua/
+stylua --check build.lua lua/ plugin/ tests/lua/
 ```
 
 `make test` is the two suites; `stylua` is a third check with no `make` target.
-CI runs all three on macOS and Ubuntu for every push and pull request, with
-Neovim pinned to `v0.12.4` and stylua to `v2.5.2` (`.github/workflows/ci.yml`) —
-match those locally or expect spurious diffs. The Lua suite needs Neovim 0.12+
+CI runs formatting on Ubuntu only, and the two suites on three cells —
+Ubuntu/Node 22.12.0 (the documented floor), Ubuntu/Node 24, and macOS/Node 24 —
+for every pull request and for pushes to `main`. Neovim is pinned to `v0.12.4`
+and stylua to `v2.5.2` (`.github/workflows/ci.yml`); match those locally or
+expect spurious diffs. The Lua suite needs Neovim 0.12+
 for the same reason the plugin does. The browser suites require an existing
 Chrome or Chromium installation; no test downloads a Playwright-managed browser.
 
@@ -305,9 +312,10 @@ at `1.0.0`.
    ```
 
 4. Add the `CHANGELOG.md` section and its link reference at the bottom of the
-   file. Keep it release notes, not a postmortem: one bullet per user-visible
-   change, at most one sentence of cause where that is what makes the fix
-   legible. Benchmarks, root-cause analysis and terminal internals belong in
+   file, dated the day the release is actually published — if tagging slips,
+   the date moves with it. Keep it release notes, not a postmortem: one bullet
+   per user-visible change, at most one sentence of cause where that is what
+   makes the fix legible. Benchmarks, root-cause analysis and terminal internals belong in
    [architecture.md](architecture.md) if they are durable invariants, in
    [terminal-support.md](terminal-support.md) if they are current limitations,
    and in Git history otherwise.
@@ -321,11 +329,25 @@ at `1.0.0`.
    malformed heading or a missing link reference breaks the release notes:
 
    ```sh
-   git tag -a v0.2.0 -m "v0.2.0: <summary>"
-   git push origin v0.2.0
-   awk '/^## \[0\.2\.0\]/{f=1;next} /^## \[/{f=0} f' CHANGELOG.md > /tmp/notes.md
-   gh release create v0.2.0 --title "v0.2.0" --notes-file /tmp/notes.md
+   version=0.3.0
+   tag="v$version"
+
+   awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {f=1;next} /^## \[/{f=0} f' \
+     CHANGELOG.md > /tmp/notes.md
+   test -s /tmp/notes.md   # empty means a malformed heading or a missing link ref
+
+   git tag -a "$tag" -m "$tag: <summary>"
+   git push origin "$tag"
+   gh release create "$tag" --title "$tag" --notes-file /tmp/notes.md --draft
+   gh release view "$tag" --web   # read it, then publish
+   gh release edit "$tag" --draft=false
    ```
+
+   The version is a variable in one place because every command below it names
+   the same tag, and a release published against last release's number is not
+   something the tooling will catch for you. Draft first: the notes are
+   extracted verbatim and this is the only point at which they can still be
+   read before anyone else sees them.
 
 ## Design constraints
 

@@ -2,9 +2,15 @@
 
 md-viewer works over SSH with one thing to set up and one thing to know.
 
-**Node.js and Chrome go on the remote host, not on your laptop.** The renderer
-runs wherever Neovim runs and produces a PNG; Neovim writes that to your terminal
-as escape sequences. A browser on the local machine is never consulted.
+**Node.js and Chrome go on the remote host, not on the machine your terminal is
+on.** The renderer runs wherever Neovim runs and produces a PNG; Neovim writes
+that to your terminal as escape sequences. Nothing on the terminal side is
+involved beyond drawing it.
+
+The one exception is [local rendering](#local-rendering) below — an experimental,
+off-by-default mode that deliberately moves the browser to the terminal side
+because on a slow enough link the picture is the whole cost. It changes which
+machine draws, not what is drawn.
 
 ## Make your terminal identifiable
 
@@ -12,20 +18,21 @@ This is the one step that needs doing, because SSH does not forward
 `TERM_PROGRAM`. Run `echo $LC_TERMINAL` on the remote host — **if it prints, skip
 this section.**
 
-iTerm2 and WezTerm export `LC_TERMINAL`, which can travel, but only if both ends
-allow it. In `~/.ssh/config` on your machine:
+iTerm2 and WezTerm export `LC_TERMINAL`, which SSH can carry — but only when
+both ends are configured to let it. In `~/.ssh/config` on your machine:
 
-```yaml
+```
 # ~/.ssh/config
-
 Host *
-  HostName
-  User
-  # ...
-  SendEnv LC_TERMINAL LC_TERMINAL_VERSION # <-- Add this
+  SendEnv LC_TERMINAL LC_TERMINAL_VERSION
 ```
 
-Make sure your remote `/etc/ssh/sshd_config` accepts these variables e.g. `AcceptEnv LANG LC_*`, check if your distribution already ships this.
+Upstream OpenSSH sends nothing by default;
+distributions usually add `SendEnv LANG LC_*`, and a `Host *` block of your own
+overrides that. On the server, `/etc/ssh/sshd_config` needs `AcceptEnv LANG LC_*`
+and an `sshd` reload — nearly every distribution ships this already, but it is
+an administrator's change where it does not. `ssh -G <host> | grep sendenv`
+shows what your client actually sends.
 
 Kitty, Ghostty and Warp export no forwardable identity at all, so name the profile on the remote host instead:
 
@@ -37,6 +44,7 @@ export MD_VIEWER_TERMINAL_PROFILE=kitty
 it. If the preview falls back to text,
 [troubleshooting.md](troubleshooting.md#the-preview-falls-back-to-text-over-ssh)
 walks it through.
+
 ## If it works but feels slow
 
 Every refresh ships a full-page PNG down the connection, so on a throttled link
@@ -102,12 +110,16 @@ render = { location = vim.env.MD_VIEWER_LOCAL and "local" or "current" }
 then `MD_VIEWER_LOCAL=1 nvim` in the sessions you launch through the helper.
 `:help md-viewer-local` is the full reference.
 
-**Requirements and limits.** Both ends must run the same md-viewer version — the
-handshake refuses a mismatch and names the older side. Without a helper you get
-one warning per preview open and remote rendering exactly as before, never a
-silent failure. In local mode resident mode demotes and `render.animate` is
-structurally off. The path is protocol-compatible but unvalidated on every
-terminal; see [terminal-support.md](terminal-support.md).
+**Requirements and limits.** Run the same tag on both ends where you can, but
+the handshake compares the control-socket *protocol* version, not the tag:
+`renderer/src/local/version.js` treats two independently-updated checkouts as
+the steady state, so ordinary skew is accepted and only an incompatible protocol
+is refused. The refusal cannot tell which side is older — update both checkouts
+to the same tag. Without a helper you get one warning per preview open and
+remote rendering exactly as before, never a silent failure. In local mode
+resident mode demotes and `render.animate` is structurally off. The path is
+protocol-compatible but unvalidated on every terminal; see
+[terminal-support.md](terminal-support.md).
 
 The trust boundary — unix socket, pairing token, push-only content-addressed
 assets — is in [SECURITY.md](../SECURITY.md); the moving parts are in

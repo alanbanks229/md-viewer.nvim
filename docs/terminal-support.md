@@ -9,15 +9,21 @@ per-terminal capability detail.
 
 ## Status
 
-| Terminal | Preview | Selection overlay | Animation |
-|---|---|---|---|
-| iTerm2 3.5+ | Supported | Supported | Supported |
-| Kitty | Supported | Supported | Supported |
-| Ghostty 1.3.1 | Supported | Supported | Supported |
-| WezTerm | Supported | Off — [upstream memory defect](#wezterm) | Off, same cause |
-| Warp | Experimental | Off — [upstream defects](#warp) | Off |
-| macOS Terminal.app | Text-only `cells` fallback | — | — |
-| Anything else speaking the protocol | Should work, unvalidated | Off by default | Off by default |
+| Terminal | Preview | Selection overlay | Animation | Resident mode |
+|---|---|---|---|---|
+| iTerm2 3.5+ | Supported | Supported | Supported | Off — [measured incorrect](#iterm2) |
+| Kitty | Supported | Supported | Supported | Permitted, unvalidated |
+| Ghostty 1.3.1 | Supported | Supported | Supported | Permitted, unvalidated |
+| WezTerm | Supported | Off — [upstream memory defect](#wezterm) | Off, same cause | Off, same cause |
+| Warp | Experimental | Off — [upstream defects](#warp) | Off | Permitted, unvalidated |
+| macOS Terminal.app | Text-only `cells` fallback | — | — | — |
+| Anything else speaking the protocol | Should work, unvalidated | Off by default | Off by default | Permitted, unvalidated |
+
+Resident mode is experimental and off by default everywhere
+(`image.resident = "off"`); the column says whether the terminal would be
+allowed to take that path at all if you turned it on. Where it reads *Off*, a
+preview silently keeps the ordinary per-scroll path and `:MdViewerDebug`'s
+`render_path_reason` says so.
 
 **Supported** means a human launched it and watched it on real hardware —
 iTerm2 2026-08-07, Kitty and Ghostty 2026-08-08, Warp 2026-08-11.
@@ -35,9 +41,13 @@ the slower, always-correct path.
 Each terminal is identified from its own native variable (`TERM_PROGRAM`,
 `KITTY_WINDOW_ID`, `WEZTERM_EXECUTABLE`, `GHOSTTY_RESOURCES_DIR`, `WARP_*`),
 none of which SSH forwards. iTerm2 and WezTerm also export `LC_TERMINAL`, which
-OpenSSH does forward, so those two identify themselves on remote hosts.
+OpenSSH *can* carry — but only where the client's `SendEnv` and the server's
+`AcceptEnv` both allow it, which most distributions ship but upstream OpenSSH
+does not. Where that holds, those two identify themselves on remote hosts.
 Everything else needs `MD_VIEWER_TERMINAL_PROFILE` set on the remote host — see
-[troubleshooting.md](troubleshooting.md#the-preview-falls-back-to-text-over-ssh).
+[ssh.md](ssh.md#make-your-terminal-identifiable) for the configuration and
+[troubleshooting.md](troubleshooting.md#the-preview-falls-back-to-text-over-ssh)
+for the symptom.
 
 `LC_TERMINAL` is ranked below every native variable and ignored when another
 terminal has set `TERM_PROGRAM`, because it is inherited: a VS Code window
@@ -82,6 +92,22 @@ under timing a terminal did not expect. What has been validated is the transport
 itself — topology and 10,000-marker transit integrity over LAN SSH, zero loss and
 zero reorder, 2026-08-26 — which is evidence about the pipe, not about any
 terminal's compositor.
+
+## iTerm2
+
+Preview rendering, the selection overlay and animation are all supported and
+operator-validated (2026-08-07).
+
+Resident mode is the exception, and it is off on measurement rather than on
+caution. Re-cropping a resident image was seen showing the wrong position — both
+on a chunk's first placement and when re-cropping an already-displayed one —
+over a real AWS SSM link on 2026-08-26, with the placement id, image id and
+every `x`/`y`/`w`/`h`/`c`/`r` parameter hand-verified against the chunk plan and
+a real-Chromium test confirming the uploaded pixels were correct. Unlike
+WezTerm's defect there is no upstream issue to cite yet; this is the first
+report. Selection-overlay placements are a much smaller and much less frequent
+operation, are not implicated, and stay on. Previews fall back to the per-scroll
+path, which is unaffected.
 
 ## WezTerm
 
