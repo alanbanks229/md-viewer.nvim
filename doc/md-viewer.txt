@@ -224,6 +224,8 @@ interaction ~
     find                         true       / and :MdViewerFind
     history_limit                32         documents kept per preview
                                             (|md-viewer-history|)
+    keymaps                      H, L       which key cycles document tabs;
+                                            either can be set to false
     external_open_timeout_ms     5000       how long a handler is watched
 
 terminal ~
@@ -614,9 +616,9 @@ wearing a count:
     CTRL-E, CTRL-Y           Scroll the view, leaving the caret on its
                              document position
     gg, G                    Start or end of the document (counts ignored)
-    H, L                     Back/forward through the preview history
-                             (|md-viewer-history|)
-    [b, ]b                   Previous/next document tab in this preview pane
+    H, L, [b, ]b             Previous/next document tab in this preview pane.
+                             H and L are configurable (`interaction.keymaps`);
+                             [b and ]b are always mapped
     gf                       Reveal the active document in the source pane
     v, V                     Start a selection at the caret, or end one;
                              extended by any motion above; V is line-wise
@@ -735,21 +737,20 @@ preview pane without replacing or focusing the editable source pane. History
 is separate from tab order, so a closed document remains reachable and is
 recreated when history returns to it.
 
-    H  / :MdViewerBack       Previous document in this preview's history
-    L  / :MdViewerForward    Next document, after going back
+    :MdViewerBack       Previous document in this preview's history
+    :MdViewerForward    Next document, after going back
 
-H and L are preview-local, installed beside the keys the preview already owns
-(`y`, `/`, `n`, `N`, `gg`, `G`), and shadow "top/bottom of screen" -- which
-addresses nothing in a preview buffer holding no document text. They are gated
-on `interaction.links`. Both commands work from either window and change only
-the preview pane. `[b` and `]b` cycle open tabs without extending history;
-`gf` is the explicit operation that reveals and focuses the active source
-document.
+History has no default keymap -- `H`/`L` cycle tabs instead
+(|md-viewer-mappings|). Bind these commands to a key of your own if you want
+one. Both commands work from either window and change only the preview pane.
+`[b` and `]b` cycle open tabs without extending history; `gf` is the explicit
+operation that reveals and focuses the active source document.
 
 Navigating from the middle abandons the forward branch, as a browser does.
 The list is capped at `interaction.history_limit` (default 32) and records a
 buffer and a path per entry, so an entry whose buffer has been wiped still
-reopens its file.
+reopens its file. Repeating a command at either end of the list reports once,
+not again until you move away from that end.
 
 =============================================================================
 OBSIDIAN WIKILINKS                                       *md-viewer-obsidian*

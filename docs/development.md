@@ -154,7 +154,8 @@ not tell you.
 | Repo-relative link | Follow `../README.md` from a subdirectory | Resolves; not refused as outside the document root |
 | Missing target | Ctrl/Cmd-click a link to a nonexistent file | Reports *does not exist* — not *outside the document root* |
 | Small target | Ctrl/Cmd-click a one-word link at the start of a line, at the default font size | Activates. This is the case that used to be unreachable at some cell alignments |
-| Tabs and history | Follow links, use `[b`/`]b`, then `H`/`L`, close a tab, and go back to it | Tabs affect only the preview; history is independent and recreates the closed document |
+| Tabs and history | Follow links, use `[b`/`]b`/`H`/`L` to cycle tabs, close a tab, then `:MdViewerBack` to go back to it | Tabs affect only the preview; history is independent and recreates the closed document |
+| History boundary spam | Repeat `:MdViewerBack` (or `:MdViewerForward`) several times while already at that end of history | Exactly one notification, not a stack; moving away and back produces one more |
 
 ### Selection-highlight overlay
 

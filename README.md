@@ -22,7 +22,7 @@ window, starts no HTTP server, and listens on no port.
 | **Live preview of what you are typing** | Unsaved changes re-render as you edit, and the preview follows your cursor, so the picture and the buffer never drift apart |
 | **Cursor/Caret - driven by Vim motions** | `hjkl`, `w`, `}`, `gg`, `G` and counts move a caret that lives in the rendered document; `v`/`V` extend a selection from it, and `y` copies to the unnamed register and the system clipboard. There is no click-and-drag selection — this is the only way to highlight text here |
 | **Search with `/`, `n` and `N`** | Runs against the rendered page rather than the source |
-| **A tab per document** | Scoped to the preview pane. Ctrl/Cmd-click a Markdown link to open one without disturbing your editable split; `[b`/`]b` cycle tabs, `H`/`L` walk history, and `gf` reveals the active document back in the source pane. Tabs are clickable in the winbar |
+| **A tab per document** | Scoped to the preview pane. Ctrl/Cmd-click a Markdown link to open one without disturbing your editable split; `[b`/`]b` and `H`/`L` (configurable, `interaction.keymaps`) cycle tabs, and `gf` reveals the active document back in the source pane. Tabs are clickable in the winbar |
 | **Obsidian wikilinks** — optional | `[[Note]]`, aliases, heading paths and block IDs resolve through those same tabs, with no obsidian.nvim runtime dependency |
 | **Animated GIF and WebP** | Actually animate, drawn by the terminal over the still frame the screenshot captured. Off by default: `render.animate = true` |
 | **Local rendering** — *experimental* | One answer to a slow SSH link: move the browser to your side of the connection entirely. `render.location = "local"` (`:help md-viewer-local`) |

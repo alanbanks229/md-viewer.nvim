@@ -117,6 +117,7 @@ function M.create(source_buf, source_win)
     -- back/forward walk the index without appending.
     history = nil,
     history_index = 0,
+    history_boundary = nil,
     find_active = false,
     find_query = nil,
     find_match_count = 0,
@@ -138,6 +139,7 @@ function M.create(source_buf, source_win)
     active = session,
     history = nil,
     history_index = 0,
+    history_boundary = nil,
     activation_epoch = 0,
     owned = true,
     closed = false,

@@ -197,6 +197,32 @@ return function(t)
   config.reset()
   t.eq(true, (pcall(config.setup, {})), "zero configuration is unaffected by the removed-key guard")
 
+  -- interaction.keymaps: which key cycles preview tabs. Each entry is a
+  -- non-empty string, or `false` to leave that action unmapped.
+  config.reset()
+  local keymaps_cfg = config.setup({ interaction = { keymaps = { tab_previous = "gh" } } })
+  t.eq("gh", keymaps_cfg.interaction.keymaps.tab_previous, "interaction.keymaps.tab_previous is overridable")
+  t.eq("L", keymaps_cfg.interaction.keymaps.tab_next, "overriding one keymap leaves the other at its default")
+  config.reset()
+  local unmapped_cfg = config.setup({ interaction = { keymaps = { tab_previous = false } } })
+  t.eq(false, unmapped_cfg.interaction.keymaps.tab_previous, "interaction.keymaps.tab_previous accepts false")
+  config.reset()
+  local bad_keymap_type_ok, bad_keymap_type_err =
+    pcall(config.setup, { interaction = { keymaps = { tab_previous = true } } })
+  t.eq(false, bad_keymap_type_ok, "a non-string, non-false interaction.keymaps.tab_previous is rejected")
+  t.ok(
+    tostring(bad_keymap_type_err):match("interaction%.keymaps%.tab_previous"),
+    "the keymaps.tab_previous error names the offending option"
+  )
+  config.reset()
+  local bad_keymaps_shape_ok, bad_keymaps_shape_err = pcall(config.setup, { interaction = { keymaps = "H" } })
+  t.eq(false, bad_keymaps_shape_ok, "a non-table interaction.keymaps is rejected")
+  t.ok(
+    tostring(bad_keymaps_shape_err):match("interaction%.keymaps"),
+    "the keymaps shape error names the offending option"
+  )
+  config.reset()
+
   -- Every option is documented, or it exists only for its author. The same
   -- pin commands.lua applies to the command surface: `:help md-viewer-options`
   -- is the canonical reference, and a table nothing checks is stale within a

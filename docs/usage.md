@@ -83,8 +83,7 @@ the size of the glyph it is on.
 | `y` | Copy the selection |
 | `Esc` | Clear the search, then the selection |
 | `/` `n` `N` | Search, next match, previous match |
-| `H` `L` | Back / forward through followed-link history |
-| `[b` `]b` | Previous / next document tab in the preview pane |
+| `H` `L` `[b` `]b` | Previous / next document tab in the preview pane. `H`/`L` are configurable (`interaction.keymaps`); `[b`/`]b` are always mapped |
 | `gf` | Reveal this preview document in the editable source pane |
 
 Counts work on every motion except `gg`/`G` — `10j`, `5w`, `3l`.

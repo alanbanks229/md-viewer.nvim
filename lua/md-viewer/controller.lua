@@ -1678,9 +1678,9 @@ function M.history_init(session)
   local pane = session.pane
   local history = { history_entry(session.source_buf) }
   if pane then
-    pane.history, pane.history_index = history, 1
+    pane.history, pane.history_index, pane.history_boundary = history, 1, nil
   end
-  session.history, session.history_index = history, 1
+  session.history, session.history_index, session.history_boundary = history, 1, nil
 end
 
 ---Append `buf` as the newest entry, discarding anything ahead of the current
@@ -1705,8 +1705,10 @@ function M.history_push(session, buf)
   while #history > limit do
     table.remove(history, 1)
   end
-  if pane then pane.history_index = #history end
-  session.history_index = #history
+  if pane then
+    pane.history_index, pane.history_boundary = #history, nil
+  end
+  session.history_index, session.history_boundary = #history, nil
 end
 
 ---Resolve a history entry to a buffer that can actually be displayed, reopening
@@ -1729,16 +1731,24 @@ local function history_go(session, step, direction)
   if not valid(session) then return false end
   local pane = session.pane
   if not (pane and pane.history) then M.history_init(session) end
-  local history = pane and pane.history or session.history
-  local index = pane and pane.history_index or session.history_index
+  local holder = pane or session
+  local history = holder.history
+  local index = holder.history_index
   if history[index] then history[index].scroll_y = session.scroll_y or 0 end
   while true do
     index = index + step
     local entry = history[index]
     if not entry then
-      vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
+      -- A repeat of the same direction's dead end is not news: only the
+      -- first one is reported, and any successful move (either direction)
+      -- re-arms it below.
+      if holder.history_boundary ~= direction then
+        holder.history_boundary = direction
+        vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
+      end
       return false
     end
+    holder.history_boundary = nil
     local buf = history_buf(entry)
     if buf then
       if buf == session.source_buf then

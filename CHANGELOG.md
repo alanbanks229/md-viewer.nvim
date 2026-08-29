@@ -101,6 +101,9 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   splits showing the same Markdown adopts the current split as the preview and
   restores its buffer, view, dimensions, and window options on close. Ambiguous
   or fixed layouts fall back to a plugin-owned split.
+- **`interaction.keymaps` configures the tab-cycle keys.** `tab_previous` and
+  `tab_next` default to `"H"`/`"L"`; set either to a different key, or to
+  `false` to leave it unmapped.
 
 ### Changed
 
@@ -127,6 +130,9 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   and the moving/settle capture split never engages — there is no wire to save.
 - `:MdViewerDebug`'s `image_update_ms` is now `ui_handoff_ms`, because that is
   what it measures: `nvim_ui_send` only queues.
+- **`H`/`L` cycle document tabs instead of walking history.** They now do the
+  same thing as `[b`/`]b`. Preview history is still reachable through
+  `:MdViewerBack`/`:MdViewerForward`, just with no default keymap.
 
 ### Fixed
 
@@ -159,6 +165,10 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   its source text instead of wrapping the children the parser had already
   produced. Items are now wrapped rather than rewritten, and a task item carries
   the same exact source provenance every other list item has.
+- **Repeating `:MdViewerBack`/`:MdViewerForward` at either end of history no
+  longer stacks notifications.** Only the first call past that end reports
+  "no previous/next document in the preview history"; further repeats are
+  silent until the preview actually moves, and moving re-arms it.
 
 ### Security
 

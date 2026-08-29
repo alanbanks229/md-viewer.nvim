@@ -493,9 +493,14 @@ scroll, caret, selection, and search state. `controller.retarget` now means
 create-or-reuse that pane's document and activate it; it never re-keys the old
 document or changes the source window. `:MdViewerBack`/`:MdViewerForward` walk
 the pane history without appending, while `[b`/`]b` change tabs without changing
-history. Entries hold a source buffer, path, and scroll target, so returning to
+history (`H`/`L` are the default keymap for the same tab change, configurable
+via `interaction.keymaps` and gone the moment either is set to `false`).
+Entries hold a source buffer, path, and scroll target, so returning to
 a closed tab recreates its preview buffer and view. Navigating from the middle
-truncates the forward branch, as a browser does.
+truncates the forward branch, as a browser does. `history_go` remembers the
+last direction it reported a dead end for (`pane.history_boundary`) so
+repeating `:MdViewerBack`/`:MdViewerForward` at either end of the list notifies
+once, not on every call; any successful move re-arms it.
 
 **Link dispatch.** `classifyLink` (pure, `renderer/src/interact.js`) separates
 `http`/`https`/`mailto`/fragment/local-file candidates from anything unsafe

@@ -294,6 +294,12 @@ M.defaults = {
     -- path, and a reader following links for an hour should not accumulate an
     -- ever-growing list.
     history_limit = 32,
+    -- Which physical key activates each preview-tab action. Either key can be
+    -- set to `false` to leave that action unmapped.
+    keymaps = {
+      tab_previous = "H",
+      tab_next = "L",
+    },
     -- How long to keep watching a system handler md-viewer started for an
     -- external link before assuming it is running normally. Only failures that
     -- happen inside this window can be reported; past it, a still-running
@@ -534,6 +540,14 @@ local function validate(cfg)
       and cfg.interaction.history_limit == math.floor(cfg.interaction.history_limit),
     "md-viewer: interaction.history_limit must be a positive integer"
   )
+  assert(type(cfg.interaction.keymaps) == "table", "md-viewer: interaction.keymaps must be a table")
+  for _, name in ipairs({ "tab_previous", "tab_next" }) do
+    local value = cfg.interaction.keymaps[name]
+    assert(
+      value == false or (type(value) == "string" and value ~= ""),
+      ("md-viewer: interaction.keymaps.%s must be a non-empty string or false"):format(name)
+    )
+  end
   assert(
     type(cfg.interaction.external_open_timeout_ms) == "number" and cfg.interaction.external_open_timeout_ms >= 0,
     "md-viewer: interaction.external_open_timeout_ms must be non-negative"

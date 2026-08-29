@@ -51,6 +51,31 @@ return function(t)
 
   controller.activate_document(document_a)
   t.eq(1, pane.history_index, "tab selection aligns to that document's most recent history entry")
+
+  -- document_a sits at the oldest entry: repeated history_back calls here
+  -- must not spam vim.notify, only report the dead end once.
+  do
+    local notified = 0
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if tostring(msg):find("no previous document", 1, true) then notified = notified + 1 end
+    end
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    t.eq(1, notified, "repeated history_back at the boundary notifies only once")
+    -- Forward then back twice: the first back only returns to document_a's
+    -- entry (a real move, not the boundary); the second is what walks past
+    -- it again and should re-fire the notification.
+    controller.history_forward(pane.active)
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    t.eq(2, notified, "moving away from the boundary and back re-arms the notification")
+    t.eq(document_a, pane.active, "the round trip lands back on the oldest document")
+    t.eq(1, pane.history_index, "the round trip leaves the index back at the oldest entry")
+    vim.notify = original_notify
+  end
+
   controller.activate_document(document_c)
   t.eq(3, pane.history_index, "tab selection does not append history")
   t.eq(3, #pane.history, "tab selection leaves history length unchanged")
