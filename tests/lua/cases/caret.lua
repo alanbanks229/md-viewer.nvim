@@ -90,14 +90,44 @@ return function(t)
   -- ---------------------------------------------------------------------
   do
     caret.set_rect(session, { x = 40, y = 300, width = 9, height = 18 }, 0)
-    session.applied_scroll_y = 100
+    -- `caret.rect` is measured against `frame_scroll_y` -- the frame actually
+    -- on screen -- not `applied_scroll_y`, the logical target; a landed scroll
+    -- moves both together (`apply_image`), which these two lines simulate.
+    session.applied_scroll_y, session.frame_scroll_y = 100, 100
     t.eq(200, caret.rect(session).y, "a scroll moves the caret's box against it, with no request")
-    session.applied_scroll_y = 400
+    session.applied_scroll_y, session.frame_scroll_y = 400, 400
     t.eq(nil, caret.rect(session), "a caret scrolled above the viewport is not drawn")
-    session.applied_scroll_y = -400
+    session.applied_scroll_y, session.frame_scroll_y = -400, -400
     t.eq(nil, caret.rect(session), "nor one scrolled below it")
-    session.applied_scroll_y = 0
+    session.applied_scroll_y, session.frame_scroll_y = 0, 0
     t.eq(300, caret.rect(session).y, "and it comes back when it scrolls back into view")
+  end
+
+  -- ---------------------------------------------------------------------
+  -- The ghost this backs out: a caret motion that scrolls bumps
+  -- `applied_scroll_y` to the new position the instant its response lands
+  -- (interaction.lua's `send_caret_motion`), before the scroll capture it
+  -- triggered has actually replaced the frame on screen. `caret.rect` must
+  -- track the frame that is really painted (`frame_scroll_y`), not the
+  -- not-yet-displayed target -- otherwise the caret's new box is drawn over
+  -- the old, still-visible pixels.
+  -- ---------------------------------------------------------------------
+  do
+    caret.set_rect(session, { x = 40, y = 300, width = 9, height = 18 }, 0)
+    session.frame_scroll_y = 0
+    -- The response landed and bumped the target, but no new frame has been
+    -- captured/displayed yet -- frame_scroll_y still describes what's on
+    -- screen.
+    session.applied_scroll_y = 400
+    t.eq(
+      300,
+      caret.rect(session).y,
+      "mid-scroll, the caret still tracks the frame on screen, not the not-yet-displayed target"
+    )
+    -- The scroll capture lands: both fields move together, same as any other
+    -- real frame.
+    session.frame_scroll_y = 400
+    t.eq(nil, caret.rect(session), "once the new frame lands, the caret is correctly hidden off screen")
   end
 
   -- ---------------------------------------------------------------------
@@ -382,10 +412,10 @@ return function(t)
 
     -- Scrolled out of view, there is no block to see -- so the real cursor has
     -- to come back rather than leave the reader with no caret at all.
-    session.applied_scroll_y = 5000
+    session.applied_scroll_y, session.frame_scroll_y = 5000, 5000
     t.eq(false, controller.display_caret_overlay(session), "a caret scrolled off screen is not drawn")
     t.eq(original_guicursor, vim.o.guicursor, "and Neovim's cursor is given back")
-    session.applied_scroll_y = 0
+    session.applied_scroll_y, session.frame_scroll_y = 0, 0
 
     -- A backend that cannot draw the overlay never hides the cursor either:
     -- there the terminal's own cursor *is* the caret.

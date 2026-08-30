@@ -380,9 +380,14 @@ function M.display_selection_overlay(session, result)
   if result.rectsTruncated then return false end
   if result.contentRevision ~= session.renderer_revision then return false end
   -- The rects were measured at the page scroll the renderer reports; the base
-  -- image on screen shows `applied_scroll_y`. Any disagreement means the
-  -- highlight would land on the wrong text.
-  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then
+  -- image on screen shows `frame_scroll_y`, not `applied_scroll_y` -- a caret
+  -- motion that scrolls bumps `applied_scroll_y` the instant its response
+  -- lands, before the scroll capture it triggered has actually replaced the
+  -- frame on screen, so checking against it here would pass during that gap
+  -- and composite the highlight over the wrong, stale pixels. Any
+  -- disagreement with what is actually painted means the highlight would
+  -- land on the wrong text.
+  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.frame_scroll_y or 0)) > 0.5 then
     return false
   end
   if update_occlusion(session) then
