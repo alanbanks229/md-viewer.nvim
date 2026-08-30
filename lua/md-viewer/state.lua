@@ -31,10 +31,12 @@ function M.create(source_buf, source_win)
     preview_buf = nil,
     preview_win = nil,
     image_id = nil,
-    -- What the frame `image_id` names is a picture of. Read by the resident
-    -- bootstrap to decide whether the frame already on screen shows the
-    -- reader's position, which is the difference between leaving correct pixels
-    -- up and blanking the pane. Non-nil only while `image_id` is.
+    -- What the screen is a picture of. Read by the resident bootstrap to decide
+    -- whether the frame already on screen shows the reader's position, which is
+    -- the difference between leaving correct pixels up and blanking the pane,
+    -- and by `caret.rect` to place the caret in the pixels actually painted.
+    -- Non-nil only while there is a screen to vouch for -- an `image_id` frame,
+    -- or the composed bands of a `resident_screen`; see M.screen_up.
     frame_scroll_y = nil,
     frame_revision = nil,
     -- Whether a resident screen (one or two cropped bands) is placed. The

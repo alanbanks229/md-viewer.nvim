@@ -445,8 +445,9 @@ end
 ---
 ---Returns false when the caret cannot be drawn -- no overlay support (the
 ---backend, or the terminal profile), nothing on the pane at all, or the caret
----has scrolled out of view. The terminal's own cursor is left visible in
----exactly those cases; see `preview.hide_cursor`.
+---has scrolled out of view. The terminal's own cursor is left visible where
+---there is no caret to draw at all; a caret that is merely off screen keeps it
+---hidden. See `preview.hide_cursor`, and the nil branch below.
 function M.display_caret_overlay(session, tint, sheet_png)
   if not valid(session) or session.backend.name == "cells" then return false end
   local backend = session.backend
@@ -464,10 +465,15 @@ function M.display_caret_overlay(session, tint, sheet_png)
   local rect = caret.rect(session)
   if not rect then
     M.clear_caret_overlay(session)
-    -- No block on screen means Neovim's cursor is the only caret there is, so
-    -- it has to come back. Restoring here rather than only on WinLeave is what
-    -- covers a caret that scrolled out of view.
-    preview.restore_cursor()
+    -- A caret that is merely scrolled out of view is still the reader's
+    -- position, and Neovim's own cursor is not a stand-in for it: it sits on
+    -- the cell `caret.shadow_cursor` last parked it on, the scroll has moved
+    -- the text out from under it, and nothing moves it again until the next
+    -- motion -- the preview window itself never scrolls. Restoring here put a
+    -- one-cell bar in the middle of unrelated prose for the whole of every
+    -- scroll past the caret, which is what was reported on 2026-08-29. Only a
+    -- session with no caret at all has nothing better to offer.
+    if not (session and session.caret_rect) then preview.restore_cursor() end
     return false
   end
   session.caret_tint = tint or session.caret_tint
@@ -494,6 +500,13 @@ function M.display_caret_overlay(session, tint, sheet_png)
   end
   session.caret_overlay_set = set_id
   session.caret_overlay_error = nil
+  -- The block just moved, so the shadow underneath it has to move too.
+  -- `caret.set_rect` shadows on a motion, but a motion that also scrolled
+  -- shadows against the frame still on screen -- `caret.rect` is deliberately
+  -- frame-relative -- and an ordinary scroll is not a motion at all. This is
+  -- the one place that knows which cell the block landed on, which is the only
+  -- cell the shadow has any business being on.
+  caret.shadow_cursor(session, rect)
   -- The block is on screen now, so Neovim's own cursor would be a second,
   -- differently-sized caret sitting somewhere else. Hidden here, at the one
   -- place that knows the block was actually drawn, rather than on a window
@@ -518,7 +531,11 @@ function M.place_caret(session)
   -- every open session.
   if vim.api.nvim_get_current_win() ~= session.preview_win then return end
   if session.caret_rect then
-    M.display_caret_overlay(session)
+    -- The shadow follows the block wherever there is one -- `display_caret_overlay`
+    -- parks it on the cell it drew into. Where the overlay cannot be drawn the
+    -- terminal's own cursor *is* the caret, so it still has to follow the
+    -- scroll, and nothing else would move it.
+    if not M.display_caret_overlay(session) then caret.shadow_cursor(session) end
     return
   end
   if not (session.renderer_revision and session.last_placement) then return end
@@ -1088,7 +1105,12 @@ function M.draw_resident(session)
     if session.image_id then
       pcall(session.backend.clear, session.image_id)
       session.image_id = nil
-      session.frame_scroll_y, session.frame_revision = nil, nil
+      -- Not `frame_scroll_y`: the compose above has already recorded what the
+      -- bands now on screen are a picture of, and this is only the frame they
+      -- replaced. Clearing it here left `caret.rect` measuring its drift
+      -- against 0, so a resident preview had no caret anywhere but the top of
+      -- the document.
+      session.frame_revision = nil
     end
     -- Same rule `apply_image` follows, for the same reason: the base under the
     -- highlight has moved, so rectangles measured against the old one are on the
@@ -2417,7 +2439,21 @@ function M.setup_autocmds()
   })
   vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave", "TabLeave", "VimSuspend", "VimLeavePre", "FocusLost" }, {
     group = group,
-    callback = function() preview.restore_cursor() end,
+    callback = function()
+      preview.restore_cursor()
+      -- And take the block down with it. The caret marks where the *focused*
+      -- reader is, so one left drawn in a preview nobody is in claims a focus
+      -- that has moved on -- and on `FocusLost`, which gives the real cursor
+      -- back without any window changing, it would sit there beside it: two
+      -- carets at once, the thing this pair exists to prevent. The current
+      -- window is still the one being left when these fire.
+      --
+      -- Only the overlay. `caret_rect` is kept, so coming back redraws the
+      -- caret exactly where it was, locally, through the `place_caret` on the
+      -- matching enter autocmd -- no round trip and no lost position.
+      local session = state.from_preview_win(vim.api.nvim_get_current_win())
+      if session and valid(session) then M.clear_caret_overlay(session) end
+    end,
   })
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,

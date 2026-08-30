@@ -12,6 +12,7 @@
 -- Nothing here spawns a renderer: `renderer.request` is stubbed, so a chunk
 -- capture is whatever this file decides it is, including a slow or a lost one.
 return function(t)
+  local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local preview = require("md-viewer.preview")
@@ -202,6 +203,11 @@ return function(t)
     t.ok(step("compose") < step("clear:5"), "in that order: nothing blanks between the two writes")
     t.eq(nil, session.image_id, "the resident path owns no frame id of its own")
     t.eq(true, session.resident_screen, "it records that bands are placed instead")
+    -- Retiring the bootstrap frame used to nil this on the way past, which left
+    -- the resident screen vouching for nothing. It is the compose above that
+    -- owns the value now, and the frame being deleted here showed the same
+    -- position anyway.
+    t.eq(0, session.frame_scroll_y, "and what those bands are a picture of, the way apply_image does")
     t.ok(session.last_placement ~= nil, "and the placement clicks and the caret resolve against")
     t.eq(nil, session.resident_waiting, "nothing is being waited on")
     t.eq(false, session.loading, "and the spinner is down")
@@ -212,6 +218,17 @@ return function(t)
     session.scroll_y = session.viewport_height_px * 0.5
     controller.draw_resident(session)
     t.ok(step("overlay_clear:91"), "panning drops the selection overlay rather than leaving it on the wrong text")
+    t.eq(session.scroll_y, session.frame_scroll_y, "and records the position the new bands show")
+
+    -- The caret measures its drift against `frame_scroll_y`. Unset by the
+    -- resident path it read as 0, so a caret anywhere but the top of the
+    -- document drifted a whole scroll off screen and was never drawn -- and
+    -- Neovim's own cursor was handed back in its place.
+    session.viewport_height_render_px = session.viewport_height_px
+    caret.set_rect(session, { x = 10, y = 20, width = 9, height = 18 }, session.frame_scroll_y)
+    local caret_rect = caret.rect(session)
+    t.ok(caret_rect ~= nil, "a caret placed on a panned resident screen is still on it")
+    t.eq(20, caret_rect and caret_rect.y, "at the box it was measured at, with no phantom drift")
 
     -- An occluding float has to reach the bands. Until `uncompose` existed
     -- nothing could: `clear_image` only knew `session.image_id`, which a

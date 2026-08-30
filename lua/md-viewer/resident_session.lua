@@ -470,6 +470,12 @@ function M.draw(session, scroll_y)
   end
   current.drawn = needed[1]
   session.applied_scroll_y = scroll_y
+  -- What the screen now *shows*, which in resident mode is the same number:
+  -- the bands were composed for this position, so there is no window where the
+  -- two disagree the way a captured frame's can. `caret.rect` measures its
+  -- drift against this, and left nil it read as 0 -- a caret at any non-zero
+  -- scroll drifted a whole document off screen and was never drawn.
+  session.frame_scroll_y = scroll_y
   return "drawn"
 end
 

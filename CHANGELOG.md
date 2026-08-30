@@ -227,6 +227,35 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   1.09MB at 1695x1029 and 4.76MB at 1696x1029 (measured on a Mac, 2026-08-29),
   so there is no ratio to predict it with. Predates 0.3.0.
 
+- **Scrolling past the caret left a stray cursor sitting in the middle of the
+  text.** Neovim's own cursor is hidden in favour of the block caret and parked
+  on the cell underneath it — but only ever on a caret *motion*, and the preview
+  window itself never scrolls, so an ordinary scroll left it on the cell the
+  caret used to be on. When the scroll carried the caret out of the viewport the
+  real cursor was handed back there: a one-cell bar in the middle of unrelated
+  prose that stayed put for the rest of the gesture and vanished only on
+  scrolling back. A caret that is merely off screen now keeps Neovim's cursor
+  hidden — nothing on screen is the honest answer when the caret is off it — and
+  only a preview with no caret at all gives it back. The shadow is also re-parked
+  on every frame that draws the block, not just on a motion, so the terminals
+  that cannot draw an overlay caret and show the real cursor instead keep up with
+  a scroll too.
+
+- **The block caret stayed drawn over a preview nobody was in.** It marks where
+  the *focused* reader is, so one left up after focus moved elsewhere claimed a
+  focus that had gone — and on `FocusLost`, which hands Neovim's real cursor back
+  without any window changing, the two sat there together. Losing focus now takes
+  the block down and gives the cursor back in the same step. Only the overlay is
+  cleared: the caret keeps its position, so returning redraws it exactly where it
+  was, locally, with no round trip.
+
+- **A resident preview had no caret anywhere but the top of the document.** The
+  resident path recorded the position it had *asked* for but not the one its
+  composed bands actually show, so the caret measured its drift against zero and
+  placed itself a whole scroll off screen — where, before the fix above, it also
+  handed back the real cursor. It now records both, the way `apply_image` does
+  for a captured frame. Resident mode is experimental and off by default.
+
 ### Security
 
 - The plugin and renderer still open no listening port. The optional local-render

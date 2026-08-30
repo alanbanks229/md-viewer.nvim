@@ -397,6 +397,23 @@ return function(t)
       "and Neovim's own cursor is hidden, so the two are never both up"
     )
 
+    -- An ordinary scroll moves the block without moving the caret, and the
+    -- shadow underneath has to go with it. Nothing else moves it: `set_rect`
+    -- shadows on a motion and a scroll is not one, so the real cursor stayed
+    -- parked on the cell the caret used to be on -- which is exactly the cell
+    -- it reappeared at when the caret finally scrolled off screen (2026-08-29).
+    session.frame_scroll_y = 0
+    caret.set_rect(session, { x = 42, y = 500, width = 19, height = 38 }, 0)
+    local parked = vim.api.nvim_win_get_cursor(session.preview_win)
+    session.frame_scroll_y = 400
+    t.eq(true, controller.display_caret_overlay(session), "the block is redrawn where the scroll put it")
+    t.eq(100, overlay_rects[1].y, "one box, drifted by the scroll since it was measured")
+    t.ok(
+      vim.api.nvim_win_get_cursor(session.preview_win)[1] < parked[1],
+      "and the shadow moved with it rather than staying on the old cell"
+    )
+    session.frame_scroll_y = 0
+
     -- Leaving the terminal gives the cursor back, and returning to it has to
     -- take it away again. Reported: coming back to the window left Neovim's own
     -- cursor sitting beside the block until some later motion happened to
@@ -404,25 +421,51 @@ return function(t)
     -- fires `WinEnter` on the way back and nothing hid it again.
     vim.api.nvim_exec_autocmds("FocusLost", { modeline = false })
     t.eq(original_guicursor, vim.o.guicursor, "leaving the terminal gives Neovim's cursor back")
+    t.eq(nil, session.caret_overlay_set, "and takes the block down rather than leaving two carets up")
     vim.api.nvim_exec_autocmds("FocusGained", { modeline = false })
     t.ok(
       vim.o.guicursor:find("MdViewerHiddenCursor", 1, true) ~= nil,
       "and returning hides it again, rather than leaving both up until the next motion"
     )
+    t.ok(session.caret_overlay_set ~= nil, "and redraws the block locally, at the position it kept")
 
-    -- Scrolled out of view, there is no block to see -- so the real cursor has
-    -- to come back rather than leave the reader with no caret at all.
+    -- Scrolled out of view there is no block to see -- and Neovim's own cursor
+    -- is not a substitute for it. It sits on the cell the caret used to be on,
+    -- the scroll has moved the text out from under it, and the preview window
+    -- itself never scrolls, so it stays there for the rest of the gesture: a
+    -- one-cell bar in the middle of unrelated prose, reported 2026-08-29.
+    -- Nothing on screen is the honest answer when the caret is off it.
     session.applied_scroll_y, session.frame_scroll_y = 5000, 5000
     t.eq(false, controller.display_caret_overlay(session), "a caret scrolled off screen is not drawn")
-    t.eq(original_guicursor, vim.o.guicursor, "and Neovim's cursor is given back")
+    t.ok(
+      vim.o.guicursor:find("MdViewerHiddenCursor", 1, true) ~= nil,
+      "and Neovim's cursor stays hidden rather than reappearing where the caret was"
+    )
     session.applied_scroll_y, session.frame_scroll_y = 0, 0
 
+    -- A session with no caret at all is the case that does still get it back:
+    -- there is nothing for the reader to look at instead.
+    local held = session.caret_rect
+    caret.forget(session)
+    t.eq(false, controller.display_caret_overlay(session), "a session with no caret draws nothing")
+    t.eq(original_guicursor, vim.o.guicursor, "and gets Neovim's cursor back")
+    caret.set_rect(session, held, 0)
+
     -- A backend that cannot draw the overlay never hides the cursor either:
-    -- there the terminal's own cursor *is* the caret.
+    -- there the terminal's own cursor *is* the caret -- which makes it the one
+    -- that has to keep up with a scroll, since no overlay draw will park it.
     preview.restore_cursor()
     session.backend = { name = "kitty_raw", clear = function() return true end }
+    caret.set_rect(session, { x = 42, y = 500, width = 19, height = 38 }, 0)
+    local parked_bare = vim.api.nvim_win_get_cursor(session.preview_win)
+    session.frame_scroll_y = 400
     controller.place_caret(session)
     t.eq(original_guicursor, vim.o.guicursor, "a backend without the overlay keeps the real cursor visible")
+    t.ok(
+      vim.api.nvim_win_get_cursor(session.preview_win)[1] < parked_bare[1],
+      "and that cursor follows the scroll, because nothing else is going to move it"
+    )
+    session.frame_scroll_y = 0
 
     session.backend = {
       name = "kitty_raw",

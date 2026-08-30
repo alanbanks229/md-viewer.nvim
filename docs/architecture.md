@@ -140,9 +140,17 @@ renderer measured. Two properties follow, and both are the point: the caret only
 ever sits on a real character — never in the page margin or beside a short
 heading — and it is drawn the size of that character, through the same
 `overlay_apply` path as the selection highlight, in its own rect set with its own tint
-(`CARET_TINT`). Neovim's cursor is hidden while a preview with a drawable caret
-is focused (`preview.hide_cursor`, a global `guicursor` swap) and shadows the
-caret underneath via `coordinates.css_to_cell`.
+(`CARET_TINT`). Neovim's cursor is hidden while a focused preview has a caret at
+all (`preview.hide_cursor`, a global `guicursor` swap) and shadows it underneath
+via `coordinates.css_to_cell`, re-parked on every frame that draws the block. A
+caret merely scrolled out of view keeps it hidden: the shadow cell is the one
+the caret used to be on, and the preview window never scrolls, so handing the
+real cursor back there put a one-cell bar in the middle of unrelated prose for
+the whole of the scroll. Losing focus takes the block down and gives the real
+cursor back together — the caret marks where the focused reader is, and
+`FocusLost` restores without any window changing, so leaving the block drawn put
+both up at once. Only the overlay is cleared; the box is kept, so re-entering
+redraws it locally.
 
 **Invariant.** Caret identity is renderer-owned and carried as a character index
 (`caretIndex`), never reconstructed from geometry. `caretPositionFromPoint`

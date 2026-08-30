@@ -106,11 +106,15 @@ end
 ---left, which matters for the terminals that cannot draw the overlay and are
 ---left showing the real cursor, and for anything that reads the window's cursor
 ---position.
-function M.shadow_cursor(session)
+---
+---`rect` is the box the caller has already drawn into, so the shadow lands on
+---the cell the block actually occupies rather than on one recomputed a moment
+---later. Callers with no box of their own pass none and take `M.rect`'s.
+function M.shadow_cursor(session, rect)
   local win = session and session.preview_win
   if not (win and vim.api.nvim_win_is_valid(win)) then return end
   if vim.api.nvim_win_get_buf(win) ~= session.preview_buf then return end
-  local rect = M.rect(session)
+  rect = rect or M.rect(session)
   if not rect then return end
   local placement = session.last_placement
   if not placement then return end
