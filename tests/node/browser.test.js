@@ -512,6 +512,7 @@ test("animated image geometry is reported in document coordinates, and forged id
 
   const result = await renderer.render(params, html, "anim-1");
   assert.equal(result.animations.length, 1, "one id was minted, so exactly one rect is reported");
+  assert.equal(result.animationsUnmeasured, 0, "every minted id was measured");
 
   const rect = result.animations[0];
   assert.equal(rect.id, "a1");
@@ -528,6 +529,7 @@ test("animated image geometry is reported in document coordinates, and forged id
   const none = await renderer.render({ ...params, documentId: "plain", animationIds: [] }, html, "anim-3");
   assert.deepEqual(none.animations, []);
   assert.equal(none.animationsIncomplete, false);
+  assert.equal(none.animationsUnmeasured, 0, "nothing minted is nothing unmeasured");
 });
 
 // The regression for the bug where every animation in a full-screen preview
@@ -602,4 +604,9 @@ test("a layout whose animation geometry never settles re-measures, then stops as
   }
   assert.equal(last.animationsIncomplete, false, "the retry is bounded rather than a render loop");
   assert.ok(renders <= 12, `gave up after ${renders} renders, which is the bound plus the first pass`);
+  // Giving up stops the retry; it must not also erase what was given up on.
+  // `animationsIncomplete: false` with a non-zero count here is the one shape
+  // that separates "these could not be measured" from "this document has none",
+  // and :MdViewerDebug had no way to tell those apart before.
+  assert.equal(last.animationsUnmeasured, 1, "the id it gave up on is still reported as unmeasured");
 });

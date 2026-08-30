@@ -115,10 +115,22 @@ M.defaults = {
     -- Used to estimate how long a resident warm-up will take. It bounds nothing,
     -- and a value set here is never capped against any other figure.
     ssh_link_bytes_per_sec = "auto",
-    -- Keeping this off improves motion and nothing else.
-    -- Better GIF rendering with this architecture needs to be explored.
-    -- Playback is expensive when sending constant PNG screenshots.
+    -- Off by default because the *first* loop of an animation is real traffic:
+    -- one PNG per frame at the size it is drawn, transmitted to the terminal.
+    -- Steady state is not -- frames are uploaded once under stable content keys
+    -- and shared across previews, sessions and renderer restarts, so every
+    -- later tick costs a placement swap and no pixels at all (`:MdViewerDebug`
+    -- reports the per-tick figure as `animation_last_bytes`). What that means
+    -- in practice: the cost is the document's animations once, not a stream,
+    -- and it is the link this has to be weighed against rather than the CPU.
+    --
+    -- Nothing here re-captures the page to animate. A frame of the preview is
+    -- one Chromium screenshot, so the animation is a separate layer the
+    -- terminal draws over the still frame -- see animation.lua's header.
     animate = false,
+    -- Ceiling on the client-driven ("frames") swap rate, 1..30. The walk skips
+    -- frames rather than stretching them when the cap bites, so a capped
+    -- animation keeps its real length and only gets choppier.
     animate_fps = 5,
     -- Where the renderer runs. "current" is the only behavior that existed
     -- before 0.3.0: Node and Chromium beside this Neovim. "local" runs

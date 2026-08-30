@@ -140,6 +140,14 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   same thing as `[b`/`]b`. Preview history is still reachable through
   `:MdViewerBack`/`:MdViewerForward`, just with no default keymap.
 
+- `:MdViewerDebug` reports `animation_geometry_unmeasured`: how many of a
+  document's animated images the renderer measured no box for. Non-zero beside
+  `animation_geometry_incomplete = false` means the renderer gave up on them,
+  which was until now indistinguishable from a document with no animated images
+  in it — counted by identity rather than by subtracting totals, because an id
+  the page does not carry and a rect the registry cannot name are the same
+  number of each.
+
 ### Fixed
 
 - **The first capture no longer costs a session its fast encoder.** A browser
@@ -180,6 +188,44 @@ memory so scrolling sends nothing, or stop sending pixels at all.
   a following `v`/`y`/motion acted from the caret's old position instead of
   the match, unlike Vim's own `/`. Each now places the caret on the active
   match the same way a click does.
+
+- **Animated GIF and WebP froze on their first frame until the window was
+  resized.** An `<img>` carrying no `width`/`height` has a zero layout box until
+  Chromium has parsed enough of its base64 data URI to know the intrinsic size,
+  and the geometry pass drops zero-area rects — so for a megabyte-scale
+  recording the document could read as having no animated images at all. The
+  bounded retry that exists for exactly this could run out while it was still
+  true, after which the still frame stood for the life of the layout and only a
+  resize, edit, or colorscheme change appeared to fix it, by re-keying it.
+  Scrolling never did: it is a capture, and captures do not re-measure geometry.
+  The animated image now states the size sniffed from its own source header, so
+  the box is right at `domcontentloaded` and the measurement never races. An
+  author's own `width`/`height` still outranks it. Predates 0.3.0.
+- **An animated image stopped animating the moment a remote image in the same
+  document finished loading**, which is what made the two above so hard to see.
+  The Lua side answers `remoteImagesPending` with one more render, which
+  re-parses the markdown — and the animation store minted a fresh id on every
+  parse, so the second parse called the same GIF `a2` where the first had called
+  it `a1`. The page was *not* reloaded, because `layoutKey` is derived from the
+  markdown cache key and that key does not record whether a remote image had
+  resolved yet, so the DOM still carried `a1`. `service.js` joins each measured
+  rect to the registry by id and drops what it cannot name, so the document
+  reported zero animations from that render on and kept reporting zero for the
+  life of the content revision. An animation id is now its ordinal within its
+  own document, which makes it a pure function of the markup and identical
+  across re-parses. Predates 0.3.0.
+- **One large animation could evict every other animation in the same document,
+  in a loop.** The frame store's byte cap (48MB) and the per-animation pixel
+  budget were unrelated numbers, so a single animation could occupy the whole
+  store on its own; evicting a sibling a preview was still reading frames from
+  made the Lua side re-materialize it two seconds later, evicting whatever had
+  displaced it, indefinitely. An animation is now thinned to its share of the
+  store — `MAX_FRAME_STORE_BYTES / MAX_ANIMATIONS_PER_DOCUMENT`, so a full
+  document always fits — by dropping frames evenly and folding their display
+  time into the survivors, the same cut the pixel budget already makes. The cut
+  has to weigh encoded bytes rather than pixels: the same frame encodes to
+  1.09MB at 1695x1029 and 4.76MB at 1696x1029 (measured on a Mac, 2026-08-29),
+  so there is no ratio to predict it with. Predates 0.3.0.
 
 ### Security
 

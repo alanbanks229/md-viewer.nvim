@@ -821,6 +821,12 @@ function M.refresh(session, render_options)
     -- renderer stops asking after a bounded number of attempts, so a genuinely
     -- unmeasurable image costs a handful of renders rather than a loop.
     session.animation_geometry_incomplete = meta.animationsIncomplete == true
+    -- How many of them the renderer has given up on. Recorded but never acted
+    -- on: `animationsIncomplete` going false is what stops the retry above, and
+    -- a non-zero count beside it is the difference between "these images could
+    -- not be measured" and "this document has none" -- which :MdViewerDebug had
+    -- no way to tell apart.
+    session.animation_geometry_unmeasured = tonumber(meta.animationsUnmeasured) or 0
     if session.animation_geometry_incomplete then M.schedule(session, 120, "animation_geometry_timer") end
     -- An image the renderer is still fetching. The document has already been
     -- shown with a placeholder in its place rather than waiting for it -- one

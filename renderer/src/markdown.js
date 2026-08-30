@@ -198,8 +198,41 @@ function registerAnimation(token, dataUri, options, env) {
   // nothing. Failing closed here is what makes "never a blank hole" true by
   // construction rather than by the Lua side checking for it.
   if (!registered) return;
-  token.attrSet("data-md-anim-id", registered.id);
-  animations.set(registered.id, { sha: registered.sha, frameCount: registered.frameCount });
+  // The animation's ordinal in this document, not a store-wide serial. That
+  // makes the id a pure function of the document, so re-parsing it yields the
+  // same ids -- which has to hold, because the page and the registry are not
+  // rebuilt together. `layoutKey` is keyed on the markdown cache key, and a
+  // remote image finishing its fetch produces new markup under the *same* key:
+  // the markdown is re-parsed, the page is not reloaded, and with a serial the
+  // DOM was left holding `a1` while the registry knew only `a2`. service.js's
+  // sha join drops any rect it cannot name, so the document reported zero
+  // animations from that moment on and the preview froze on its still frame
+  // until the content revision changed -- which is the freeze this whole
+  // mechanism kept being blamed for.
+  const id = `a${animations.size + 1}`;
+  token.attrSet("data-md-anim-id", id);
+  // An <img> carrying no dimensions has a *zero* layout box until Chromium has
+  // parsed enough of its base64 data URI to know the intrinsic size --
+  // asynchronous, and for a megabyte-scale recording measurably slower than the
+  // geometry pass is willing to wait. collectAnimationGeometry drops zero-area
+  // rects, so the document then reads as having no animated images at all, and
+  // browser.js's bounded retry can run out while it is still true: the still
+  // frame then stands for the life of the layout and only a resize (which
+  // re-keys it) appears to "fix" it.
+  //
+  // The size was already sniffed from the source header to register it, so
+  // state it. The box is then right at domcontentloaded, the geometry pass
+  // exits on its first probe, and nothing races. `preview.css` gives every
+  // image `max-width: 100%; height: auto`, so these attributes only supply the
+  // aspect ratio -- a wide recording still shrinks to a narrow column.
+  //
+  // Both absent, not either: an author who wrote `<img width="120">` and let
+  // the height follow keeps their number driving it.
+  if (registered.width && registered.height && token.attrIndex("width") < 0 && token.attrIndex("height") < 0) {
+    token.attrSet("width", String(registered.width));
+    token.attrSet("height", String(registered.height));
+  }
+  animations.set(id, { sha: registered.sha, frameCount: registered.frameCount });
 }
 
 function xmlEscape(text) {
@@ -284,10 +317,12 @@ export async function renderMarkdown(markdown, options) {
       // document can do by forging one is send its own click somewhere else in
       // itself -- the same bounded exposure `data-source-start` already has.
       "*": ["class", "data-source-start", "data-source-end", "data-alert-title", "data-md-source-id", "data-md-obsidian-block-id"],
-      // `width`/`height` carry across from a raw `<img>` only. sanitize-html
-      // validates attribute *names* and never their values, so raw-image.js's
-      // bare-integer check is the actual guard and this entry is only what lets
-      // an already-validated value through. They matter because preview.css
+      // `width`/`height` reach here from a raw `<img>` and from
+      // registerAnimation, which states an animated image's sniffed header
+      // size. sanitize-html validates attribute *names* and never their values,
+      // so raw-image.js's bare-integer check and the sniff's own bounds are the
+      // actual guards; this entry only lets an already-validated value through.
+      // They matter because preview.css
       // gives every image `max-width: 100%; height: auto` -- with no intrinsic
       // size the box is laid out from the decoded bytes alone, and a wide
       // screenshot reflows the document around it after the fact.
