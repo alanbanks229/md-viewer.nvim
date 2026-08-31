@@ -22,30 +22,24 @@ slow SSH links get their own guide in [ssh.md](ssh.md).
 
 ## How a preview reaches your terminal
 
-```text
-┌──────────────────┐
-│  Markdown buffer │   the file you're editing, untouched
-└────────┬─────────┘
-         │ buffer text, scroll position, gestures
-┌────────▼─────────┐
-│  md-viewer.nvim  │   Lua: commands, windows, geometry,
-│  (inside Neovim) │   input capture in the preview split
-└────────┬─────────┘
-         │ JSON over stdio (one long-lived process)
-┌────────▼─────────┐
-│  Node renderer   │──►  headless Chromium
-└────────┬─────────┘     markdown-it → HTML, CSS layout,
-         │               links, search, text selection
-         │ screenshot of the visible viewport
-      PNG bytes
-         │ Kitty graphics protocol (escape sequences)
-┌────────▼─────────┐
-│  preview split   │   the image, sized to the window
-└──────────────────┘
+```mermaid
+sequenceDiagram
+    participant N as Neovim (md-viewer.nvim)
+    participant R as Node renderer
+    participant B as Headless Chromium
 
-The same pipe runs upward: keys and mouse gestures in the
-preview are forwarded to the Chromium page as DOM events,
-and the viewport is recaptured to show what changed.
+    N->>R: Current buffer text (saved or not)
+    R->>B: Load HTML (markdown-it) + theme CSS
+    B->>B: Lay out the page
+    B-->>R: Screenshot of the visible viewport
+    R-->>N: PNG
+    Note over N: Placed in the preview split via<br/>Kitty graphics escape sequences
+
+    N->>R: Scroll / search / select / click
+    R->>B: Apply to the live DOM
+    B->>B: Scroll, move caret, highlight, hit-test
+    B-->>R: Screenshot of the result
+    R-->>N: Updated PNG
 ```
 
 Step by step:
