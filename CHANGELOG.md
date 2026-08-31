@@ -11,250 +11,148 @@ Highlighting is now exclusively a keyboard gesture, the preview pane carries a
 tab per document, and on a link too slow for pictures the browser can move to
 your side of it.
 
-The breaking part is the first of those. Mouse click-drag, double-click and
-triple-click selection are gone, and seven `interaction.*` keys went with them —
-setting one is now a configuration error rather than a silent no-op. What
-replaces them is `v`/`V` and the ordinary motion keys against a real caret in the
-rendered document. Everything else here is additive: preview tabs and history,
-optional Obsidian wikilink navigation through those tabs, and two independent
-answers to a slow SSH link — hold the whole document in the terminal's image
-memory so scrolling sends nothing, or stop sending pixels at all.
+The breaking part is the first of those: mouse click-drag, double-click and
+triple-click selection are gone, replaced by `v`/`V` and the ordinary motion
+keys against a real caret in the rendered document. Everything else is
+additive.
 
 ### Removed
 
 - **Click-drag, double-click, and triple-click selection.** Dragging the mouse
-  over the preview no longer highlights anything; an ordinary drag falls through
-  to Neovim's own harmless default, the way an unmapped gesture always has.
-  `interaction.drag_threshold_cells`, `interaction.double_click`,
-  `interaction.autoscroll`, `interaction.autoscroll_interval_ms`,
-  `interaction.autoscroll_max_lines`, `interaction.word_select`, and
-  `interaction.paragraph_select` are gone — setting any of them is now a
-  configuration error rather than a silent no-op. The mouse still places the
-  caret, still opens a link on Ctrl/Cmd-click, and still scrolls with the wheel.
+  over the preview no longer highlights anything; an ordinary drag falls
+  through to Neovim's own harmless default. `interaction.drag_threshold_cells`,
+  `interaction.double_click`, `interaction.autoscroll`,
+  `interaction.autoscroll_interval_ms`, `interaction.autoscroll_max_lines`,
+  `interaction.word_select`, and `interaction.paragraph_select` are gone —
+  setting any of them is now a configuration error rather than a silent no-op.
+  The mouse still places the caret, still opens a link on Ctrl/Cmd-click, and
+  still scrolls with the wheel.
 
 ### Added
 
-- **`render.location = "local"` renders and presents frames beside the
-  terminal.** Launch ssh through the helper on the machine your terminal runs on
-  — `node <md-viewer>/renderer/src/local-main.js -- ssh <host>` — and the
-  connection carries prepared markup, each asset's bytes once, and a ~0.3–1 KB
-  marker per frame instead of an ~80–305 KB PNG per frame. A scroll sends one
-  marker and no request at all. The plugin adopts a helper only after a versioned
-  hello *and* a probe marker through its own tty that only the helper filtering
-  that terminal can see, so the two ends cannot cross-wire. The handshake
-  compares the control-socket protocol version rather than the tag — ordinary
-  checkout skew between two independently-updated ends is the steady state —
-  and an incompatible protocol is refused with the fix in the message. No helper, a dead socket, or a mid-session
-  crash produces one warning and remote rendering exactly as before, with the
-  reason in `:MdViewerHealth` and `:MdViewerDebug`. See `:help md-viewer-local`.
+- **`render.location = "local"` (experimental) renders and presents frames
+  beside the terminal.** Launch ssh through the helper on the machine your
+  terminal runs on — `node <md-viewer>/renderer/src/local-main.js -- ssh
+  <host>` — and the connection carries a small marker per frame instead of a
+  PNG per frame; a scroll sends one marker and no request at all. No helper, a
+  dead socket, or a mid-session crash produces one warning and remote
+  rendering exactly as before, with the reason in `:MdViewerHealth`.
+  See `:help md-viewer-local`.
 - **Pane-scoped preview documents and tabs.** Every followed Markdown document
-  owns a stable, unlisted `md-viewer://preview/...` buffer. Clickable winbar
-  tabs, `[b`/`]b`, and `:MdViewerTabNext`/`:MdViewerTabPrevious`/
-  `:MdViewerTabClose` switch only the preview pane; `gf` and
-  `:MdViewerRevealSource` reveal a document in the editable source pane. History
-  is independent of tab order and recreates a closed document with its saved
-  scroll target.
-- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders and follows
-  note, path, alias, heading-hierarchy, and block-id links through the same
-  preview tabs. Vault lookup is case-insensitive for bare stems, duplicate-aware,
-  rescanned on activation, and confined against traversal and symlink escapes.
-  No obsidian.nvim dependency is introduced — this is syntax compatibility, not
-  an integration. See `:help md-viewer-obsidian`.
-- **Whole-document resident image mode, experimental and off by default.** Where
-  the terminal supports it, the document is captured once as a handful of chunks
-  held in the terminal's image memory, and scrolling becomes a placement command
-  — no renderer request and no pixels on the wire, measured at 196 bytes per
-  scroll against the ~80 KB the per-scroll path sends. It trades a long warm-up
-  and a document's worth of terminal image memory for that, which only pays on a
-  link slow enough that the per-scroll capture is what you are waiting on.
-  `image.resident = "auto"` is that condition rather than a plain opt-in: it
-  takes the resident path only where the terminal supports it *and* this machine
-  has measured a link under `image.resident_below_bytes_per_sec` (4 MB/s, a gap
-  between the two reference links rather than a measurement of anything). It
-  never measures on its own, so run `:MdViewerMeasureLink` once per machine — an
-  unmeasured link is unknown rather than slow, and keeps the ordinary path.
-  `"on"` drops the rate question for exercising the mode deliberately on a
-  machine that will not benefit from it. New options
-  `image.resident_below_bytes_per_sec`, `image.resident_chunk_viewports`,
-  `image.resident_memory_mb` and `image.resident_max_chunks` bound it;
-  `:MdViewerDebug`'s `render_path_reason` names whichever condition decided.
+  owns a stable preview buffer. Clickable winbar tabs, `[b`/`]b`, and
+  `:MdViewerTabNext`/`:MdViewerTabPrevious`/`:MdViewerTabClose` switch only
+  the preview pane; `gf` and `:MdViewerRevealSource` reveal a document in the
+  editable source pane. History is independent of tab order and recreates a
+  closed document with its saved scroll target.
+- **Optional native Obsidian wikilinks.** `obsidian.enabled` renders and
+  follows note, path, alias, heading-hierarchy, and block-id links through the
+  same preview tabs, confined to the vault root. No obsidian.nvim dependency
+  is introduced — this is syntax compatibility, not an integration.
+  See `:help md-viewer-obsidian`.
+- **Whole-document resident image mode, experimental and off by default.**
+  Where the terminal supports it, the document is captured once into the
+  terminal's image memory and scrolling becomes a placement command — no
+  renderer request and no pixels on the wire. `image.resident = "auto"` takes
+  that path only where the terminal supports it *and* this machine has
+  measured a slow link (it never measures on its own — run
+  `:MdViewerMeasureLink` once per machine); `"on"` skips the rate check. New
+  `image.resident_*` options bound it, and `:MdViewerDebug`'s
+  `render_path_reason` names whichever condition decided.
   See `:help md-viewer-resident`.
-- **`:MdViewerMeasureLink` measures this link and caches the answer for this
-  machine.** Run it once from an SSH session with no preview open. It runs
-  `scripts/ssh-link-speed.sh` in a subprocess writing to the pty named by
-  `$SSH_TTY`, which is the only route that works: the answer is not observable
-  from inside Neovim at any link rate — `nvim_ui_send` appends to Neovim's own UI
-  queue and returns, and 24 MB was accepted in 0.03 s on a 0.80 MB/s link — and a
-  subprocess Neovim starts has no controlling terminal, so `/dev/tty` fails with
-  ENXIO. It refuses outside SSH, with a preview open, or where no terminal device
-  resolves, each of which would measure something other than the link.
+- **`:MdViewerMeasureLink` measures this SSH link and caches the answer for
+  this machine.** Run it once from an SSH session with no preview open; the
+  cached figure is what `render.ssh_link_bytes_per_sec = "auto"` reads.
 - **Absolute and relative rendered line numbers.**
   `:MdViewerToggleAbsoluteLineNumbers` and `:MdViewerToggleRelativeLineNumbers`
   select one three-state `preview.line_numbers` preference over the *rendered*
-  visual lines. The cells backend uses Neovim's native number options.
+  visual lines.
 - **A statusline progress API.** `statusline_progress()` reports
-  `All`/`Top`/`Bot`/`NN%` from the rendered document's own geometry, and a
-  deduplicated `MdViewerProgressChanged` User event lets a configured statusline
-  refresh itself. md-viewer no longer writes `'statusline'` itself. See
-  `:help md-viewer-statusline`.
+  `All`/`Top`/`Bot`/`NN%`, with a deduplicated `MdViewerProgressChanged` User
+  event; md-viewer no longer writes `'statusline'` itself.
+  See `:help md-viewer-statusline`.
 - **Manual split adoption.** Running `:MdViewerToggle` in one of exactly two
   splits showing the same Markdown adopts the current split as the preview and
-  restores its buffer, view, dimensions, and window options on close. Ambiguous
-  or fixed layouts fall back to a plugin-owned split.
+  restores its buffer, view, dimensions, and window options on close.
 - **`interaction.keymaps` configures the tab-cycle keys.** `tab_previous` and
   `tab_next` default to `"H"`/`"L"`; set either to a different key, or to
   `false` to leave it unmapped.
-- **`preview.tab_accent` underlines the active winbar tab.** Default
-  `"#61afef"`; some colorschemes render `TabLineSel` and `TabLine` almost
-  identically, which made the active tab hard to pick out. Doubled rather
-  than single -- the closest a terminal-text underline gets to "thicker",
-  since there is no pixel stroke width to ask for. Set to `false` for the
-  plain link with no underline.
+- **`preview.tab_accent` underlines the active winbar tab** (default
+  `"#61afef"`, `false` for none), for colorschemes that render `TabLineSel`
+  and `TabLine` almost identically.
 
 ### Changed
 
-- **`render.ssh_link_bytes_per_sec` now defaults to `"auto"`,** reading a
-  measurement this machine has already made. It never takes one: nothing happens
-  until `:MdViewerMeasureLink` or `sh scripts/ssh-link-speed.sh --write-cache`
-  has been run there. The cache lives under `stdpath("state")`, keyed by a hash
-  of the host, both ends of the connection and the terminal, so several people
-  sharing a bastion each get their own and no address is ever printed. Precedence
-  is `MD_VIEWER_SSH_LINK_BYTES_PER_SEC` > configuration > cache > unknown, and a
-  number in configuration still wins and is still never capped — which is also
-  the trap, since a rate left in a shared config silently defeats per-machine
-  detection on every machine sharing it. Unknown remains a legitimate answer.
-- **`scripts/ssh-link-speed.sh` measures the effective rate, and any figure taken
-  with an older copy should be re-measured.** It used to send `tr '\0' '.'`,
-  which is maximally compressible, so any compressing hop made it report a rate
-  the link cannot do. It now sends base64 over `/dev/urandom` and times payload
-  generation separately.
+- **`render.ssh_link_bytes_per_sec` now defaults to `"auto"`,** reading the
+  per-machine measurement `:MdViewerMeasureLink` cached. Precedence is
+  `MD_VIEWER_SSH_LINK_BYTES_PER_SEC` > configuration > cache > unknown — a
+  number in configuration still wins, which is also the trap: a rate left in a
+  shared config silently defeats per-machine detection everywhere it lands.
+- **`scripts/ssh-link-speed.sh` now sends incompressible data.** Any figure
+  taken with an older copy read high through a compressing hop and should be
+  re-measured.
 - **Leaving Visual mode (`<Esc>`) clears the preview highlight immediately,**
-  matching Vim. The final sharp frame still lands first and `copy_on_select`
-  still runs, so a fast `v`…`<Esc>` copies exactly what was shown.
-- **In local mode, resident mode demotes** ("local render owns scrolling"),
-  `render.animate` is structurally off with a health warning if configured on,
-  and the moving/settle capture split never engages — there is no wire to save.
-- `:MdViewerDebug`'s `image_update_ms` is now `ui_handoff_ms`, because that is
-  what it measures: `nvim_ui_send` only queues.
-- **`H`/`L` cycle document tabs instead of walking history.** They now do the
-  same thing as `[b`/`]b`. Preview history is still reachable through
-  `:MdViewerBack`/`:MdViewerForward`, just with no default keymap.
-
-- `:MdViewerDebug` reports `animation_geometry_unmeasured`: how many of a
-  document's animated images the renderer measured no box for. Non-zero beside
-  `animation_geometry_incomplete = false` means the renderer gave up on them,
-  which was until now indistinguishable from a document with no animated images
-  in it — counted by identity rather than by subtracting totals, because an id
-  the page does not carry and a rect the registry cannot name are the same
-  number of each.
+  matching Vim; the final sharp frame still lands first and `copy_on_select`
+  still runs.
+- **In local mode, resident mode demotes and `render.animate` is structurally
+  off** — there is no wire to save — with a health warning if configured on.
+- **`H`/`L` cycle document tabs instead of walking history,** the same as
+  `[b`/`]b`; history stays reachable through
+  `:MdViewerBack`/`:MdViewerForward`.
+- `:MdViewerDebug`: `image_update_ms` is now `ui_handoff_ms` (it measures the
+  queue hand-off, not the wire), and a new `animation_geometry_unmeasured`
+  counter distinguishes "no animated images" from "the renderer gave up
+  measuring them".
+- Documentation: contributor docs consolidated into
+  [CONTRIBUTING.md](CONTRIBUTING.md), and `docs/architecture.md` rewritten as
+  a short visual overview.
 
 ### Fixed
 
 - **The first capture no longer costs a session its fast encoder.** A browser
-  process pays a fixed one-off capture warm-up (9,874–16,335 ms on Ubuntu 22.04
-  / Chrome 151, against 116–373 ms for every later capture) that could outlast
-  the capture timeout on a session's very first frame; losing that race demoted
-  the whole renderer to the slower Playwright encoder for the rest of the
-  session, silently, and took `render.scroll_scale` with it. The demotion is no
-  longer permanent and the warm-up no longer races. Predates 0.3.0.
-- **A character-wise preview selection could lose its first or last character.**
-  Selections anchored at a glyph's exact centre are the one tie browser
-  hit-testing cannot break; `v` on a heading's first character selected
-  `## Changelog` as `hangelog`. Selection now resolves through the same
-  character-index space the caret already uses, falling back to coordinates only
-  when no index is available.
-- **Held `j` inside the preview lagged behind release by one round trip per
-  keystroke.** Caret motion asks the renderer for a real glyph box and nothing
-  paced those requests. A same-direction repeat arriving while one is in flight
-  now accumulates into a pending count flushed as a single follow-up, so a held
-  key costs one round trip per *answer* rather than per keystroke. A different
-  motion arriving mid-flight is still sent at once.
-- **`:MdViewerDebug` and `:MdViewerHealth` blanked an open preview.** The health
-  check forced its browser context to device-scale 1; the mismatch tore down the
-  context and cleared the active document. Health now reuses the active scale.
+  process's one-off capture warm-up could outlast the capture timeout on a
+  session's very first frame, silently demoting the renderer to the slower
+  Playwright encoder for the rest of the session; the demotion is no longer
+  permanent and the warm-up no longer races.
+- **A character-wise preview selection could lose its first or last
+  character** when anchored at a glyph's exact centre — `v` on a heading's
+  first character selected `## Changelog` as `hangelog`. Selection now
+  resolves through the same character-index space the caret uses.
+- **Held `j` inside the preview lagged behind release.** Same-direction
+  repeats now coalesce while a request is in flight, so a held key costs one
+  renderer round trip per *answer* rather than per keystroke.
+- **`:MdViewerDebug` and `:MdViewerHealth` blanked an open preview** by
+  forcing a mismatched browser scale; health now reuses the active scale.
 - **A task-list item containing a link or any inline markup drew its own
-  Markdown a second time.** `- [ ] see [docs](x)` rendered the item's raw source
-  as literal text inside the still-open link, and `- [ ] with **bold**` lost its
-  emphasis — because the task-list plugin was rebuilding each item's label from
-  its source text instead of wrapping the children the parser had already
-  produced. Items are now wrapped rather than rewritten, and a task item carries
-  the same exact source provenance every other list item has.
+  Markdown a second time.** Items are now wrapped rather than rebuilt from
+  their source text, and carry the same source provenance as other list items.
 - **Repeating `:MdViewerBack`/`:MdViewerForward` at either end of history no
-  longer stacks notifications.** Only the first call past that end reports
-  "no previous/next document in the preview history"; further repeats are
-  silent until the preview actually moves, and moving re-arms it.
-- **`/`, `n`, and `N` left the caret wherever it already was.** A search
-  scrolled to and highlighted the match but never moved the caret onto it, so
-  a following `v`/`y`/motion acted from the caret's old position instead of
-  the match, unlike Vim's own `/`. Each now places the caret on the active
-  match the same way a click does.
+  longer stacks notifications** — one per dead end, re-armed by actually
+  moving.
+- **`/`, `n`, and `N` now place the caret on the active match,** the way
+  Vim's own search leaves the cursor on the hit, so a following `v`/`y`/motion
+  acts from the match.
 
 - **Animated GIF and WebP froze on their first frame until the window was
-  resized.** An `<img>` carrying no `width`/`height` has a zero layout box until
-  Chromium has parsed enough of its base64 data URI to know the intrinsic size,
-  and the geometry pass drops zero-area rects — so for a megabyte-scale
-  recording the document could read as having no animated images at all. The
-  bounded retry that exists for exactly this could run out while it was still
-  true, after which the still frame stood for the life of the layout and only a
-  resize, edit, or colorscheme change appeared to fix it, by re-keying it.
-  Scrolling never did: it is a capture, and captures do not re-measure geometry.
-  The animated image now states the size sniffed from its own source header, so
-  the box is right at `domcontentloaded` and the measurement never races. An
-  author's own `width`/`height` still outranks it. Predates 0.3.0.
+  resized.** An animated image now states the size sniffed from its own
+  header, so its layout box is right before geometry is measured; an author's
+  own `width`/`height` still outranks it.
 - **An animated image stopped animating the moment a remote image in the same
-  document finished loading**, which is what made the two above so hard to see.
-  The Lua side answers `remoteImagesPending` with one more render, which
-  re-parses the markdown — and the animation store minted a fresh id on every
-  parse, so the second parse called the same GIF `a2` where the first had called
-  it `a1`. The page was *not* reloaded, because `layoutKey` is derived from the
-  markdown cache key and that key does not record whether a remote image had
-  resolved yet, so the DOM still carried `a1`. `service.js` joins each measured
-  rect to the registry by id and drops what it cannot name, so the document
-  reported zero animations from that render on and kept reporting zero for the
-  life of the content revision. An animation id is now its ordinal within its
-  own document, which makes it a pure function of the markup and identical
-  across re-parses. Predates 0.3.0.
-- **One large animation could evict every other animation in the same document,
-  in a loop.** The frame store's byte cap (48MB) and the per-animation pixel
-  budget were unrelated numbers, so a single animation could occupy the whole
-  store on its own; evicting a sibling a preview was still reading frames from
-  made the Lua side re-materialize it two seconds later, evicting whatever had
-  displaced it, indefinitely. An animation is now thinned to its share of the
-  store — `MAX_FRAME_STORE_BYTES / MAX_ANIMATIONS_PER_DOCUMENT`, so a full
-  document always fits — by dropping frames evenly and folding their display
-  time into the survivors, the same cut the pixel budget already makes. The cut
-  has to weigh encoded bytes rather than pixels: the same frame encodes to
-  1.09MB at 1695x1029 and 4.76MB at 1696x1029 (measured on a Mac, 2026-08-29),
-  so there is no ratio to predict it with. Predates 0.3.0.
-
+  document finished loading.** An animation's id is now its ordinal within
+  its own document — a pure function of the markup, identical across
+  re-parses.
+- **One large animation could evict every other animation in the same
+  document, in a loop.** Each animation is now thinned to its share of the
+  frame store, so a full document always fits.
 - **Scrolling past the caret left a stray cursor sitting in the middle of the
-  text.** Neovim's own cursor is hidden in favour of the block caret and parked
-  on the cell underneath it — but only ever on a caret *motion*, and the preview
-  window itself never scrolls, so an ordinary scroll left it on the cell the
-  caret used to be on. When the scroll carried the caret out of the viewport the
-  real cursor was handed back there: a one-cell bar in the middle of unrelated
-  prose that stayed put for the rest of the gesture and vanished only on
-  scrolling back. A caret that is merely off screen now keeps Neovim's cursor
-  hidden — nothing on screen is the honest answer when the caret is off it — and
-  only a preview with no caret at all gives it back. The shadow is also re-parked
-  on every frame that draws the block, not just on a motion, so the terminals
-  that cannot draw an overlay caret and show the real cursor instead keep up with
-  a scroll too.
-
-- **The block caret stayed drawn over a preview nobody was in.** It marks where
-  the *focused* reader is, so one left up after focus moved elsewhere claimed a
-  focus that had gone — and on `FocusLost`, which hands Neovim's real cursor back
-  without any window changing, the two sat there together. Losing focus now takes
-  the block down and gives the cursor back in the same step. Only the overlay is
-  cleared: the caret keeps its position, so returning redraws it exactly where it
-  was, locally, with no round trip.
-
-- **A resident preview had no caret anywhere but the top of the document.** The
-  resident path recorded the position it had *asked* for but not the one its
-  composed bands actually show, so the caret measured its drift against zero and
-  placed itself a whole scroll off screen — where, before the fix above, it also
-  handed back the real cursor. It now records both, the way `apply_image` does
-  for a captured frame. Resident mode is experimental and off by default.
+  text.** A caret that is merely off screen now keeps Neovim's cursor hidden,
+  and its shadow cell is re-parked on every frame rather than only on a
+  motion.
+- **The block caret stayed drawn over a preview nobody was in.** Losing focus
+  now takes the block down and gives Neovim's cursor back in the same step;
+  refocusing redraws it in place with no round trip.
+- **A resident preview had no caret anywhere but the top of the document.**
+  The resident path now records the scroll its composed bands actually show,
+  the way a captured frame does.
 
 ### Security
 
