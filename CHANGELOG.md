@@ -105,6 +105,9 @@ additive.
 - Documentation: contributor docs consolidated into
   [CONTRIBUTING.md](CONTRIBUTING.md), and `docs/architecture.md` rewritten as
   a short visual overview.
+- **Project licensing changed from MIT to Apache-2.0.** Releases up to and
+  including 0.2.1 stay under the MIT License they were published with. See
+  [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ### Fixed
 

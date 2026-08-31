@@ -126,5 +126,5 @@ major version is `0`, a breaking change is allowed in a MINOR bump.
    gh release edit "$tag" --draft=false
    ```
 
-By contributing, you agree that your contribution is licensed under the MIT
-License included in this repository.
+By contributing, you agree that your contribution is licensed under the Apache
+License 2.0 included in this repository.
