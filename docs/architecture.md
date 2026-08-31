@@ -2,7 +2,8 @@
 
 How md-viewer is built, and which invariants a change must not break. Statements
 marked **Invariant** are load-bearing: each has a plausible-looking simplification
-that reintroduces a real defect.
+that reintroduces a real defect, and each is pinned by a test under `tests/`. A
+change that has to weaken one of those tests is the thing that is wrong.
 
 The preview is a browser-rendered PNG surface. Mouse and keyboard interactions
 are forwarded to a persistent Chromium DOM, which performs hit-testing, search,
@@ -163,12 +164,14 @@ The index is checked, not trusted — the renderer rebuilds that character space
 from the DOM per request, and an index that no longer names a character falls
 back to the point. Two granularities withhold it deliberately: `"none"`, the
 snap-only case meaning "the character nearest here", and a click, which is asking
-for a point to be resolved.
+for a point to be resolved. `tests/lua/cases/caret.lua` pins which requests carry
+the index and which withhold it.
 
 **Invariant.** `caret_move` is read-only. A motion in visual mode must *extend*
 the selection without disturbing it, which rules out `Selection.modify` — the
 obvious primitive — because that can only move a caret by moving the selection's
-own focus.
+own focus. `tests/node/selection.test.js` asserts a motion leaves the DOM
+selection untouched.
 
 **Invariant.** Character motion is line-aware: `h` and `l` compare the candidate
 glyph's box against the current one and refuse to leave the rendered row, as
@@ -176,7 +179,8 @@ Vim's do under the default `whichwrap`. Word motion crosses rows and blocks, but
 the flat character space must insert a separator between blocks: the whitespace
 between two of them lives in their container and is never walked, and without one
 `Intl.Segmenter` reads the end of one block and the start of the next as a single
-word.
+word. The same file walks `l` across every glyph of a rendered row, and `w`
+across a block boundary, rather than sampling one alignment.
 
 The box is stored with the scroll it was measured at, so an ordinary scroll
 re-places the caret locally with no round trip and a caret scrolled out of view is
@@ -276,17 +280,26 @@ boundary.
 All image implementations expose `detect`, `show`, `update`, `move`, `clear`,
 `clear_all` and `health`.
 
+`backends/init.lua` resolves `auto` in a fixed order: `nvim_img` if it detects,
+then `kitty_raw`, then `cells`. `vim.ui.img` is absent on Neovim 0.12.4, so
+`nvim_img` currently fails detection everywhere and `auto` reaches `kitty_raw`
+on every graphical host — but the preference is real and takes effect the moment
+a build ships the API.
+
 - `nvim_img` wraps only `vim.ui.img`; replacement creates the new image before
-  deleting the old owned ID. It never performs wildcard deletion.
+  deleting the old owned ID. It never performs wildcard deletion. Its `move`
+  has no contract on the experimental API and answers `nil` where the build
+  cannot honour it, leaving the controller to re-render.
 - `kitty_raw` contains the minimal direct protocol encoder: PNG/base64 chunks,
   static cell placement, cursor preservation, quiet mode, movement and targeted
   deletion. It writes only through `nvim_ui_send` (a Neovim 0.12 API, and the
   reason the plugin's version floor is what it is). Because Neovim owns terminal
   input, capability is *inferred* from the environment and never probed, so
   `detect()` answers from `terminal.capability` rather than from the wire.
-  `auto` selects it whenever that inference finds any Kitty-graphics evidence.
+  `auto` falls to it whenever that inference finds any Kitty-graphics evidence.
 - `cells` writes Markdown-like text and extmark highlights into the preview
-  buffer when graphics are unavailable.
+  buffer when graphics are unavailable. Its `detect` always succeeds, which is
+  what makes it the terminal case of the chain above.
 
 ## Scroll synchronization
 
@@ -328,23 +341,31 @@ takes the resident path only where the terminal permits it *and*
 `linkrate.resolve()` returns a rate under `image.resident_below_bytes_per_sec`,
 so an unmeasured machine keeps the viewport model. `"on"` drops the rate half for
 deliberate exercise; `resident_session.select_path` is the whole decision and
-reports it as `render_path_reason`.
+reports it as `render_path_reason`. The terminal half is `resident_pan` on the
+profile, and iTerm2 and WezTerm both set it `false` — so on the two terminals
+most readers have, this path is unreachable at any link speed
+([terminal-support.md](terminal-support.md#status) records why). A local-render
+session demotes it too, ahead of every other check: that already scrolls without
+sending pixels, and two scroll owners is the oscillation the function exists to
+prevent.
 
 The **viewport** model is the original: every scroll position is a fresh
 screenshot of the reader's viewport. Simple, works everywhere, and costs bytes
 proportional to how far you scrolled — an ~80 KB moving frame and a ~305 KB
-settle frame. On the 0.80 MB/s AWS SSM tunnel this feature was built for that is
-~134 ms and ~508 ms of wire each; on an ordinary SSH session, whose raw channel to a
-LAN host measures 16–23 MB/s, it is ~5 ms and ~19 ms and none of this matters. The gap
-between those two is why resident mode is opt-in rather than automatic — see
+settle frame. On the 0.80 MB/s AWS SSM tunnel this feature was built for (SSM
+reference host, 2026-08-25) that is ~134 ms and ~508 ms of wire each; at the
+14.7 MB/s the LAN reference host measured through a pty the same day, it is
+~5 ms and ~21 ms and none of this matters. The gap between those two is why
+resident mode is opt-in rather than automatic — see
 [Where that ceiling comes from](ssh.md#ssm-ceiling) for why the
 SSM number is what it is and why it is not a general "over SSH" figure.
 
 The **resident** model captures the document once as N chunks, holds every chunk
 in the terminal's image memory, and turns a scroll into a cropped placement.
-Measured against this repository's own README, 40 scrolls over a 12,505 px
-document issued 0 renderer requests, uploaded 0 image bytes, and sent 58
-placements in 7,855 bytes — 196 bytes per scroll.
+Driven against this repository's own README by `scripts/resident/drive.lua` on
+Ubuntu 22.04 / Chrome 151, 40 scrolls over a 12,505 px document issued 0
+renderer requests, uploaded 0 image bytes, and sent 58 placements in 7,855
+bytes — 196 bytes per scroll.
 
 Three layers, and conflating any two of them is how this feature fails:
 
@@ -373,7 +394,10 @@ Four constraints shape it, all measured rather than assumed:
   at a whole cell row and both halves agree about the same document position.
 - **Terminal memory is the budget, not the wire.** The resident set is bounded
   by a byte estimate *and* by a hard chunk count, because the byte estimate
-  rests on a figure two measurements disagree about by 34x.
+  rests on 13 bytes per resident pixel (iTerm2 3.6.11 / macOS 15, synthetic
+  gradients) that a sustained-RSS run against a real iTerm2 session disagreed
+  with by 34x. `image.resident_max_chunks` is therefore the bound that holds
+  whichever figure is right, and lowering it is what to do if memory bites.
 
 A position that cannot be drawn from resident chunks clears the pane rather than
 leaving the previous screen up. That is the whole design goal restated: a stale
@@ -388,16 +412,18 @@ the pixels, and the difference is the whole of the bootstrap. The render that
 measures the document is a picture of the reader's own position; the chunk plan
 is derived from it; and `begin_resident` runs one line after it reaches the
 screen, when no chunk has been captured yet. Blanking there destroys correct
-pixels, so `controller.holding_position` asks the narrower question — is this
-image placed, captured against this content, and captured at this scroll? — and
-the frame stays up until the chunks can replace it. It is retired *after* the
-first compose, never before: deleting first is a blank pane for one write.
+pixels, so `controller.lua`'s `holding_position` asks the narrower question — is
+this image placed, captured against this content, and captured at this scroll? —
+and the frame stays up until the chunks can replace it. It is retired *after*
+the first compose, never before: deleting first is a blank pane for one write.
+`tests/lua/cases/resident_bootstrap.lua` pins both halves.
 
-An earlier revision blanked it immediately, and the viewport model's recovery
-machinery then restored a cached full-viewport frame into a pane the resident
-compositor believed it owned. The two placements shared a z layer, Kitty breaks
-a z tie by image id, and which one the reader saw came down to which integer was
-larger. That is why the two models now agree about ownership:
+Blanking early is not merely a flicker: it hands the pane back to the viewport
+model's recovery machinery, which restores a cached full-viewport frame into a
+pane the resident compositor believes it owns. Two placements then share a z
+layer, Kitty breaks a z tie by image id, and which one the reader sees comes
+down to which integer is larger. So the two models agree about ownership by
+construction:
 
 - `session.image_id` means "the one frame this session owns, and may `update` in
   place or `clear`". A resident screen has none — putting a chunk id there would
@@ -585,7 +611,7 @@ same code.
 
 - **`"current"`** (default): everything above — render beside Neovim, ship
   PNG bytes to the terminal.
-- **`"local"`** (opt-in): the operator launches ssh through
+- **`"local"`** (experimental, opt-in): the operator launches ssh through
   `renderer/src/local-main.js` on the machine the terminal runs on. The
   helper probes the terminal (the one moment queries are safe — it
   exclusively owns the tty before ssh exists), listens on a 0600 unix socket
@@ -647,8 +673,15 @@ The invariants the marker transaction path keeps, each pinned by a test:
   presenter and stdio renderer, notifies once, and records the reason where
   health and debug report it.
 
+What has been validated is the transport, not any terminal's compositor:
+injection inverts the upload timing, so byte-correct sequences can still misdraw
+under timing a terminal did not expect, and no terminal has been watched running
+this path. That is why `"local"` is experimental and why there is deliberately
+no `"auto"` — `config.lua`'s validator refuses the string.
+
 Trust boundary and threat model: [SECURITY.md](../SECURITY.md). Reference
-environment and validation: [ssh.md](ssh.md).
+environment and validation: [ssh.md](ssh.md) and
+[terminal-support.md](terminal-support.md#local-rendering).
 
 ## Lifecycle
 

@@ -1,5 +1,11 @@
 # Development
 
+How to get a change built, tested, verified by hand, and released. What the
+change must not break is [architecture.md](architecture.md); this file is the
+process around it. Everything up to [For maintainers](#for-maintainers) applies
+to any pull request; everything after it needs hardware a contributor is not
+expected to have.
+
 ## Repository layout
 
 - `lua/md-viewer/`: configuration, sessions, lifecycle, synchronization,
@@ -52,7 +58,9 @@ for every pull request and for pushes to `main`. Neovim is pinned to `v0.12.4`
 and stylua to `v2.5.2` (`.github/workflows/ci.yml`); match those locally or
 expect spurious diffs. The Lua suite needs Neovim 0.12+
 for the same reason the plugin does. The browser suites require an existing
-Chrome or Chromium installation; no test downloads a Playwright-managed browser.
+Chrome, Chromium or Edge installation — the same three
+`renderer/src/browser-discovery.js` finds at runtime, and they skip rather than
+fail where none is present; no test downloads a Playwright-managed browser.
 
 To run less than everything:
 
@@ -100,6 +108,13 @@ usable evidence. Sanity-check at least one terminal from the `Supported` set in
 Attach a screenshot for anything visual. For alignment and bleed-through a
 screenshot is the *only* acceptable evidence — the protocol specification will
 not tell you.
+
+Everything below covers the default path — `render.location = "current"`,
+`image.resident = "off"`. Whole-document resident mode and local rendering are
+both experimental and off by default, and neither is checked here: read the
+silence as "not covered", not as "passed". `scripts/resident/drive.lua` and the
+rigs under `scripts/local/` are what exercise them, and
+[../scripts/README.md](../scripts/README.md) says what each proves.
 
 ### Rendering and sync
 
@@ -185,6 +200,57 @@ or `off -- <reason>`.
 | Repeated open/close | Open and close several times | No stray placements accumulate |
 | Teardown | `:qa` | No image left on the terminal, and no Node or Chromium process still running |
 
+## Design constraints
+
+Preserve these unless a proposal explicitly revisits them: no listening port
+beyond the local-render helper's unix socket, browser networking blocked
+unconditionally, remote images fetched only by the Node process and only from
+public destinations, Playwright driving an existing browser and managing no
+downloads, local file access canonicalized into a document root, raw image
+cleanup targeting only plugin-owned IDs, and the graphical preview staying a
+read-only raster surface.
+
+Every one of those is stated with its mechanism, and its enforcement, in
+[SECURITY.md](../SECURITY.md) and [architecture.md](architecture.md) — read them
+there rather than here, because a second copy is a second thing to keep true.
+What this section adds is only the rule about them: a change that crosses one is
+a design change, not a patch, and belongs in an issue before a pull request.
+
+## Code with no live caller right now
+
+Some paths are correct, tested, and reachable in principle, but nothing on any
+host this plugin currently runs on exercises them -- e.g. the resident-mode
+warm-up traffic reductions in `resident_session.lua` and `controller.lua`,
+dormant because no combination of a measured link and a terminal profile in
+active use selects the resident render path today. Resident mode is
+experimental and off by default, so the default never reaches them at all; and
+under `image.resident = "auto"` neither reference host qualifies either, one
+having the link but a terminal that refuses resident panning and the other
+having neither. That is a fact about today's deployed hosts, not about the
+code, and it can flip the moment a host or a terminal's `resident_pan` setting
+changes.
+
+Note what that does *not* cover. The bar is that no configuration on any current
+host reaches the path -- not that the default does not. Setting
+`image.resident = "on"` reaches this same code from any desk machine, which is
+why it is dormant rather than dead; and a documented one-line opt-in like
+`terminal.animation = "native"` or an explicit `image.backend` is a feature with
+its own instructions elsewhere, however few readers have turned it on. What
+qualifies for a comment is a path still waiting on a host or a terminal that
+nobody has.
+
+Mark this with a `KEEP_IN_MIND:` comment at the dormant site, stating exactly
+what would need to be true for it to run again and how to exercise it
+deliberately (a stub, a script, an env var) without waiting for a real host to
+change. A grep for `KEEP_IN_MIND` should always find every such site.
+
+Do not delete code just because it currently has no live caller -- that is
+what the comment is for. If a path should be removed outright rather than left
+dormant (the feature it serves is being dropped, not just currently
+unexercised), that is a product decision -- open an issue rather than deleting
+it in a pull request. Once a real host exercises the path again, delete the
+comment along with it: it has done its job.
+
 ## For maintainers
 
 Everything below this line needs hardware, a terminal, or a remote host that a
@@ -240,27 +306,38 @@ Warp was driven by hand on 2026-08-11 (see
 [terminal-support.md](terminal-support.md#warp)), but the sub-cell offset was
 not among what was measured, so it stays `Unmeasured` here.
 
+Neither of the two rows above records the date it was taken, and nothing else in
+the repository does either — the options they produced shipped in v0.1.0
+(2026-08-11), which is the only bound recoverable. Both rows therefore need
+re-taking rather than citing, and that is the same run the open question below
+already asks for.
+
 **Open question.** `raw_cell_offset_px` ships as pixels because iTerm2 measured
 at exactly half a cell, which cannot distinguish a constant-10px theory from a
 half-a-cell theory, and there is no second data point. If a second terminal — or
 iTerm2 across two font sizes — shows the offset scaling with cell width, the
 option is the wrong shape and should express a fraction of a cell instead.
 **Settle this before adding another terminal's calibration numbers: changing the
-option's shape afterwards is a breaking config change.**
+option's shape afterwards is a breaking config change.** The run that settles it
+is question 2 above on iTerm2: set `image.raw_cell_offset_px = { x = 10 }`,
+screenshot a notification over the preview at the default font size, change the
+font size once, screenshot again, and record both offsets with the date.
 
 ## Measuring the link rate over a fast connection
 
 `:MdViewerMeasureLink`'s cache key includes terminal identity
 (`terminal_id()` in `lua/md-viewer/linkrate.lua`) because on a fast link the
 terminal emulator, not the network, dominates the measured throughput.
-Measured on the LAN reference host (2026-08-26), same script, same day, three drains of the
-identical link:
+All three figures below are the LAN reference host, same script
+(`scripts/ssh-link-speed.sh`, which is what `:MdViewerMeasureLink` runs), same
+link, 64 MB of base64 per drain. They are not the same day, and the dates are
+the point of the table:
 
-| drain | rate |
-|---|---|
-| iTerm2 rendering it | 14,700,000 B/s |
-| `:MdViewerMeasureLink`, headless Neovim, `/dev/null` | 23,970,342 B/s |
-| `ssh-link-speed.sh` by hand, `/dev/null` | 25,938,722 B/s |
+| drain | measured | rate |
+|---|---|---|
+| a real iTerm2 rendering it | 2026-08-25 | 14,700,000 B/s |
+| `:MdViewerMeasureLink`, headless Neovim, `/dev/null` | 2026-08-26 | 23,970,342 B/s |
+| `ssh-link-speed.sh` by hand, `/dev/null` | 2026-08-26 | 25,938,722 B/s |
 
 Compression was off for this host, so none of that spread is a compressor —
 it's the terminal. On a link this fast, roughly 40% of the wall clock is the
@@ -268,16 +345,26 @@ emulator, which is why the same host reached from two different terminals can
 measure two different rates, and why the cache key has to include which
 terminal is asking.
 
-**Open:** the LAN reference host's own link rate under a real iTerm2 drain has never been
-measured — only the `/dev/null`-drain figures above exist. An agent has no
-terminal emulator to drain into. Run `:MdViewerMeasureLink` from inside a real
-iTerm2 session on the LAN reference host and record the result here.
+14,700,000 is the figure the rest of the repository quotes for this host,
+because a pty a terminal is actually draining is what predicts a frame's
+transit; the `/dev/null` figures measure the channel with the drain taken away.
+
+**Open:** no `:MdViewerMeasureLink` run on this host has ever gone through a
+real terminal — every figure that command has produced here drained to
+`/dev/null`, so the 40% above is inferred across two days rather than measured
+in one session, and the command's own cache has never held a terminal-drained
+number. An agent has no terminal emulator to drain into. Run
+`:MdViewerMeasureLink` from inside a real iTerm2 session on the LAN reference
+host and record the result here.
 
 ## The local-render helper
 
 `renderer/src/local-main.js` is the optional per-session process behind
-`render.location = "local"` — same package, zero extra dependencies. Run it in
-place of plain ssh, on the machine the terminal is on:
+`render.location = "local"` — same package, zero extra dependencies. The mode is
+experimental and off by default (`render.location = "current"`), and it is
+unvalidated on every terminal: what has been watched is the transport, never a
+compositor drawing injected transactions. Run it in place of plain ssh, on the
+machine the terminal is on:
 
 ```sh
 node renderer/src/local-main.js -- ssh <host>     # the session wrapper
@@ -286,12 +373,13 @@ node renderer/src/local-main.js --status          # counters from every helper s
 node renderer/src/local-main.js --marker-echo-test -- ssh <host>   # K2 transit rig
 ```
 
-Its tests are part of the ordinary node suite (`local-*.test.js`: stream
-parser + passthrough fuzz, injector rules, socket hello/pairing, replica
-renders, no-TCP, orphan-exit). The pieces that need real hardware have rigs
-under `scripts/local/`: `topology-check.sh` proves the wrapped-ssh topology
-(raw mode, resize, `~.`) against a real host, and `marker-echo-emit.sh` is
-the remote half of the echo test. Two hard-won facts to preserve when
+Its tests are part of the ordinary node suite and run for every contributor
+(`local-*.test.js`: stream parser + passthrough fuzz, injector rules, socket
+hello/pairing, replica renders, timing reservoir, no-TCP, orphan-exit). Only the
+pieces that need real hardware have rigs under `scripts/local/`:
+`topology-check.sh` proves the wrapped-ssh topology (raw mode, resize, `~.`)
+against a real host, and `marker-echo-emit.sh` is the remote half of the echo
+test. Two hard-won facts to preserve when
 touching it: the helper must never read `process.stdin` (the tty probe opens
 its own `/dev/tty` — see the header in `renderer/src/local/tty-probe.js` for the measured
 failure), and remote forward paths must be absolute and short
@@ -350,43 +438,3 @@ at `1.0.0`.
    something the tooling will catch for you. Draft first: the notes are
    extracted verbatim and this is the only point at which they can still be
    read before anyone else sees them.
-
-## Design constraints
-
-Preserve these unless a proposal explicitly revisits them. Each is stated with
-its mechanism in [SECURITY.md](../SECURITY.md) or
-[architecture.md](architecture.md):
-
-- the plugin and renderer open no listening port; renderer transport is
-  child-process stdin/stdout, and the one listener anywhere — the optional
-  local-render helper's unix socket, operator-launched on the operator's own
-  machine — is never TCP (a test pins that) and never gains a path-request
-  channel: assets are push-only
-- browser networking blocked unconditionally; remote images fetched only by the
-  Node process, only from public destinations, on every redirect hop
-- Playwright uses an existing browser and manages no downloads
-- raw image cleanup targets only plugin-owned image and placement IDs
-- local file access canonicalized and confined to a document root
-- the graphical preview stays a read-only raster surface
-
-## Code with no live caller right now
-
-Some paths are correct, tested, and reachable in principle, but nothing on any
-host this plugin currently runs on exercises them -- e.g. the resident-mode
-warm-up traffic reductions in `resident_session.lua` and `controller.lua`,
-dormant because no combination of a measured link and a terminal profile in
-active use selects the resident render path today. That is a fact about
-today's deployed hosts, not about the code, and it can flip the moment a host
-or a terminal's `resident_pan` setting changes.
-
-Mark this with a `KEEP_IN_MIND:` comment at the dormant site, stating exactly
-what would need to be true for it to run again and how to exercise it
-deliberately (a stub, a script, an env var) without waiting for a real host to
-change. A grep for `KEEP_IN_MIND` should always find every such site.
-
-Do not delete code just because it currently has no live caller -- that is
-what the comment is for. If a path should be removed outright rather than left
-dormant (the feature it serves is being dropped, not just currently
-unexercised), that is a product decision -- open an issue rather than deleting
-it in a pull request. Once a real host exercises the path again, delete the
-comment along with it: it has done its job.

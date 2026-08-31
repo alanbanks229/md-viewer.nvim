@@ -10,15 +10,9 @@ normal, editable Neovim buffer.
 Mouse and keyboard gestures over the preview (png) are forwarded to the live Chromium
 DOM, which does the search, hit-testing and link resolution before the viewport
 is recaptured. Overall you get browser-like behavior through a PNG surface.
-**THIS IS NOT** not an embedded webview. The renderer opens no window, starts no HTTP server, and listens on no port.
+Despite the browser-like behavior, this is not an embedded webview. The renderer opens no window, starts no HTTP server, and listens on no port.
 
 ![A Markdown note rendered in a preview split beside its editable Neovim source](assets/demo.gif)
-
-*Typing into the source buffer re-renders the page as the keys land, well before the file is
-written. A caret driven by Vim motions extends a selection inside the rendered document. Two
-wikilinks followed in the preview open notes as tabs in the same split — one of them a PNG bar
-chart, a JPEG and an animated GIF, all drawn by the terminal — and narrowing the source pane
-reflows the rendered page to the width it is given.*
 
 ## Features
 
@@ -43,6 +37,11 @@ reflows the rendered page to the width it is given.*
 
 ## Installation
 
+> [!NOTE]
+> md-viewer.nvim is not pure Lua. The part that turns Markdown into an image is a Node.js program under `renderer/`, and its third-party packages are not committed here — only a lockfile naming their exact versions is.
+> 
+> The plugin is therefore not runnable until `npm ci` has fetched those packages into `renderer/`, which is where `build.lua` comes in (for lazy.nvim)
+
 ### lazy.nvim
 
 ```lua
@@ -55,57 +54,58 @@ reflows the rendered page to the width it is given.*
 }
 ```
 
-**What the install hook is for.**
+<hr/>
 
-  md-viewer.nvim is not pure Lua. The part that turns Markdown into an image is a Node.js program under `renderer/`, and its third-party packages are not committed here — only a lockfile naming their exact versions is.
-  The plugin is therefore not runnable until `npm ci` has fetched those packages into `renderer/`, which is where `build.lua` comes in (for lazy.nvim)
-
-Other plugin managers require a small amount of additional setup, as shown below.
-
-<details>
-<summary>Native <code>vim.pack</code></summary>
+### vim.pack
 
 > [!WARNING]
 > This installation method has not yet been fully validated.
+>
+> > <details>
+> > <summary>Native <code>vim.pack</code></summary>
+> >
+> > `vim.pack` does not provide a build hook, so the plugin's build script needs to
+> > be run from a `PackChanged` autocmd.
+> >
+> > Register the autocmd **before** the first `vim.pack.add()` call so it also runs
+> > during the initial installation:
+> >
+> > ```lua
+> > vim.api.nvim_create_autocmd("PackChanged", {
+> >   callback = function(event)
+> >     local data = event.data
+> >     if data.spec.name == "md-viewer.nvim"
+> >         and (data.kind == "install" or data.kind == "update") then
+> >       dofile(data.path .. "/build.lua")
+> >     end
+> >   end,
+> > })
+> >
+> > vim.pack.add({
+> >   {
+> >     src = "https://github.com/alanbanks229/md-viewer.nvim",
+> >     version = "v0.3.0",
+> >   },
+> > })
+> >
+> > require("md-viewer").setup({})
+> > ```
+> >
+> > If `md-viewer.nvim` was installed before adding the `PackChanged` hook, run the
+> > following command once from the plugin's `renderer/` directory:
+> >
+> > ```sh
+> > PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
+> > ```
+> >
+> > </details>
 
-`vim.pack` does not provide a build hook, so the plugin's build script needs to
-be run from a `PackChanged` autocmd.
+<hr/>
 
-Register the autocmd **before** the first `vim.pack.add()` call so it also runs
-during the initial installation:
-
-```lua
-vim.api.nvim_create_autocmd("PackChanged", {
-  callback = function(event)
-    local data = event.data
-    if data.spec.name == "md-viewer.nvim"
-        and (data.kind == "install" or data.kind == "update") then
-      dofile(data.path .. "/build.lua")
-    end
-  end,
-})
-
-vim.pack.add({
-  { src = "https://github.com/alanbanks229/md-viewer.nvim", version = "v0.3.0" },
-})
-
-require("md-viewer").setup({})
-```
-
-If `md-viewer.nvim` was installed before adding the `PackChanged` hook, run the
-following command once from the plugin's `renderer/` directory:
-
-```sh
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
-```
-
-If you run into problems with this installation method, please open an issue.
-
-</details>
-
+### Other
 
 <details>
-<summary>Other plugin managers, or running the hook by hand</summary>
+<summary>Running the hook by hand</summary>
 
 Any manager that can run a Lua file after install works the same way —
 `dofile` reads a Lua file and runs it immediately:
@@ -129,41 +129,44 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts --prefix renderer
 
 ## First use
 
-**`opts = {}` is a complete configuration.** Everything that can be detected is
-detected: the terminal and its graphics protocol, the cell dimensions (measured
-from the operating system, not estimated), the theme, and the document root that
-bounds local links and images.
-
 1. Open a Markdown file.
 2. Run `:MdViewerToggle`.
 3. If nothing appears, run `:MdViewerHealth` — it says why in one screen.
 
-[docs/usage.md](docs/usage.md) or `:help md-viewer` has every command, key
-and mouse gesture. `:MdViewerDebug` is what to attach to a bug report.
+> See [docs/usage.md](docs/usage.md) or `:help md-viewer` for every command, key and mouse gesture.
+> `:MdViewerDebug` is what to attach to a bug report.
 
 ## Configuration
 
-What `opts = {}` does *not* give you is the four features that cost something,
-each off until you say otherwise:
+**Start with `opts = {}`.** md-viewer.nvim detects your terminal and graphics
+protocol, measures its cell dimensions, follows your theme, and finds the
+document root that bounds local links and images. The defaults are intended to
+work as-is; only set values for behavior you want to change.
 
-| Off by default | Because |
-|---|---|
-| `render.animate` | Animation is redrawn frames; motion costs a stream of placements |
-| `obsidian.enabled` | `[[Note]]` is not Markdown, and resolving it walks a vault |
-| `image.resident` | Trades a long warm-up and a document of terminal memory for free scrolling — worth it only on a slow link |
-| `render.location = "local"` | Needs a helper process running beside your terminal |
-
-The handful most people set:
+A small, practical configuration might look like this:
 
 ```lua
 require("md-viewer").setup({
-  split = { position = "right" },   -- right | left | below | above
-  render = { animate = true },      -- animate GIF/WebP
-  obsidian = { enabled = true },    -- [[wikilinks]]
+  render = {
+    animate = true,                 -- animate GIF and WebP images
+  },
+  preview = {
+    line_numbers = "relative",      -- "off" | "absolute" | "relative"
+  },
+  obsidian = {
+    enabled = true,                 -- follow [[wikilinks]]
+  },
 })
 ```
 
-For more information see `:help md-viewer-options`, which lists **every option and its default** in one table.
+The option groups most users are likely to browse are:
+
+- `preview` — the winbar, loading indicator, and rendered line numbers
+- `interaction` — keyboard, mouse, selection, search, and link behavior
+- `obsidian` — optional Obsidian wikilink navigation
+
+> Run `:help md-viewer-options` for every option and default. Each option group
+> also corresponds to the table passed to `setup()`.
 
 ## Optional capabilities
 

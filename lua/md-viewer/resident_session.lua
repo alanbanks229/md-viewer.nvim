@@ -321,14 +321,15 @@ end
 ---KEEP_IN_MIND: dormant on every host this plugin runs on as of 2026-08-29.
 ---This function's only caller (`controller.pump_resident`'s settle-before-
 ---placing check) is reached only when a session is on the resident render
----path, which under the default `image.resident = "auto"` needs both a measured
----link under `image.resident_below_bytes_per_sec` (4 MB/s; see `select_path`
----above) and a terminal profile that does not refuse resident_pan (kitty,
----ghostty, generic_kitty -- not iTerm2, which now refuses it in terminal.lua,
----and not WezTerm, which always has). The SSM reference host's link qualifies
----but runs iTerm2; the LAN reference host's link does not qualify. Neither
----exercises this today. `image.resident = "on"` skips the rate half of that,
----which is what the drive script below relies on.
+---path, which the default `image.resident = "off"` never selects at all. Under
+---`"auto"` it needs both a measured link under
+---`image.resident_below_bytes_per_sec` (4 MB/s; see `select_path` above) and a
+---terminal profile that does not refuse resident_pan (kitty, ghostty, warp,
+---generic_kitty -- not iTerm2, which now refuses it in terminal.lua, and not
+---WezTerm, which always has). The SSM reference host's link qualifies but runs
+---iTerm2; the LAN reference host's link does not qualify. Neither exercises
+---this today. `image.resident = "on"` skips the rate half of that, which is
+---what the drive script below relies on.
 ---
 ---This is reachable in principle and covered by
 ---tests/lua/cases/resident_placement.lua -- it is not orphaned, just
@@ -412,7 +413,7 @@ function M.draw(session, scroll_y)
   --
   -- KEEP_IN_MIND: this whole function only runs for a session on the resident
   -- render path, which is currently unreached on every host this plugin runs
-  -- on -- see the longer note on M.is_needed below for why and how to
+  -- on -- see the longer note on M.is_needed above for why and how to
   -- exercise it deliberately. Same rule: unexercised, not orphaned; do not
   -- delete for that reason alone, and raise removing the path itself with
   -- the operator/orchestrator rather than deciding it here.
