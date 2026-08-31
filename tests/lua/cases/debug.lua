@@ -33,6 +33,12 @@ return function(t)
   session.interaction_request_count = 6
   session.interaction_stale_count = 2
   session.coalesced_preview_events = 3
+  -- The state that used to be invisible: images the renderer measured nothing
+  -- for. `geometry_count = 0` alone reads exactly like a document with no
+  -- animated images, which is how the freeze-until-resize bug hid.
+  session.animation_geometry = {}
+  session.animation_geometry_incomplete = false
+  session.animation_geometry_unmeasured = 2
 
   -- Round-trips to the renderer (a cold Chromium launch on a loaded CI runner
   -- is not fast) so the Chromium path and launch result are answered for by
@@ -96,6 +102,10 @@ return function(t)
   t.ok(buffer_text:match("interaction_request_count = 6"), "snapshot reports the interaction request count")
   t.ok(buffer_text:match("interaction_stale_count = 2"), "snapshot reports the stale-interaction count")
   t.ok(buffer_text:match("coalesced_preview_events = 3"), "snapshot reports the coalesced-preview-event count")
+  t.ok(
+    buffer_text:match("animation_geometry_unmeasured = 2"),
+    "snapshot reports animations the renderer gave up measuring, which a zero geometry count alone cannot say"
+  )
 
   vim.cmd("bwipeout!")
   controller.close(source)

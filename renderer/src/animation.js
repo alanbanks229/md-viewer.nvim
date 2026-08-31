@@ -94,7 +94,6 @@ export class AnimationStore {
     this.refused = new Map();
     // Same key while a decode is in flight: concurrent askers share one job.
     this.pending = new Map();
-    this.serial = 0;
     // For :MdViewerDebug / health, not for control flow.
     this.stats = { decodes: 0, decodeMs: 0, refusals: 0, errors: 0, evictions: 0 };
   }
@@ -106,12 +105,20 @@ export class AnimationStore {
     return this.maxPerDocument;
   }
 
-  /// Recognize an animated image and mint an opaque per-render id for it.
+  /// Recognize an animated image and retain its bytes for materialization.
   ///
   /// Runs on every image the render rule emits, so it must be cheap for the
   /// common case: the sniff reads fixed header fields and, for GIF, walks
   /// length-prefixed blocks without expanding one. A still image returns null
   /// -- meaning "not animated, or not worth animating" -- rather than throwing.
+  ///
+  /// **Deliberately mints no id.** The id has to be the animation's ordinal
+  /// within its own document (registerAnimation in markdown.js assigns it), so
+  /// that re-parsing the same document yields the same ids. A store-wide serial
+  /// did not: a re-parse under an unchanged layout key -- which is exactly what
+  /// a resolved remote image triggers -- left the page holding `a1` while the
+  /// fresh registry knew only `a2`, and the sha join in service.js then dropped
+  /// every rect it could not name. The animation died and never came back.
   register(bytes) {
     if (!Buffer.isBuffer(bytes) || bytes.length === 0) return null;
     const sniffed = sniffAnimation(bytes, { maxPixels: this.maxSourcePixels, maxFrames: this.maxSourceFrames });
@@ -129,8 +136,11 @@ export class AnimationStore {
       this.sourceBytes += bytes.length;
       this.#evictSources();
     }
-    this.serial += 1;
-    return { id: `a${this.serial}`, sha, frameCount: sniffed.frameCount };
+    // The intrinsic size travels back to the caller because the render rule has
+    // to state it on the tag: an <img> with no dimensions has a zero layout box
+    // until Chromium has decoded enough of the data URI to know them, and the
+    // geometry pass drops zero-area rects. See registerAnimation in markdown.js.
+    return { sha, frameCount: sniffed.frameCount, width: sniffed.width, height: sniffed.height };
   }
 
   /// Produce the PNG frames for one animation at one drawn size.
@@ -198,6 +208,14 @@ export class AnimationStore {
       return { status: "error", reason: decoded.reason ?? "decode failed" };
     }
 
+    // Encoded before anything is written, because the byte cost of a frame is
+    // not knowable from its pixel count -- see `#thinToShare`.
+    const encoded = decoded.frames.map((frame) => ({
+      png: Buffer.from(frame.png, "base64"),
+      gapMs: frame.gapMs,
+    }));
+    const kept = this.#thinToShare(encoded);
+
     // Directory named by a hash of the *whole* cache key. The previous scheme
     // omitted part of the key from the directory name, so evicting one entry
     // deleted files a surviving entry still pointed at; a bijection between
@@ -207,15 +225,15 @@ export class AnimationStore {
     const frames = [];
     try {
       fs.mkdirSync(directory, { recursive: true });
-      for (let index = 0; index < decoded.frames.length; index += 1) {
+      for (let index = 0; index < kept.length; index += 1) {
         const file = path.join(directory, `${String(index).padStart(4, "0")}.png`);
-        const png = Buffer.from(decoded.frames[index].png, "base64");
+        const png = kept[index].png;
         fs.writeFileSync(file, png);
         bytes += png.length;
         frames.push({
           path: file,
           key: sha256(`${key}:${index}`).slice(0, 16),
-          gapMs: decoded.frames[index].gapMs,
+          gapMs: kept[index].gapMs,
         });
       }
     } catch (error) {
@@ -232,7 +250,9 @@ export class AnimationStore {
       frameWidthPx: width,
       frameHeightPx: height,
       sourceFrameCount: decoded.sourceFrameCount,
-      keptFrameCount: decoded.keptFrameCount,
+      // The count that reached disk, which is the decode context's own thinning
+      // and then `#thinToShare`'s. A caller reading this is asking what it got.
+      keptFrameCount: frames.length,
       decodeMs,
       bytes,
     };
@@ -240,6 +260,58 @@ export class AnimationStore {
     this.frameBytes += bytes;
     this.#evictMaterialized();
     return { status: "ok", ...payload };
+  }
+
+  /// One animation's fair share of the frame store, in bytes.
+  ///
+  /// Derived rather than chosen: `animation.lua` holds every animation in a
+  /// document at once, and a document may carry `maxPerDocument` of them, so a
+  /// full complement has to fit the store simultaneously. Anything looser lets
+  /// one entry evict a sibling a live preview is still reading frames from --
+  /// which is not a degradation but a loop, because the Lua side answers a
+  /// missing frame path by re-materializing after RETRY_MS, evicting the entry
+  /// that displaced it, forever.
+  get maxEntryBytes() {
+    return Math.floor(this.maxFrameStoreBytes / Math.max(1, this.maxPerDocument));
+  }
+
+  /// Drop frames evenly until the set fits `maxEntryBytes`, folding each
+  /// dropped frame's display time into the kept frame before it -- the same cut
+  /// the decode context makes for `uploadPixelBudget`, on the same terms:
+  /// duration is preserved, the animation gets choppier, and choppy reads as
+  /// choppy where blurry would read as broken.
+  ///
+  /// It has to happen *here*, on encoded bytes, because the pixel budget cannot
+  /// predict them. Measured on this Mac 2026-08-29 against `large.gif` from
+  /// scripts/animation/make-fixtures.mjs: the same source frame encodes to
+  /// 1,087,970 bytes at 1695x1029 and 4,760,070 bytes at 1696x1029 -- identical
+  /// pixel dimensions, 4.4x the bytes -- and the figure is non-monotonic across
+  /// the range (454KB at 1400, 2.55MB at 1600, 1.04MB at 1800). Upscaling by a
+  /// non-integer ratio leaves interpolation detail that PNG compresses well or
+  /// badly depending on the width it lands on. There is no ratio to design
+  /// against; the bytes have to be weighed after the fact.
+  #thinToShare(frames) {
+    const budget = this.maxEntryBytes;
+    let total = 0;
+    for (const frame of frames) total += frame.png.length;
+    if (total <= budget || frames.length < 2) return frames;
+
+    // At the set's own average cost. Never below two: one frame is a still, and
+    // the caller has a perfectly good painted still already.
+    const keep = Math.max(2, Math.min(frames.length - 1, Math.floor((frames.length * budget) / total)));
+    // Evenly spaced indices, exactly `keep` of them -- not a stride, which
+    // rounds a 12-of-13 cut down to 7 and throws away frames the budget would
+    // have paid for.
+    const wanted = new Set();
+    for (let slot = 0; slot < keep; slot += 1) wanted.add(Math.floor((slot * frames.length) / keep));
+
+    const out = [];
+    for (let index = 0; index < frames.length; index += 1) {
+      if (wanted.has(index)) out.push({ png: frames[index].png, gapMs: frames[index].gapMs });
+      else if (out.length > 0) out[out.length - 1].gapMs += frames[index].gapMs;
+      else out.push({ png: frames[index].png, gapMs: frames[index].gapMs });
+    }
+    return out;
   }
 
   #refuse(key, reason) {

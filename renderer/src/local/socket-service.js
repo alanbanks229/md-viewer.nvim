@@ -211,7 +211,7 @@ export class SocketService {
           id: message.id,
           ok: false,
           code: "PROTOCOL_MISMATCH",
-          error: `helper speaks local protocol ${LOCAL_PROTOCOL}, plugin sent ${remote.protocol}; update the older checkout to the same md-viewer tag`,
+          error: `helper speaks local protocol ${LOCAL_PROTOCOL}, plugin sent ${remote.protocol}; update both checkouts to the same md-viewer tag`,
           detail: { helperProtocol: LOCAL_PROTOCOL, helperVersion: this.helperVersion },
         });
         drop();

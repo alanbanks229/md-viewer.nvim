@@ -12,6 +12,7 @@
 -- Nothing here spawns a renderer: `renderer.request` is stubbed, so a chunk
 -- capture is whatever this file decides it is, including a slow or a lost one.
 return function(t)
+  local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local preview = require("md-viewer.preview")
@@ -202,6 +203,11 @@ return function(t)
     t.ok(step("compose") < step("clear:5"), "in that order: nothing blanks between the two writes")
     t.eq(nil, session.image_id, "the resident path owns no frame id of its own")
     t.eq(true, session.resident_screen, "it records that bands are placed instead")
+    -- Retiring the bootstrap frame used to nil this on the way past, which left
+    -- the resident screen vouching for nothing. It is the compose above that
+    -- owns the value now, and the frame being deleted here showed the same
+    -- position anyway.
+    t.eq(0, session.frame_scroll_y, "and what those bands are a picture of, the way apply_image does")
     t.ok(session.last_placement ~= nil, "and the placement clicks and the caret resolve against")
     t.eq(nil, session.resident_waiting, "nothing is being waited on")
     t.eq(false, session.loading, "and the spinner is down")
@@ -212,6 +218,17 @@ return function(t)
     session.scroll_y = session.viewport_height_px * 0.5
     controller.draw_resident(session)
     t.ok(step("overlay_clear:91"), "panning drops the selection overlay rather than leaving it on the wrong text")
+    t.eq(session.scroll_y, session.frame_scroll_y, "and records the position the new bands show")
+
+    -- The caret measures its drift against `frame_scroll_y`. Unset by the
+    -- resident path it read as 0, so a caret anywhere but the top of the
+    -- document drifted a whole scroll off screen and was never drawn -- and
+    -- Neovim's own cursor was handed back in its place.
+    session.viewport_height_render_px = session.viewport_height_px
+    caret.set_rect(session, { x = 10, y = 20, width = 9, height = 18 }, session.frame_scroll_y)
+    local caret_rect = caret.rect(session)
+    t.ok(caret_rect ~= nil, "a caret placed on a panned resident screen is still on it")
+    t.eq(20, caret_rect and caret_rect.y, "at the box it was measured at, with no phantom drift")
 
     -- An occluding float has to reach the bands. Until `uncompose` existed
     -- nothing could: `clear_image` only knew `session.image_id`, which a
@@ -394,6 +411,97 @@ return function(t)
     t.eq(nil, winbar(session):match("~"), "but there is nothing to extrapolate from yet")
 
     controller.close(source)
+    config.reset()
+    linkrate.invalidate()
+  end
+
+  -- ---------------------------------------------------------------------
+  -- `image.resident = "auto"` is a question about the link, not the terminal.
+  --
+  -- A terminal that can pan chunks says nothing about whether panning them is
+  -- worth a warm-up: the warm-up and the terminal memory are spent on every
+  -- link and only a slow one pays them back. Before this gate existed, "auto"
+  -- meant "wherever the terminal allows", and the speed half lived in whatever
+  -- Lua each user wrote in their own config -- which is to say it did not exist
+  -- for anyone who had not written it.
+  --
+  -- The rate here is supplied through `render.ssh_link_bytes_per_sec` because
+  -- that is the tier a test can set. On a real machine the number normally
+  -- arrives from :MdViewerMeasureLink's cache instead; `linkrate.resolve` is
+  -- what reconciles the two, and it is already covered in cases/linkrate.lua.
+  -- ---------------------------------------------------------------------
+  do
+    local linkrate = require("md-viewer.linkrate")
+    -- The terminal half, granted. Every assertion below varies only the link.
+    local pannable = { name = "kitty_raw", resident_pan_supported = function() return true end }
+    local function path_at(rate, resident)
+      config.setup({ image = { backend = "cells", resident = resident }, render = { ssh_link_bytes_per_sec = rate } })
+      config.get().render.ssh_link_bytes_per_sec = rate
+      linkrate.invalidate()
+      return resident_session.select_path({ backend = pannable })
+    end
+
+    local path, reason = path_at(nil, "auto")
+    t.eq("viewport", path, "an unmeasured link keeps the per-scroll path under auto")
+    t.ok(reason:find("unknown", 1, true), "and says the speed is unknown rather than naming a number: " .. reason)
+    t.ok(reason:find(":MdViewerMeasureLink", 1, true), "and names the command that answers it")
+
+    -- The LAN reference host, measured 2026-08-25 through the pty. A settle
+    -- frame is ~20ms here; the warm-up is the only thing a reader would notice.
+    path, reason = path_at(14700000, "auto")
+    t.eq("viewport", path, "a fast link keeps the per-scroll path under auto")
+    t.ok(reason:find("14.70 MB/s", 1, true), "and names the rate it compared: " .. reason)
+    t.ok(reason:find("4.00 MB/s", 1, true), "and the cutoff it compared it against")
+
+    -- The SSM reference host, same day. A settle frame is ~508ms here, which is
+    -- the entire reason this rendering model exists.
+    path, reason = path_at(1030000, "auto")
+    t.eq("resident", path, "a link under the cutoff takes the resident path")
+    t.ok(reason:find("1.03 MB/s", 1, true), "and says which rate put it there: " .. reason)
+
+    -- Exactly at the cutoff is above it: the option reads "below", and a
+    -- boundary that flips on the equal case makes the name a lie.
+    t.eq("viewport", (path_at(4000000, "auto")), "the cutoff itself is not under the cutoff")
+
+    -- Moving the line moves the answer, and nothing else does. Same 14.7 MB/s
+    -- link that was refused above.
+    config.setup({
+      image = { backend = "cells", resident = "auto", resident_below_bytes_per_sec = 20000000 },
+      render = { ssh_link_bytes_per_sec = 14700000 },
+    })
+    linkrate.invalidate()
+    t.eq(
+      "resident",
+      (resident_session.select_path({ backend = pannable })),
+      "raising image.resident_below_bytes_per_sec admits a faster link"
+    )
+
+    -- "on" is the gate removed, not a firmer "auto" -- it is what
+    -- scripts/resident/drive.lua uses to exercise this path on a machine whose
+    -- link would never qualify, and what a bug report can be asked for.
+    path, reason = path_at(14700000, "on")
+    t.eq("resident", path, "on takes the resident path on a link auto refuses")
+    t.ok(reason:find("image.resident = on", 1, true), "and says the config is why, not the link: " .. reason)
+    t.eq("resident", (path_at(nil, "on")), "on does not need a measured link either")
+
+    -- Off outranks both. Nothing about a link reaches a terminal question.
+    t.eq("viewport", (path_at(1030000, "off")), "off stays off on the slowest link measured")
+
+    -- The terminal still gets the first and final word: a refusal there is not
+    -- a rate the reader could fix by measuring anything.
+    local refuses = {
+      name = "kitty_raw",
+      resident_pan_supported = function() return false, "wezterm#7953: repeat placements leak" end,
+    }
+    config.setup({
+      image = { backend = "cells", resident = "on" },
+      render = { ssh_link_bytes_per_sec = 1030000 },
+    })
+    linkrate.invalidate()
+    path, reason = resident_session.select_path({ backend = refuses })
+    t.eq("viewport", path, "a terminal that refuses resident_pan is refused whatever the link")
+    t.eq("wezterm#7953: repeat placements leak", reason, "and the terminal's own reason survives")
+
     config.reset()
     linkrate.invalidate()
   end

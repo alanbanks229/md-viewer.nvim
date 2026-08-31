@@ -8,18 +8,22 @@
 # this terminal's byte stream), one scroll resolved by marker alone, zero
 # direct-byte fallbacks.
 #
-#   scripts/local/live-pipeline-check.sh [ssh-host] [remote-checkout-dir]
+#   scripts/local/live-pipeline-check.sh <ssh-host> [remote-checkout-dir]
 #
 # Needs: tmux locally; promptless key auth; the same md-viewer commit checked
 # out at <remote-checkout-dir> on the host with renderer deps installed
 # (npm ci); a system Chrome/Chromium beside this script. tmux never renders
 # the injected graphics -- what this proves is the byte pipeline, not glass;
-# glass is the operator-driven iTerm2 run in docs/aws-ssm.md.
+# glass is the operator-driven iTerm2 run in docs/ssh.md.
 
 set -u
 
-host=${1:-ichigo}
+host=${1:-}
 remote_repo=${2:-md-viewer.nvim}
+if [ -z "$host" ]; then
+  echo "usage: scripts/local/live-pipeline-check.sh <ssh-host> [remote-checkout-dir]" >&2
+  exit 2
+fi
 here=$(cd "$(dirname "$0")/../.." && pwd)
 session="mdv-live-$$"
 

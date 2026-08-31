@@ -119,6 +119,21 @@ return function(t)
   t.eq(false, bad_numbers_ok, "an unknown line-number mode is rejected")
   t.ok(tostring(bad_numbers_err):match("line_numbers"), "the line-number error names the offending option")
   config.reset()
+  t.eq("#61afef", config.setup({}).preview.tab_accent, "the active-tab underline defaults to a fixed accent color")
+  config.reset()
+  local accented_cfg = config.setup({ preview = { tab_accent = "#ff0000" } })
+  t.eq("#ff0000", accented_cfg.preview.tab_accent, "preview.tab_accent is overridable")
+  config.reset()
+  local no_accent_cfg = config.setup({ preview = { tab_accent = false } })
+  t.eq(false, no_accent_cfg.preview.tab_accent, "preview.tab_accent accepts false")
+  config.reset()
+  local bad_accent_ok, bad_accent_err = pcall(config.setup, { preview = { tab_accent = "red" } })
+  t.eq(false, bad_accent_ok, "a color name instead of #rrggbb is rejected")
+  t.ok(tostring(bad_accent_err):match("tab_accent"), "the tab_accent error names the offending option")
+  config.reset()
+  local short_hex_ok = pcall(config.setup, { preview = { tab_accent = "#fff" } })
+  t.eq(false, short_hex_ok, "a 3-digit hex shorthand is rejected -- nvim_set_hl wants the full 6 digits")
+  config.reset()
   config.setup({ split = { width = 0.4 }, image = { backend = "cells" } })
   t.eq(nil, cfg.image.raw_zindex, "raw z-index defers to the terminal profile default until overridden")
   t.eq(nil, cfg.image.double_buffer, "double buffering defers to the terminal profile default until overridden")
@@ -157,6 +172,72 @@ return function(t)
   t.eq(false, bad_obsidian_ok, "a non-boolean obsidian.enabled is rejected")
   t.ok(tostring(bad_obsidian_err):match("obsidian.enabled"), "the Obsidian error names the option")
 
+  -- The seven interaction settings that went with mouse selection in 0.3.0.
+  -- `vim.tbl_deep_extend` keeps keys nothing declares, so before this guard a
+  -- configuration written against 0.2 was accepted whole and every one of
+  -- these silently did nothing -- while CHANGELOG.md promised a configuration
+  -- error. Each is checked with `false`, the value most likely to be read as
+  -- "not set": a 0.2 config that switched one of these off is still a 0.2
+  -- config, and saying nothing about it is the failure, not the value.
+  for _, name in ipairs({
+    "drag_threshold_cells",
+    "double_click",
+    "autoscroll",
+    "autoscroll_interval_ms",
+    "autoscroll_max_lines",
+    "word_select",
+    "paragraph_select",
+  }) do
+    config.reset()
+    local removed_ok, removed_err = pcall(config.setup, { interaction = { [name] = false } })
+    t.eq(false, removed_ok, ("interaction.%s is refused rather than silently ignored"):format(name))
+    t.ok(
+      tostring(removed_err):match("interaction%." .. name),
+      ("the error for interaction.%s names the option in full"):format(name)
+    )
+    t.ok(
+      tostring(removed_err):match("md%-viewer%-visual"),
+      ("the error for interaction.%s points at the replacement"):format(name)
+    )
+  end
+
+  -- The guard reads what the caller wrote, so an unrelated interaction table
+  -- and a bare setup() must both still pass straight through it.
+  config.reset()
+  t.eq(
+    true,
+    config.setup({ interaction = { copy_on_select = true } }).interaction.copy_on_select,
+    "an interaction table with no removed key still configures"
+  )
+  config.reset()
+  t.eq(true, (pcall(config.setup, {})), "zero configuration is unaffected by the removed-key guard")
+
+  -- interaction.keymaps: which key cycles preview tabs. Each entry is a
+  -- non-empty string, or `false` to leave that action unmapped.
+  config.reset()
+  local keymaps_cfg = config.setup({ interaction = { keymaps = { tab_previous = "gh" } } })
+  t.eq("gh", keymaps_cfg.interaction.keymaps.tab_previous, "interaction.keymaps.tab_previous is overridable")
+  t.eq("L", keymaps_cfg.interaction.keymaps.tab_next, "overriding one keymap leaves the other at its default")
+  config.reset()
+  local unmapped_cfg = config.setup({ interaction = { keymaps = { tab_previous = false } } })
+  t.eq(false, unmapped_cfg.interaction.keymaps.tab_previous, "interaction.keymaps.tab_previous accepts false")
+  config.reset()
+  local bad_keymap_type_ok, bad_keymap_type_err =
+    pcall(config.setup, { interaction = { keymaps = { tab_previous = true } } })
+  t.eq(false, bad_keymap_type_ok, "a non-string, non-false interaction.keymaps.tab_previous is rejected")
+  t.ok(
+    tostring(bad_keymap_type_err):match("interaction%.keymaps%.tab_previous"),
+    "the keymaps.tab_previous error names the offending option"
+  )
+  config.reset()
+  local bad_keymaps_shape_ok, bad_keymaps_shape_err = pcall(config.setup, { interaction = { keymaps = "H" } })
+  t.eq(false, bad_keymaps_shape_ok, "a non-table interaction.keymaps is rejected")
+  t.ok(
+    tostring(bad_keymaps_shape_err):match("interaction%.keymaps"),
+    "the keymaps shape error names the offending option"
+  )
+  config.reset()
+
   -- Every option is documented, or it exists only for its author. The same
   -- pin commands.lua applies to the command surface: `:help md-viewer-options`
   -- is the canonical reference, and a table nothing checks is stale within a
@@ -175,20 +256,69 @@ return function(t)
   local options_section = help:match("%*md%-viewer%-options%*(.-)\nThe options in the rest of this section")
   t.ok(options_section ~= nil, "the help file has an *md-viewer-options* section")
 
-  -- Every row is four spaces, the option name, then padding, so anchoring on
-  -- the indent and requiring a trailing space keeps `scroll_scale` from being
-  -- satisfied by `ssh_scroll_scale`.
-  local documented, missing = 0, {}
+  -- Six options declare `nil` as their default, and a nil value simply does
+  -- not exist in a Lua table -- so `pairs(config.defaults)` sees 70 of the 76
+  -- rows the help carries, and any of those six could be dropped from either
+  -- side without this guard noticing. Listed here because the runtime records
+  -- their existence nowhere else.
+  local nil_defaults = {
+    "browser.executable_path",
+    "image.double_buffer",
+    "image.raw_zindex",
+    "obsidian.vault_root",
+    "render.scroll_scale",
+    "security.document_root",
+  }
+
+  -- Rows are four spaces, the option name, then padding; continuation lines are
+  -- indented far past that and group headings sit at column 1, so the group a
+  -- row belongs to is whichever heading last preceded it. Anchoring on the
+  -- exact indent keeps `scroll_scale` from being satisfied by `ssh_scroll_scale`.
+  local help_rows, group_now = {}, nil
+  for line in (options_section .. "\n"):gmatch("([^\n]*)\n") do
+    local heading = line:match("^([a-z][a-z0-9_]*) ~$")
+    if heading then
+      group_now = heading
+    else
+      local name = line:match("^    ([a-z][a-z0-9_]*)%s")
+      if name and group_now then help_rows[group_now .. "." .. name] = true end
+    end
+  end
+
+  local runtime = {}
   for group, options in pairs(config.defaults) do
     t.ok(options_section:find("\n" .. group .. " ~", 1, true) ~= nil, ("the %s group has a heading"):format(group))
     for name in pairs(options) do
-      documented = documented + 1
-      if not options_section:find("\n    " .. name .. " ", 1, true) then table.insert(missing, group .. "." .. name) end
+      runtime[group .. "." .. name] = true
     end
   end
-  table.sort(missing)
-  t.eq(0, #missing, "every option appears in *md-viewer-options*: " .. table.concat(missing, ", "))
-  t.ok(documented > 60, ("the option table covers the whole surface (%d options)"):format(documented))
+  for _, path in ipairs(nil_defaults) do
+    local group, name = path:match("^(.-)%.(.*)$")
+    t.ok(config.defaults[group] ~= nil, ("the %s group exists for nil-default %s"):format(group, path))
+    -- If one of these ever gains a real default, `pairs` starts seeing it and
+    -- this list is the thing that has gone stale.
+    t.eq(nil, config.defaults[group][name], ("%s is still a nil default"):format(path))
+    runtime[path] = true
+  end
+
+  -- Set equality in both directions. The old check ran one way only, so a help
+  -- row for an option that no longer exists read as complete coverage.
+  local undocumented, unimplemented = {}, {}
+  for path in pairs(runtime) do
+    if not help_rows[path] then table.insert(undocumented, path) end
+  end
+  for path in pairs(help_rows) do
+    if not runtime[path] then table.insert(unimplemented, path) end
+  end
+  table.sort(undocumented)
+  table.sort(unimplemented)
+  t.eq(0, #undocumented, "every option appears in *md-viewer-options*: " .. table.concat(undocumented, ", "))
+  t.eq(0, #unimplemented, "every *md-viewer-options* row is a real option: " .. table.concat(unimplemented, ", "))
+  local surface = 0
+  for _ in pairs(runtime) do
+    surface = surface + 1
+  end
+  t.ok(surface > 60, ("the option table covers the whole surface (%d options)"):format(surface))
 
   -- plugin/md-viewer.lua calls setup() with no arguments after every rtp
   -- load, and plugin files run *after* a manual init file's explicit setup --

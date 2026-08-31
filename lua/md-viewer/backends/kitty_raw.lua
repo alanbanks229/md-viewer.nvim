@@ -1568,8 +1568,8 @@ end
 ---
 ---`composed` is module-global rather than per session, so two resident previews
 ---open at once would take each other's screens down. That is pre-existing --
----`M.compose` already retires every tracked placement whoever owns it -- and is
----recorded in docs/architecture.md rather than fixed here.
+---`M.compose` already retires every tracked placement whoever owns it -- and
+---stands as a known one-preview-at-a-time limitation rather than fixed here.
 function M.uncompose()
   local removals = {}
   for image_id in pairs(composed) do

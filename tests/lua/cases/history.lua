@@ -4,6 +4,7 @@ return function(t)
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local interaction = require("md-viewer.interaction")
+  local preview = require("md-viewer.preview")
   local state = require("md-viewer.state")
 
   local project = vim.uv.fs_realpath((function()
@@ -51,6 +52,31 @@ return function(t)
 
   controller.activate_document(document_a)
   t.eq(1, pane.history_index, "tab selection aligns to that document's most recent history entry")
+
+  -- document_a sits at the oldest entry: repeated history_back calls here
+  -- must not spam vim.notify, only report the dead end once.
+  do
+    local notified = 0
+    local original_notify = vim.notify
+    vim.notify = function(msg, level)
+      if tostring(msg):find("no previous document", 1, true) then notified = notified + 1 end
+    end
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    t.eq(1, notified, "repeated history_back at the boundary notifies only once")
+    -- Forward then back twice: the first back only returns to document_a's
+    -- entry (a real move, not the boundary); the second is what walks past
+    -- it again and should re-fire the notification.
+    controller.history_forward(pane.active)
+    controller.history_back(pane.active)
+    controller.history_back(pane.active)
+    t.eq(2, notified, "moving away from the boundary and back re-arms the notification")
+    t.eq(document_a, pane.active, "the round trip lands back on the oldest document")
+    t.eq(1, pane.history_index, "the round trip leaves the index back at the oldest entry")
+    vim.notify = original_notify
+  end
+
   controller.activate_document(document_c)
   t.eq(3, pane.history_index, "tab selection does not append history")
   t.eq(3, #pane.history, "tab selection leaves history length unchanged")
@@ -96,6 +122,24 @@ return function(t)
   local winbar = vim.wo[pane.preview_win].winbar
   t.ok(winbar:find("one/readme.md", 1, true) ~= nil, "duplicate filenames gain a shortest unique path label")
   t.ok(winbar:find("two/readme.md", 1, true) ~= nil, "both duplicate labels are unambiguous")
+
+  -- The active tab's underline is what makes it distinguishable from an
+  -- inactive one when a colorscheme renders TabLineSel and TabLine alike.
+  local active_hl = vim.api.nvim_get_hl(0, { name = "MdViewerTabActive" })
+  t.eq(true, active_hl.underdouble, "the active tab gets a doubled underline by default")
+  t.eq(tonumber("61afef", 16), active_hl.sp, "the underline uses the default preview.tab_accent color")
+
+  config.reset()
+  config.setup({ preview = { tab_accent = false } })
+  preview.update_title(pane.active)
+  local disabled_hl = vim.api.nvim_get_hl(0, { name = "MdViewerTabActive" })
+  t.eq("TabLineSel", disabled_hl.link, "preview.tab_accent = false falls back to a plain TabLineSel link")
+  config.reset()
+  config.setup({})
+  preview.update_title(pane.active)
+  -- update_title regenerates the winbar's click ids each call, so the ids
+  -- captured above are now stale -- re-read it before using them.
+  winbar = vim.wo[pane.preview_win].winbar
 
   local first_click = tonumber(winbar:match("%%(%d+)@v:lua%.MdViewerWinbarClick@"))
   local first_document = pane.documents[1]

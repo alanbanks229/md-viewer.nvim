@@ -41,12 +41,21 @@ function M.point(session)
   return { x = rect.x + rect.width / 2, y = rect.y + rect.height / 2 }
 end
 
----The caret's glyph box in viewport CSS pixels at the current scroll, or nil
----when there is no caret or it is off screen.
+---The caret's glyph box in viewport CSS pixels at the scroll of the frame
+---currently on screen, or nil when there is no caret or it is off screen.
+---
+---Deliberately `frame_scroll_y`, not `applied_scroll_y`: a caret motion that
+---scrolls updates `applied_scroll_y` the instant its response lands, before
+---the scroll capture it triggered has produced and displayed a new frame.
+---Using `applied_scroll_y` here during that window draws the caret's new,
+---post-scroll box over the old, still-displayed pixels -- a ghost detached
+---from the text underneath it. `frame_scroll_y` is set exactly once, when
+---`apply_image` actually paints a frame, so it always names the picture this
+---box is being composited onto.
 function M.rect(session)
   local rect = session and session.caret_rect
   if not rect then return nil end
-  local drift = (session.applied_scroll_y or 0) - (session.caret_scroll_y or 0)
+  local drift = (session.frame_scroll_y or 0) - (session.caret_scroll_y or 0)
   local y = rect.y - drift
   local height = session.viewport_height_render_px or 0
   if height > 0 and (y + rect.height <= 0 or y >= height) then return nil end
@@ -97,11 +106,15 @@ end
 ---left, which matters for the terminals that cannot draw the overlay and are
 ---left showing the real cursor, and for anything that reads the window's cursor
 ---position.
-function M.shadow_cursor(session)
+---
+---`rect` is the box the caller has already drawn into, so the shadow lands on
+---the cell the block actually occupies rather than on one recomputed a moment
+---later. Callers with no box of their own pass none and take `M.rect`'s.
+function M.shadow_cursor(session, rect)
   local win = session and session.preview_win
   if not (win and vim.api.nvim_win_is_valid(win)) then return end
   if vim.api.nvim_win_get_buf(win) ~= session.preview_buf then return end
-  local rect = M.rect(session)
+  rect = rect or M.rect(session)
   if not rect then return end
   local placement = session.last_placement
   if not placement then return end

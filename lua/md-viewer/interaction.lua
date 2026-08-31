@@ -754,7 +754,7 @@ end
 
 ---A caret motion is a renderer round trip: it answers with a glyph box the
 ---renderer alone computed, so it cannot be a marker like a scroll is. Held-key
----repeat fires far faster than that round trip returns (measured on aide-spock
+---repeat fires far faster than that round trip returns (measured on the SSM reference host
 ---2026-08-27: an `interact` request crosses the same AWS SSM tunnel a scroll
 ---marker does, ~85-120ms each way), and nothing paced it -- every keystroke
 ---queued its own request, so held-`j` visibly lagged behind release by as many
@@ -861,6 +861,23 @@ function M.clear_selection(session)
   end)
 end
 
+---A found match moves the caret onto it, the same as a click does: recorded
+---with no index (`caret.set_rect`'s nil case), so the next real motion
+---resolves fresh from the rect rather than trusting a character index find
+---never computes. Reuses whatever tint `display_caret_overlay` already has
+---cached rather than asking the renderer for one -- by the time a search
+---runs, `M.place_caret` has always already seeded it once.
+---
+---Called after `display_interact_result`, which repaints the whole frame and
+---would carry no caret box of its own onto it even if this ran first.
+local function move_caret_to_match(session, result)
+  if type(result.activeRect) ~= "table" then return end
+  caret.set_rect(session, result.activeRect, session.applied_scroll_y or 0, nil)
+  preview.set_progress_basis(session, "caret")
+  preview.update_line_numbers(session)
+  require("md-viewer.controller").display_caret_overlay(session)
+end
+
 function M.find_set(session, query)
   if type(query) ~= "string" or query == "" then return end
   if not session.renderer_revision then
@@ -885,6 +902,7 @@ function M.find_set(session, query)
     session.find_match_count = result.matchCount or 0
     session.find_active_index = result.activeIndex
     require("md-viewer.controller").display_interact_result(session, result)
+    move_caret_to_match(session, result)
     if session.find_match_count == 0 then
       vim.notify(("md-viewer: no matches for %q"):format(query), vim.log.levels.INFO)
     end
@@ -908,6 +926,7 @@ local function find_step(session, action)
     session.find_active_index = result.activeIndex
     session.find_match_count = result.matchCount or session.find_match_count
     require("md-viewer.controller").display_interact_result(session, result)
+    move_caret_to_match(session, result)
   end)
 end
 

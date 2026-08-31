@@ -1,9 +1,10 @@
 {
   "name": "md-viewer-renderer",
-  "version": "0.3.0-rc11",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Persistent local Markdown renderer for md-viewer.nvim",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=22.12"
   },

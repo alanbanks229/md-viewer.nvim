@@ -43,6 +43,14 @@ const MAX_DOCUMENT_FRAMES = 64;
 // source has a zero box for good) from becoming a permanent render loop.
 const MAX_ANIMATION_GEOMETRY_RETRIES = 10;
 
+/// Minted animation ids the page produced no rect for. By identity rather than
+/// by subtracting counts: the two sets can be the same size and still disjoint,
+/// which is precisely the state a re-parse under a reused layout leaves behind.
+function unmeasuredCount(animationIds, rects) {
+  const measured = new Set((rects ?? []).map((rect) => rect.id));
+  return (animationIds ?? []).filter((id) => !measured.has(id)).length;
+}
+
 // How long the raw CDP capture may take before it is treated as unavailable.
 // A frame that takes this long is already useless to a preview; the number only
 // has to be far above a real capture (tens of milliseconds) and far below any
@@ -285,7 +293,17 @@ export class BrowserRenderer {
     // is the least likely moment in the document's life for every data-URI
     // image to have an intrinsic size yet.
     const { rects: animations, complete } = await collectAnimationGeometry(this.page, animationIds ?? []);
-    this.layout = { key: layoutKey, documentHeight, blocks, lines, animations, animationsComplete: complete };
+    this.layout = {
+      key: layoutKey, documentHeight, blocks, lines, animations, animationsComplete: complete,
+      // Which minted animations this layout has no rect for. Carried beside
+      // the flag because the flag is latched true when the retry below gives
+      // up, and "gave up with nothing" would otherwise be indistinguishable
+      // from "this document has no animated images". By *identity*, not by
+      // count: an id the page does not carry and a rect the registry cannot
+      // name are the same number of each, and a bare difference reads zero
+      // through exactly that -- which is how the re-minted-id bug hid.
+      animationsUnmeasured: unmeasuredCount(animationIds, animations),
+    };
     this.active = { documentId, contentRevision, layoutKey, token, width, height, scrollY: 0 };
     return { token, documentHeight, blocks, lines, animations };
   }
@@ -596,6 +614,11 @@ export class BrowserRenderer {
         // both this retry and the scheduling on the Lua side.
         this.layout.animationRetries = (this.layout.animationRetries ?? 0) + 1;
         this.layout.animationsComplete = complete || this.layout.animationRetries >= MAX_ANIMATION_GEOMETRY_RETRIES;
+        // Declaring the layout settled stops the retry; it must not also erase
+        // the fact that some animation never got a rect. Left non-zero, this is
+        // the one number that separates a document whose images could not be
+        // measured from a document that has none.
+        this.layout.animationsUnmeasured = unmeasuredCount(params.animationIds, this.layout.animations);
       }
     }
     const layoutMs = performance.now() - layoutStarted;
@@ -654,6 +677,11 @@ export class BrowserRenderer {
       // idle preview issues no renders at all, so without a nudge the retry
       // above would sit waiting for a scroll or a keystroke that never comes.
       animationsIncomplete: this.layout.animationsComplete === false,
+      // How many of this document's animated images still have no measurable
+      // box. Non-zero beside `animationsIncomplete: false` means the bounded
+      // retry gave up on them, which is a state the Lua side can report but
+      // must not keep re-rendering for.
+      animationsUnmeasured: this.layout.animationsUnmeasured ?? 0,
       layoutReused,
       captureScale: capture.captureScale,
       captureScaleFactor: capture.captureScaleFactor,

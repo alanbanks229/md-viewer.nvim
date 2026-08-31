@@ -669,10 +669,12 @@ test("hit-testing resolves real content honestly and refuses to guess elsewhere"
     // and the two content types that cannot carry one say so rather than
     // guessing.
     const cannotBeExact = new Set([
-      // markdown-it-task-lists re-emits the item text as raw html_inline, so no
-      // text token survives to carry a position.
-      "task list item",
-      // A thematic break has no text at all.
+      // A thematic break has no text at all. It is the only entry: a task list
+      // item used to be here too, because markdown-it-task-lists' `labelAfter`
+      // re-emitted the item text as raw html_inline and left no text token to
+      // carry a position. That option is gone, the children survive, and the
+      // item resolves exactly like any other list item -- which is what the
+      // `else` branch below now checks for it.
       "thematic break (an empty block)",
     ]);
     for (const [label, block] of Object.entries(targets)) {

@@ -1,4 +1,4 @@
-local M = { version = "0.3.0-rc11" }
+local M = { version = "0.3.0" }
 local initialized = false
 local configured = false
 

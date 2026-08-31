@@ -28,14 +28,25 @@ jobs:
           rm stylua.zip
 
       - name: Check Lua formatting
-        run: stylua --check lua/ plugin/ tests/lua/
+        run: stylua --check build.lua lua/ plugin/ tests/lua/
 
   test:
+    # Explicit cells rather than a product: the documented floor is Node 22.12,
+    # so it has to be exercised somewhere, and both operating systems have to be
+    # covered -- but the OS x version product buys a fourth cell that proves
+    # nothing the other three do not.
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        include:
+          - os: ubuntu-latest
+            node: 22.12.0
+          - os: ubuntu-latest
+            node: 24
+          - os: macos-latest
+            node: 24
 
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
 
@@ -44,7 +55,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: renderer/package-lock.json
 

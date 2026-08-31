@@ -29,18 +29,65 @@ const animatedGif = () =>
 
 // -- Registration: pure, no browser required --------------------------------
 
-test("register accepts an animated GIF and mints per-render ids over one shared sha", (t) => {
+test("register recognizes an animated GIF, retains it once, and mints no id", (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-store-"));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const store = new AnimationStore({ dir });
 
   const first = store.register(animatedGif());
   const second = store.register(animatedGif());
-  assert.match(first.id, /^a\d+$/);
-  assert.notEqual(first.id, second.id, "ids are per render");
+  // The store deliberately does not name animations. An id has to be a pure
+  // function of the document so that re-parsing it produces the same ids -- the
+  // page and the registry are not rebuilt together -- and only the render rule
+  // knows a document's ordering. See registerAnimation in markdown.js.
+  assert.equal(first.id, undefined, "the store mints no id");
   assert.equal(first.sha, second.sha, "content shares one sha");
   assert.equal(first.frameCount, 2);
+  // The sniffed intrinsic size comes back because the render rule has to state
+  // it on the tag. Without it the <img> has a zero layout box until Chromium
+  // decodes the data URI, and the geometry pass drops zero-area rects.
+  assert.equal(first.width, 2, "the sniffed width comes back to the caller");
+  assert.equal(first.height, 1, "and the sniffed height with it");
   assert.equal(store.sources.size, 1, "one copy of the bytes is retained");
+});
+
+test("re-parsing a document yields the same animation ids", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-store-"));
+  const docDir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-doc-"));
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(docDir, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(docDir, "one.gif"), animatedGif());
+  fs.writeFileSync(path.join(docDir, "two.gif"), buildGif(3, 1, [
+    { indices: solid(1, 3), delayCs: 5 },
+    { indices: solid(2, 3), delayCs: 5 },
+  ], { loopCount: 0 }));
+
+  const store = new AnimationStore({ dir });
+  const options = {
+    localImages: true,
+    maxLocalImageBytes: 10 * 1024 * 1024,
+    baseDir: docDir,
+    documentRoot: docDir,
+    animationStore: store,
+  };
+  const markdown = "![a](one.gif)\n\n![b](two.gif)\n";
+
+  const first = await renderMarkdown(markdown, options);
+  const second = await renderMarkdown(markdown, options);
+
+  // The property the whole scheme exists for. `layoutKey` is keyed on the
+  // markdown cache key, and a remote image finishing its fetch produces new
+  // markup under that same key: the markdown is re-parsed and the page is not
+  // reloaded. With a store-wide serial the DOM held `a1` while the fresh
+  // registry knew only `a2`, service.js's sha join dropped the rect it could
+  // not name, and the document reported zero animations from then on.
+  assert.deepEqual([...second.animations.keys()], [...first.animations.keys()]);
+  assert.deepEqual([...second.animations.keys()], ["a1", "a2"], "ids are the document's own ordering");
+  for (const [id, meta] of first.animations) {
+    assert.equal(second.animations.get(id).sha, meta.sha, "and each id still means the same image");
+  }
 });
 
 test("register refuses stills, garbage, and over-cap sources", (t) => {
@@ -122,20 +169,120 @@ test("renderMarkdown mints data-md-anim-id through the image rule, capped per do
   for (const meta of rendered.animations.values()) {
     assert.match(meta.sha, /^[0-9a-f]{64}$/, "the registry carries the sha the media lane is addressed by");
   }
-  // Without a store the markup is byte-for-byte what it was: no ids at all.
-  // This is the `render.animate = false` path -- service.js passes a null store --
-  // and it is why turning animation off costs motion and never a picture. The
-  // GIF is still inlined and still painted, so the screenshot keeps the first
-  // frame; the only difference is the attribute the terminal would have used
-  // to draw a layer over it.
+  // Every minted image states the size sniffed from its own header. This is
+  // what keeps the geometry pass off a race: an <img> with no dimensions has a
+  // zero layout box until Chromium has decoded enough of the data URI to know
+  // them, collectAnimationGeometry drops zero-area rects, and browser.js's
+  // bounded retry can run out while that is still true -- after which the still
+  // frame stands for the life of the layout and only a resize appears to fix it.
+  const sized = [...rendered.html.matchAll(/<img [^>]*data-md-anim-id="a\d+"[^>]*>/g)].map((m) => m[0]);
+  assert.equal(sized.length, 2, "both minted images were matched");
+  for (const tag of sized) {
+    assert.match(tag, /width="2"/, "the sniffed width is stated on the tag");
+    assert.match(tag, /height="1"/, "and the sniffed height with it");
+  }
+
+  // Without a store there are no ids and no stated sizes. This is the
+  // `render.animate = false` path -- service.js passes a null store -- and it is
+  // why turning animation off costs motion and never a picture. The GIF is
+  // still inlined and still painted, so the screenshot keeps whichever frame
+  // Chromium was on; the only differences are the attribute the terminal would
+  // have used to draw a layer over it and the size it would have measured.
   const plain = await renderMarkdown(markdown, { ...options, animationStore: null });
   assert.doesNotMatch(plain.html, /data-md-anim-id/);
   assert.match(plain.html, /src="data:image\/gif;base64,/, "the animated image is still inlined for the still frame");
   assert.equal(
-    rendered.html.replace(/ data-md-anim-id="a\d+"/g, ""),
+    rendered.html.replace(/ data-md-anim-id="a\d+"/g, "").replace(/ width="2" height="1"/g, ""),
     plain.html,
-    "the id is the only difference: nothing else about the document changes with animation off",
+    "the id and the stated size are the only differences: nothing else changes with animation off",
   );
+});
+
+test("an author's own width/height outranks the sniffed one", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-store-"));
+  const docDir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-doc-"));
+  t.after(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(docDir, { recursive: true, force: true });
+  });
+  fs.writeFileSync(path.join(docDir, "anim.gif"), animatedGif());
+
+  const store = new AnimationStore({ dir });
+  const rendered = await renderMarkdown('<img width="120" height="60" src="anim.gif" />\n', {
+    rawHtml: true,
+    localImages: true,
+    maxLocalImageBytes: 10 * 1024 * 1024,
+    baseDir: docDir,
+    documentRoot: docDir,
+    animationStore: store,
+  });
+
+  // The point of stating a size is to give the box one before the bytes decode.
+  // An author who already gave it one has done that job, and overwriting their
+  // number would resize their picture -- so the id is minted and the dimensions
+  // are left exactly as written.
+  assert.match(rendered.html, /data-md-anim-id="a\d+"/, "a raw <img> still animates");
+  assert.match(rendered.html, /width="120"/, "the author's width stands");
+  assert.match(rendered.html, /height="60"/, "and the author's height with it");
+  assert.doesNotMatch(rendered.html, /width="2"/, "the sniffed size did not overwrite it");
+});
+
+test("one animation cannot evict the rest: entries are bounded to their share of the store", async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "md-viewer-store-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // A stub decode context: the point is the byte accounting, not the pixels.
+  // 12 frames of 1MB is 12MB, three times the 4MB share below.
+  const frame = (index) => ({ png: Buffer.alloc(1024 * 1024, index).toString("base64"), gapMs: 50 });
+  const store = new AnimationStore({
+    dir,
+    maxFrameStoreBytes: 16 * 1024 * 1024,
+    maxPerDocument: 4, // -> a 4MB share per animation
+    decodeContext: {
+      decode: async () => ({
+        status: "ok",
+        frames: Array.from({ length: 12 }, (_, index) => frame(index)),
+        loop: "infinite",
+        sourceFrameCount: 12,
+        keptFrameCount: 12,
+      }),
+    },
+  });
+
+  const shas = [];
+  for (let n = 0; n < 4; n += 1) {
+    // Distinct bytes so each is its own sha, all four the same shape.
+    const bytes = Buffer.concat([animatedGif(), Buffer.from([n])]);
+    const registered = store.register(bytes);
+    assert.ok(registered, "each source registers");
+    shas.push(registered.sha);
+  }
+
+  const results = [];
+  for (const sha of shas) results.push(await store.materialize(sha, 100, 100));
+
+  for (const result of results) {
+    assert.equal(result.status, "ok");
+    // 12 x 1MB does not fit a 4MB share; the cut is even and duration survives.
+    assert.ok(result.frames.length >= 2 && result.frames.length < 12, `thinned to ${result.frames.length}`);
+    assert.equal(result.keptFrameCount, result.frames.length, "the reported count is what reached disk");
+    const total = result.frames.reduce((sum, f) => sum + fs.statSync(f.path).size, 0);
+    assert.ok(total <= store.maxEntryBytes, `${total} bytes is within the ${store.maxEntryBytes}-byte share`);
+    assert.equal(
+      result.frames.reduce((sum, f) => sum + f.gapMs, 0),
+      12 * 50,
+      "dropped frames fold their display time into the survivor before them",
+    );
+  }
+
+  // The property that matters. Before the share bound, one oversized animation
+  // filled the store on its own and evicted its siblings -- whose frame paths
+  // the Lua side then read as missing and re-materialized after RETRY_MS,
+  // evicting whatever had displaced them. A loop, not a degradation.
+  assert.equal(store.stats.evictions, 0, "a full document's animations coexist");
+  for (const result of results) {
+    for (const f of result.frames) assert.ok(fs.existsSync(f.path), "every frame of every animation is still on disk");
+  }
 });
 
 // -- Materialization: needs the real Chromium -------------------------------

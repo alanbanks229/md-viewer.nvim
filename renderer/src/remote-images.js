@@ -72,12 +72,21 @@ for (const [address, prefix] of [
   ["fe80::", 10], // link-local
   ["fc00::", 7], // unique-local (RFC4193) -- IPv6's private range
   ["ff00::", 8], // multicast
+  // IPv4-in-IPv6 transition forms. BlockList unwraps exactly one of these on
+  // its own -- the standard IPv4-mapped ::ffff:0:0/96 (verified: it treats
+  // ::ffff:127.0.0.1 as 127.0.0.1, so the IPv4 rows above already cover it) --
+  // and none of the rest, so a hostname resolving to any of them reached an
+  // address the IPv4 list would have refused outright. Blocked as whole
+  // prefixes rather than unwrapped and re-checked: nothing legitimate serves
+  // images from them (verified against public Cloudflare, Google, Wikimedia,
+  // Fastly and CloudFront IPv6, all unaffected), and unwrapping would be one
+  // more format parser sitting in front of an SSRF check.
+  ["::", 96], // IPv4-compatible, deprecated by RFC4291 s2.5.5.1 -- ::127.0.0.1
+  ["64:ff9b::", 96], // NAT64 well-known prefix (RFC6052)
+  ["64:ff9b:1::", 48], // NAT64 local-use (RFC8215) -- explicitly not restricted to public v4
+  ["2002::", 16], // 6to4 (RFC3056); the v4 relay anycast 192.88.99.0/24 is above
+  ["2001::", 32], // Teredo (RFC4380) -- 2001:0000::/32 only, not the wider 2001::/16
 ]) UNSAFE_DESTINATIONS.addSubnet(address, prefix, "ipv6");
-// Known residual gap, not handled: legacy transition mechanisms (6to4
-// 2002::/16, Teredo 2001::/32) can embed an IPv4 address in a way BlockList
-// does not unwrap the way it does the standard ::ffff:0:0/96 form (verified:
-// BlockList treats ::ffff:127.0.0.1 as 127.0.0.1 automatically). Neither is
-// in active use for ordinary image hosting.
 
 function isPublicAddress(address, family) {
   return !UNSAFE_DESTINATIONS.check(address, family === 6 ? "ipv6" : "ipv4");

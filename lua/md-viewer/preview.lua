@@ -273,6 +273,35 @@ local function title_text(session)
   return text
 end
 
+---TabLineSel and TabLine read as the same color in more than a few
+---colorschemes, which is what makes the active tab hard to pick out at a
+---glance. `preview.tab_accent` adds an underline in a color that does not
+---depend on that contrast: resolved fresh against the *current* TabLineSel
+---every call, so a colorscheme switch is picked up without needing its own
+---autocmd, and set to `false` restores the plain link with no underline.
+---`underdouble` rather than a plain `underline`: Neovim's highlight API has no
+---pixel stroke width to ask for -- that is the terminal's own font
+---rendering -- so a second stacked line is the closest thing to "thicker"
+---available here, and terminals that do not support it fall back to a single
+---line on their own.
+---
+---MdViewerTabActive is fully config-owned once this runs, so both branches set
+---it unconditionally rather than with `default = true`: a `default` write is a
+---no-op once anything (including our own earlier call) has already defined the
+---group, which would leave `tab_accent = false` unable to undo the underline
+---set by a previous, truthier config.
+local function apply_tab_highlights()
+  vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+  local accent = config.get().preview.tab_accent
+  if not accent then
+    vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel" })
+    return
+  end
+  local active_hl = vim.api.nvim_get_hl(0, { name = "TabLineSel", link = false })
+  active_hl.underdouble, active_hl.sp = true, accent
+  vim.api.nvim_set_hl(0, "MdViewerTabActive", active_hl)
+end
+
 function M.update_title(session)
   if
     not config.get().preview.winbar
@@ -282,8 +311,7 @@ function M.update_title(session)
     return
   end
   local active = session.pane and session.pane.active or session
-  vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
-  vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+  apply_tab_highlights()
   vim.wo[session.preview_win].winbar = title_text(active)
 end
 
@@ -524,8 +552,7 @@ local function configure_window(win, session)
   vim.wo[win].winhighlight = "Visual:MdViewerInertVisual,VisualNOS:MdViewerInertVisual"
 
   if cfg.preview.winbar then
-    vim.api.nvim_set_hl(0, "MdViewerTabActive", { link = "TabLineSel", default = true })
-    vim.api.nvim_set_hl(0, "MdViewerTabInactive", { link = "TabLine", default = true })
+    apply_tab_highlights()
     vim.wo[win].winbar = title_text(session)
   end
   if session.backend and session.backend.name == "cells" then

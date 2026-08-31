@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: What are you trying to do?
+      description: Describe the workflow or situation — what you want to accomplish, not necessarily how.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What would you like to happen?
+      description: What did you expect, or how do you imagine it working?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Anything else?
+      description: Alternatives you tried, other tools that do something similar, examples.

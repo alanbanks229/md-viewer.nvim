@@ -272,7 +272,7 @@ test("fuzz: identity minus matched markers, stable across chunkings", () => {
 test("remote graphics are attributed by image-id space: md-viewer's direct path vs everything else", () => {
   // 0x4d000100: a frame id exactly as kitty_raw.lua allocates them
   // (0x4d000000 + pid-seeded offset). The split answers what rc9's single
-  // counter could not (work laptop, 2026-08-27): whether raster arriving
+  // counter could not (laptop, 2026-08-27): whether raster arriving
   // through the remote stream came from an md-viewer session rendering
   // direct bytes, or from some unrelated program in the same wrapped
   // session.

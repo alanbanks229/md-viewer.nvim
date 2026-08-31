@@ -94,7 +94,7 @@ function M.snapshot()
         or nil,
       retina_png_bytes = session.retina_png_bytes,
       retina_capture_ms = session.retina_capture_ms,
-      retina_image_update_ms = session.retina_image_update_ms,
+      retina_ui_handoff_ms = session.retina_image_update_ms,
       retina_frame_count = session.retina_frame_count or 0,
       retina_bytes_total = session.retina_bytes_total or 0,
       coalesced_scroll_events = session.coalesced_scroll_events or 0,
@@ -107,6 +107,11 @@ function M.snapshot()
       -- `incomplete` means the renderer is still trying to measure them.
       animation_geometry_count = session.animation_geometry and #session.animation_geometry or 0,
       animation_geometry_incomplete = session.animation_geometry_incomplete or false,
+      -- Non-zero with `incomplete = false` is the renderer having given up: the
+      -- images are there, their boxes never measured, and nothing will try
+      -- again for the life of this layout. Without this the state was
+      -- indistinguishable from a document with no animated images in it.
+      animation_geometry_unmeasured = session.animation_geometry_unmeasured or 0,
       remote_images_pending = session.remote_images_pending or false,
       animation_count = session.animation_assets and vim.tbl_count(session.animation_assets) or 0,
       animation_strategy = session.animation_strategy,

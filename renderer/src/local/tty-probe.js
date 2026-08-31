@@ -86,7 +86,7 @@ export function probeTerminal({ output = process.stdout, timeoutMs = 500 } = {})
       // Read from the terminal's own reply (CSI 18t), not Node's cached
       // `output.columns`/`rows`: those can still hold the 80x25 default if
       // this helper starts before the terminal has propagated its real size
-      // down to the pty (observed on aide-spock 2026-08-27 -- a session
+      // down to the pty (observed on the SSM reference host 2026-08-27 -- a session
       // opened with `helper_terminal.cellPixels.cols/rows` at 80x25 while
       // Neovim's own preview window was already 88 columns wide, which is
       // impossible if the terminal were really that narrow). Every later

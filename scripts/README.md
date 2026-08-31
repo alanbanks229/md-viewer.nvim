@@ -3,14 +3,28 @@
 Nothing here runs in CI. These are the checks that need something CI does not
 have: a real browser, or a real terminal window with a real display behind it.
 The headless suites (`tests/lua/`, `tests/node/`) cover everything that can be
-covered without one — run those first.
+covered without one — run those first. The eyes-on release checklist — what to
+watch on a real terminal before tagging — is
+[manual-checklist.md](manual-checklist.md).
 
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
 fully prove: the **selection-highlight overlay** (`overlay/`) and **animated
 images** (`animation/`). Two others need neither a display nor a browser:
 `scroll-scale/` needs a *slow link*, and `remote-images/` needs a *network with
-no direct route out* -- the two pieces of hardware no test machine has.
+no direct route out* -- the two pieces of hardware no test machine has. A third
+group needs a *second machine*: `local/` drives the local-render helper against
+a real remote host, and `rig/` deploys to one.
+
+`ssh-link-speed.sh` sits at the top level rather than in a feature directory
+because it measures the link itself, not a feature. Run it from the shell inside
+an SSH session with Neovim closed; `--write-cache` files the answer where
+md-viewer looks for it, which is what `:MdViewerMeasureLink` does from inside
+Neovim. Its own header carries the usage and the reference measurements. A
+figure measured into `/dev/null` reads higher than one drained by a real
+terminal — on a fast link the emulator itself is a large share of the wall
+clock — so measure from inside the terminal you will actually use; that is
+also why the measurement cache is keyed per terminal.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -95,9 +109,12 @@ chunk is 373ms of capture and 1,559ms of wire, where a 1x chunk is 116ms and
 
 The wire column throughout is 0.80 MB/s, which is an **AWS SSM tunnel** and not
 remote sessions in general — see
-[Where that ceiling comes from](../docs/local-render-design.md#ssm-ceiling). An
-ordinary SSH session measures 16–23 MB/s, where every wire figure above drops
-below the capture time next to it and this whole sweep stops being interesting.
+[Where that ceiling comes from](../docs/ssh.md#ssm-ceiling). An
+ordinary SSH session's raw channel measures 16–23 MB/s to a LAN host — 14.7 MB/s
+through a pty, which is the number md-viewer configures against (a `/dev/null`
+figure reads higher; see the `ssh-link-speed.sh` note at the top of this
+file). Either way every wire figure above drops below the capture
+time next to it and this whole sweep stops being interesting.
 
 **This section is not only about resident mode.** `CDP_CAPTURE_TIMEOUT_MS` is
 10,000ms and the first capture on this host takes 9,874-16,335ms — including an
@@ -123,11 +140,11 @@ Chrome/Chromium. Exits non-zero on any failed assertion.
 `--slow-chunks=MS` holds every chunk reply back by `MS` before handing it to the
 controller, which is the whole of what a slow link does to this feature. Use it
 for anything about the *warm-up*: on a fast host the first chunk lands before
-the pane can be observed at all, which is how a blank first paint survived to
-0.3.0-rc5. `--slow-chunks=2000` is roughly a chunk's cost on an AWS SSM link.
+the pane can be observed at all, which is how a blank first paint went unnoticed
+through several rounds of hand testing. `--slow-chunks=2000` is roughly a chunk's cost on an AWS SSM link.
 
-One of the assertions is the bug that motivated the knob, stated as an
-invariant: **the pane is never both blank and quiet.** Sampled every 100 ms from
+One of the assertions is the bug that motivated the knob:
+**the pane is never both blank and quiet.** Sampled every 100 ms from
 preview open until residency, there is always either a frame placed, or resident
 bands placed, or a spinner saying why there is neither.
 
@@ -258,6 +275,28 @@ geometry and stress harnesses above.
 [issue]: https://github.com/wezterm/wezterm/issues/7953
 [pr]: https://github.com/wezterm/wezterm/pull/8035
 
+## Calibrating a terminal's graphics offset
+
+Some terminals apply their window margin to text but not to graphics, landing
+a raw placement a fraction of a cell off; `image.raw_cell_offset_px` and
+`image.raw_overlay_bleed_cells` exist because iTerm2 measured that way. The
+measurement is a screenshot, never a calculation — compare the x coordinate of
+the image's edge against a notification's edge. Two questions per terminal:
+
+1. **Does it implement the protocol's `X`/`Y` placement keys?** Set
+   `image.raw_cell_offset_px = { x = 10 }`, open a notification over the
+   preview, and look. If the image shifts, record the offset that closes the
+   gap; if nothing changes, record `X`/`Y` as unimplemented there and rely on
+   `raw_overlay_bleed_cells` alone.
+2. **Is the offset a fixed margin, or does it scale with cell width?** Change
+   the terminal's font size once and re-measure.
+
+The existing iTerm2 and WezTerm readings are undated and need re-taking rather
+than citing. Settle question 2 before recording another terminal's numbers: if
+the offset scales with cell width, `raw_cell_offset_px` is the wrong shape and
+should express a fraction of a cell instead — and changing the option's shape
+later is a breaking config change.
+
 ## `scroll-scale/ab.lua` — does a smaller moving frame actually help?
 
 Run inside a real Neovim, on the far end of the connection you care about,
@@ -273,13 +312,14 @@ scroll for a few seconds:
 ```
 
 Reports `fast_png_bytes` for each phase, the transit each implies at the
-0.80 MB/s ceiling `docs/local-render-design.md` was measured against, and a
+0.80 MB/s ceiling [docs/ssh.md](../docs/ssh.md#ssm-ceiling)
+derives, and a
 verdict. `:ScrollABCancel` abandons a run partway. The configuration in force
 is saved before the first phase and restored after the last, including by the
 error path -- nothing is written to disk and no file is edited.
 
 Use the plugin's own README as the document if you want numbers comparable to
-the ones recorded in `docs/local-render-design.md`.
+the ones recorded above.
 
 The verdict worth watching for is **INERT**: `capture_encoder` is
 `playwright_png` rather than `cdp_fast_png`. Playwright's own `scale` is a
@@ -315,6 +355,27 @@ second run would measure the cache rather than the network. A `true` in the
 `still fetching` column is the expected steady state on a network that cannot
 reach the host: the image stays a placeholder and the document does not wait
 for it.
+
+## `local/`
+
+Everything here needs a **second machine**: a remote host reachable over ssh,
+with a matching md-viewer checkout. Nothing in this directory is meaningful on
+one box. [../docs/ssh.md](../docs/ssh.md) is the manual; this is the
+inventory. The helper itself has a few directly useful invocations:
+
+```sh
+node renderer/src/local-main.js -- ssh <host>   # the session wrapper
+node renderer/src/local-main.js --version       # what a bug report should quote
+node renderer/src/local-main.js --status        # counters from every helper socket
+```
+
+| Script | Runs on | What it proves |
+|---|---|---|
+| `topology-check.sh` | terminal side | That `ssh -t` still behaves when its stdout is a pipe through the helper -- raw mode, window-size propagation, `~.`, and a usable full-screen nvim. The stdin-inherited/stdout-piped seam rests on this. |
+| `marker-echo-emit.sh <token> [n]` | remote | Marker transit. Emits `n` markers through a session wrapped by `local-main.js --marker-echo-test`; the helper counts what arrives. |
+| `live-pipeline-check.sh <host>` | terminal side | Everything the local-render unit rigs fake, real: helper-wrapped ssh in a tmux pane, a real remote nvim on `render.location = "local"`, the real socket forward, and the helper's browser beside the terminal. |
+| `e2e-init.lua` | remote | The `nvim -u` init the check above drives, including the held-key scroll burst it times. |
+| `dump-upload-golden.lua` | either | Regenerates `tests/fixtures/local-upload-golden.json`, the committed byte-for-byte contract the JS Kitty writer is compared against. Run after any change to `kitty_raw.lua`'s chunker. |
 
 ## `animation/` — animated-image qualification
 

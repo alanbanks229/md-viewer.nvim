@@ -31,9 +31,11 @@ local controller = require("md-viewer.controller")
 
 -- A real, public, small PNG that also exercises the redirect path GitHub
 -- attachment URLs take (github.com -> avatars.githubusercontent.com), since
--- every hop is re-checked against the destination blocklist. Change it if this
--- host reaches the internet by some route that does not include GitHub.
-local IMAGE_URL = "https://github.com/alanbanks229.png"
+-- every hop is re-checked against the destination blocklist. GitHub's own
+-- account rather than anyone's in particular: the probe needs the redirect, not
+-- an identity. Change it if this host reaches the internet by some route that
+-- does not include GitHub.
+local IMAGE_URL = "https://github.com/github.png"
 
 -- The renderer remembers a failure for NEGATIVE_TTL_MS (60s) and a success for
 -- as long as the cache holds it, so a second run would measure the cache

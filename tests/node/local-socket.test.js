@@ -87,7 +87,7 @@ test("a protocol mismatch is refused with the upgrade hint and the connection dr
   const reply = await client.next();
   assert.equal(reply.ok, false);
   assert.equal(reply.code, "PROTOCOL_MISMATCH");
-  assert.match(reply.error, /update the older checkout/);
+  assert.match(reply.error, /update both checkouts to the same md-viewer tag/);
   assert.equal(reply.detail.helperProtocol, LOCAL_PROTOCOL);
   await client.closed;
   assert.equal(service.connected(), false);

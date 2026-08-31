@@ -5,6 +5,11 @@ M.defaults = {
   preview = {
     pinned = true,
     winbar = true,
+    -- The active tab's winbar underline, so it doesn't rely on TabLineSel
+    -- and TabLine being distinguishable colors -- some colorschemes render
+    -- them nearly identically. "#rrggbb", or `false` for the plain
+    -- TabLineSel/TabLine link with no underline added.
+    tab_accent = "#61afef",
     loading = true,
     loading_interval_ms = 80,
     -- Rendered visual lines, not Markdown source lines. `relative` mirrors
@@ -70,7 +75,7 @@ M.defaults = {
     -- render, is the lag. That ceiling is SSM's, not SSH's: it is the agent
     -- pacing its output at a kilobyte per millisecond, and an ordinary SSH
     -- session (measured: 16-23 MB/s to a LAN host) is twenty times faster. See
-    -- docs/local-render-design.md, "Where that ceiling comes from".
+    -- docs/ssh.md, "Where that ceiling comes from".
     --
     -- Still gated on SSH generally rather than on SSM, because the plugin
     -- cannot tell the two apart -- SSM arrives as an ordinary SSH session with
@@ -110,13 +115,25 @@ M.defaults = {
     -- Used to estimate how long a resident warm-up will take. It bounds nothing,
     -- and a value set here is never capped against any other figure.
     ssh_link_bytes_per_sec = "auto",
-    -- Keeping this off improves motion and nothing else.
-    -- Better GIF rendering with this architecture needs to be explored.
-    -- Playback is expensive when sending constant PNG screenshots.
+    -- Off by default because the *first* loop of an animation is real traffic:
+    -- one PNG per frame at the size it is drawn, transmitted to the terminal.
+    -- Steady state is not -- frames are uploaded once under stable content keys
+    -- and shared across previews, sessions and renderer restarts, so every
+    -- later tick costs a placement swap and no pixels at all (`:MdViewerDebug`
+    -- reports the per-tick figure as `animation_last_bytes`). What that means
+    -- in practice: the cost is the document's animations once, not a stream,
+    -- and it is the link this has to be weighed against rather than the CPU.
+    --
+    -- Nothing here re-captures the page to animate. A frame of the preview is
+    -- one Chromium screenshot, so the animation is a separate layer the
+    -- terminal draws over the still frame -- see animation.lua's header.
     animate = false,
+    -- Ceiling on the client-driven ("frames") swap rate, 1..30. The walk skips
+    -- frames rather than stretching them when the cap bites, so a capped
+    -- animation keeps its real length and only gets choppier.
     animate_fps = 5,
     -- Where the renderer runs. "current" is the only behavior that existed
-    -- before v0.3.0-rc9: Node and Chromium beside this Neovim. "local" runs
+    -- before 0.3.0: Node and Chromium beside this Neovim. "local" runs
     -- them beside the *terminal* instead -- for sessions where this Neovim is
     -- remote and the link is the whole cost (the reference case is an AWS SSM
     -- tunnel at ~0.8 MB/s) -- and requires the md-viewer-local helper to be
@@ -142,9 +159,12 @@ M.defaults = {
     raw_cell_offset_px = { x = 0, y = 0 },
     ui_poll_ms = 50,
     -- Whole-document resident mode: capture the document once as chunks, hold
-    -- them in the terminal, and make scrolling a pure placement. "auto" uses it
-    -- where the terminal and the renderer both support it, "off" keeps the
-    -- per-scroll capture loop everywhere.
+    -- them in the terminal, and make scrolling a pure placement.
+    --
+    --   "off"   the per-scroll capture loop everywhere. The default.
+    --   "auto"  where the terminal supports it *and* this machine has measured
+    --           a link slower than `resident_below_bytes_per_sec`.
+    --   "on"    wherever the terminal supports it, whatever the link is.
     --
     -- Experimental, and off by default. What it trades is a long warm-up and a
     -- document's worth of terminal image memory for scrolling that sends no
@@ -156,11 +176,42 @@ M.defaults = {
     -- millisecond -- a settle frame is ~508ms of wire and this feature is the
     -- difference between usable and not. At 16-23 MB/s, which is what an
     -- ordinary SSH session to a LAN host measures, the same frame is ~20ms and
-    -- the warm-up is the only thing the reader will notice. Measure before
-    -- turning it on -- `:MdViewerMeasureLink`, once per machine -- and
-    -- `render_path` in :MdViewerDebug says which model a session actually
-    -- chose. A measured link also gives the warm-up an ETA in the winbar.
+    -- the warm-up is the only thing the reader will notice.
+    --
+    -- Which is why "auto" is the speed question and not the terminal question:
+    -- a terminal that *can* hold a document resident says nothing about whether
+    -- doing so helps. `resident_below_bytes_per_sec` is where that line sits and
+    -- `:MdViewerMeasureLink` is what puts this machine on one side of it; an
+    -- unmeasured link is not slow, it is unknown, and unknown stays off.
+    -- `render_path` in :MdViewerDebug says which model a session actually chose,
+    -- and names the rate when the rate is why.
+    --
+    -- "on" is that gate removed, not a stronger "auto": it is for exercising the
+    -- resident path deliberately -- a fast desk machine, a bug report, the
+    -- scripts under scripts/resident/ -- where waiting out a warm-up you gain
+    -- nothing from is the point rather than a regression.
     resident = "off",
+    -- The link speed `resident = "auto"` turns resident mode on *below*, in
+    -- bytes per second.
+    --
+    -- 4 MB/s, which is not a measurement -- it is a gap. Both reference hosts
+    -- sit an order of magnitude clear of it, one on each side: an AWS SSM tunnel
+    -- measured 0.77-1.06 MB/s (2026-08-25), where resident mode is the
+    -- difference between usable and not, and a LAN host measured 14.7 MB/s
+    -- through the pty, where it is warm-up and nothing else. Anywhere in between
+    -- would be a number pretending to know something about links nobody here has
+    -- measured.
+    --
+    -- What it means in frames: the settle capture measured at 304,666 bytes is
+    -- ~76ms of pure wire at 4 MB/s, which is about where waiting on bytes stops
+    -- being a detail of the render and starts being the thing you are waiting
+    -- for. Below that line the wait grows fast -- the same frame is ~508ms on
+    -- the SSM link.
+    --
+    -- Raising this turns resident mode on for faster links; there is no evidence
+    -- either way above 1.06 MB/s, because the next link anyone has measured is
+    -- fourteen times faster than that.
+    resident_below_bytes_per_sec = 4000000,
     -- How many viewports tall one chunk is.
     --
     -- Not a first-paint knob. Measured on Ubuntu 22.04 / Chrome 151, the first
@@ -260,6 +311,12 @@ M.defaults = {
     -- path, and a reader following links for an hour should not accumulate an
     -- ever-growing list.
     history_limit = 32,
+    -- Which physical key activates each preview-tab action. Either key can be
+    -- set to `false` to leave that action unmapped.
+    keymaps = {
+      tab_previous = "H",
+      tab_next = "L",
+    },
     -- How long to keep watching a system handler md-viewer started for an
     -- external link before assuming it is running normally. Only failures that
     -- happen inside this window can be reported; past it, a still-running
@@ -417,9 +474,10 @@ local function validate(cfg)
     type(cfg.image.ui_poll_ms) == "number" and cfg.image.ui_poll_ms >= 0,
     "md-viewer: image.ui_poll_ms must be non-negative"
   )
+  assert(tri_state[cfg.image.resident], 'md-viewer: image.resident must be "off", "auto" or "on"')
   assert(
-    cfg.image.resident == "auto" or cfg.image.resident == "off",
-    'md-viewer: image.resident must be "auto" or "off"'
+    type(cfg.image.resident_below_bytes_per_sec) == "number" and cfg.image.resident_below_bytes_per_sec > 0,
+    "md-viewer: image.resident_below_bytes_per_sec must be a positive number of bytes per second"
   )
   assert(
     type(cfg.image.resident_chunk_viewports) == "number"
@@ -445,6 +503,11 @@ local function validate(cfg)
   assert(
     line_number_modes[cfg.preview.line_numbers],
     "md-viewer: preview.line_numbers must be off, absolute, or relative"
+  )
+  assert(
+    cfg.preview.tab_accent == false
+      or (type(cfg.preview.tab_accent) == "string" and cfg.preview.tab_accent:match("^#%x%x%x%x%x%x$") ~= nil),
+    'md-viewer: preview.tab_accent must be a "#rrggbb" color or false'
   )
   assert(
     terminal_profiles[cfg.terminal.profile],
@@ -499,6 +562,14 @@ local function validate(cfg)
       and cfg.interaction.history_limit == math.floor(cfg.interaction.history_limit),
     "md-viewer: interaction.history_limit must be a positive integer"
   )
+  assert(type(cfg.interaction.keymaps) == "table", "md-viewer: interaction.keymaps must be a table")
+  for _, name in ipairs({ "tab_previous", "tab_next" }) do
+    local value = cfg.interaction.keymaps[name]
+    assert(
+      value == false or (type(value) == "string" and value ~= ""),
+      ("md-viewer: interaction.keymaps.%s must be a non-empty string or false"):format(name)
+    )
+  end
   assert(
     type(cfg.interaction.external_open_timeout_ms) == "number" and cfg.interaction.external_open_timeout_ms >= 0,
     "md-viewer: interaction.external_open_timeout_ms must be non-negative"
@@ -516,9 +587,41 @@ local function invalidate_memoized()
   end
 end
 
+-- Removed in 0.3.0 along with mouse click-drag, double-click and triple-click
+-- selection. Checked against what the caller actually wrote rather than the
+-- merged table, because `vim.tbl_deep_extend` keeps keys nothing declares --
+-- which is exactly how these went on being silently accepted after the code
+-- reading them was deleted. A list rather than a set so the error names the
+-- same option on every run.
+local removed_interaction = {
+  "drag_threshold_cells",
+  "double_click",
+  "autoscroll",
+  "autoscroll_interval_ms",
+  "autoscroll_max_lines",
+  "word_select",
+  "paragraph_select",
+}
+
+-- `~= nil` rather than truthiness: `double_click = false` is still a setting
+-- carried over from a configuration written against 0.2, and reading it as
+-- "not set" would keep the exact silence this exists to end.
+local function reject_removed(opts)
+  if type(opts.interaction) ~= "table" then return end
+  for _, name in ipairs(removed_interaction) do
+    assert(
+      opts.interaction[name] == nil,
+      ("md-viewer: interaction.%s was removed in 0.3.0 with mouse selection. "):format(name)
+        .. "Highlighting is now v/V plus the preview motion keys -- see :help md-viewer-visual. "
+        .. "Remove this option."
+    )
+  end
+end
+
 function M.setup(opts)
   vim.validate({ opts = { opts or {}, "table" } })
   opts = vim.deepcopy(opts or {})
+  reject_removed(opts)
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
   invalidate_memoized()

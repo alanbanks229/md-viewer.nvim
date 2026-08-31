@@ -8,8 +8,8 @@
 --
 -- What it needs: a preview open (`:MdViewerToggle`) on a document long enough
 -- to scroll for a few seconds. The plugin's own README is the reference
--- document every measurement in docs/local-render-design.md was taken against,
--- so use that if you want numbers comparable to the ones recorded there.
+-- document scripts/README.md's own figures were taken against, so use that if
+-- you want numbers comparable to the ones recorded there.
 --
 -- How to run it, from inside Neovim:
 --

@@ -19,17 +19,38 @@ Fixes are provided for `main` and the latest tagged release.
   way: a bare `<img>` becomes an ordinary Markdown image carrying only `src`,
   `alt`, `title`, and integer `width`/`height`. Writing it as HTML grants no
   privilege — same resolver, same document root, same placeholder when refused.
-- Images are inlined as data URIs only after validation: PNG, JPEG, GIF, or
-  WebP, extension and magic bytes in agreement, regular file, size capped by
-  `max_local_image_bytes`. SVG is excluded until a dedicated sanitizer exists.
-  Remote images pass the same checks and are fetched over HTTPS by the renderer
-  process, never the browser. Anything that fails renders as a visible
-  placeholder naming the reason instead of disappearing.
-- Remote fetches only ever reach public addresses. Loopback, RFC1918 and other
-  private ranges, link-local addresses (including `169.254.0.0/16`, where cloud
-  metadata services live), and multicast/reserved ranges are refused — on the
-  URL as written and on every redirect hop, before a connection is attempted.
-  There is no allowlist and no way to widen it. The resolved address is the one
+- **Local images** are inlined as data URIs only after validation: inside the
+  document root, a regular file rather than a device or a symlink out, PNG /
+  JPEG / GIF / WebP with the extension and the magic bytes in agreement, and
+  under `max_local_image_bytes`. SVG is excluded until a dedicated sanitizer
+  exists.
+- **Remote images** are fetched over HTTPS by the renderer process, never the
+  browser, and are checked by what a network response can actually be checked
+  by: the destination policy below on the URL and every redirect hop, the
+  address pinned at resolution time, `max_local_image_bytes` enforced while
+  streaming rather than trusted from `Content-Length`, and the same PNG / JPEG
+  / GIF / WebP magic bytes. There is no filename to agree with and no
+  filesystem object, so the extension and regular-file checks above do not
+  apply and are not claimed.
+- Either way, anything that fails renders as a visible placeholder naming the
+  reason instead of disappearing.
+- A link to a non-Markdown file is handed to the operating system's opener, but
+  never if the target is executable: macOS bundles and scripts, Windows
+  executables, `.desktop`/`.AppImage`/`.jar`, disk images, or any file carrying
+  an execute bit are refused with a notification rather than launched. Markdown
+  targets open as a preview tab and never leave Neovim. Both checks happen after
+  the document-root and symlink containment above, not instead of it.
+- Remote fetches are refused for every destination on an enumerated blocklist,
+  checked on the URL as written and on every redirect hop, before a connection
+  is attempted. It covers loopback, RFC1918 and other private ranges,
+  carrier-grade NAT, link-local (including `169.254.0.0/16`, where cloud
+  metadata services live), multicast and reserved ranges; the IPv6 equivalents;
+  and the standardized ways an IPv4 address can be carried inside an IPv6 one —
+  IPv4-mapped, IPv4-compatible, NAT64, 6to4 and Teredo — so an IPv6 answer
+  cannot reach an IPv4 endpoint the list would refuse directly. The list is in
+  `UNSAFE_DESTINATIONS` in `renderer/src/remote-images.js` and is deliberately
+  a maintained enumeration rather than a claim to classify every allocation
+  IANA has ever made. There is no allowlist and no way to widen it. The resolved address is the one
   connected to, pinned at resolution time, so a second lookup cannot substitute
   a different address in between validating and connecting. `$HTTP_PROXY` and
   `$HTTPS_PROXY` are deliberately not consulted: a proxied connection goes where

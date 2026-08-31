@@ -161,26 +161,6 @@ local function interaction_mappings()
     list[#list + 1] = { "n", function(session) interaction.find_next(session) end, "Next search match" }
     list[#list + 1] = { "N", function(session) interaction.find_previous(session) end, "Previous search match" }
   end
-  if cfg.links then
-    -- Gated on `links` because a link activation is the only thing that ever
-    -- puts a second document in the history: with links off these would be two
-    -- keys that can never do anything.
-    --
-    -- `H`/`L` keep meaning back/forward rather than Vim's "top/bottom of the
-    -- visible screen". The caret makes the Vim meaning implementable now, but
-    -- these are shipped keys, and `gg`/`G` plus the scroll motions already cover
-    -- going somewhere in the document.
-    list[#list + 1] = {
-      "H",
-      function(session) controller().history_back(session) end,
-      "Previous document in the preview history",
-    }
-    list[#list + 1] = {
-      "L",
-      function(session) controller().history_forward(session) end,
-      "Next document in the preview history",
-    }
-  end
   -- Always installed, regardless of which features are enabled above, so it
   -- can fall through cleanly to normal Escape behaviour when neither a find
   -- nor a selection is active: interaction.escape() returns false in that
@@ -204,6 +184,20 @@ local function interaction_mappings()
     function(session) controller().tab_previous(session) end,
     "Previous document tab in this preview pane",
   }
+  if cfg.keymaps.tab_previous then
+    list[#list + 1] = {
+      cfg.keymaps.tab_previous,
+      function(session) controller().tab_previous(session) end,
+      "Previous document tab in this preview pane",
+    }
+  end
+  if cfg.keymaps.tab_next then
+    list[#list + 1] = {
+      cfg.keymaps.tab_next,
+      function(session) controller().tab_next(session) end,
+      "Next document tab in this preview pane",
+    }
+  end
   list[#list + 1] = {
     "gf",
     function(session) controller().reveal_source(session) end,

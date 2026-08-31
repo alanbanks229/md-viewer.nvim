@@ -278,10 +278,17 @@ function M.describe()
   return text
 end
 
--- Said once per Neovim, never once per preview. The rate does nothing except
--- put an estimate on a resident warm-up, so this fires only where that estimate
--- would have appeared -- and it is a suggestion, not a warning: an unmeasured
--- link is not a fault, and `:MdViewerHealth` deliberately raises nothing for it.
+-- Said once per Neovim, never once per preview. Fires where a resident warm-up
+-- would have carried an estimate -- and it is a suggestion, not a warning: an
+-- unmeasured link is not a fault, and `:MdViewerHealth` deliberately raises
+-- nothing for it.
+--
+-- Deliberately not raised where the *other* consumer of the rate is: an
+-- unmeasured link keeps `image.resident = "auto"` on the per-scroll path
+-- (resident_session.select_path), which is the default behaviour and the
+-- correct one, so there is nothing there to tell anybody about. Whoever wants
+-- to know why asks :MdViewerDebug, and `render_path` says it in the same words
+-- as this.
 local told = false
 
 function M.notice_unknown()

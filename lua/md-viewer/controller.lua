@@ -380,9 +380,14 @@ function M.display_selection_overlay(session, result)
   if result.rectsTruncated then return false end
   if result.contentRevision ~= session.renderer_revision then return false end
   -- The rects were measured at the page scroll the renderer reports; the base
-  -- image on screen shows `applied_scroll_y`. Any disagreement means the
-  -- highlight would land on the wrong text.
-  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then
+  -- image on screen shows `frame_scroll_y`, not `applied_scroll_y` -- a caret
+  -- motion that scrolls bumps `applied_scroll_y` the instant its response
+  -- lands, before the scroll capture it triggered has actually replaced the
+  -- frame on screen, so checking against it here would pass during that gap
+  -- and composite the highlight over the wrong, stale pixels. Any
+  -- disagreement with what is actually painted means the highlight would
+  -- land on the wrong text.
+  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.frame_scroll_y or 0)) > 0.5 then
     return false
   end
   if update_occlusion(session) then
@@ -440,8 +445,9 @@ end
 ---
 ---Returns false when the caret cannot be drawn -- no overlay support (the
 ---backend, or the terminal profile), nothing on the pane at all, or the caret
----has scrolled out of view. The terminal's own cursor is left visible in
----exactly those cases; see `preview.hide_cursor`.
+---has scrolled out of view. The terminal's own cursor is left visible where
+---there is no caret to draw at all; a caret that is merely off screen keeps it
+---hidden. See `preview.hide_cursor`, and the nil branch below.
 function M.display_caret_overlay(session, tint, sheet_png)
   if not valid(session) or session.backend.name == "cells" then return false end
   local backend = session.backend
@@ -459,10 +465,15 @@ function M.display_caret_overlay(session, tint, sheet_png)
   local rect = caret.rect(session)
   if not rect then
     M.clear_caret_overlay(session)
-    -- No block on screen means Neovim's cursor is the only caret there is, so
-    -- it has to come back. Restoring here rather than only on WinLeave is what
-    -- covers a caret that scrolled out of view.
-    preview.restore_cursor()
+    -- A caret that is merely scrolled out of view is still the reader's
+    -- position, and Neovim's own cursor is not a stand-in for it: it sits on
+    -- the cell `caret.shadow_cursor` last parked it on, the scroll has moved
+    -- the text out from under it, and nothing moves it again until the next
+    -- motion -- the preview window itself never scrolls. Restoring here put a
+    -- one-cell bar in the middle of unrelated prose for the whole of every
+    -- scroll past the caret, which is what was reported on 2026-08-29. Only a
+    -- session with no caret at all has nothing better to offer.
+    if not (session and session.caret_rect) then preview.restore_cursor() end
     return false
   end
   session.caret_tint = tint or session.caret_tint
@@ -489,6 +500,13 @@ function M.display_caret_overlay(session, tint, sheet_png)
   end
   session.caret_overlay_set = set_id
   session.caret_overlay_error = nil
+  -- The block just moved, so the shadow underneath it has to move too.
+  -- `caret.set_rect` shadows on a motion, but a motion that also scrolled
+  -- shadows against the frame still on screen -- `caret.rect` is deliberately
+  -- frame-relative -- and an ordinary scroll is not a motion at all. This is
+  -- the one place that knows which cell the block landed on, which is the only
+  -- cell the shadow has any business being on.
+  caret.shadow_cursor(session, rect)
   -- The block is on screen now, so Neovim's own cursor would be a second,
   -- differently-sized caret sitting somewhere else. Hidden here, at the one
   -- place that knows the block was actually drawn, rather than on a window
@@ -513,7 +531,11 @@ function M.place_caret(session)
   -- every open session.
   if vim.api.nvim_get_current_win() ~= session.preview_win then return end
   if session.caret_rect then
-    M.display_caret_overlay(session)
+    -- The shadow follows the block wherever there is one -- `display_caret_overlay`
+    -- parks it on the cell it drew into. Where the overlay cannot be drawn the
+    -- terminal's own cursor *is* the caret, so it still has to follow the
+    -- scroll, and nothing else would move it.
+    if not M.display_caret_overlay(session) then caret.shadow_cursor(session) end
     return
   end
   if not (session.renderer_revision and session.last_placement) then return end
@@ -816,6 +838,12 @@ function M.refresh(session, render_options)
     -- renderer stops asking after a bounded number of attempts, so a genuinely
     -- unmeasurable image costs a handful of renders rather than a loop.
     session.animation_geometry_incomplete = meta.animationsIncomplete == true
+    -- How many of them the renderer has given up on. Recorded but never acted
+    -- on: `animationsIncomplete` going false is what stops the retry above, and
+    -- a non-zero count beside it is the difference between "these images could
+    -- not be measured" and "this document has none" -- which :MdViewerDebug had
+    -- no way to tell apart.
+    session.animation_geometry_unmeasured = tonumber(meta.animationsUnmeasured) or 0
     if session.animation_geometry_incomplete then M.schedule(session, 120, "animation_geometry_timer") end
     -- An image the renderer is still fetching. The document has already been
     -- shown with a placeholder in its place rather than waiting for it -- one
@@ -990,10 +1018,11 @@ function M.pump_resident(session)
     -- KEEP_IN_MIND: this branch (and is_needed itself) is currently
     -- unreached on every host this plugin runs on -- pump_resident only
     -- runs at all when session.render_path == "resident" (guarded at the
-    -- top of this function), which needs a measured link under
-    -- image.resident "auto"'s cutoff on a terminal profile that allows
-    -- resident_pan. See the fuller note on resident_session.is_needed in
-    -- resident_session.lua for why, and how to exercise this deliberately.
+    -- top of this function), which under `image.resident = "auto"` needs a
+    -- measured link under image.resident_below_bytes_per_sec on a terminal
+    -- profile that allows resident_pan. See the fuller note on
+    -- resident_session.is_needed in resident_session.lua for why, and how to
+    -- exercise this deliberately with `image.resident = "on"`.
     -- Unexercised, not orphaned -- do not delete for lack of a live caller;
     -- raise removing the path itself with the operator/orchestrator first.
     if resident_session.is_needed(session, session.scroll_y or 0, index) then
@@ -1076,7 +1105,12 @@ function M.draw_resident(session)
     if session.image_id then
       pcall(session.backend.clear, session.image_id)
       session.image_id = nil
-      session.frame_scroll_y, session.frame_revision = nil, nil
+      -- Not `frame_scroll_y`: the compose above has already recorded what the
+      -- bands now on screen are a picture of, and this is only the frame they
+      -- replaced. Clearing it here left `caret.rect` measuring its drift
+      -- against 0, so a resident preview had no caret anywhere but the top of
+      -- the document.
+      session.frame_revision = nil
     end
     -- Same rule `apply_image` follows, for the same reason: the base under the
     -- highlight has moved, so rectangles measured against the old one are on the
@@ -1162,7 +1196,7 @@ end
 ---trades sharpness for *wire bytes*, and local mode never puts a captured
 ---frame on the wire regardless of resolution -- only a ~0.3-1 KB marker
 ---crosses SSH either way. Reusing it here bought nothing and cost
----sharpness for free. Measured on aide-spock (2026-08-27): a full-resolution
+---sharpness for free. Measured on the SSM reference host (2026-08-27): a full-resolution
 ---local capture (device scale 2) costs 31-52ms against 15-34ms at half scale
 ---(`--status` -> `replica.timing.captureDuration`) -- a ~15-20ms difference,
 ---not the ~85-120ms AWS SSM round trip `schedule_scroll` no longer waits on.
@@ -1230,7 +1264,7 @@ function M.schedule_scroll(session)
     session.scroll_scale_source = scale_source
     -- Every scroll emits a marker immediately -- no gate on the `presented`
     -- ack. That ack crosses the same link a marker does: on AWS SSM
-    -- (~1 MB/s, ~100ms RTT measured on aide-spock 2026-08-27), waiting for it
+    -- (~1 MB/s, ~100ms RTT measured on the SSM reference host 2026-08-27), waiting for it
     -- capped throughput at one round trip per frame (p50 116ms, ~8-9
     -- frames/sec) regardless of capture cost (15-50ms measured on the same
     -- session's `--status`). The backpressure this used to buy is already
@@ -1677,9 +1711,9 @@ function M.history_init(session)
   local pane = session.pane
   local history = { history_entry(session.source_buf) }
   if pane then
-    pane.history, pane.history_index = history, 1
+    pane.history, pane.history_index, pane.history_boundary = history, 1, nil
   end
-  session.history, session.history_index = history, 1
+  session.history, session.history_index, session.history_boundary = history, 1, nil
 end
 
 ---Append `buf` as the newest entry, discarding anything ahead of the current
@@ -1704,8 +1738,10 @@ function M.history_push(session, buf)
   while #history > limit do
     table.remove(history, 1)
   end
-  if pane then pane.history_index = #history end
-  session.history_index = #history
+  if pane then
+    pane.history_index, pane.history_boundary = #history, nil
+  end
+  session.history_index, session.history_boundary = #history, nil
 end
 
 ---Resolve a history entry to a buffer that can actually be displayed, reopening
@@ -1728,16 +1764,24 @@ local function history_go(session, step, direction)
   if not valid(session) then return false end
   local pane = session.pane
   if not (pane and pane.history) then M.history_init(session) end
-  local history = pane and pane.history or session.history
-  local index = pane and pane.history_index or session.history_index
+  local holder = pane or session
+  local history = holder.history
+  local index = holder.history_index
   if history[index] then history[index].scroll_y = session.scroll_y or 0 end
   while true do
     index = index + step
     local entry = history[index]
     if not entry then
-      vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
+      -- A repeat of the same direction's dead end is not news: only the
+      -- first one is reported, and any successful move (either direction)
+      -- re-arms it below.
+      if holder.history_boundary ~= direction then
+        holder.history_boundary = direction
+        vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
+      end
       return false
     end
+    holder.history_boundary = nil
     local buf = history_buf(entry)
     if buf then
       if buf == session.source_buf then
@@ -1922,8 +1966,8 @@ end
 ---
 ---Exclusions have to count because of what `raw_zindex = -1` actually means:
 ---in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
----below text glyphs but *above* cell background colors (see
----docs/architecture.md). A passive float therefore does not occlude the image
+---below text glyphs but *above* cell background colors.
+---A passive float therefore does not occlude the image
 ---on its own -- only its glyphs and border characters survive, and the image
 ---keeps compositing across everything else, so a notification renders with the
 ---Markdown showing through its background instead of its own. Cutting the
@@ -2395,7 +2439,21 @@ function M.setup_autocmds()
   })
   vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave", "TabLeave", "VimSuspend", "VimLeavePre", "FocusLost" }, {
     group = group,
-    callback = function() preview.restore_cursor() end,
+    callback = function()
+      preview.restore_cursor()
+      -- And take the block down with it. The caret marks where the *focused*
+      -- reader is, so one left drawn in a preview nobody is in claims a focus
+      -- that has moved on -- and on `FocusLost`, which gives the real cursor
+      -- back without any window changing, it would sit there beside it: two
+      -- carets at once, the thing this pair exists to prevent. The current
+      -- window is still the one being left when these fire.
+      --
+      -- Only the overlay. `caret_rect` is kept, so coming back redraws the
+      -- caret exactly where it was, locally, through the `place_caret` on the
+      -- matching enter autocmd -- no round trip and no lost position.
+      local session = state.from_preview_win(vim.api.nvim_get_current_win())
+      if session and valid(session) then M.clear_caret_overlay(session) end
+    end,
   })
   vim.api.nvim_create_autocmd("BufFilePost", {
     group = group,

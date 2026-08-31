@@ -76,9 +76,11 @@ CONFIGURATION                                               *md-viewer-config*
 md-viewer needs no configuration. On a terminal it recognizes, the default
 `image.backend = "auto"` already selects the Kitty graphics path.
 
-Requesting it explicitly is still worth doing, because an explicit backend
-that cannot run fails with an actionable error where `auto` degrades quietly
-to text: >lua
+Setting a backend explicitly is a diagnostic move rather than part of a normal
+configuration: `auto` degrades quietly to text where graphics are unavailable,
+while an explicit backend that cannot run fails with an actionable error saying
+why. Reach for it when you are working out why a preview is not graphical, not
+as a default: >lua
 
     require("md-viewer").setup({
       image = { backend = "kitty_raw" },
@@ -115,6 +117,8 @@ preview ~
     pinned                       true       keep the preview when the source
                                             window shows another file
     winbar                       true       pane-scoped document tabs/notices
+    tab_accent                   "#61afef"  active-tab underline color, or
+                                            false for none
     loading                      true       startup spinner
     loading_interval_ms          80         spinner tick
     line_numbers                 "off"      off, absolute, relative; rendered
@@ -171,8 +175,9 @@ image ~
     raw_overlay_bleed_cells      1          |md-viewer-overlay-alignment|
     raw_cell_offset_px           {x=0,y=0}  |md-viewer-overlay-alignment|
     ui_poll_ms                   50         poll for no-autocmd floats
-    resident                     "off"      experimental; "auto" opts in
+    resident                     "off"      "off"|"auto"|"on"; experimental
                                             (|md-viewer-resident|)
+    resident_below_bytes_per_sec 4000000    the link speed "auto" opts in below
     resident_chunk_viewports     2          1..8; viewports per document chunk
     resident_memory_mb           512        heuristic terminal-memory budget
     resident_max_chunks          24         hard bound on resident chunks
@@ -221,6 +226,8 @@ interaction ~
     find                         true       / and :MdViewerFind
     history_limit                32         documents kept per preview
                                             (|md-viewer-history|)
+    keymaps                      H, L       which key cycles document tabs;
+                                            either can be set to false
     external_open_timeout_ms     5000       how long a handler is watched
 
 terminal ~
@@ -454,8 +461,8 @@ COMMANDS                                                  *md-viewer-commands*
         To open or close one from an autocmd or another plugin, call the
         Lua API rather than this command: >lua
 
-            require("md-viewer.controller").open("right")
-            require("md-viewer.controller").close()
+            require("md-viewer").open("right")
+            require("md-viewer").close()
 <
         `open()` is idempotent -- it returns the existing preview rather
         than opening a second one, and never closes one, which is exactly
@@ -475,7 +482,8 @@ COMMANDS                                                  *md-viewer-commands*
 :MdViewerFind [query]
         Search the rendered preview for `query`. Prompts for one via
         |vim.ui.input()| when none is given, also bound to `/` with the
-        preview focused.
+        preview focused. Moves the caret onto the match, so a following
+        `v`, `y`, or motion key acts from there, the same as Vim's own `/`.
 
         The prompt always opens empty -- the previous query is never
         prefilled -- and dismissing it without a query clears both the
@@ -484,11 +492,13 @@ COMMANDS                                                  *md-viewer-commands*
 
                                                            *:MdViewerFindNext*
 :MdViewerFindNext
-        Jump to the next search match. Also `n` with the preview focused.
+        Jump to the next search match and move the caret onto it. Also `n`
+        with the preview focused.
 
                                                        *:MdViewerFindPrevious*
 :MdViewerFindPrevious
-        Jump to the previous search match. Also `N`.
+        Jump to the previous search match and move the caret onto it. Also
+        `N`.
 
                                                                *:MdViewerBack*
 :MdViewerBack
@@ -611,18 +621,27 @@ wearing a count:
     CTRL-E, CTRL-Y           Scroll the view, leaving the caret on its
                              document position
     gg, G                    Start or end of the document (counts ignored)
-    H, L                     Back/forward through the preview history
-                             (|md-viewer-history|)
-    [b, ]b                   Previous/next document tab in this preview pane
+    H, L, [b, ]b             Previous/next document tab in this preview pane.
+                             H and L are configurable (`interaction.keymaps`);
+                             [b and ]b are always mapped
     gf                       Reveal the active document in the source pane
-    v, V                     Start a selection at the caret, extended by
-                             any motion above; V is line-wise
+    v, V                     Start a selection at the caret, or end one;
+                             extended by any motion above; V is line-wise
+    CTRL-V                   The same as v. Neovim's own blockwise Visual
+                             is mapped away here because it would paint a
+                             rectangle of blank cells across the picture
+    gv                       Reserved, and does nothing. Neovim's visual
+                             mode is not usable over the preview surface,
+                             so there is no previous selection to restore
     o                        Swap which end of the selection the caret
                              holds
     y                        Copy the current selection (:MdViewerCopy),
                              leaving visual mode
-    /                        Prompt and search (:MdViewerFind)
-    n, N                     Next/previous search match
+    <Esc>                    Clear the search, then the selection; a third
+                             press is an ordinary <Esc>
+    /                        Prompt and search (:MdViewerFind), moving the
+                             caret onto the match
+    n, N                     Next/previous search match, moving the caret
 
 The view scrolls whenever a motion would take the caret out of it, so holding
 j scrolls as it always did. CTRL-D and friends are line motions with a count,
@@ -724,21 +743,20 @@ preview pane without replacing or focusing the editable source pane. History
 is separate from tab order, so a closed document remains reachable and is
 recreated when history returns to it.
 
-    H  / :MdViewerBack       Previous document in this preview's history
-    L  / :MdViewerForward    Next document, after going back
+    :MdViewerBack       Previous document in this preview's history
+    :MdViewerForward    Next document, after going back
 
-H and L are preview-local, installed beside the keys the preview already owns
-(`y`, `/`, `n`, `N`, `gg`, `G`), and shadow "top/bottom of screen" -- which
-addresses nothing in a preview buffer holding no document text. They are gated
-on `interaction.links`. Both commands work from either window and change only
-the preview pane. `[b` and `]b` cycle open tabs without extending history;
-`gf` is the explicit operation that reveals and focuses the active source
-document.
+History has no default keymap -- `H`/`L` cycle tabs instead
+(|md-viewer-mappings|). Bind these commands to a key of your own if you want
+one. Both commands work from either window and change only the preview pane.
+`[b` and `]b` cycle open tabs without extending history; `gf` is the explicit
+operation that reveals and focuses the active source document.
 
 Navigating from the middle abandons the forward branch, as a browser does.
 The list is capped at `interaction.history_limit` (default 32) and records a
 buffer and a path per entry, so an entry whose buffer has been wiped still
-reopens its file.
+reopens its file. Repeating a command at either end of the list reports once,
+not again until you move away from that end.
 
 =============================================================================
 OBSIDIAN WIKILINKS                                       *md-viewer-obsidian*
@@ -752,7 +770,17 @@ Native Obsidian syntax is optional and has no obsidian.nvim dependency: >lua
       },
     })
 <
-When `vault_root` is nil, |md-viewer-document-root| is the vault boundary.
+When `vault_root` is nil, |md-viewer-document-root| is the vault boundary --
+the nearest ancestor holding `.git`, `.hg` or `.svn` -- which makes every
+marker-rooted vault work without naming any of them.
+
+Setting it does not mean "the vault", it means "the only vault". md-viewer then
+requires the open document to sit inside that one directory: a note anywhere
+else resolves `outside_root` and every wikilink in it refuses to follow, since
+`M.vault_root` checks containment before it looks anything up. Set it only if
+you have exactly one vault and it carries no marker of its own; otherwise leave
+it nil and let detection handle several.
+
 Explicit paths resolve from that root. Bare note names match Markdown filename
 stems case-insensitively; ambiguous names use |vim.ui.select()| with
 vault-relative paths. The vault is scanned when a link is activated, so an add
@@ -830,11 +858,21 @@ produces a PNG which Neovim then writes to your terminal as Kitty graphics
 escape sequences, travelling down the SSH connection.
 
 The part that needs care is terminal identification, because SSH does not
-forward TERM_PROGRAM. It does forward LC_* by default, and iTerm2 and WezTerm
-both export LC_TERMINAL for exactly that reason, so those two are recognized
-automatically -- provided the remote sshd accepts the variable. Nearly every
-distribution ships `AcceptEnv LANG LC_*` already; check with `echo
-$LC_TERMINAL` on the remote host.
+forward TERM_PROGRAM. iTerm2 and WezTerm export LC_TERMINAL for exactly that
+reason, so those two can be recognized automatically -- but the variable has
+to be allowed through at both ends, and neither end is guaranteed.
+
+Client, in ~/.ssh/config: >
+    Host *
+      SendEnv LC_TERMINAL LC_TERMINAL_VERSION
+<
+Upstream OpenSSH sends nothing by default. Most distributions add `SendEnv
+LANG LC_*` in /etc/ssh/ssh_config, but a `Host *` block of your own can
+override it; `ssh -G <host> | grep sendenv` shows what will actually be sent.
+
+Server, in /etc/ssh/sshd_config: `AcceptEnv LANG LC_*`, which nearly every
+distribution ships already. Confirm the whole path with `echo $LC_TERMINAL`
+on the remote host.
 
 Kitty, Ghostty and Warp export no forwardable identity, so name the profile on
 the remote host: >sh
@@ -853,8 +891,8 @@ them -- the backlog is the lag, not the render.
 
 That ceiling is SSM's, not SSH's. It is the SSM agent pacing its output at one
 kilobyte per millisecond, which AWS has said they will not raise
-(aws/amazon-ssm-agent#664); an ordinary SSH session goes nowhere near that code
-and measures 16-23 MB/s to a host on the same network. So "remote" is not a
+(aws/amazon-ssm-agent#664); an ordinary SSH session goes nowhere near that code,
+and its raw channel to a host on the same network measures 16-23 MB/s. So "remote" is not a
 useful predictor of any of this, and the two adjustments below are applied to
 every SSH session only because Neovim cannot tell an SSM tunnel from a LAN hop
 -- both arrive as an ordinary SSH session. On a fast link they cost a little
@@ -871,8 +909,9 @@ buying a full-size transfer the next notch immediately makes stale. >lua
     opts = {
       render = {
         -- What an SSH session uses when scroll_scale is unset.
-        -- 0.5 is 2.6x to 3x fewer bytes per moving frame.
-        ssh_scroll_scale = 0.25,
+        -- 0.5 is 2.6x to 3x fewer bytes per moving frame, and is
+        -- already the default -- this line changes nothing.
+        ssh_scroll_scale = 0.5,
         -- Pin one factor regardless of session, if preferred.
         scroll_scale = nil,
         -- Idle time before the sharp capture. These are two independent
@@ -910,8 +949,9 @@ WHOLE-DOCUMENT RESIDENT MODE (EXPERIMENTAL) ~
 Where the terminal supports it, md-viewer can capture the whole document once
 as a handful of chunks, keep them in the terminal's image memory, and turn
 scrolling into a placement command. After the warm-up, scrolling costs no
-captures and no pixels on the wire -- about 140 bytes per pan, whatever the
-link.
+captures and no pixels on the wire -- 196 bytes per scroll, whatever the link
+(40 scrolls over this repository's own README issued 58 placements in 7,855
+bytes).
 
 Off by default. Turn it on with: >
 
@@ -926,12 +966,40 @@ entirely on the link, and by more than most people expect: >
     plain SSH, host on the LAN      ~19ms       no -- you would only notice
                                                 the warm-up
 <
-Twenty times apart, so "it is remote" predicts nothing. Measure yours before
-turning this on -- |:MdViewerMeasureLink| once per machine, and see
-`render.ssh_link_bytes_per_sec` below -- and read `render_path` in
-|:MdViewerDebug| to confirm which model a preview actually chose. A measured
-link also puts an estimate on the warm-up: the winbar reads `warming 3/12 ~14s`
-rather than `warming 3/12`.
+Twenty times apart, so "it is remote" predicts nothing -- which is why `"auto"`
+asks about the link and not about the terminal:
+
+    "off"   the ordinary per-scroll path everywhere. The default.
+    "auto"  the terminal supports it AND this machine has measured a link
+            under `image.resident_below_bytes_per_sec` (4 MB/s).
+    "on"    the terminal supports it. The link is not consulted.
+
+`"auto"` measures nothing on its own. It reads what |:MdViewerMeasureLink| left
+behind on this machine, so on a machine nobody has measured it stays off -- an
+unmeasured link is not a slow link, it is an unknown one, and a warm-up nobody
+asked for is the wrong way to find out. Run the command once per machine and
+`"auto"` starts answering; `render.ssh_link_bytes_per_sec` and
+`$MD_VIEWER_SSH_LINK_BYTES_PER_SEC` are the other two ways to supply the number.
+
+4 MB/s is a gap, not a measurement. The two reference links sit an order of
+magnitude either side of it -- 0.77-1.06 MB/s through an AWS SSM tunnel,
+14.7 MB/s to a LAN host -- and nothing in between has been measured, so raising
+`image.resident_below_bytes_per_sec` turns the mode on for links no evidence
+covers.
+
+`"on"` is that gate removed rather than a firmer `"auto"`: it is how you exercise
+the path deliberately on a machine that will not benefit from it -- a fast desk
+machine, a bug report, `scripts/resident/drive.lua`.
+
+`render_path` in |:MdViewerDebug| reports which model a preview chose and, when
+the link is the reason, the rate it compared. A measured link also puts an
+estimate on the warm-up: the winbar reads `warming 3/12 ~14s` rather than
+`warming 3/12`.
+
+The winbar shows `warming N/N` on every resident session, on any link --
+nothing here is gated on speed. What speed changes is how long it stays up:
+on a fast link the whole warm-up can finish in well under a second, so it is
+easy to blink and miss.
 
 Selected once per preview, when it opens, and reported by |:MdViewerDebug| as
 `render_path`. It is never re-decided mid-scroll: a preview that switched
@@ -958,10 +1026,24 @@ against a single base frame, and a resident screen has none -- it is one or two
 crops of chunks that move whenever you scroll. Leave `image.resident` off if a
 document's animations matter more than its scrolling.
 
-WezTerm is excluded. wezterm#7953 duplicates a cell's attachment list on every
-repeat placement over that cell, and panning is nothing but repeat placements
-for as long as the preview stays open. WezTerm keeps the per-scroll capture
-path, which is correct and merely slower.
+Two terminals are excluded, and between them they are most of the ones people
+read this on. Both keep the per-scroll capture path, which is correct and
+merely slower; :MdViewerDebug's `render_path_reason` names the exclusion.
+
+iTerm2 is excluded because re-cropping a resident image was measured showing
+the wrong position -- both on a chunk's first placement and when re-cropping an
+already-displayed one -- over a real AWS SSM link on 2026-08-26, with the escape
+sequence hand-verified byte-correct in both cases. Selection-overlay placements
+are a smaller and far less frequent operation and are not implicated, so the
+overlay stays on. See `resident_pan` in lua/md-viewer/terminal.lua.
+
+WezTerm is excluded because wezterm#7953 duplicates a cell's attachment list on
+every repeat placement over that cell, and panning is nothing but repeat
+placements for as long as the preview stays open.
+
+One limitation is recorded rather than fixed: the raw backend's composition
+table is module-global rather than per session, so two resident previews open
+at the same time will take each other's placements down. Open one at a time.
 
 Chunk size is `image.resident_chunk_viewports`, and it is not a first-paint
 knob. Measured on Ubuntu 22.04 / Chrome 151, the first capture of a browser
@@ -1026,9 +1108,10 @@ instance"), where a reporter on a 27.5 MB/s connection measures the same thing
 after ruling out instance type from t3.micro to m7i.8xlarge.
 
 It has nothing to do with SSH. A plain SSH session touches none of that code:
-measured 2026-08-25, 8 MB through a pty to a host on the same network took
-0.47-0.54 seconds, or 16-18 MB/s. See docs/local-render-design.md for the full
-working.
+measured on the LAN reference host 2026-08-25, 64 MB of base64 through a pty to a host on the
+same network ran at 14.7 MB/s, and 21.8-23.0 MB/s on the raw channel. Those
+two figures measure the same link; the pty figure is lower because the
+terminal emulator itself is part of the drain. docs/ssh.md has the details.
 
                                                              *md-viewer-local*
 Local rendering (experimental) ~
@@ -1039,20 +1122,39 @@ machine your terminal runs on, launch ssh through the helper: >sh
 
     node <md-viewer>/renderer/src/local-main.js -- ssh <host>
 <
-and set `render = { location = "local" }` in the remote Neovim. The remote
-keeps Markdown parsing and the whole security pipeline; the helper renders
-frames beside the terminal and injects them into the session's own byte
-stream. What crosses the link is prepared markup, each asset's bytes once,
-and a ~0.3-1 KB marker per frame -- no PNG in either direction, and no frame
-ever waits on a round trip. Scrolling in particular sends one marker and
-nothing else.
+and set `render = { location = "local" }` in the remote Neovim.
+
+One `~/.config/nvim` usually reaches machines that are not all behind a
+helper, and there is no autodetection (`"auto"` is deliberately refused --
+|md-viewer-options|). Gate it on a variable of your own instead, and export
+that variable only in the sessions you launch through the helper: >lua
+
+    render = {
+      location = vim.env.MD_VIEWER_LOCAL and "local" or "current",
+    }
+<
+    vm$ MD_VIEWER_LOCAL=1 nvim notes.md
+
+`MD_VIEWER_LOCAL` is your variable, not md-viewer's: the plugin reads
+`render.location` and nothing else here. Do not confuse it with
+`$MD_VIEWER_LOCAL_SOCKET` below, which pins the control-socket path.
+
+The remote keeps Markdown parsing and the whole security pipeline; the
+helper renders frames beside the terminal and injects them into the
+session's own byte stream. What crosses the link is prepared markup, each
+asset's bytes once, and a ~0.3-1 KB marker per frame -- no PNG in either
+direction, and no frame ever waits on a round trip. Scrolling in particular
+sends one marker and nothing else.
 
 Requirements and behavior:
 
 - The helper machine needs Node >= 22.12 and a system Chrome/Chromium/Edge
-  (discovered, never downloaded), plus this repository checked out at the
-  SAME version as the remote plugin -- the handshake refuses a mismatch and
-  its message names the older side.
+  (discovered, never downloaded), plus this repository checked out. Run the
+  same tag on both ends where you can, but what the hello handshake actually
+  compares is the control-socket protocol version: two independently-updated
+  checkouts are the steady state, so ordinary skew is accepted and only an
+  incompatible protocol is refused. That refusal cannot establish which side
+  is older, so its message says to update both to the same tag.
 - With no helper (or after it dies), the preview warns once and renders
   remotely exactly as before; nothing else changes. The reason is kept in
   |:MdViewerHealth| and `:MdViewerDebug`'s `local_render` block.
@@ -1066,18 +1168,19 @@ Requirements and behavior:
   `parser.remoteGraphicsCommands` counts graphics from every program in the
   wrapped session, so a nonzero value there proves nothing by itself.
 
-The full manual -- topology, trust boundary, per-environment validation
-status, and the procedure for validating a new environment -- is
-docs/aws-ssm.md, with the design record in docs/local-render-design.md.
+The full reference -- measuring a link, where the SSM ceiling comes from,
+setup, and the trust boundary -- is docs/ssh.md.
 
 =============================================================================
 SECURITY                                                  *md-viewer-security*
 
 The renderer blocks all runtime browser networking unconditionally, disables
 browser JavaScript, and disables raw Markdown HTML. Remote images are fetched
-by the renderer process rather than the browser, and only from public network
-destinations -- never loopback, private, or link-local, on the initial URL or
-a redirect hop (|md-viewer-remote-images|). Local images and local links are
+by the renderer process rather than the browser, and every destination is
+checked against an enumerated blocklist -- loopback, private, carrier-grade
+NAT, link-local, multicast and reserved ranges, their IPv6 equivalents, and the
+standardized IPv4-in-IPv6 transition forms -- on the initial URL and on every
+redirect hop (|md-viewer-remote-images|). SECURITY.md has the full list. Local images and local links are
 confined to a canonical document root (|md-viewer-document-root|). Initial
 npm ci installation may contact the configured npm registry.
 

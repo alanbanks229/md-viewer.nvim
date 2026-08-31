@@ -433,6 +433,11 @@ return function(t)
     session.last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} }
     session.renderer_revision = "1:0"
     session.applied_scroll_y = 40
+    -- The frame actually on screen, which `display_selection_overlay` must
+    -- check against -- not `applied_scroll_y`, which a caret motion that
+    -- scrolls can bump ahead of the frame it belongs to before that frame has
+    -- actually landed. In every case below the two agree except where noted.
+    session.frame_scroll_y = 40
     session.viewport_width_px = 800
     session.viewport_height_render_px = 600
 
@@ -459,6 +464,21 @@ return function(t)
       (controller.display_selection_overlay(session, vim.tbl_extend("force", vim.deepcopy(good), { scrollY = 0 }))),
       "a result measured at a different scroll than the frame on screen is refused"
     )
+
+    -- The ghost this backs out: a caret motion that scrolls bumps
+    -- `applied_scroll_y` to the new position the instant its response lands,
+    -- before the scroll capture it triggered has actually replaced the frame
+    -- on screen. A result whose scrollY matches that new target but not the
+    -- frame still on screen must be refused, not applied over stale pixels.
+    session.applied_scroll_y = 90
+    t.eq(
+      false,
+      (controller.display_selection_overlay(session, vim.tbl_extend("force", vim.deepcopy(good), { scrollY = 90 }))),
+      "a result matching the not-yet-displayed target, but not the frame on screen, is refused"
+    )
+    t.eq(0, #applied, "and never reaches the backend")
+    session.applied_scroll_y = 40
+
     t.eq(
       false,
       (
