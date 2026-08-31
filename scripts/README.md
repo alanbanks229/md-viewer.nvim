@@ -3,7 +3,9 @@
 Nothing here runs in CI. These are the checks that need something CI does not
 have: a real browser, or a real terminal window with a real display behind it.
 The headless suites (`tests/lua/`, `tests/node/`) cover everything that can be
-covered without one — run those first.
+covered without one — run those first. The eyes-on release checklist — what to
+watch on a real terminal before tagging — is
+[manual-checklist.md](manual-checklist.md).
 
 Two features live here, and they are the two parts of md-viewer that think in
 device pixels rather than terminal cells -- the parts a headless test cannot
@@ -18,7 +20,11 @@ a real remote host, and `rig/` deploys to one.
 because it measures the link itself, not a feature. Run it from the shell inside
 an SSH session with Neovim closed; `--write-cache` files the answer where
 md-viewer looks for it, which is what `:MdViewerMeasureLink` does from inside
-Neovim. Its own header carries the usage and the reference measurements.
+Neovim. Its own header carries the usage and the reference measurements. A
+figure measured into `/dev/null` reads higher than one drained by a real
+terminal — on a fast link the emulator itself is a large share of the wall
+clock — so measure from inside the terminal you will actually use; that is
+also why the measurement cache is keyed per terminal.
 
 Output goes to `tmp/<feature>/<label>/`, which is gitignored.
 
@@ -105,9 +111,9 @@ The wire column throughout is 0.80 MB/s, which is an **AWS SSM tunnel** and not
 remote sessions in general — see
 [Where that ceiling comes from](../docs/ssh.md#ssm-ceiling). An
 ordinary SSH session's raw channel measures 16–23 MB/s to a LAN host — 14.7 MB/s
-through a pty, which is the number md-viewer configures against; see
-[../docs/development.md](../docs/development.md#measuring-the-link-rate-over-a-fast-connection)
-for why those differ. Either way every wire figure above drops below the capture
+through a pty, which is the number md-viewer configures against (a `/dev/null`
+figure reads higher; see the `ssh-link-speed.sh` note at the top of this
+file). Either way every wire figure above drops below the capture
 time next to it and this whole sweep stops being interesting.
 
 **This section is not only about resident mode.** `CDP_CAPTURE_TIMEOUT_MS` is
@@ -137,8 +143,8 @@ for anything about the *warm-up*: on a fast host the first chunk lands before
 the pane can be observed at all, which is how a blank first paint went unnoticed
 through several rounds of hand testing. `--slow-chunks=2000` is roughly a chunk's cost on an AWS SSM link.
 
-One of the assertions is the bug that motivated the knob, stated as an
-invariant: **the pane is never both blank and quiet.** Sampled every 100 ms from
+One of the assertions is the bug that motivated the knob:
+**the pane is never both blank and quiet.** Sampled every 100 ms from
 preview open until residency, there is always either a frame placed, or resident
 bands placed, or a spinner saying why there is neither.
 
@@ -269,6 +275,28 @@ geometry and stress harnesses above.
 [issue]: https://github.com/wezterm/wezterm/issues/7953
 [pr]: https://github.com/wezterm/wezterm/pull/8035
 
+## Calibrating a terminal's graphics offset
+
+Some terminals apply their window margin to text but not to graphics, landing
+a raw placement a fraction of a cell off; `image.raw_cell_offset_px` and
+`image.raw_overlay_bleed_cells` exist because iTerm2 measured that way. The
+measurement is a screenshot, never a calculation — compare the x coordinate of
+the image's edge against a notification's edge. Two questions per terminal:
+
+1. **Does it implement the protocol's `X`/`Y` placement keys?** Set
+   `image.raw_cell_offset_px = { x = 10 }`, open a notification over the
+   preview, and look. If the image shifts, record the offset that closes the
+   gap; if nothing changes, record `X`/`Y` as unimplemented there and rely on
+   `raw_overlay_bleed_cells` alone.
+2. **Is the offset a fixed margin, or does it scale with cell width?** Change
+   the terminal's font size once and re-measure.
+
+The existing iTerm2 and WezTerm readings are undated and need re-taking rather
+than citing. Settle question 2 before recording another terminal's numbers: if
+the offset scales with cell width, `raw_cell_offset_px` is the wrong shape and
+should express a fraction of a cell instead — and changing the option's shape
+later is a breaking config change.
+
 ## `scroll-scale/ab.lua` — does a smaller moving frame actually help?
 
 Run inside a real Neovim, on the far end of the connection you care about,
@@ -333,7 +361,13 @@ for it.
 Everything here needs a **second machine**: a remote host reachable over ssh,
 with a matching md-viewer checkout. Nothing in this directory is meaningful on
 one box. [../docs/ssh.md](../docs/ssh.md) is the manual; this is the
-inventory.
+inventory. The helper itself has a few directly useful invocations:
+
+```sh
+node renderer/src/local-main.js -- ssh <host>   # the session wrapper
+node renderer/src/local-main.js --version       # what a bug report should quote
+node renderer/src/local-main.js --status        # counters from every helper socket
+```
 
 | Script | Runs on | What it proves |
 |---|---|---|
