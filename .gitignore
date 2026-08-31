@@ -9,3 +9,5 @@ tmp/
 .obsidian/
 # Agent instructions -- local working file, not part of the public plugin
 CLAUDE.md
+# Editor workspace settings and local release helpers -- per-machine
+.vscode/

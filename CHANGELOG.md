@@ -5,7 +5,7 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-30
+## [0.3.0] - 2026-08-31
 
 Highlighting is now exclusively a keyboard gesture, the preview pane carries a
 tab per document, and on a link too slow for pictures the browser can move to
