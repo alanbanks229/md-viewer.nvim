@@ -1,9 +1,13 @@
-## Summary
+## What changed, and why?
 
-## Verification
+## How did you test it?
 
-- [ ] Lua tests pass
-- [ ] Node.js tests pass
-- [ ] Interactive terminal checks from `docs/development.md` completed when applicable (say which terminal)
-- [ ] Documentation and changelog updated when applicable
-- [ ] No generated dependencies, browser binaries, logs, screenshots, or local configuration added
+## Does it affect terminal rendering or graphics?
+
+<!-- If yes: say which terminal you tried it on, and attach a screenshot or
+     short recording for anything visual. scripts/manual-checklist.md has the
+     checks that matter. If no: delete this section. -->
+
+- [ ] `make test` and `stylua --check build.lua lua/ plugin/ tests/lua/` pass
+- [ ] Docs / CHANGELOG updated if behavior changed
+- [ ] No generated files, binaries, logs, or screenshots committed
