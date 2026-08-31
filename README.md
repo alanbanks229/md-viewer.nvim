@@ -21,7 +21,7 @@ Despite the browser-like behavior, this is not an embedded webview. The renderer
 | **Live preview of what you are typing** | Unsaved changes re-render as you edit, and the preview follows your cursor, so the picture and the buffer never drift apart |
 | **Cursor/Caret - driven by Vim motions** | `hjkl`, `w`, `}`, `gg`, `G` and counts move a caret that lives in the rendered document; `v`/`V` extend a selection from it, and `y` copies to the unnamed register and the system clipboard. There is no click-and-drag selection — this is the only way to highlight text here |
 | **Search with `/`, `n` and `N`** | Runs against the rendered page rather than the source |
-| **A tab per document** | Scoped to the preview pane. Ctrl/Cmd-click a Markdown link to open one without disturbing your editable split; `[b`/`]b` and `H`/`L` (configurable, `interaction.keymaps`) cycle tabs, and `gf` reveals the active document back in the source pane. Tabs are clickable in the winbar, and the active one gets an underline in `preview.tab_accent` (default `"#61afef"`, or `false` for none) so it stays visible even when a colorscheme renders TabLineSel and TabLine alike |
+| **A tab per document** | Scoped to the preview pane. Ctrl/Cmd-click a Markdown link to open one without disturbing your editable split; `[b`/`]b` or `H`/`L` cycle tabs, and `gf` reveals the active document back in the source pane. Tabs are clickable in the winbar, and the active one is underlined (`preview.tab_accent`) |
 | **Obsidian wikilinks** — optional | `[[Note]]`, aliases, heading paths and block IDs resolve through those same tabs, with no obsidian.nvim runtime dependency |
 | **Animated GIF and WebP** | Actually animate, drawn by the terminal over the still frame the screenshot captured. Off by default: `render.animate = true` |
 | **Local rendering** — *experimental* | One answer to a slow SSH link: move the browser to your side of the connection entirely. `render.location = "local"` (`:help md-viewer-local`) |
@@ -54,53 +54,49 @@ Despite the browser-like behavior, this is not an embedded webview. The renderer
 }
 ```
 
-<hr/>
-
 ### vim.pack
 
 > [!WARNING]
 > This installation method has not yet been fully validated.
->
-> > <details>
-> > <summary>Native <code>vim.pack</code></summary>
-> >
-> > `vim.pack` does not provide a build hook, so the plugin's build script needs to
-> > be run from a `PackChanged` autocmd.
-> >
-> > Register the autocmd **before** the first `vim.pack.add()` call so it also runs
-> > during the initial installation:
-> >
-> > ```lua
-> > vim.api.nvim_create_autocmd("PackChanged", {
-> >   callback = function(event)
-> >     local data = event.data
-> >     if data.spec.name == "md-viewer.nvim"
-> >         and (data.kind == "install" or data.kind == "update") then
-> >       dofile(data.path .. "/build.lua")
-> >     end
-> >   end,
-> > })
-> >
-> > vim.pack.add({
-> >   {
-> >     src = "https://github.com/alanbanks229/md-viewer.nvim",
-> >     version = "v0.3.0",
-> >   },
-> > })
-> >
-> > require("md-viewer").setup({})
-> > ```
-> >
-> > If `md-viewer.nvim` was installed before adding the `PackChanged` hook, run the
-> > following command once from the plugin's `renderer/` directory:
-> >
-> > ```sh
-> > PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
-> > ```
-> >
-> > </details>
 
-<hr/>
+<details>
+<summary>Native <code>vim.pack</code></summary>
+
+`vim.pack` does not provide a build hook, so the plugin's build script needs to
+be run from a `PackChanged` autocmd.
+
+Register the autocmd **before** the first `vim.pack.add()` call so it also runs
+during the initial installation:
+
+```lua
+vim.api.nvim_create_autocmd("PackChanged", {
+  callback = function(event)
+    local data = event.data
+    if data.spec.name == "md-viewer.nvim"
+        and (data.kind == "install" or data.kind == "update") then
+      dofile(data.path .. "/build.lua")
+    end
+  end,
+})
+
+vim.pack.add({
+  {
+    src = "https://github.com/alanbanks229/md-viewer.nvim",
+    version = "v0.3.0",
+  },
+})
+
+require("md-viewer").setup({})
+```
+
+If `md-viewer.nvim` was installed before adding the `PackChanged` hook, run the
+following command once from the plugin's `renderer/` directory:
+
+```sh
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
+```
+
+</details>
 
 ### Other
 
@@ -214,11 +210,11 @@ Both of these values work out their answer per machine.
 
 - **`render.ssh_link_bytes_per_sec`** — the default `"auto"` reads this
   machine's `:MdViewerMeasureLink` result, and a number outranks that on every
-  machine the config file lands on. Measured 2026-08-25, two reference hosts
-  sit fourteen times apart: 0.77–1.06 MB/s through an AWS SSM tunnel against
-  14.7 MB/s to a LAN host. No single value is honest for both.
+  machine the config file lands on. Real links measure far apart — fourteen
+  times, between an SSH session tunneled through AWS SSM and a LAN host — so
+  no single value is honest for both.
   [Where the AWS SSM ceiling comes from](docs/ssh.md#where-the-aws-ssm-ceiling-comes-from)
-  has the working.
+  has the numbers.
 
 - **`obsidian.vault_root`** — the default `nil` detects the vault around the
   open note (the nearest ancestor holding `.git`, `.hg` or `.svn`), which
@@ -296,10 +292,12 @@ Read [SECURITY.md](SECURITY.md) before enabling `security.raw_html`, and
 
 **Working on it**
 
-- [Contributing](CONTRIBUTING.md) — how to open a change
-- [Development](docs/development.md) — tests, manual verification, releasing
-- [Architecture](docs/architecture.md) — how it works, and which invariants matter
+- [Contributing](CONTRIBUTING.md) — setup, tests, and how to open a change
+- [Architecture](docs/architecture.md) — how a preview reaches your terminal
 - [Changelog](CHANGELOG.md)
+
+md-viewer.nvim has been developed with significant AI assistance. Changes are
+reviewed, tested, and maintained like any other contribution.
 
 ## License
 
