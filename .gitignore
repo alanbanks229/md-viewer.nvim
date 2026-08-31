@@ -7,3 +7,6 @@ tmp/
 # Local Obsidian workspace state -- this repo doubles as a test vault
 # (it has a .git marker), and that state is per-machine.
 .obsidian/
+
+# Demo source recordings -- the committed artifact is assets/demo.gif
+*.mov

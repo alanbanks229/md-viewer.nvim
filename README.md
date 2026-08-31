@@ -1,19 +1,24 @@
 # md-viewer.nvim
 
-**Browser-quality Markdown previews inside terminal Neovim.**
+**Browser-quality Markdown previews inside the terminal.**
 
 `md-viewer.nvim` opens a read-only split beside your Markdown source. A headless
 Chromium page renders the unsaved buffer to viewport-sized PNGs, which Neovim
 draws in the split through the Kitty graphics protocol. The source stays a
 normal, editable Neovim buffer.
 
-Mouse and keyboard gestures over the preview are forwarded to that live Chromium
-DOM, which does the hit-testing, search and link resolution before the viewport
-is recaptured. You get browser behaviour — but the preview is a PNG surface,
-**NOT** native terminal text and not an embedded webview. The renderer opens no
-window, starts no HTTP server, and listens on no port.
+Mouse and keyboard gestures over the preview (png) are forwarded to the live Chromium
+DOM, which does the search, hit-testing and link resolution before the viewport
+is recaptured. Overall you get browser-like behavior through a PNG surface.
+**THIS IS NOT** not an embedded webview. The renderer opens no window, starts no HTTP server, and listens on no port.
 
-<!-- <img width="1470" height="892" alt="md-viewer.nvim preview" src="https://github.com/user-attachments/assets/ef40d45f-a5b6-4823-b961-bc904ee1e726" /> -->
+![A Markdown note rendered in a preview split beside its editable Neovim source](assets/demo.gif)
+
+*Typing into the source buffer re-renders the page as the keys land, well before the file is
+written. A caret driven by Vim motions extends a selection inside the rendered document. Two
+wikilinks followed in the preview open notes as tabs in the same split — one of them a PNG bar
+chart, a JPEG and an animated GIF, all drawn by the terminal — and narrowing the source pane
+reflows the rendered page to the width it is given.*
 
 ## Features
 
@@ -31,19 +36,10 @@ window, starts no HTTP server, and listens on no port.
 
 ## Requirements
 
-- **Neovim 0.12+.** The graphical backend writes escape sequences through
-  `nvim_ui_send()`, which is a 0.12 API. On anything older there is no graphical
-  path at all, so the plugin refuses to load.
-- **Node.js 22.12+**, for the renderer process.
-- **An existing Google Chrome, Chromium, or Microsoft Edge installation**, on
-  whichever machine Neovim itself runs on. md-viewer never downloads a browser:
-  Playwright's browser download is disabled in the install hook and no test or
-  runtime path re-enables it.
-- **A terminal that speaks the Kitty graphics protocol, used directly** — see
-  [Terminal support](#terminal-support).
-- **macOS or Linux.** CI runs the full suites on both, at the Node floor and at
-  Node 24. Windows discovery paths have unit coverage but no CI, no live
-  validation, and no terminal cell measurement — treat it as unsupported.
+- **Neovim 0.12+.** The graphical backend writes escape sequences through `nvim_ui_send()`, which is a 0.12 API.
+- **Node.js 22.12+**. For the renderer process.
+- **An existing Chromium, Google Chrome, or Microsoft Edge installation**, on whichever machine your Neovim runs on.
+- **A terminal that speaks the Kitty graphics protocol** — see [Terminal support](#terminal-support).
 
 ## Installation
 
@@ -59,26 +55,24 @@ window, starts no HTTP server, and listens on no port.
 }
 ```
 
-**What the install hook is for.** md-viewer.nvim is not pure Lua. The part
-that turns Markdown into an image is a Node.js program under `renderer/`, and
-its third-party packages are not committed here — only a lockfile naming their
-exact versions is. A freshly downloaded copy of the plugin is therefore not
-runnable until `npm ci` has fetched those packages into `renderer/`.
-`build.lua` is that one step. lazy.nvim finds and runs it on install and update
-without being asked, which is why the spec above has no `build` key; other
-plugin managers have to be pointed at it, as below.
+**What the install hook is for.**
 
-Installing needs npm registry access, unless the locked packages are already
-in npm's cache. No browser is ever downloaded — `build.lua` passes
-`--ignore-scripts` and `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD`, and md-viewer drives
-the Chrome, Chromium or Edge already on the machine.
+  md-viewer.nvim is not pure Lua. The part that turns Markdown into an image is a Node.js program under `renderer/`, and its third-party packages are not committed here — only a lockfile naming their exact versions is.
+  The plugin is therefore not runnable until `npm ci` has fetched those packages into `renderer/`, which is where `build.lua` comes in (for lazy.nvim)
+
+Other plugin managers require a small amount of additional setup, as shown below.
 
 <details>
-<summary>Native <code>vim.pack</code> — untested by the author</summary>
+<summary>Native <code>vim.pack</code></summary>
 
-`vim.pack` has no build hook, so run the same file from a `PackChanged`
-autocmd. Register it before the first `vim.pack.add()` call, so it also runs on
-a first-time installation:
+> [!WARNING]
+> This installation method has not yet been fully validated.
+
+`vim.pack` does not provide a build hook, so the plugin's build script needs to
+be run from a `PackChanged` autocmd.
+
+Register the autocmd **before** the first `vim.pack.add()` call so it also runs
+during the initial installation:
 
 ```lua
 vim.api.nvim_create_autocmd("PackChanged", {
@@ -98,16 +92,17 @@ vim.pack.add({
 require("md-viewer").setup({})
 ```
 
-If the plugin was installed before the hook was added, run this once from the
-repository's `renderer/` directory:
+If `md-viewer.nvim` was installed before adding the `PackChanged` hook, run the
+following command once from the plugin's `renderer/` directory:
 
 ```sh
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci --ignore-scripts
 ```
 
-If it does not work, please open an issue.
+If you run into problems with this installation method, please open an issue.
 
 </details>
+
 
 <details>
 <summary>Other plugin managers, or running the hook by hand</summary>
@@ -143,7 +138,7 @@ bounds local links and images.
 2. Run `:MdViewerToggle`.
 3. If nothing appears, run `:MdViewerHealth` — it says why in one screen.
 
-Then [docs/usage.md](docs/usage.md) or `:help md-viewer` has every command, key
+[docs/usage.md](docs/usage.md) or `:help md-viewer` has every command, key
 and mouse gesture. `:MdViewerDebug` is what to attach to a bug report.
 
 ## Configuration
@@ -168,13 +163,7 @@ require("md-viewer").setup({
 })
 ```
 
-That is a normal, complete setup. If your terminal is in the
-[support table](#terminal-support) and Node and Chrome are installed, nothing
-below is needed.
-
-`:help md-viewer-options` lists **every option and its default** in one table,
-and **[`lua/md-viewer/config.lua`](lua/md-viewer/config.lua)** carries the
-reasoning behind each non-obvious one.
+For more information see `:help md-viewer-options`, which lists **every option and its default** in one table.
 
 ## Optional capabilities
 
@@ -218,8 +207,7 @@ The following capabilities are not setup automatically.
 
 ### Two options to leave unset
 
-Both work out their answer per machine, and both stop being right the moment a
-fixed value is written into a config that reaches more than one machine.
+Both of these values work out their answer per machine.
 
 - **`render.ssh_link_bytes_per_sec`** — the default `"auto"` reads this
   machine's `:MdViewerMeasureLink` result, and a number outranks that on every
