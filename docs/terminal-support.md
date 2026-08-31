@@ -99,14 +99,11 @@ Preview rendering, the selection overlay and animation are all supported and
 operator-validated (2026-08-07).
 
 Resident mode is the exception, and it is off on measurement rather than on
-caution. Re-cropping a resident image was seen showing the wrong position — both
-on a chunk's first placement and when re-cropping an already-displayed one —
-over a real AWS SSM link on 2026-08-26, with the placement id, image id and
-every `x`/`y`/`w`/`h`/`c`/`r` parameter hand-verified against the chunk plan and
-a real-Chromium test confirming the uploaded pixels were correct. Unlike
-WezTerm's defect there is no upstream issue to cite yet; this is the first
-report. Selection-overlay placements are a much smaller and much less frequent
-operation, are not implicated, and stay on. Previews fall back to the per-scroll
+caution: re-cropping a resident image was seen drawing the wrong position over
+a real AWS SSM link (2026-08-26), with the placements and uploaded pixels
+verified correct — so the defect sits on the terminal side, and there is no
+upstream issue to cite yet. Selection-overlay placements are smaller, less
+frequent, not implicated, and stay on. Previews fall back to the per-scroll
 path, which is unaffected.
 
 ## WezTerm

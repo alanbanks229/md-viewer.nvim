@@ -160,7 +160,7 @@ A multiplexer between ssh and the terminal also eats the probe.
 
 **Is it actually rendering locally?** `:MdViewerHealth`'s `Location` row answers
 in words. In the counters, read `parser.remoteMdvGraphicsCommands` — it counts
-only md-viewer's own graphics, and zero while attached is the invariant. Its
+only md-viewer's own graphics, and it must read zero while attached. Its
 sibling `parser.remoteGraphicsCommands` counts every program in the session and
 proves nothing on its own.
 

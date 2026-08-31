@@ -144,72 +144,29 @@ stays on the per-scroll path. `:help md-viewer-resident` has the bounds.
 a flat ceiling near **0.80 MB/s**, confirmed from 1 KB to 5 MB with no burst
 allowance. No setting raises it, and it is the reason local rendering exists.
 
-**AWS says so directly.** In
-[aws/amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664),
-a reporter measures ~0.6–0.8 MB/s from a client whose own link runs at
-27.5 MB/s, having ruled out instance type (`t3.micro` through `m7i.8xlarge`) and
-the far-end service. A maintainer answers:
-
-> It's due to: `agent/session/config/config.go#L50` in combination with a max
-> message rate of 1/ms
-
-and closes it with:
-
-> Unfortunately at current time we can't support an increase in scale through
-> our service, so this limitation will be kept for now.
-
-Line 50 is `StreamDataPayloadSize = 1024`. One kilobyte per millisecond is
-**1.024 MB/s**. See also
-[#227](https://github.com/aws/amazon-ssm-agent/issues/227) and
-[#259](https://github.com/aws/amazon-ssm-agent/issues/259).
-
-**The pacing is in the direction that carries pixels.** Both of the agent's
-output paths — VM to terminal, which is where md-viewer's bytes go — do the
-same thing:
-
-| Session | File | Loop |
-|---|---|---|
-| `aws ssm start-session` (plain shell) | `agent/session/shell/shell.go` | reads ≤ `StreamDataPayloadSize` from the pty, then `time.Sleep(time.Millisecond)` — *"Pace the sending to prevent flooding the websocket"* |
-| SSH over SSM (`ProxyCommand`) | `agent/session/plugins/port/port_basic.go` | reads ≤ `StreamDataPayloadSize` from the TCP conn, then `time.Sleep(time.Millisecond)` — *"Wait for TCP to process more data"* |
-
-`time.Sleep` overshoots rather than undershoots, so the achievable band is
-roughly 0.7–1.0 MB/s.
-
-**Measured against the channel itself** (SSM reference host, 2026-08-25, reached
-by `ProxyCommand aws ssm start-session --document-name AWS-StartSSHSession` with
-`Compression yes` live): 64 MiB of incompressible bytes pushed straight down the
-SSH channel, three times, measured **0.77–0.78 MB/s** — 76% of what the
-kilobyte-per-millisecond loop allows, inside the predicted band. Compression was
-running throughout and could only have flattered the result; choosing a payload
-it cannot help is what excluded it.
-
-The client has mirror-image loops, but those pace **keystrokes going up**. The
-link is asymmetric and md-viewer lives in the throttled half.
+The cause is upstream and acknowledged: the agent sends stream data in 1 KB
+payloads at a maximum of one message per millisecond — 1.024 MB/s by
+arithmetic — and
+[aws/amazon-ssm-agent#664](https://github.com/aws/amazon-ssm-agent/issues/664)
+confirms both the mechanism and that it is staying. The pacing sits in the
+direction that carries md-viewer's pixels; keystrokes going up are unaffected.
+Measured against the channel itself (an SSM-tunneled host, 2026-08-25): 64 MiB
+of incompressible bytes, three runs, **0.77–0.78 MB/s** — inside the band the
+arithmetic predicts.
 
 ### If you measure an SSM link faster than that
 
-It happens, and it does not mean the arithmetic is wrong — it means the bytes
-being counted are not the bytes the agent pumped. Three causes, in descending
-order of how much they inflate:
+The bytes being counted are probably not the bytes the agent pumped:
 
-1. **A compressing hop upstream of the agent.** With `Compression yes` (or
-   `ssh -C`), sshd deflates the stream *before* the agent reads it, so
-   repetitive test data clears the 1 KB/ms pump instantly. Measured directly:
-   **13.6x on 64 MiB**. This is why `scripts/ssh-link-speed.sh` sends base64
-   over `/dev/urandom` rather than something compressible.
-2. **base64 is itself compressible, so even a correct measurement reads ~33%
-   high.** It looks incompressible because PNG is already deflated, but that is
-   the wrong layer: base64 is 64 symbols carried in 8-bit bytes — six bits of
-   entropy per byte — so deflate takes it to about 75% whatever is inside it.
-   0.774 ÷ 0.75 = 1.032, which is exactly the gap between the channel figure and
-   the 1.01–1.07 MB/s the same host reports through a pty. **Keep the gap rather
-   than correcting it**: md-viewer's own base64 gets the same quarter back, so
-   the pty figure is the one that predicts a frame's transit time and the one
-   that belongs in `render.ssh_link_bytes_per_sec`.
-3. **The host is not reached through an SSM data channel at all.**
+1. **A compressing hop upstream of the agent** (`Compression yes`, `ssh -C`)
+   deflates the stream before the agent reads it — measured inflating a figure
+   13.6x on compressible test data, which is why `scripts/ssh-link-speed.sh`
+   sends base64 of `/dev/urandom`.
+2. **base64 itself deflates by ~25%**, so even a correct raw-channel figure
+   reads high. Keep the gap rather than correcting it: md-viewer's own
+   transfers are base64 too, so the pty figure is the one that predicts a
+   frame's transit time and the one that belongs in
+   `render.ssh_link_bytes_per_sec`.
+3. **The host may not be reached through SSM at all.**
    `ssh -G <host> | grep -i proxycommand` settles it in one command: no
    `session-manager-plugin` there means none of this applies.
-
-The falsifiable claim is narrow, and it is about the channel rather than
-anything a pty reports: *sustained transfer of incompressible bytes through an
-SSM data channel cannot exceed ~1.024 MB/s.*
