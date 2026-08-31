@@ -951,7 +951,7 @@ as a handful of chunks, keep them in the terminal's image memory, and turn
 scrolling into a placement command. After the warm-up, scrolling costs no
 captures and no pixels on the wire -- 196 bytes per scroll, whatever the link
 (40 scrolls over this repository's own README issued 58 placements in 7,855
-bytes; docs/architecture.md has the working).
+bytes).
 
 Off by default. Turn it on with: >
 
@@ -1044,7 +1044,6 @@ placements for as long as the preview stays open.
 One limitation is recorded rather than fixed: the raw backend's composition
 table is module-global rather than per session, so two resident previews open
 at the same time will take each other's placements down. Open one at a time.
-See docs/architecture.md, "Whole-document resident mode".
 
 Chunk size is `image.resident_chunk_viewports`, and it is not a first-paint
 knob. Measured on Ubuntu 22.04 / Chrome 151, the first capture of a browser
@@ -1111,9 +1110,8 @@ after ruling out instance type from t3.micro to m7i.8xlarge.
 It has nothing to do with SSH. A plain SSH session touches none of that code:
 measured on the LAN reference host 2026-08-25, 64 MB of base64 through a pty to a host on the
 same network ran at 14.7 MB/s, and 21.8-23.0 MB/s on the raw channel. Those
-two figures measure the same link; docs/development.md says why a pty figure
-and a channel figure differ, and docs/ssh.md has the full
-working.
+two figures measure the same link; the pty figure is lower because the
+terminal emulator itself is part of the drain. docs/ssh.md has the details.
 
                                                              *md-viewer-local*
 Local rendering (experimental) ~

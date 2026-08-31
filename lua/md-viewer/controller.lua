@@ -1966,8 +1966,8 @@ end
 ---
 ---Exclusions have to count because of what `raw_zindex = -1` actually means:
 ---in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
----below text glyphs but *above* cell background colors (see
----docs/architecture.md). A passive float therefore does not occlude the image
+---below text glyphs but *above* cell background colors.
+---A passive float therefore does not occlude the image
 ---on its own -- only its glyphs and border characters survive, and the image
 ---keeps compositing across everything else, so a notification renders with the
 ---Markdown showing through its background instead of its own. Cutting the
