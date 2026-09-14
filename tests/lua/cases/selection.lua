@@ -2,7 +2,8 @@ return function(t)
   local config = require("md-viewer.config")
   local interaction = require("md-viewer.interaction")
   local process = require("md-viewer.process")
-  local controller = require("md-viewer.controller")
+  require("md-viewer.controller")
+  local presenter = require("md-viewer.presenter")
   local debounce = require("md-viewer.debounce")
 
   -- config.setup() merges its argument onto the *defaults*, not onto the
@@ -88,9 +89,9 @@ return function(t)
   -- Stub out the actual backend display: these tests are about the
   -- request/backpressure/state machinery in interaction.lua, not image
   -- rendering, which controller.lua's own tests already cover.
-  local original_display = controller.display_interact_result
+  local original_display = presenter.display_interact_result
   local displayed = {}
-  controller.display_interact_result = function(session, result)
+  presenter.display_interact_result = function(session, result)
     displayed[#displayed + 1] = { session = session, result = result }
   end
 
@@ -921,10 +922,10 @@ return function(t)
       requests[#requests + 1] = params
       callbacks[#callbacks + 1] = callback
     end
-    local original_overlay_display = controller.display_selection_overlay
+    local original_overlay_display = presenter.display_selection_overlay
     local overlay_displays = {}
     local overlay_result = { applied = true, reason = nil }
-    controller.display_selection_overlay = function(session, result)
+    presenter.display_selection_overlay = function(session, result)
       overlay_displays[#overlay_displays + 1] = { session = session, result = result }
       return overlay_result.applied, overlay_result.reason
     end
@@ -1009,12 +1010,12 @@ return function(t)
     -- visible for the whole second gesture, which is what the operator
     -- reported on 2026-08-08 (highlight one code block, release, then select
     -- another).
-    local original_restore = controller.restore_clean_base
+    local original_restore = presenter.restore_clean_base
     local restores = 0
     needs_sheet = false
     session = overlay_session()
     session.base_selection_painted = true
-    controller.restore_clean_base = function(s)
+    presenter.restore_clean_base = function(s)
       restores = restores + 1
       s.base_selection_painted = false
       return true
@@ -1034,18 +1035,18 @@ return function(t)
     -- stale highlight.
     session = overlay_session()
     session.base_selection_painted = true
-    controller.restore_clean_base = function() return false end
+    presenter.restore_clean_base = function() return false end
     fresh_gesture(session)
     t.eq(true, session.pointer.overlay_fallback, "an unrestorable base falls back for the gesture")
     t.eq(nil, requests[1].capture, "and captures the frame instead of overlaying it")
     callbacks[1]({ kind = "selection", ok = true, text = "abc", collapsed = false }, nil)
     interaction.forget_selection(session)
-    controller.restore_clean_base = original_restore
+    presenter.restore_clean_base = original_restore
 
-    controller.display_selection_overlay = original_overlay_display
+    presenter.display_selection_overlay = original_overlay_display
     process.request = original_request
   end
 
-  controller.display_interact_result = original_display
+  presenter.display_interact_result = original_display
   config.reset()
 end
