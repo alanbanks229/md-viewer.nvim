@@ -20,6 +20,11 @@ vim.opt.shadafile = "NONE"
 local t = dofile(root .. "/tests/lua/harness.lua")
 local world = dofile(root .. "/tests/lua/world.lua")
 local shape = dofile(root .. "/tests/lua/session_shape.lua")
+local browser = dofile(root .. "/tests/lua/browser.lua")
+
+-- Cases reach the browser question through `t`, so the answer is discovered
+-- once per run rather than once per case.
+function t.browser() return browser.available(root) end
 
 require("md-viewer.config").reset()
 

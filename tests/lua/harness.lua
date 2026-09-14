@@ -1,4 +1,4 @@
-local M = { count = 0, failures = {} }
+local M = { count = 0, failures = {}, skips = {} }
 
 ---Called before every assertion, when the runner installs one. The session
 ---shape contract uses it to sample the live sessions: a field that exists only
@@ -34,6 +34,17 @@ function M.near(expected, actual, tolerance, label)
   end
 end
 
+---Record that a block of assertions did not run, and why. A skip is not a
+---pass: it is printed after the count so a run that quietly covered less than
+---the last one says so.
+function M.skip(what, reason)
+  -- Sample here too: a skip is where a case stops, and the session it was
+  -- about is still on the table at this point but will not be by the next
+  -- assertion in some later case.
+  if M.on_assert then M.on_assert() end
+  M.skips[#M.skips + 1] = ("%s -- %s"):format(what, reason)
+end
+
 ---`filter` is MD_VIEWER_TEST_FILTER, when one was in effect. It is printed
 ---so that a green partial run cannot be read as a green suite.
 function M.finish(filter)
@@ -42,6 +53,9 @@ function M.finish(filter)
     print(("md-viewer Lua tests: %d assertions passed (filter %q -- NOT the full suite)"):format(M.count, filter))
   else
     print(("md-viewer Lua tests: %d assertions passed"):format(M.count))
+  end
+  for _, skip in ipairs(M.skips) do
+    print("  skipped: " .. skip)
   end
 end
 

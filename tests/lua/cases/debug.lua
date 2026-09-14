@@ -42,7 +42,18 @@ return function(t)
 
   -- Round-trips to the renderer (a cold Chromium launch on a loaded CI runner
   -- is not fast) so the Chromium path and launch result are answered for by
-  -- the subprocess rather than guessed at locally.
+  -- the subprocess rather than guessed at locally. That is also why everything
+  -- below is skipped without one: there is no report to assert about, and the
+  -- alternative is a 30-second wait ending in a failure about the machine
+  -- rather than about the code.
+  local executable, no_browser = t.browser()
+  if not executable then
+    t.skip(":MdViewerDebug's renderer round-trip", no_browser)
+    controller.close(source)
+    require("md-viewer.config").reset()
+    return
+  end
+
   vim.cmd("MdViewerDebug")
   vim.wait(30000, function() return vim.bo.filetype == "md-viewer-debug" end, 20)
   t.eq("md-viewer-debug", vim.bo.filetype, "MdViewerDebug renders its snapshot buffer")

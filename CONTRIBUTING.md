@@ -46,6 +46,11 @@ load-bearing in at least one place — and a filter matching nothing fails
 rather than passing quietly. A filtered run says so in its summary line; only
 an unfiltered one is the suite.
 
+Both suites skip what needs a browser when none is present: the Lua suite asks
+the renderer's own discovery, the same question the Node suite asks, and prints
+what it skipped after the assertion count. `MD_VIEWER_TEST_NO_BROWSER=1`
+forces that path so you can check it on a machine that does have one.
+
 Cases run in one shared Neovim, so each must hand the world back as it found
 it: no leaked windows or tabpages, no pane left in `state.panes()`, no second
 registration of the `md-viewer` autocmd group, and the configuration
