@@ -54,7 +54,7 @@ end
 ---suppression. Calling this `must_hide` names the broader meaning that the old
 ---`update_occlusion` boolean left implicit.
 function M.must_hide(session)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   -- preview.occlusion only examines windows on the preview's own tabpage.
   -- A hidden tab retains plausible geometry, so detect it independently before
   -- any placement can be sent over the currently visible tabpage.
@@ -77,14 +77,14 @@ local function local_mode(session) return presenter.local_mode(session) end
 ---change. `force` redraws even an identical placement for terminal-owned UI
 ---transitions such as CmdlineEnter and CmdlineLeave.
 function M.reconcile_placement(session, force)
-  if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
+  if not session.backend.places_raw_images or not session.image_id or session.ui_suppressed then return end
   -- In local mode, the id is only a reference until the helper confirms the
   -- upload. Addressing it earlier asks the terminal to move pixels not yet up.
   if local_mode(session) and not session.local_frame_confirmed then return end
   -- A hidden tabpage keeps reporting geometry, but using it would place the
   -- image over the tabpage the user is actually viewing.
   if not coordinates.window_is_displayed(session.preview_win) then return end
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   if force or not coordinates.same(session.last_placement, placement) then
     local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
     if not ok then
@@ -116,12 +116,12 @@ function M.reconcile_resident(session)
     host.draw_resident(session)
     return
   end
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   if not coordinates.same(session.last_placement, placement) then host.draw_resident(session) end
 end
 
 local function reconcile_session(session, idle_only)
-  if session.backend.name == "cells" then return end
+  if not session.backend.is_graphical then return end
   if M.must_hide(session) then
     M.clear_image(session)
   elseif session.image_id then
@@ -141,20 +141,20 @@ function M.reconcile() M.each_session(reconcile_session) end
 
 function M.clear_raw_sessions()
   M.each_session(function(session)
-    if session.backend.name == "kitty_raw" then M.clear_image(session) end
+    if session.backend.needs_ui_poll then M.clear_image(session) end
   end)
 end
 
 function M.refresh_raw_sessions()
   M.each_session(function(session)
-    if session.backend.name ~= "kitty_raw" or session.ui_suppressed then return end
+    if not session.backend.needs_ui_poll or session.ui_suppressed then return end
     if host.show_cached(session) then return end
     if not M.must_hide(session) then host.schedule(session, 0) end
   end)
 end
 
 function M.start_ui_poll(session)
-  if session.backend.name ~= "kitty_raw" then return end
+  if not session.backend.needs_ui_poll then return end
   local interval = math.max(0, math.floor(config.get().image.ui_poll_ms or 50))
   if interval == 0 or session.ui_poll_timer then return end
   local timer = vim.uv.new_timer()

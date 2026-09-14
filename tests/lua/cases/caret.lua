@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local coords = require("md-viewer.coordinates")
@@ -21,7 +22,7 @@ return function(t)
   -- The caret exists only on a graphical backend: `cells` writes real document
   -- text into the preview buffer, and a caret over that would be addressing
   -- text rather than an image.
-  session.backend = { name = "kitty_raw" }
+  session.backend = backends.capabilities("kitty_raw")
   preview.reset_surface(session)
   session.renderer_revision = "1:0"
   session.viewport_width_px = 800
@@ -30,7 +31,7 @@ return function(t)
   session.document_height_px = 10000
   session.scroll_y = 0
   session.applied_scroll_y = 0
-  session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+  session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
 
   local original_schedule_scroll = controller.schedule_scroll
   controller.schedule_scroll = function() end
@@ -355,8 +356,7 @@ return function(t)
   -- ---------------------------------------------------------------------
   do
     local overlay_rects = nil
-    session.backend = {
-      name = "kitty_raw",
+    session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       overlay_supported = function() return true end,
       overlay_apply = function(_, _, rects)
         overlay_rects = rects
@@ -364,7 +364,7 @@ return function(t)
       end,
       overlay_clear = function() end,
       clear = function() return true end,
-    }
+    })
     session.image_id = 7
     local original_guicursor = vim.o.guicursor
     preview.restore_cursor()
@@ -455,7 +455,8 @@ return function(t)
     -- there the terminal's own cursor *is* the caret -- which makes it the one
     -- that has to keep up with a scroll, since no overlay draw will park it.
     preview.restore_cursor()
-    session.backend = { name = "kitty_raw", clear = function() return true end }
+    session.backend =
+      vim.tbl_extend("force", backends.capabilities("kitty_raw"), { clear = function() return true end })
     caret.set_rect(session, { x = 42, y = 500, width = 19, height = 38 }, 0)
     local parked_bare = vim.api.nvim_win_get_cursor(session.preview_win)
     session.frame_scroll_y = 400
@@ -467,13 +468,12 @@ return function(t)
     )
     session.frame_scroll_y = 0
 
-    session.backend = {
-      name = "kitty_raw",
+    session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       overlay_supported = function() return true end,
       overlay_apply = function() return 42, { rects = 1 } end,
       overlay_clear = function() end,
       clear = function() return true end,
-    }
+    })
   end
 
   -- ---------------------------------------------------------------------

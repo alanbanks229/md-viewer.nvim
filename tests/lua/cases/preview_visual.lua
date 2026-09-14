@@ -11,6 +11,7 @@
 ---in. It was reported as the preview blinking to a blank pane with a blue
 ---rectangle on it; the rectangle was V-BLOCK.
 return function(t)
+  local backends = require("md-viewer.backends")
   local controller = require("md-viewer.controller")
   local state = require("md-viewer.state")
   local config = require("md-viewer.config")
@@ -34,13 +35,12 @@ return function(t)
 
   -- With a graphical backend the guard fires and puts the preview back in
   -- normal mode, whichever visual flavour it was pushed into.
-  session.backend = {
-    name = "kitty_raw",
+  session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
-  }
+  })
   for _, key in ipairs({ "v", "V", "\22" }) do
     vim.api.nvim_set_current_win(session.preview_win)
     vim.api.nvim_feedkeys(key, "x", false)

@@ -50,7 +50,7 @@ function M.clear_selection_overlay(session) clear_selection_overlay(session) end
 local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
   preview.stop_loading(session)
   preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   session.preview_width_cells = placement.width
   session.preview_height_cells = placement.height
   local image_started = vim.uv.hrtime()
@@ -145,7 +145,7 @@ end
 ---is attached and the backend can speak markers; every local branch in this
 ---file asks this one question.
 local function local_mode(session)
-  return localrender.active() and session.backend and session.backend.name == "kitty_raw"
+  return localrender.active() and session.backend and session.backend.supports_local_markers
 end
 
 ---`apply_image` for a frame whose pixels live beside the terminal: emit one
@@ -171,7 +171,7 @@ end
 ---same never-soft-at-rest rule `render.scroll_scale` documents.
 local function apply_surface(session, revision, scroll_y, viewport, opts)
   preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   session.preview_width_cells = placement.width
   session.preview_height_cells = placement.height
   local scale = opts and opts.scale or viewport.deviceScaleFactor or 1
@@ -242,7 +242,7 @@ end
 ---caller falls back to captured frames for that gesture.
 function M.restore_clean_base(session)
   if not session.base_selection_painted then return true end
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   if not session.clean_image_bytes then return false end
   if math.abs((session.clean_image_scroll_y or 0) - (session.applied_scroll_y or 0)) > 0.5 then return false end
   if session.clean_image_revision ~= session.renderer_revision then return false end
@@ -266,7 +266,7 @@ end
 ---no base image, or a backend without overlay support. The caller falls back
 ---to the captured-frame path -- correct and slow beats fast and wrong.
 function M.display_selection_overlay(session, result)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   local backend = session.backend
   if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
   -- "Is there a screen to composite over", not "is there a frame this session
@@ -354,7 +354,7 @@ end
 ---there is no caret to draw at all; a caret that is merely off screen keeps it
 ---hidden. See `preview.hide_cursor`, and the nil branch below.
 function M.display_caret_overlay(session, tint, sheet_png)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   local backend = session.backend
   if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
   -- Either model's screen will do; see `display_selection_overlay`. Without
@@ -427,7 +427,7 @@ end
 ---put it on. Called from every path that can make a caret visible -- focusing
 ---the preview, and the first frame landing in an already-focused one.
 function M.place_caret(session)
-  if not valid(session) or session.backend.name == "cells" then return end
+  if not valid(session) or not session.backend.is_graphical then return end
   if not config.get().interaction.enabled then return end
   -- Only for the preview the reader is actually in. A caret in an unfocused
   -- preview is one nobody can see, and placing it costs a round trip -- which
@@ -463,7 +463,7 @@ end
 ---is the fetch half `controller.refresh`'s render/capture path gets from
 ---`renderer.lua`; the display half is `apply_image`, shared verbatim.
 function M.display_interact_result(session, result)
-  if not valid(session) or session.backend.name == "cells" then return end
+  if not valid(session) or not session.backend.is_graphical then return end
   if type(result) ~= "table" then return end
   if local_mode(session) then
     -- No PNG crossed the socket and none was captured. The mutation lives in

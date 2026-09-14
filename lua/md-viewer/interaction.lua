@@ -124,7 +124,7 @@ end
 ---Everything `M.locate` needs besides the window/point check itself.
 local function interaction_ready(session)
   if not config.get().interaction.enabled then return false end
-  if not (session.backend and session.backend.name ~= "cells") then return false end
+  if not (session.backend and session.backend.is_graphical) then return false end
   if not session.last_placement then return false end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return false end
   return true

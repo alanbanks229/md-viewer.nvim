@@ -1,6 +1,7 @@
 -- Pane-scoped preview history is independent of both the editable source
 -- window and the set of currently open preview tabs.
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local interaction = require("md-viewer.interaction")
@@ -21,13 +22,12 @@ return function(t)
   local document_a = assert(controller.open("right"))
   local pane, source_win = document_a.pane, document_a.source_win
   local source_buf = vim.api.nvim_win_get_buf(source_win)
-  local backend = {
-    name = "kitty_raw",
+  local backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
-  }
+  })
   document_a.backend = backend
   local original_refresh = controller.refresh
   controller.refresh = function() end

@@ -101,7 +101,7 @@ interaction.set_host({
 ---branch re-uploaded a full-viewport frame the resident compositor knows nothing
 ---about, and left it z-fighting the bands by image id.
 local function show_cached(session)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   if must_hide(session) then
     clear_image(session)
     return false
@@ -125,7 +125,7 @@ local function show_cached(session)
   if not session.last_image_bytes then return false end
   preview.stop_loading(session)
   preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   local ok, image_id, image_err = pcall(session.backend.show, session.last_image_bytes, placement)
   if not ok or not image_id then
     session.render_failed = true
@@ -173,7 +173,7 @@ function M.refresh(session, render_options)
   session = session or current_session()
   if not valid(session) then return end
   if explicit then session.render_epoch = (session.render_epoch or 0) + 1 end
-  if session.backend.name == "cells" then
+  if not session.backend.is_graphical then
     session.backend.render(session.preview_buf, markdown(session))
     session.dirty = false
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
@@ -195,7 +195,11 @@ function M.refresh(session, render_options)
   -- opening are exactly when this fires). Both attach outcomes re-render:
   -- success through the "attached" listener, failure through M.open's
   -- continuation.
-  if localrender.enabled() and session.backend.name == "kitty_raw" and localrender.status().phase == "connecting" then
+  if
+    localrender.enabled()
+    and session.backend.supports_local_markers
+    and localrender.status().phase == "connecting"
+  then
     session.refresh_deferred = true
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
@@ -220,7 +224,7 @@ function M.refresh(session, render_options)
     -- is computed here, so pixels never wait for any response. The helper
     -- holds the marker until its own render resolves the reference.
     local revision = renderer.content_revision(session)
-    local viewport = preview.viewport(session.preview_win, session.backend.name)
+    local viewport = preview.viewport(session.preview_win, session.backend)
     apply_surface(session, revision, session.scroll_y or 0, viewport)
   end
   renderer.request(session, markdown(session), render_options, function(result, err, stale)
@@ -974,13 +978,13 @@ function M.open(position)
   -- `preview.open` cannot do it itself, since the placement it measures needs
   -- the window handle this line is what assigns.
   preview.reset_surface(session)
-  if backend.name ~= "cells" then
+  if backend.is_graphical then
     preview.start_loading(session)
     navigation.attach(session, M.navigate)
     mouse.attach(M.navigate)
   end
   if not adopt_win then vim.api.nvim_set_current_win(source_win) end
-  if localrender.enabled() and backend.name == "kitty_raw" and not localrender.active() then
+  if localrender.enabled() and backend.supports_local_markers and not localrender.active() then
     -- The first render waits for the attach to settle rather than racing it:
     -- losing the race would spawn this host's Chromium and ship one full PNG
     -- over the very link local mode exists to spare. On success the
@@ -995,7 +999,7 @@ function M.open(position)
       -- Every raw session, not just this one: refreshes deferred while the
       -- attach was settling have no other continuation on the failure path.
       each_session(function(deferred)
-        if deferred.backend.name == "kitty_raw" then M.refresh(deferred) end
+        if deferred.backend.supports_local_markers then M.refresh(deferred) end
       end)
     end)
   else
@@ -1021,7 +1025,7 @@ function M.retarget(session, new_buf, record, restore_scroll, pending_obsidian_a
     target.backend, target.backend_reason = session.backend, session.backend_reason
     target.render_path, target.render_path_reason = session.render_path, session.render_path_reason
     target.preview_buf = preview.create_buffer(target)
-    if target.backend.name ~= "cells" then navigation.attach(target, M.navigate) end
+    if target.backend.is_graphical then navigation.attach(target, M.navigate) end
   end
   if type(restore_scroll) == "number" then
     target.scroll_y = restore_scroll
@@ -1074,7 +1078,7 @@ function M.activate_document(session, opts)
   if opts.align_history ~= false then history.align(session) end
   preview.reset_surface(session)
   preview.update_title(session)
-  if session.backend and session.backend.name ~= "cells" then preview.start_loading(session) end
+  if session.backend and session.backend.is_graphical then preview.start_loading(session) end
   M.refresh(session)
   if start_ui_poll then start_ui_poll(session) end
   return true
@@ -1195,7 +1199,7 @@ end
 ---the manual-scroll hold and the source-sync opt-in are stated once.
 ---Returns whether the position actually changed.
 function M.scroll_to(session, next_scroll)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   local cfg = config.get()
   next_scroll = math.max(0, math.min(scroll_maximum(session), next_scroll))
   if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return false end
@@ -1208,12 +1212,12 @@ function M.scroll_to(session, next_scroll)
 end
 
 function M.scroll_by(session, delta_px)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   return M.scroll_to(session, (session.scroll_y or 0) + delta_px)
 end
 
 function M.navigate(session, action, count)
-  if not valid(session) or session.backend.name == "cells" then return end
+  if not valid(session) or not session.backend.is_graphical then return end
   local cfg = config.get()
   count = math.max(1, math.floor(count or 1))
   local maximum = scroll_maximum(session)
@@ -1385,7 +1389,7 @@ function M.setup_autocmds()
   -- direct frame each session had up.
   localrender.on("attached", function()
     each_session(function(session)
-      if session.backend.name == "kitty_raw" then M.schedule(session, 0) end
+      if session.backend.supports_local_markers then M.schedule(session, 0) end
     end)
   end)
   -- The helper died. Injected surfaces died with it (its teardown deletes
@@ -1394,7 +1398,7 @@ function M.setup_autocmds()
   -- put back in charge -- presenter included.
   localrender.on("demoted", function()
     each_session(function(session)
-      if session.backend.name == "kitty_raw" then
+      if session.backend.supports_local_markers then
         clear_image(session)
         M.schedule(session, 0)
       end
@@ -1430,7 +1434,7 @@ function M.setup_autocmds()
     callback = function(args)
       local session = state.from_preview(args.buf)
       if not session or session.closed then return end
-      if not (session.backend and session.backend.name ~= "cells") then return end
+      if not (session.backend and session.backend.is_graphical) then return end
       -- One escape per tick. Without this a stream of drag events -- each
       -- re-entering Visual as fast as the escape leaves it -- would spin.
       if session.leaving_visual then return end
@@ -1615,7 +1619,7 @@ function M.setup_autocmds()
     group = group,
     callback = function()
       each_session(function(session)
-        if session.backend.name == "kitty_raw" then session.ui_suppressed = true end
+        if session.backend.needs_ui_poll then session.ui_suppressed = true end
       end)
       clear_raw_sessions()
     end,
@@ -1625,7 +1629,7 @@ function M.setup_autocmds()
     callback = function(args)
       if args.event ~= "WinClosed" then
         each_session(function(session)
-          if session.backend.name == "kitty_raw" then session.ui_suppressed = false end
+          if session.backend.needs_ui_poll then session.ui_suppressed = false end
         end)
       end
       vim.schedule(function()

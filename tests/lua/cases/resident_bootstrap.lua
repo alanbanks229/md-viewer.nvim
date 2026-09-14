@@ -12,6 +12,7 @@
 -- Nothing here spawns a renderer: `renderer.request` is stubbed, so a chunk
 -- capture is whatever this file decides it is, including a slow or a lost one.
 return function(t)
+  local backends = require("md-viewer.backends")
   local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
@@ -46,8 +47,7 @@ return function(t)
   end
 
   local function stub_backend()
-    return {
-      name = "kitty_raw",
+    return vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       clear = function(id)
         log[#log + 1] = "clear:" .. tostring(id)
         return true
@@ -76,7 +76,7 @@ return function(t)
       retire = function() return 0 end,
       overlay_clear = function(set) log[#log + 1] = "overlay_clear:" .. tostring(set) end,
       overlay_supported = function() return true end,
-    }
+    })
   end
 
   -- A session on the resident path with a real chunk plan and no chunks yet:
@@ -94,7 +94,7 @@ return function(t)
     session.render_path = "resident"
     session.render_path_reason = "forced by tests"
     session.renderer_revision = "1:0"
-    local placement = preview.placement(session.preview_win, "kitty_raw")
+    local placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     local rows = placement.height
     local plan = assert(resident.chunk_plan({
       document_h = 30 * rows,
@@ -134,7 +134,7 @@ return function(t)
     session.image_id = 5
     session.frame_scroll_y = 0
     session.frame_revision = "1:0"
-    session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+    session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
 
     controller.draw_resident(session)
 
@@ -191,7 +191,7 @@ return function(t)
     session.image_id = 5
     session.frame_scroll_y = 0
     session.frame_revision = "1:0"
-    session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+    session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     session.resident.images[1] = 900
     session.resident.captured = 1
     session.resident.queue = {}
@@ -242,7 +242,7 @@ return function(t)
     -- resident session does not have, so the document went on compositing
     -- underneath the float.
     log = {}
-    local float_placement = preview.placement(session.preview_win, "kitty_raw")
+    local float_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     local float_buf = vim.api.nvim_create_buf(false, true)
     local float_win = vim.api.nvim_open_win(float_buf, false, {
       relative = "editor",
@@ -440,7 +440,11 @@ return function(t)
   do
     local linkrate = require("md-viewer.linkrate")
     -- The terminal half, granted. Every assertion below varies only the link.
-    local pannable = { name = "kitty_raw", resident_pan_supported = function() return true end }
+    local pannable = vim.tbl_extend(
+      "force",
+      backends.capabilities("kitty_raw"),
+      { resident_pan_supported = function() return true end }
+    )
     local function path_at(rate, resident)
       config.setup({ image = { backend = "cells", resident = resident }, render = { ssh_link_bytes_per_sec = rate } })
       config.get().render.ssh_link_bytes_per_sec = rate
@@ -496,10 +500,9 @@ return function(t)
 
     -- The terminal still gets the first and final word: a refusal there is not
     -- a rate the reader could fix by measuring anything.
-    local refuses = {
-      name = "kitty_raw",
+    local refuses = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       resident_pan_supported = function() return false, "wezterm#7953: repeat placements leak" end,
-    }
+    })
     config.setup({
       image = { backend = "cells", resident = "on" },
       render = { ssh_link_bytes_per_sec = 1030000 },

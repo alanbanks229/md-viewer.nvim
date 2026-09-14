@@ -8,6 +8,7 @@
 -- mark every user render stale before it landed, which is the single most
 -- expensive mistake this module could make and the least visible.
 
+local backends = require("md-viewer.backends")
 local config = require("md-viewer.config")
 local cellpixels = require("md-viewer.cellpixels")
 local process = require("md-viewer.process")
@@ -80,8 +81,7 @@ return function(t)
   local uploads, uploaded_by_key, applied, cleared, freed = {}, {}, {}, 0, {}
   local native = { begins = {}, frames = {}, finishes = {}, supported = false, existing = false }
   local next_image_id = 500
-  local backend = {
-    name = "kitty_raw",
+  local backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     animation_supported = function() return true end,
     animation_native_supported = function() return native.supported end,
     animation_uploaded = function(key) return uploaded_by_key[key] end,
@@ -117,7 +117,7 @@ return function(t)
       native.finishes[#native.finishes + 1] = { key = key, loop = loop }
       return true
     end,
-  }
+  })
 
   local function make_session(geometry)
     return {
@@ -232,10 +232,14 @@ return function(t)
   t.eq(true, (animation._internal.permitted(session)), "a released pointer does not suppress animation")
   session.pointer = nil
 
-  t.eq(false, (animation._internal.permitted({ backend = { name = "cells" } })), "the text backend never animates")
   t.eq(
     false,
-    (animation._internal.permitted({ backend = { name = "nvim_img" } })),
+    (animation._internal.permitted({ backend = backends.capabilities("cells") })),
+    "the text backend never animates"
+  )
+  t.eq(
+    false,
+    (animation._internal.permitted({ backend = backends.capabilities("nvim_img") })),
     "nor does nvim_img, which exposes no sub-cell placement"
   )
 

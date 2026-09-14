@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local coords = require("md-viewer.coordinates")
   local preview = require("md-viewer.preview")
@@ -23,7 +24,7 @@ return function(t)
   t.eq(true, placement.winbar, "image placement accounts for preview winbar")
   t.ok(placement.row > placement.window_row, "image starts below preview winbar")
 
-  local raw_placement = preview.placement(session.preview_win, "kitty_raw")
+  local raw_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
   t.eq(placement.height - 1, raw_placement.height, "raw placement keeps one row above the statusline")
   t.eq(1, raw_placement.statusline_guard_cells, "raw placement reports its dynamic statusline guard")
   preview.start_loading(session)
@@ -45,8 +46,7 @@ return function(t)
   t.eq(nil, session.loading_win, "startup indicator window is cleaned up")
   local original_backend = session.backend
   local cleared_images, restored_images = 0, 0
-  session.backend = {
-    name = "kitty_raw",
+  session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function()
       cleared_images = cleared_images + 1
       return true
@@ -57,7 +57,7 @@ return function(t)
       return 88
     end,
     move = function(image_id) return image_id end,
-  }
+  })
   session.image_id = 77
   session.last_image_bytes = "cached-png"
   local float_buf = vim.api.nvim_create_buf(false, true)
@@ -91,7 +91,7 @@ return function(t)
     focusable = false,
   })
   t.eq(false, select(1, preview.occlusion(session.preview_win)), "non-focusable notifications do not blank the preview")
-  local passive_placement = preview.placement(session.preview_win, "kitty_raw")
+  local passive_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
   t.ok(#passive_placement.exclusions > 0, "non-focusable notification creates a raw-image cutout")
   local passive_rect = passive_placement.exclusions[1]
   t.eq(
@@ -240,7 +240,7 @@ return function(t)
   -- row at or past `placement.height`, so a surface even one row taller would
   -- give the caret a position that silently resolves to nothing.
   do
-    local placement = preview.placement(session.preview_win, session.backend.name)
+    local placement = preview.placement(session.preview_win, session.backend)
     local lines = vim.api.nvim_buf_get_lines(session.preview_buf, 0, -1, false)
     t.eq(placement.height, #lines, "the caret surface is exactly as tall as the placement")
     t.eq(placement.width, #lines[1], "and exactly as wide")
@@ -410,8 +410,7 @@ return function(t)
     vim.api.nvim_set_current_buf(source)
     local session = assert(controller.open("right"))
     local applied, cleared = {}, {}
-    session.backend = {
-      name = "kitty_raw",
+    session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       overlay_supported = function() return true end,
       overlay_needs_sheet = function() return false end,
       overlay_apply = function(set_id, image_id, rects, viewport, tint, sheet, placement)
@@ -428,7 +427,7 @@ return function(t)
       end,
       overlay_clear = function(set_id) cleared[#cleared + 1] = set_id end,
       clear = function() return true end,
-    }
+    })
     session.image_id = 7
     session.last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} }
     session.renderer_revision = "1:0"

@@ -1,4 +1,15 @@
-local M = { name = "cells" }
+-- No pixels at all: the "preview" is styled text in a real buffer, which is
+-- why every graphical concern in the plugin asks `is_graphical` before it does
+-- anything. See the flag matrix in backends/init.lua.
+local M = {
+  name = "cells",
+  is_graphical = false,
+  places_raw_images = false,
+  accepts_exclusions = false,
+  needs_statusline_guard = false,
+  needs_ui_poll = false,
+  supports_local_markers = false,
+}
 local ns = vim.api.nvim_create_namespace("md-viewer_cells")
 
 function M.detect() return true, "terminal-native fallback is always available" end

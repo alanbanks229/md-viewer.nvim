@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local coords = require("md-viewer.coordinates")
   local preview = require("md-viewer.preview")
@@ -345,8 +346,8 @@ return function(t)
   vim.cmd("rightbelow vsplit")
   local guard_win = vim.api.nvim_get_current_win()
   vim.o.laststatus = 2
-  local plain_placement = preview.placement(guard_win, "nvim_img")
-  local raw_placement = preview.placement(guard_win, "kitty_raw")
+  local plain_placement = preview.placement(guard_win, backends.capabilities("nvim_img"))
+  local raw_placement = preview.placement(guard_win, backends.capabilities("kitty_raw"))
   t.eq(coords.for_window(guard_win).height, plain_placement.height, "non-raw backends get no statusline guard")
   t.eq(
     plain_placement.height - cfg.image.raw_statusline_guard_cells,

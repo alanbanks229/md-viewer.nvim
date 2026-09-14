@@ -203,7 +203,7 @@ function M.request(session, markdown, options, callback)
   local cfg = config.get()
   session.request_serial = session.request_serial + 1
   local serial = session.request_serial
-  local viewport = preview.viewport(session.preview_win, session.backend and session.backend.name)
+  local viewport = preview.viewport(session.preview_win, session.backend)
   -- One root, one implementation. This used to compute its own
   -- (`cfg.security.document_root or base_dir(...)`), which skipped the
   -- normalization and the project-root detection that the link path gets --
@@ -211,7 +211,7 @@ function M.request(session, markdown, options, callback)
   local root =
     security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
   local content_revision = M.content_revision(session)
-  if localrender.active() and session.backend and session.backend.name == "kitty_raw" then
+  if localrender.active() and session.backend and session.backend.supports_local_markers then
     return request_local(session, markdown, options, callback, {
       cfg = cfg,
       serial = serial,

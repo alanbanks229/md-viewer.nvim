@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local interaction = require("md-viewer.interaction")
   local process = require("md-viewer.process")
@@ -42,7 +43,7 @@ return function(t)
       viewport_width_px = 800,
       viewport_height_render_px = 600,
       last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} },
-      backend = { name = "kitty_raw" },
+      backend = backends.capabilities("kitty_raw"),
       closed = false,
     }
   end
@@ -907,12 +908,11 @@ return function(t)
     local function overlay_session()
       local session = fake_session()
       session.image_id = 7
-      session.backend = {
-        name = "kitty_raw",
+      session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
         overlay_supported = function() return true end,
         overlay_apply = function() end,
         overlay_needs_sheet = function() return needs_sheet end,
-      }
+      })
       return session
     end
 

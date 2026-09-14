@@ -3,6 +3,7 @@
 ---line-number overlay and the progress component a statusline integration may
 ---choose to render.
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local coordinates = require("md-viewer.coordinates")
   local preview = require("md-viewer.preview")
@@ -16,7 +17,7 @@ return function(t)
   vim.bo[source].filetype = "markdown"
   vim.api.nvim_buf_set_lines(source, 0, -1, false, { "# One", "", "body" })
   local session = assert(controller.open("right"))
-  session.backend = { name = "kitty_raw" }
+  session.backend = backends.capabilities("kitty_raw")
   preview.reset_surface(session)
   vim.api.nvim_set_current_win(session.preview_win)
 
@@ -67,7 +68,7 @@ return function(t)
   vim.cmd("MdViewerToggleRelativeLineNumbers")
   t.eq("off", config.get().preview.line_numbers, "repeating the visible relative mode turns numbering off")
 
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   session.last_placement = placement
   local cell_height = session.viewport_height_render_px / placement.height
   session.latest_lines = { { topPx = 1, bottomPx = cell_height * 2 + 1 } }
@@ -117,7 +118,7 @@ return function(t)
   t.eq("1", ordered[1][2], "relative mode falls back to absolute labels before a caret exists")
   t.eq("2", ordered[2][2], "the no-caret fallback remains sequential")
 
-  session.backend = { name = "cells" }
+  session.backend = backends.capabilities("cells")
   config.get().preview.line_numbers = "relative"
   preview.update_line_numbers(session)
   t.eq(true, vim.wo[session.preview_win].number, "cells relative mode enables the number column")
@@ -127,7 +128,7 @@ return function(t)
   t.eq(false, vim.wo[session.preview_win].number, "cells off mode clears the number column")
   t.eq(false, vim.wo[session.preview_win].relativenumber, "cells off mode clears relative numbers")
 
-  session.backend = { name = "kitty_raw" }
+  session.backend = backends.capabilities("kitty_raw")
   session.last_placement = placement
   session.latest_lines = {}
   for index = 1, 10 do
@@ -171,7 +172,7 @@ return function(t)
   t.eq(original_statusline, vim.wo[session.preview_win].statusline, "progress updates never replace the statusline")
   vim.api.nvim_del_augroup_by_id(event_group)
 
-  session.backend = { name = "cells" }
+  session.backend = backends.capabilities("cells")
   t.eq(
     nil,
     preview.statusline_progress(session.preview_buf),

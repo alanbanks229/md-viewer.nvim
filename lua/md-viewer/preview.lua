@@ -187,7 +187,7 @@ end
 ---of silently rendering degraded output that looks like a bug. Explicitly
 ---requesting `image.backend = "cells"` is not a fallback, so it stays quiet.
 local function fallback_notice(session)
-  if not session.backend or session.backend.name ~= "cells" then return nil end
+  if not session.backend or session.backend.is_graphical then return nil end
   if config.get().image.backend ~= "auto" then return nil end
   return "%#WarningMsg#⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)%*"
 end
@@ -392,7 +392,7 @@ end
 ---fall back to its ordinary component.
 function M.statusline_progress(buf)
   local session = state.from_preview(buf or vim.api.nvim_get_current_buf())
-  if not session or not session.backend or session.backend.name == "cells" then return nil end
+  if not session or not session.backend or not session.backend.is_graphical then return nil end
   return progress_text(session)
 end
 
@@ -400,7 +400,7 @@ end
 ---cached so a run of motions within one percentage does not churn a global
 ---statusline renderer such as Lualine.
 function M.update_progress(session)
-  if not session or not session.backend or session.backend.name == "cells" then return end
+  if not session or not session.backend or not session.backend.is_graphical then return end
   local text = progress_text(session)
   if text == session.last_progress_text then return end
   session.last_progress_text = text
@@ -425,7 +425,7 @@ function M.update_line_numbers(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
   vim.api.nvim_buf_clear_namespace(session.preview_buf, line_number_ns, 0, -1)
   local mode = config.get().preview.line_numbers
-  if session.backend and session.backend.name == "cells" then
+  if session.backend and not session.backend.is_graphical then
     if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
       vim.wo[session.preview_win].number = mode ~= "off"
       vim.wo[session.preview_win].relativenumber = mode == "relative"
@@ -437,7 +437,7 @@ function M.update_line_numbers(session)
   vim.api.nvim_set_hl(0, "MdViewerCurrentLineNumber", { link = "CursorLineNr", default = true })
   local placement = session.last_placement
   if not placement and session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
-    placement = M.placement(session.preview_win, session.backend and session.backend.name)
+    placement = M.placement(session.preview_win, session.backend)
   end
   if not placement or placement.height <= 0 then return end
   local viewport_height = session.viewport_height_render_px or 0
@@ -555,7 +555,7 @@ local function configure_window(win, session)
     apply_tab_highlights()
     vim.wo[win].winbar = title_text(session)
   end
-  if session.backend and session.backend.name == "cells" then
+  if session.backend and not session.backend.is_graphical then
     vim.wo[win].number = cfg.preview.line_numbers ~= "off"
     vim.wo[win].relativenumber = cfg.preview.line_numbers == "relative"
   end
@@ -650,21 +650,26 @@ function M.restore_cursor()
   saved_guicursor = nil
 end
 
-function M.placement(win, backend_name)
+---The geometry an image is drawn into. `backend` is the session's backend
+---table; nil where the caller has none, which yields the plain window
+---rectangle without either raw adjustment below. It is the table rather than
+---the name because the two adjustments answer to two different capabilities:
+---a backend can want the statusline row back without accepting exclusions.
+function M.placement(win, backend)
   local value = coordinates.for_window(win)
-  if backend_name == "kitty_raw" and value.statusline then
+  if backend and backend.needs_statusline_guard and value.statusline then
     local guard = math.max(0, math.floor(config.get().image.raw_statusline_guard_cells or 1))
     guard = math.min(guard, math.max(0, value.height - 1))
     value.height = value.height - guard
     value.statusline_guard_cells = guard
   end
-  if backend_name == "kitty_raw" then
+  if backend and backend.accepts_exclusions then
     value.exclusions = coordinates.passive_overlays(value, win, config.get().image.raw_overlay_bleed_cells)
   end
   return value
 end
 
-function M.viewport(win, backend_name) return coordinates.viewport(M.placement(win, backend_name), config.get().render) end
+function M.viewport(win, backend) return coordinates.viewport(M.placement(win, backend), config.get().render) end
 
 function M.occlusion(win)
   local overlaps = coordinates.overlapping_floats(M.placement(win), win)
@@ -682,9 +687,8 @@ end
 ---content" is spelled everywhere downstream.
 function M.surface_size(session)
   if not (session.preview_win and vim.api.nvim_win_is_valid(session.preview_win)) then return nil end
-  local backend_name = session.backend and session.backend.name
-  if backend_name == "cells" then return nil end
-  local placement = M.placement(session.preview_win, backend_name)
+  if session.backend and not session.backend.is_graphical then return nil end
+  local placement = M.placement(session.preview_win, session.backend)
   return math.max(1, placement.height), math.max(1, placement.width)
 end
 
@@ -707,7 +711,7 @@ end
 ---a caret.
 function M.reset_surface(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
-  if session.backend and session.backend.name == "cells" then return end
+  if session.backend and not session.backend.is_graphical then return end
   local rows, columns = M.surface_size(session)
   if not rows then return end
   local blank = string.rep(" ", columns)

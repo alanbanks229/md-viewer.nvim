@@ -106,7 +106,7 @@ local function permitted(session)
   local backend = session.backend
   -- `cells` has no pixels at all, and `nvim_img` exposes no sub-cell placement
   -- API to position a frame with.
-  if not backend or backend.name ~= "kitty_raw" then return false, "backend does not place raw images" end
+  if not backend or not backend.places_raw_images then return false, "backend does not place raw images" end
   if not backend.animation_supported then return false, "backend has no animation support" end
   local ok, reason = backend.animation_supported()
   if not ok then return false, reason end

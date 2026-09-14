@@ -1,4 +1,16 @@
-local M = { name = "nvim_img" }
+-- Neovim owns these images: it knows they are there, it reflows them with the
+-- window, and it exposes no sub-cell position to lay an overlay or an animation
+-- frame at. So the pixels are real, and none of the raw-placement duties are.
+-- See the flag matrix in backends/init.lua.
+local M = {
+  name = "nvim_img",
+  is_graphical = true,
+  places_raw_images = false,
+  accepts_exclusions = false,
+  needs_statusline_guard = false,
+  needs_ui_poll = false,
+  supports_local_markers = false,
+}
 local owned = {}
 local last_render_succeeded = false
 local terminal = require("md-viewer.terminal")

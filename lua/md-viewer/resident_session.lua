@@ -38,7 +38,7 @@ local function mbps(bytes_per_sec) return ("%.2f MB/s"):format(bytes_per_sec / 1
 function M.select_path(session)
   local cfg = config.get()
   if not session or not session.backend then return "cells", "no backend" end
-  if session.backend.name == "cells" then return "cells", "text-only backend" end
+  if not session.backend.is_graphical then return "cells", "text-only backend" end
   -- Ahead of every resident check: a locally rendered session scrolls by
   -- marker, and resident mode's whole reason to exist -- scrolling without
   -- pixels on the wire -- is already met better. Two scroll owners would be
@@ -133,7 +133,7 @@ end
 ---from. Returns false when no plan is possible, which is a demotion.
 function M.begin(session, meta)
   local cfg = config.get()
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   if not placement or (placement.height or 0) < 1 then return false, "no preview placement" end
 
   local scale = cfg.render.device_scale_factor
@@ -398,7 +398,7 @@ function M.draw(session, scroll_y)
     return "waiting", absent
   end
 
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   if not placement or placement.height ~= plan.rows then return "failed", "the pane changed size" end
 
   -- Every chunk landing during warm-up calls this again for the reader's

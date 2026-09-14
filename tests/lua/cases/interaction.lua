@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local interaction = require("md-viewer.interaction")
   local security = require("md-viewer.security")
@@ -22,7 +23,7 @@ return function(t)
       viewport_width_px = 800,
       viewport_height_render_px = 600,
       last_placement = { row = 0, col = 0, width = 80, height = 24, exclusions = {} },
-      backend = { name = "kitty_raw" },
+      backend = backends.capabilities("kitty_raw"),
     }
   end
 

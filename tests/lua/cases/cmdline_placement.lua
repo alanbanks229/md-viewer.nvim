@@ -3,6 +3,7 @@ return function(t)
   -- re-upload the raw Kitty image, leaving the preview blank for the
   -- duration. It should instead just re-place the already-uploaded image at
   -- its current geometry -- cheap, and never actually disappears.
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local occlusion = require("md-viewer.occlusion")
@@ -16,8 +17,7 @@ return function(t)
   local session = assert(controller.open("right"))
 
   local move_calls, clear_calls, show_calls = 0, 0, 0
-  session.backend = {
-    name = "kitty_raw",
+  session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function()
       clear_calls = clear_calls + 1
       return true
@@ -30,9 +30,9 @@ return function(t)
       move_calls = move_calls + 1
       return image_id
     end,
-  }
+  })
   session.image_id = 42
-  session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+  session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
 
   local visited = {}
   occlusion.each_session(function(active) visited[#visited + 1] = active end)

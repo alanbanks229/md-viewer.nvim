@@ -16,7 +16,7 @@ local wheels = {
 
 local function has_graphical_session()
   for _, session in pairs(state.all()) do
-    if not session.closed and session.backend and session.backend.name ~= "cells" then return true end
+    if not session.closed and session.backend and session.backend.is_graphical then return true end
   end
   return false
 end

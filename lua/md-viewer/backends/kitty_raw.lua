@@ -1,4 +1,15 @@
-local M = { name = "kitty_raw" }
+-- This backend writes the graphics escapes itself, so everything about what is
+-- on the glass is the plugin's to manage -- and every raw-placement flag is
+-- true here and nowhere else. See the flag matrix in backends/init.lua.
+local M = {
+  name = "kitty_raw",
+  is_graphical = true,
+  places_raw_images = true,
+  accepts_exclusions = true,
+  needs_statusline_guard = true,
+  needs_ui_poll = true,
+  supports_local_markers = true,
+}
 local owned = {}
 -- Image ids the last `M.compose` left placed. Tracked separately from `owned`
 -- because a chunk that scrolls off screen keeps its pixels and loses only its
