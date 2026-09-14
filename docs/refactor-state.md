@@ -76,11 +76,23 @@ Completed:
   failed child cannot strand it on a dead Unix socket. Two consecutive live
   runs passed, as did `make test` (3,359 Lua assertions and 350 Node tests).
 
+- Phase B, item 12: extracted the frame-on-glass block into `presenter.lua`:
+  base PNG application, local surface references, clean-base restoration,
+  selection and caret overlays, caret placement, and captured interaction
+  results. Controller retains compatibility aliases for its existing
+  low-level API and injects the validity/occlusion/teardown orchestration the
+  presenter must call. `interaction.lua` now has one top-level presenter
+  dependency and no controller require; controller injects its remaining
+  retarget/scroll callbacks, removing the module cycle. `make test` passed
+  with 3,359 Lua assertions and 350 Node tests, `stylua --check` passed, and
+  the mandatory live overlay driver passed against the real renderer and
+  Chromium.
+
 Next:
-- Continue Phase B with item 12 (`presenter.lua`) from docs/refactor-plan.md.
+- Continue Phase B with item 13 (`occlusion.lua`) from docs/refactor-plan.md.
 
 Last verified commit:
-- `75f31b0` (Phase B item 11 landed and verified).
+- `0d6ae36` (Phase B item 12 landed and verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
