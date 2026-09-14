@@ -58,14 +58,22 @@ Completed:
 - Phase A complete: all four items (7-10) landed. `make test` passed with
   3,355 Lua assertions and 350 Node tests, and `stylua --check` passed.
 
+- Phase B, item 11: extracted preview history into `history.lua`. Real preview
+  sessions now keep the history list, index, and boundary exclusively on the
+  pane; the five former pane/session synchronization sites were removed.
+  Pane-less tables retain a single-owner fallback for the public low-level API
+  and its bounded-history test. Diagnostics now read history through the new
+  module. `make test` passed with 3,358 Lua assertions and 350 Node tests, and
+  `stylua --check` passed.
+
 Next:
-- Begin Phase B with item 11 from docs/refactor-plan.md in the next session.
+- Continue Phase B with item 12 from docs/refactor-plan.md in this session.
 - Phase B item 12 (`presenter.lua`) requires `scripts/overlay/live/drive.lua`
   passing first (see Notes) — resolve or account for the "settle after y"
   timeout before attempting item 12.
 
 Last verified commit:
-- `1cb8d0a` (Phase A complete; items 7-10 verified).
+- `75f31b0` (Phase B item 11 landed and verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
