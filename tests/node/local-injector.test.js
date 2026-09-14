@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildMarkerPayload, parseMarkerPayload, wrapMarker, markerPrefix } from "../../renderer/src/local/markers.js";
+import {
+  buildMarkerPayload,
+  parseMarkerPayload,
+  wrapMarker,
+  markerPrefix,
+  MAX_MARKER_BYTES,
+} from "../../renderer/src/local/markers.js";
 import { uploadSequence, deleteImage, chunks, command } from "../../renderer/src/local/kitty-writer.js";
 import { Injector } from "../../renderer/src/local/injector.js";
 
@@ -65,6 +71,15 @@ test("marker payloads round-trip through build and parse", () => {
 test("a document id that needs escaping survives the round trip", () => {
   const built = payload({ seq: 1, doc: "buffer 5;weird\x1b" });
   assert.equal(parseMarkerPayload(built).doc, "buffer 5;weird\x1b");
+});
+
+test("marker builders and parsers enforce the shared full-wire size bound", () => {
+  assert.throws(
+    () => payload({ seq: 1, doc: "buffer-1", placements: Buffer.alloc(MAX_MARKER_BYTES, "P") }),
+    /marker is .* bytes; the bound is 65536/
+  );
+  assert.throws(() => parseMarkerPayload("A".repeat(MAX_MARKER_BYTES)), /the bound is 65536/);
+  assert.throws(() => wrapMarker("A".repeat(MAX_MARKER_BYTES)), /the bound is 65536/);
 });
 
 test("a ready surface transaction injects as one write: uploads, placements, deletions", () => {

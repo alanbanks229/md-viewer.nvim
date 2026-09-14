@@ -11,12 +11,15 @@ Completed:
 - Phase 0, item 3: separated overlay-sheet transactions from the injector's
   frame supersession lane and refused selection overlays until their local
   base frame is confirmed.
+- Phase 0, item 4: unified the local marker emitter, parser, and decoder on a
+  64 KiB full-wire limit and made the Lua emitter refuse oversized markers
+  before writing or counting them.
 
 Next:
-- Continue Phase 0 with item 4 (unify and enforce local marker size bounds).
+- Continue Phase 0 with item 5 (correct SECURITY.md's token transport claim).
 
 Last verified commit:
-- `88b7f56` (Phase 0, item 2); this commit is Phase 0, item 3.
+- `0e7ed52` (Phase 0, item 3); this commit is Phase 0, item 4.
 
 Notes:
 - Follow docs/refactor-plan.md in order.

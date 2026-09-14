@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { StreamParser, MARKER_CANDIDATE_MAX } from "../../renderer/src/local/stream-parser.js";
+import { StreamParser, MAX_MARKER_BYTES } from "../../renderer/src/local/stream-parser.js";
 
 // The property under test is the filter's whole safety argument: for any byte
 // stream containing no matched-token marker, the parser's output is the input,
@@ -124,12 +124,21 @@ test("a committed marker aborted by a new escape flushes verbatim as malformed",
 });
 
 test("a committed marker over the size cap flushes verbatim rather than buffering", () => {
-  const oversized = Buffer.from(`${ESC}_M${PREFIX}${"A".repeat(MARKER_CANDIDATE_MAX + 8)}${ST}`, "latin1");
+  const oversized = Buffer.from(`${ESC}_M${PREFIX}${"A".repeat(MAX_MARKER_BYTES + 8)}${ST}`, "latin1");
   const input = Buffer.concat([Buffer.from("a"), oversized, Buffer.from("b")]);
   const { out, markers, parser } = run(input);
   assert.deepEqual(out, input);
   assert.deepEqual(markers, []);
   assert.equal(parser.stats.malformedMarkers, 1);
+});
+
+test("a valid marker larger than the old 4096-byte parser cap is swallowed", () => {
+  const large = marker(`s=1;d=buffer-1;p=${"A".repeat(5000)};x=`);
+  assert.ok(large.length > 4096 && large.length < MAX_MARKER_BYTES);
+  const { out, markers, parser } = run(large);
+  assert.equal(out.length, 0);
+  assert.equal(markers.length, 1);
+  assert.equal(parser.stats.markerBytes, large.length);
 });
 
 test("flush releases a truncated candidate so teardown cannot eat bytes", () => {

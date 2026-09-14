@@ -41,7 +41,16 @@
 
 const DOC_SAFE = /^[A-Za-z0-9_-]+$/;
 const MAX_UPLOADS = 8;
-const MAX_BODY_BYTES = 64 * 1024;
+// Full wire size, including `ESC _ M` and the terminating `ESC \\`. Shared
+// with stream-parser.js and mirrored by kitty_marker.lua: the emitter must
+// never write a marker the filter would release verbatim to the terminal.
+const MARKER_FRAMING_BYTES = 5;
+const MAX_MARKER_BYTES = 64 * 1024;
+
+function assertMarkerSize(payload) {
+  const bytes = Buffer.byteLength(payload, "latin1") + MARKER_FRAMING_BYTES;
+  if (bytes > MAX_MARKER_BYTES) throw new Error(`marker is ${bytes} bytes; the bound is ${MAX_MARKER_BYTES}`);
+}
 
 export function markerPrefix(token) {
   return `v=1;t=${token};`;
@@ -105,10 +114,13 @@ export function buildMarkerPayload({
   for (const upload of uploads) parts.push(`${encodeUpload(upload)};`);
   parts.push(`p=${Buffer.from(placements).toString("base64")};`);
   parts.push(`x=${Buffer.from(deletions).toString("base64")}`);
-  return parts.join("");
+  const payload = parts.join("");
+  assertMarkerSize(payload);
+  return payload;
 }
 
 export function wrapMarker(payload) {
+  assertMarkerSize(payload);
   return Buffer.from(`\x1b_M${payload}\x1b\\`, "latin1");
 }
 
@@ -162,6 +174,7 @@ function parseUpload(value) {
 /// validates everything behind it). Throws on anything malformed -- the
 /// caller counts and drops, it never guesses.
 export function parseMarkerPayload(payload) {
+  assertMarkerSize(payload);
   const fields = payload.split(";");
   const out = { uploads: [], placements: null, deletions: null, token: null, seq: null, doc: null, kill: false };
   let sawVersion = false;
@@ -209,10 +222,7 @@ export function parseMarkerPayload(payload) {
   if (!sawVersion || out.token === null || out.seq === null || out.doc === null || out.placements === null || out.deletions === null) {
     throw new Error("marker is missing a required field");
   }
-  if (out.placements.length + out.deletions.length > MAX_BODY_BYTES) {
-    throw new Error("marker body exceeds the size bound");
-  }
   return out;
 }
 
-export { MAX_UPLOADS, MAX_BODY_BYTES };
+export { MAX_UPLOADS, MAX_MARKER_BYTES };

@@ -26,7 +26,7 @@
 
 local localrender = require("md-viewer.localrender")
 
-local M = { name = "kitty_marker" }
+local M = { name = "kitty_marker", MAX_MARKER_BYTES = 64 * 1024 }
 
 local doc_by_image = {}
 local stats = { markers = 0, marker_bytes = 0, direct_bytes_fallbacks = 0 }
@@ -93,6 +93,13 @@ function M.present(tx)
   parts[#parts + 1] = ("p=%s;"):format(vim.base64.encode(tx.place or ""))
   parts[#parts + 1] = ("x=%s"):format(vim.base64.encode(tx.delete or ""))
   local marker = "\27_M" .. table.concat(parts) .. "\27\\"
+  -- Cross-language contract with markers.js and stream-parser.js. Emitting
+  -- anything larger would make the helper flush our authenticated APC
+  -- verbatim to the terminal, where it is ignored as an unknown command,
+  -- while the counters below falsely claimed the transaction was delivered.
+  if #marker > M.MAX_MARKER_BYTES then
+    error(("md-viewer: local marker is %d bytes; limit is %d"):format(#marker, M.MAX_MARKER_BYTES))
+  end
   stats.markers = stats.markers + 1
   stats.marker_bytes = stats.marker_bytes + #marker
   vim.api.nvim_ui_send(marker)

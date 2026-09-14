@@ -204,6 +204,20 @@ return function(t)
     "markers stay small: " .. emitted.marker_bytes
   )
 
+  -- The emitter and helper share one full-wire cap. A marker beyond it must
+  -- fail before nvim_ui_send and before the emitted counters advance; the
+  -- helper would otherwise flush the APC verbatim and the frame would vanish
+  -- while diagnostics claimed it landed.
+  reset_writes()
+  local before_oversize = marker.stats()
+  local oversize_ok, oversize_err = pcall(marker.present, { place = ("P"):rep(marker.MAX_MARKER_BYTES) })
+  t.eq(false, oversize_ok, "an oversized marker is refused at its emitter")
+  t.ok(tostring(oversize_err):match("limit is 65536"), "the refusal names the shared limit")
+  t.eq(0, #writes, "no oversized APC reaches the terminal stream")
+  local after_oversize = marker.stats()
+  t.eq(before_oversize.markers, after_oversize.markers, "a refused marker is not counted as emitted")
+  t.eq(before_oversize.marker_bytes, after_oversize.marker_bytes, "nor are its bytes counted")
+
   -- Restoring the default presenter restores the direct bytes.
   raw.set_presenter(nil)
   reset_writes()
