@@ -22,11 +22,22 @@ Completed:
 - Phase 0 complete: all six items landed; `make test` passed with 3,355 Lua
   assertions and 350 Node tests, and StyLua passed.
 
+- Phase A, item 7: deleted confirmed-dead session fields `visual_columns`,
+  `obsolete_files`, `selection_render_in_flight`, `selection_render_pending`
+  (state.lua), and the empty-bodied `WinLeave` autocmd (controller.lua).
+  The plan's fifth sub-item, `debug.log`, was excluded: verification showed
+  `md-viewer.debug`'s `M.log` has 6 live callers in `animation.lua` and its
+  output is surfaced through `:MdViewerDebug`, asserted by
+  `tests/lua/cases/debug.lua` and `tests/lua/cases/interaction.lua:750` — the
+  plan's "no callers" premise was wrong for this one, so it was left in place
+  per instruction to stop rather than guess on a material contradiction.
+
 Next:
-- Begin Phase A with item 7 from docs/refactor-plan.md in the next session.
+- Continue Phase A with item 8 from docs/refactor-plan.md in the next session.
 
 Last verified commit:
-- `1d2453b` (Phase 0 complete; items 1-6 verified).
+- `4564c8b` (Phase A item 7 landed; debug.log deletion excluded as a plan
+  contradiction — verified live, not dead).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
