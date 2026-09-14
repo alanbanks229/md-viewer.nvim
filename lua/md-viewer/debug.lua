@@ -2,6 +2,7 @@ local state = require("md-viewer.state")
 local process = require("md-viewer.process")
 local config = require("md-viewer.config")
 local history = require("md-viewer.history")
+local lanes = require("md-viewer.lanes")
 
 local M = { events = {} }
 
@@ -22,6 +23,11 @@ function M.snapshot()
       image_id = session.image_id,
       requested = session.request_serial,
       applied = session.applied_serial,
+      -- Which request each lane is waiting on, and the epoch a content render
+      -- bumps. "requested" above counts every request this document issued;
+      -- these say which of them a late reply would still be measured against,
+      -- which is the question when a warm-up stops advancing.
+      lanes = lanes.snapshot(session),
       scroll_y = session.scroll_y,
       document_height_px = session.document_height_px,
       applied_scroll_y = session.applied_scroll_y,

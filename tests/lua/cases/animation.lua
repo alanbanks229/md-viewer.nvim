@@ -4,8 +4,8 @@
 -- restraint -- none of which needs a terminal or a wall clock.
 --
 -- The stub `process.request` also asserts the lane: a controller that reached
--- `renderer.request` would bump `session.request_serial` on every fetch and
--- mark every user render stale before it landed, which is the single most
+-- `renderer.request` would admit a lane ticket on every fetch, and a content
+-- one would mark every user render stale before it landed -- the single most
 -- expensive mistake this module could make and the least visible.
 
 local backends = require("md-viewer.backends")

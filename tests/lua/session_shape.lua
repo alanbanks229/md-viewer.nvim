@@ -102,6 +102,10 @@ add(fields("target", true, {
   "applied_scroll_y",
   "request_serial",
   "applied_serial",
+  -- Per-lane staleness (md-viewer.lanes). `request_serial` counts what this
+  -- document has asked for; these decide which replies that invalidates.
+  "lanes",
+  "lane_epoch",
   "render_epoch",
   "renderer_revision",
   "content_render_in_flight",

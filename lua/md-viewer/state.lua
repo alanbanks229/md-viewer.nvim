@@ -1,4 +1,5 @@
 local config = require("md-viewer.config")
+local lanes = require("md-viewer.lanes")
 
 local M = {}
 local sessions = {}
@@ -54,6 +55,12 @@ function M.create(source_buf, source_win)
     backend = nil,
     request_serial = 0,
     applied_serial = 0,
+    -- Per-lane staleness. `request_serial` above is still the count of
+    -- requests this document has issued -- and still the serial each lane
+    -- stores -- but which replies it invalidates is md-viewer.lanes' question
+    -- now, not "any newer request invalidates any older one".
+    lanes = lanes.fields(),
+    lane_epoch = 0,
     render_epoch = 0,
     renderer_revision = nil,
     latest_blocks = {},

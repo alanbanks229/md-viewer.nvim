@@ -26,8 +26,8 @@
 ---disagree, which is what deleted the stale-rect race the previous design
 ---carried. Frames come over the side channel (`process.request("animation")`)
 ---addressed purely by content hash and drawn size. **This module never calls
----`renderer.request`** -- a frame fetch must never bump `request_serial` and
----mark a user's render stale.
+---`renderer.request`** -- a frame fetch must never be admitted to a lane at
+---all, let alone the content one, which would mark a user's render stale.
 ---
 ---Terminal ownership: uploaded images are cached under stable content keys
 ---(hashes of source bytes and drawn size, never temp paths) and shared across

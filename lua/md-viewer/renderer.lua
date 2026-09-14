@@ -1,3 +1,4 @@
+local lanes = require("md-viewer.lanes")
 local localrender = require("md-viewer.localrender")
 local process = require("md-viewer.process")
 local preview = require("md-viewer.preview")
@@ -5,9 +6,33 @@ local security = require("md-viewer.security")
 
 local M = {}
 
-function M.is_stale(session, serial)
-  return session.closed or not require("md-viewer.state").is_active(session) or serial ~= session.request_serial
+---Is this reply still worth anything? Three separate questions: the document
+---is gone, the document is no longer the one its pane is showing, or something
+---newer has superseded this request's lane. Only the third moved when
+---md-viewer.lanes replaced the single shared serial -- a settle capture no
+---longer voids an in-flight resident chunk, and a scroll frame no longer voids
+---anything but the scroll frame before it.
+function M.is_stale(session, ticket)
+  if session.closed or not require("md-viewer.state").is_active(session) then return true end
+  return lanes.superseded(session, ticket)
 end
+
+---A staleness the *renderer* decided, reported to the caller as staleness
+---rather than as a failure.
+---
+---The two sides have their own supersession rules and neither is a superset of
+---the other: the renderer keeps one `capture` lane for what this side now
+---splits into scroll frames, settle frames and resident chunks, so it can drop
+---a moving capture that a settle capture overtook while this side still
+---considers the moving frame's own lane current. That reply is not a broken
+---render -- it is a frame nobody wants any more, and the caller's stale branch
+---(put the chunk back, leave the pixels alone, say nothing) is exactly right
+---for it. Before md-viewer.lanes the single shared serial happened to cover
+---this case by staling everything; it has to be said explicitly now, or a
+---routine supersession surfaces to the reader as an error notification.
+local STALE_CODES = { STALE_RENDER = true, STALE_INTERACTION = true }
+
+function M.superseded_by_renderer(meta) return meta ~= nil and STALE_CODES[meta.code] == true end
 
 ---Promptly release all renderer-side state for a preview document. Fire and
 ---forget: closure must never wait on Chromium, and an already-dead renderer is
@@ -82,7 +107,7 @@ local function ensure_metrics_hook()
   end)
 end
 
-local function await_metrics(session, serial, doc, rev, on_metrics, callback)
+local function await_metrics(session, ticket, doc, rev, on_metrics, callback)
   ensure_metrics_hook()
   local key = tostring(doc) .. "\0" .. tostring(rev)
   local timer = vim.uv.new_timer()
@@ -103,14 +128,14 @@ local function await_metrics(session, serial, doc, rev, on_metrics, callback)
       -- same revision has replaced the entry with its own continuation.
       if pending_metrics[key] ~= waiter then return end
       pending_metrics[key] = nil
-      if M.is_stale(session, serial) then return end
+      if M.is_stale(session, ticket) then return end
       callback(nil, "local render timed out waiting for pushed assets", false)
     end)
   end)
 end
 
 local function request_local(session, markdown, options, callback, ctx)
-  local cfg, serial, viewport, revision = ctx.cfg, ctx.serial, ctx.viewport, ctx.revision
+  local cfg, ticket, viewport, revision = ctx.cfg, ctx.ticket, ctx.viewport, ctx.revision
   process.request_stdio("prepare", {
     documentId = session.document_id,
     contentRevision = revision,
@@ -121,8 +146,8 @@ local function request_local(session, markdown, options, callback, ctx)
     localImages = cfg.render.local_images,
     maxLocalImageBytes = cfg.render.max_local_image_bytes,
     obsidianEnabled = cfg.obsidian.enabled,
-  }, function(prepared, prepare_err)
-    if M.is_stale(session, serial) then return callback(nil, nil, true) end
+  }, function(prepared, prepare_err, prepare_meta)
+    if M.is_stale(session, ticket) or M.superseded_by_renderer(prepare_meta) then return callback(nil, nil, true) end
     if prepare_err then return callback(nil, prepare_err, false) end
     if type(prepared) ~= "table" or type(prepared.html) ~= "string" then
       return callback(nil, "invalid prepare result", false)
@@ -130,8 +155,8 @@ local function request_local(session, markdown, options, callback, ctx)
     local remote_pending = prepared.remoteImagesPending == true
     local requested_scroll = session.scroll_y or 0
     local function finish(metrics)
-      if M.is_stale(session, serial) then return callback(nil, nil, true) end
-      session.applied_serial = serial
+      if M.is_stale(session, ticket) then return callback(nil, nil, true) end
+      session.applied_serial = ticket.serial
       session.renderer_revision = revision
       callback({
         metadata = {
@@ -167,7 +192,7 @@ local function request_local(session, markdown, options, callback, ctx)
       scrollPastEndOffsetPx = cfg.render.scroll_past_end_offset_px,
       theme = cfg.render.theme == "auto" and (vim.o.background == "dark" and "dark" or "light") or cfg.render.theme,
     }, function(result, render_err, meta)
-      if M.is_stale(session, serial) then return callback(nil, nil, true) end
+      if M.is_stale(session, ticket) or M.superseded_by_renderer(meta) then return callback(nil, nil, true) end
       if render_err then
         if meta and meta.code == "LOCAL_DISCONNECT" and not options.local_retry then
           -- The helper died between the controller's mode check and this
@@ -185,7 +210,7 @@ local function request_local(session, markdown, options, callback, ctx)
         -- before pushing, so the metrics notification cannot race it; the
         -- bytes go content-addressed from the stdio renderer's store, which
         -- is the only path SECURITY.md allows them to travel.
-        await_metrics(session, serial, session.document_id, revision, finish, callback)
+        await_metrics(session, ticket, session.document_id, revision, finish, callback)
         process.request_stdio("fetch_assets", { shas = result.missingAssets or {} }, function(fetched)
           if type(fetched) ~= "table" or type(fetched.assets) ~= "table" then return end
           process.request("asset", { assets = fetched.assets }, function() end)
@@ -200,8 +225,6 @@ end
 function M.request(session, markdown, options, callback)
   options = options or {}
   local cfg = session.config
-  session.request_serial = session.request_serial + 1
-  local serial = session.request_serial
   local viewport = preview.viewport(session.preview_win, session.backend)
   -- One root, one implementation. This used to compute its own
   -- (`cfg.security.document_root or base_dir(...)`), which skipped the
@@ -211,15 +234,20 @@ function M.request(session, markdown, options, callback)
     security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)
   local content_revision = M.content_revision(session)
   if localrender.active() and session.backend and session.backend.supports_local_markers then
+    -- Two hops, one request: `prepare` here and `render` over the socket are
+    -- one content render, admitted once.
     return request_local(session, markdown, options, callback, {
       cfg = cfg,
-      serial = serial,
+      ticket = lanes.admit(session, "content"),
       viewport = viewport,
       root = root,
       revision = content_revision,
     })
   end
+  -- A capture whose cached revision no longer matches goes out as a full
+  -- render, so it is admitted to the lane it will actually behave like.
   local capture_only = options.capture_only == true and session.renderer_revision == content_revision
+  local ticket = lanes.admit(session, lanes.lane_for(options, options.capture_only == true and not capture_only))
   local params = {
     documentId = session.document_id,
     contentRevision = content_revision,
@@ -256,8 +284,8 @@ function M.request(session, markdown, options, callback)
   -- Explicitly the stdio child: while a local transport is attached, direct
   -- render/capture must not leak markdown to the helper (which could not
   -- serve it anyway -- it renders prepared html, never raw markdown).
-  local request_id = process.request_stdio(capture_only and "capture" or "render", params, function(result, err)
-    if M.is_stale(session, serial) then
+  local request_id = process.request_stdio(capture_only and "capture" or "render", params, function(result, err, meta)
+    if M.is_stale(session, ticket) or M.superseded_by_renderer(meta) then
       if result and result.pngPath then vim.uv.fs_unlink(result.pngPath) end
       callback(nil, nil, true)
       return
@@ -281,7 +309,7 @@ function M.request(session, markdown, options, callback)
       callback(nil, read_err, false)
       return
     end
-    session.applied_serial = serial
+    session.applied_serial = ticket.serial
     session.renderer_revision = content_revision
     callback({ image = image, metadata = result, viewport = viewport }, nil, false)
   end)

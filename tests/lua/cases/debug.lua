@@ -113,6 +113,10 @@ return function(t)
   t.ok(buffer_text:match("interaction_request_count = 6"), "snapshot reports the interaction request count")
   t.ok(buffer_text:match("interaction_stale_count = 2"), "snapshot reports the stale-interaction count")
   t.ok(buffer_text:match("coalesced_preview_events = 3"), "snapshot reports the coalesced-preview-event count")
+  -- Per-lane staleness. "requested" alone cannot answer the question a stalled
+  -- warm-up asks -- which request each lane is actually waiting on.
+  t.ok(buffer_text:match("lanes = {"), "snapshot reports the per-lane serials")
+  t.ok(buffer_text:match("resident = %d+"), "including the resident chunk lane")
   t.ok(
     buffer_text:match("animation_geometry_unmeasured = 2"),
     "snapshot reports animations the renderer gave up measuring, which a zero geometry count alone cannot say"

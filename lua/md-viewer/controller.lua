@@ -13,6 +13,7 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
+local lanes = require("md-viewer.lanes")
 local resident_session = require("md-viewer.resident_session")
 local linkrate = require("md-viewer.linkrate")
 local localrender = require("md-viewer.localrender")
@@ -118,8 +119,10 @@ local function show_cached(session)
     -- True whatever `draw_resident` decided. It has already put up a screen, or
     -- kept the bootstrap frame, or gone blank on purpose and said so in the
     -- winbar -- and in none of those cases does the caller's fallback (a full
-    -- document re-render) help. That re-render is also a `request_serial` bump,
-    -- which is what used to lose an in-flight chunk.
+    -- document re-render) help. That re-render is also a content admission,
+    -- which voids an in-flight chunk -- deliberately now (it re-lays out the
+    -- page the chunk was cut from), where it used to be a side effect of one
+    -- serial shared by everything.
     return true
   end
   if not session.last_image_bytes then return false end
@@ -205,13 +208,11 @@ function M.refresh(session, render_options)
     return
   end
   -- A render of the document's content, as opposed to a chunk capture, has
-  -- right of way over the warm-up while it is in flight. `pump_resident` issues
-  -- `renderer.request` too and every request bumps `request_serial`, so an edit
-  -- made during warm-up could be staled by the very next chunk -- and a staled
-  -- render is dropped silently below, with nothing to re-issue it until the
-  -- reader typed again. On a host where the warm-up is minutes rather than
-  -- seconds that is easy to hit. `pump_resident` waits; the callback below
-  -- restarts it either way.
+  -- right of way over the warm-up while it is in flight. The lane rules mean a
+  -- chunk can no longer stale a render outright, but the queueing is still
+  -- worth keeping: a chunk capture is 116-373ms of renderer time and about a
+  -- second of wire, spent ahead of an edit the reader is waiting to see.
+  -- `pump_resident` waits; the callback below restarts it either way.
   local content_render = not render_options_is_chunk(render_options)
   if content_render then session.content_render_in_flight = true end
   if local_mode(session) and content_render then
@@ -437,10 +438,10 @@ function M.pump_resident(session)
   -- without a slow real host. Raise removing the path itself with the
   -- operator/orchestrator rather than deciding it here.
   if not valid(session) or session.render_path ~= "resident" then return end
-  -- A render of the reader's content outranks the warm-up: issuing a chunk
-  -- capture now would bump `request_serial` and stale it, and a staled content
-  -- render is dropped with nothing to re-issue it. `M.refresh`'s callback
-  -- restarts the pump on every exit, so this is a wait rather than a stop.
+  -- A render of the reader's content outranks the warm-up: the chunk would
+  -- otherwise spend the renderer and the wire ahead of an edit the reader is
+  -- waiting to see. `M.refresh`'s callback restarts the pump on every exit, so
+  -- this is a wait rather than a stop.
   if session.content_render_in_flight then return end
   local state = session.resident
   if not state or state.in_flight then return end
@@ -459,14 +460,16 @@ function M.pump_resident(session)
     state.in_flight = nil
     if stale then
       -- Superseded, but not necessarily by anything that invalidates this plan.
-      -- *Every* renderer.request bumps `request_serial`, so a settle capture, a
-      -- resize, a ColorScheme or an OptionSet is enough to stale a chunk that is
-      -- in flight -- and `next_chunk` has already removed this index from the
-      -- queue, so returning here dropped it for good. Nothing rebuilds the
-      -- queue: `resident_session.begin` early-returns on an unchanged key, so
-      -- the warm-up simply stopped at n/N and stayed there, and the region was
-      -- only ever captured if the reader happened to scroll into it. On a link
-      -- where a chunk is a second of wire that is not a rare race.
+      -- This is now much rarer than it was: a chunk is only staled by another
+      -- chunk or by a content render, because md-viewer.lanes gave it a lane of
+      -- its own. Before that every `renderer.request` shared one serial, so a
+      -- settle capture, a resize, a ColorScheme or an OptionSet was enough --
+      -- and `next_chunk` has already removed this index from the queue, so
+      -- returning here dropped it for good. Nothing rebuilds the queue:
+      -- `resident_session.begin` early-returns on an unchanged key, so the
+      -- warm-up simply stopped at n/N and stayed there, and the region was only
+      -- ever captured if the reader happened to scroll into it. On a link where
+      -- a chunk is a second of wire that was not a rare race.
       --
       -- A reply that really does belong to a dead plan is caught above, by
       -- `live ~= state`: a content change builds a new state table and a
@@ -869,7 +872,7 @@ end
 local function release_document(session, forget_renderer, keep_buffer)
   if not session or session.closed then return end
   session.closed = true
-  session.request_serial = session.request_serial + 1
+  lanes.invalidate(session)
   close_session_timers(session)
   preview.stop_loading(session)
   preview.restore_cursor()
@@ -1038,9 +1041,9 @@ end
 
 local function deactivate_document(session)
   if not session or session.closed then return end
-  -- Every callback already carries request_serial; advancing it is the pane
+  -- Every callback already carries a lane ticket; voiding them all is the pane
   -- activation epoch at the document boundary and makes late frames stale.
-  session.request_serial = session.request_serial + 1
+  lanes.invalidate(session)
   close_session_timers(session)
   preview.stop_loading(session)
   interaction.forget(session)

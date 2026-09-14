@@ -278,11 +278,12 @@ return function(t)
   -- ---------------------------------------------------------------------
   -- A stale chunk reply must not lose the chunk.
   --
-  -- Every renderer.request bumps `request_serial`, so a settle capture, a
-  -- resize or a ColorScheme is enough to stale a chunk in flight -- and
-  -- `next_chunk` has already taken it off the queue. The invariant asserted
-  -- here is the one that was broken: queue + captured + in-flight accounts for
-  -- every chunk in the plan, at every step.
+  -- A chunk in flight can still be staled -- by another chunk, or by a content
+  -- render, which re-lays out the page it was cut from. (Before md-viewer.lanes
+  -- a settle capture, a resize or a ColorScheme was enough too.) `next_chunk`
+  -- has already taken the index off the queue, so the invariant asserted here
+  -- is the one that was broken: queue + captured + in-flight accounts for every
+  -- chunk in the plan, at every step.
   -- ---------------------------------------------------------------------
   do
     local session, plan = open_resident()
