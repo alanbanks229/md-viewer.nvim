@@ -59,9 +59,11 @@ export class Injector {
     // carries nothing and is never injected -- it is answered, over the
     // socket, by whoever constructed us with this hook.
     this.onPairing = onPairing ?? (() => {});
-    // Called after a transaction's bytes reach the terminal, with the parsed
-    // transaction; the session layer turns it into the `presented`
-    // notification the remote reconciles scroll state from.
+    // Called after a frame transaction's bytes reach the terminal, with the
+    // parsed transaction; the session layer turns it into the `presented`
+    // notification the remote reconciles scroll state from. Placement,
+    // deletion, and overlay-sheet transactions do not prove that a pending
+    // frame's pixels reached the glass, so they never call this hook.
     this.onInjected = () => {};
 
     this.pendingByDoc = new Map(); // doc -> parsed surface transaction, newest only
@@ -194,7 +196,7 @@ export class Injector {
       this.stats.injectedBytes += transaction.length;
       if (tx.receivedAt !== undefined) this.frameTiming.add(this.now() - tx.receivedAt);
       this.write(transaction);
-      this.onInjected(tx);
+      if (tx.uploads.some((upload) => upload.kind === "frame")) this.onInjected(tx);
     }
   }
 
