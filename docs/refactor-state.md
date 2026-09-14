@@ -3,13 +3,14 @@
 Current phase: Phase 0
 
 Completed:
-- Nothing yet
+- Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
+  `_diagnose` assertions use the explicit test configuration.
 
 Next:
-- Begin Phase 0 from docs/refactor-plan.md
+- Continue Phase 0 with item 2 (local `presented` confirmation semantics).
 
 Last verified commit:
-- None
+- This commit (Phase 0, item 1)
 
 Notes:
 - Follow docs/refactor-plan.md in order.

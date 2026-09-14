@@ -79,11 +79,11 @@ end
 return function(t)
   require("md-viewer").setup({})
   local health = require("md-viewer.health")
+  local auto_cfg = { image = { backend = "auto" } }
 
   -- Status classification is pure and fast via M._diagnose -- no renderer
   -- round-trip or real terminal/env state needed to cover the decision logic.
   do
-    local auto_cfg = { image = { backend = "auto" } }
     local cells_cfg = { image = { backend = "cells" } }
 
     local healthy = health._diagnose(base_report(), auto_cfg)
@@ -168,8 +168,6 @@ return function(t)
   -- assert the two ways it used to be broken: provenance filed as a warning,
   -- and a stated configuration argued with as if it were a fault.
   do
-    local auto_cfg = { image = { backend = "auto" } }
-
     local noisy = base_report()
     noisy.graphics_caveats = {
       { kind = "note", text = "Selection-overlay placements were validated by the operator on 2026-08-07." },
