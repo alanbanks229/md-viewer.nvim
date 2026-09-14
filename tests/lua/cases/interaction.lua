@@ -14,6 +14,7 @@ return function(t)
 
   local function fake_session()
     return {
+      config = config.snapshot(),
       source_buf = nil,
       source_win = nil,
       preview_win = PREVIEW_WIN,
@@ -175,12 +176,15 @@ return function(t)
       { type = "mailto", href = "mailto:person@example.invalid" },
     }) do
       opened = {}
-      interaction.activate_link({}, { link = case })
+      interaction.activate_link({ config = config.snapshot() }, { link = case })
       t.eq({ case.href }, opened, ("%s links open via vim.ui.open"):format(case.type))
     end
 
     opened, notified = {}, {}
-    interaction.activate_link({}, { link = { type = "unsafe", href = "javascript:alert(1)" } })
+    interaction.activate_link(
+      { config = config.snapshot() },
+      { link = { type = "unsafe", href = "javascript:alert(1)" } }
+    )
     t.eq({}, opened, "an unsafe scheme is never opened")
     t.eq(1, #notified, "an unsafe scheme activation is reported to the user")
 
@@ -190,7 +194,10 @@ return function(t)
     -- *returning* nil rather than raising, so pcall alone never caught it.
     notified = {}
     vim.ui.open = function() return nil, "no handler for scheme" end
-    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/c" } })
+    interaction.activate_link(
+      { config = config.snapshot() },
+      { link = { type = "https", href = "https://example.invalid/c" } }
+    )
     t.eq(1, #notified, "a handler-less system open is reported instead of being swallowed")
     t.ok(notified[1].message:find("no system handler", 1, true) ~= nil, "and the message says the handler is missing")
     t.eq(
@@ -202,7 +209,10 @@ return function(t)
 
     notified = {}
     vim.ui.open = function() error("spawn failed") end
-    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/d" } })
+    interaction.activate_link(
+      { config = config.snapshot() },
+      { link = { type = "https", href = "https://example.invalid/d" } }
+    )
     t.eq(1, #notified, "a raising system open is still reported")
     t.ok(notified[1].message:find("failed to open link", 1, true) ~= nil, "and named as a failure to open")
 
@@ -212,7 +222,10 @@ return function(t)
     -- exit status is observed without blocking the editor.
     notified = {}
     vim.ui.open = function() return vim.system({ "sh", "-c", "echo nope 1>&2; exit 3" }, { text = true }) end
-    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/e" } })
+    interaction.activate_link(
+      { config = config.snapshot() },
+      { link = { type = "https", href = "https://example.invalid/e" } }
+    )
     vim.wait(4000, function() return #notified > 0 end)
     t.eq(1, #notified, "a system handler that exits non-zero is reported")
     t.ok(notified[1].message:find("nope", 1, true) ~= nil, "and the handler's own message is carried through")
@@ -221,7 +234,10 @@ return function(t)
     -- The successful case says nothing and records the clean exit.
     notified = {}
     vim.ui.open = function() return vim.system({ "true" }, { text = true }) end
-    interaction.activate_link({}, { link = { type = "https", href = "https://example.invalid/f" } })
+    interaction.activate_link(
+      { config = config.snapshot() },
+      { link = { type = "https", href = "https://example.invalid/f" } }
+    )
     vim.wait(4000, function() return interaction.last_external.result ~= "spawned" end)
     t.eq("exited 0", interaction.last_external.result, "a handler that exits cleanly is recorded as such")
     t.eq({}, notified, "and says nothing to the user")
@@ -306,12 +322,18 @@ return function(t)
 
     local source_buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(source_buf, root .. "/sub/doc.md")
-    interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = "note.md" } })
+    interaction.activate_link(
+      { source_buf = source_buf, config = config.snapshot() },
+      { link = { type = "local_file", href = "note.md" } }
+    )
     t.eq({}, opened, "an in-root Markdown link is not handed to the OS")
     t.eq(1, vim.fn.bufloaded(inside_file), "an in-root Markdown link loads a normal source buffer")
 
     opened, notified = {}, {}
-    interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = outside_file } })
+    interaction.activate_link(
+      { source_buf = source_buf, config = config.snapshot() },
+      { link = { type = "local_file", href = outside_file } }
+    )
     t.eq({}, opened, "an out-of-root local_file link is never opened")
     t.ok(#notified > 0, "an out-of-root local_file link is reported to the user")
 
@@ -355,7 +377,10 @@ return function(t)
 
     local source_buf = vim.api.nvim_create_buf(false, true)
     vim.api.nvim_buf_set_name(source_buf, root .. "/doc.md")
-    interaction.activate_link({ source_buf = source_buf }, { link = { type = "local_file", href = "escape.md" } })
+    interaction.activate_link(
+      { source_buf = source_buf, config = config.snapshot() },
+      { link = { type = "local_file", href = "escape.md" } }
+    )
     t.eq({}, opened, "a symlink escape is never opened")
     t.ok(#notified > 0, "a symlink escape is reported to the user")
 
@@ -371,7 +396,7 @@ return function(t)
     local scrolled = {}
     controller.schedule_scroll = function(session) scrolled[#scrolled + 1] = session end
 
-    local session = { scroll_y = 0 }
+    local session = { scroll_y = 0, config = config.snapshot() }
     interaction.activate_link(session, {
       link = { type = "fragment", href = "#target" },
       fragmentResolved = true,
@@ -380,7 +405,7 @@ return function(t)
     t.eq(480, session.scroll_y, "a resolved fragment updates the session's scroll position")
     t.eq(1, #scrolled, "a resolved fragment schedules a real scroll frame")
 
-    local unresolved = { scroll_y = 0 }
+    local unresolved = { scroll_y = 0, config = config.snapshot() }
     interaction.activate_link(unresolved, { link = { type = "fragment", href = "#missing" }, fragmentResolved = false })
     t.eq(0, unresolved.scroll_y, "an unresolved fragment leaves the scroll position untouched")
 
@@ -587,7 +612,7 @@ return function(t)
     vim.cmd.edit(vim.fn.fnameescape(project .. "/doc.md"))
     local source_win = vim.api.nvim_get_current_win()
     local source_buf = vim.api.nvim_get_current_buf()
-    local session = { source_buf = source_buf, source_win = source_win }
+    local session = { source_buf = source_buf, source_win = source_win, config = config.snapshot() }
 
     interaction.activate_link(session, { link = { type = "local_file", href = "target.md" } })
     t.eq({}, opened, "a markdown link is not handed to the OS handler")

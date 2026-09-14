@@ -21,7 +21,7 @@ end
 ---has to in order to keep the caret in view.
 local function viewport_lines(session, fraction)
   local height = session.viewport_height_px or 0
-  local line = config.get().sync.navigation_line_px
+  local line = session.config.sync.navigation_line_px
   if height <= 0 or line <= 0 then return 1 end
   return math.max(1, math.floor((height * fraction) / line))
 end
@@ -86,8 +86,8 @@ local mappings = {
 ---Selection, search, history and Escape keys. Kept as a second, small loop
 ---rather than folded into `mappings` above: each is individually gated by its
 ---own `interaction.*` config flag, where the caret motions are not.
-local function interaction_mappings()
-  local cfg = config.get().interaction
+local function interaction_mappings(session)
+  local cfg = session.config.interaction
   local list = {}
   if cfg.visual and cfg.selection then
     -- Neovim stays in normal mode throughout: `v` here starts a *preview*
@@ -216,7 +216,7 @@ function M.attach(session, callback)
       desc = description,
     })
   end
-  for _, mapping in ipairs(interaction_mappings()) do
+  for _, mapping in ipairs(interaction_mappings(session)) do
     local lhs, fn, description = mapping[1], mapping[2], mapping[3]
     vim.keymap.set("n", lhs, function() fn(session) end, {
       buffer = session.preview_buf,

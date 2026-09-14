@@ -102,7 +102,7 @@ return function(t)
 
   config.reset()
   config.setup({ interaction = { history_limit = 2 } })
-  local bounded = { source_buf = 1, history = nil, history_index = 0 }
+  local bounded = { source_buf = 1, history = nil, history_index = 0, config = config.snapshot() }
   controller.history_init(bounded)
   for buf = 2, 6 do
     controller.history_push(bounded, buf)

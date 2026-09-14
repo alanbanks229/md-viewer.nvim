@@ -1,5 +1,3 @@
-local config = require("md-viewer.config")
-
 local M = {}
 
 ---History belongs to the preview pane, not to whichever document happens to
@@ -37,7 +35,7 @@ function M.push(session, buf)
   -- from, would grow the list without adding anywhere to go.
   if history[history_index] and history[history_index].buf == buf then return end
   history[#history + 1] = history_entry(buf)
-  local limit = config.get().interaction.history_limit
+  local limit = session.config.interaction.history_limit
   while #history > limit do
     table.remove(history, 1)
   end

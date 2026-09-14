@@ -642,7 +642,7 @@ end
 ---on screen, and the geometry that arrived with it is the geometry the frames
 ---must be positioned against.
 function M.adopt(session)
-  if config.get().render.animate ~= true then return end
+  if session.config.render.animate ~= true then return end
   sessions[session] = true
   -- Placements from the superseded frame refer to a base that has just been
   -- replaced, so they go before anything else is drawn -- and the current

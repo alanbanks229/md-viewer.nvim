@@ -329,4 +329,59 @@ return function(t)
   t.eq("local", config.get().render.location, "an argless setup defers to an explicit configuration")
   require("md-viewer").setup({})
   t.eq("current", config.get().render.location, "an explicit empty setup still reconfigures")
+
+  -- ---------------------------------------------------------------------
+  -- Snapshots and the runtime layer.
+  --
+  -- `config.get()` returns the user's live table. Handing that to the
+  -- rendering path meant every read was a read of a global -- and meant one
+  -- command, :MdViewerLineNumbers, edited the reader's own options in place,
+  -- past `validate`, with nothing afterwards able to tell what they had asked
+  -- for from what a keystroke had changed. A session reads a snapshot instead,
+  -- and what md-viewer sets for itself goes in a runtime layer over the top.
+  -- ---------------------------------------------------------------------
+  config.reset()
+  config.setup({ split = { width = 0.4 } })
+
+  local snapshot = config.snapshot()
+  t.eq(0.4, snapshot.split.width, "a snapshot carries the configuration as it stands")
+  snapshot.split.width = 0.9
+  t.eq(0.4, config.get().split.width, "and is a copy: writing to it cannot reach the user's table")
+  t.eq(0.4, config.snapshot().split.width, "nor the next snapshot")
+
+  config.set_runtime("preview.line_numbers", "relative")
+  t.eq("relative", config.snapshot().preview.line_numbers, "a runtime value is layered onto every snapshot")
+  t.eq("relative", config.effective("preview.line_numbers"), "and is what `effective` reports")
+  t.eq("off", config.get().preview.line_numbers, "while the user's own table still says what they set")
+  t.eq(0.4, config.effective("split.width"), "effective falls through to the user's value where nothing overrides")
+  t.eq(nil, config.effective("split.no_such_option"), "and answers nil for a path that does not exist")
+
+  local bad_runtime = pcall(config.set_runtime, "preview.line_numbers", "sometimes")
+  t.eq(false, bad_runtime, "a runtime value is validated exactly as a user's option is")
+  t.eq("relative", config.effective("preview.line_numbers"), "and a refused one changes nothing")
+
+  config.setup({ split = { width = 0.4 } })
+  t.eq(
+    "off",
+    config.effective("preview.line_numbers"),
+    "setup clears the runtime layer: the user restated what they want"
+  )
+  config.set_runtime("preview.line_numbers", "absolute")
+  config.reset()
+  t.eq("off", config.effective("preview.line_numbers"), "and so does reset")
+
+  -- A session takes a snapshot when it is created and re-takes it whenever the
+  -- configuration changes, so reconfiguring a running Neovim still reaches the
+  -- previews that are already open -- which it always has.
+  local state = require("md-viewer.state")
+  config.setup({ split = { width = 0.4 } })
+  local session = state.create(9401, 1)
+  t.eq(0.4, session.config.split.width, "a new session is created with the current configuration")
+  config.setup({ split = { width = 0.25 } })
+  t.eq(0.25, session.config.split.width, "reconfiguring re-takes every open session's snapshot")
+  config.set_runtime("preview.line_numbers", "absolute")
+  t.eq("absolute", session.config.preview.line_numbers, "as does a runtime value md-viewer sets for itself")
+  state.remove_document(session)
+  config.reset()
+  config.setup({})
 end

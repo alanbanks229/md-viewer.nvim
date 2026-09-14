@@ -121,6 +121,7 @@ return function(t)
 
   local function make_session(geometry)
     return {
+      config = config.snapshot(),
       backend = backend,
       image_id = 1,
       -- 80x40 cells at a 10x20 cell: an 800x800 drawn box over an 800x800

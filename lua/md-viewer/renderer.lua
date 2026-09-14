@@ -1,4 +1,3 @@
-local config = require("md-viewer.config")
 local localrender = require("md-viewer.localrender")
 local process = require("md-viewer.process")
 local preview = require("md-viewer.preview")
@@ -200,7 +199,7 @@ end
 
 function M.request(session, markdown, options, callback)
   options = options or {}
-  local cfg = config.get()
+  local cfg = session.config
   session.request_serial = session.request_serial + 1
   local serial = session.request_serial
   local viewport = preview.viewport(session.preview_win, session.backend)

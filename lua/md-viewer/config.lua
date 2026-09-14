@@ -576,15 +576,42 @@ local function validate(cfg)
   )
 end
 
--- Two modules memoize a snapshot taken partly from this configuration -- the
--- terminal's capabilities and the link rate's precedence tier -- and a config
--- change is the one event that can invalidate either. Guarded on package.loaded
--- so configuring md-viewer does not load them as a side effect.
+-- Three modules memoize something taken from this configuration -- the
+-- terminal's capabilities, the link rate's precedence tier, and every session's
+-- own snapshot -- and a config change is the one event that can invalidate any
+-- of them. Guarded on package.loaded so configuring md-viewer does not load
+-- them as a side effect.
 local function invalidate_memoized()
-  for _, name in ipairs({ "md-viewer.terminal", "md-viewer.linkrate" }) do
+  for _, name in ipairs({ "md-viewer.terminal", "md-viewer.linkrate", "md-viewer.state" }) do
     local module = package.loaded[name]
     if module and module.invalidate then module.invalidate() end
   end
+end
+
+-- Configuration md-viewer sets for itself at runtime, keyed by dotted path and
+-- layered over the user's options every time a snapshot is taken.
+--
+-- `preview.line_numbers` is the only one, and it is why this exists: the two
+-- `:MdViewerToggle*LineNumbers` commands switch numbering for every preview,
+-- including ones opened later, and used to do that by writing straight into
+-- the table `M.get()` hands out -- the user's own configuration, past
+-- `validate`, with no way afterwards to tell what they asked for from what a
+-- keystroke changed.
+--
+-- Cleared by setup() and reset(), because a reconfiguration is the user
+-- restating what they want.
+local runtime = {}
+
+local function apply_runtime(cfg, overrides)
+  for path, value in pairs(overrides) do
+    local target, last = cfg, nil
+    for segment in path:gmatch("[^.]+") do
+      if last then target = target[last] end
+      last = segment
+    end
+    target[last] = value
+  end
+  return cfg
 end
 
 -- Removed in 0.3.0 along with mouse click-drag, double-click and triple-click
@@ -624,14 +651,53 @@ function M.setup(opts)
   reject_removed(opts)
   current = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), opts)
   validate(current)
+  runtime = {}
   invalidate_memoized()
   return current
 end
 
 function M.get() return current end
 
+---A private copy for one session to read for its lifetime.
+---
+---`M.get()` returns the live table, which is the user's own: handing it to the
+---rendering path made every read a read of a global that anything could have
+---written to mid-frame, and made one plugin write (see `runtime` above)
+---indistinguishable from a user's option. A session takes one of these at
+---creation and re-takes it whenever the configuration changes, so what it reads
+---is stable within a frame and is never the table the user passed to `setup`.
+function M.snapshot() return apply_runtime(vim.deepcopy(current), runtime) end
+
+---One configuration value as a session sees it: the user's option with any
+---runtime override on top. Reading `M.get()` for a value md-viewer itself may
+---have set answers with what the reader asked for rather than what is in
+---effect.
+function M.effective(path)
+  if runtime[path] ~= nil then return runtime[path] end
+  local value = current
+  for segment in path:gmatch("[^.]+") do
+    if type(value) ~= "table" then return nil end
+    value = value[segment]
+  end
+  return value
+end
+
+---Set a configuration value md-viewer itself owns, by dotted path.
+---
+---Validated exactly as a user's option is: the candidate is built and run
+---through `validate` before it is kept, so a bad value is refused here rather
+---than surfacing as a broken preview later.
+function M.set_runtime(path, value)
+  local candidate = vim.deepcopy(runtime)
+  candidate[path] = value
+  validate(apply_runtime(vim.deepcopy(current), candidate))
+  runtime = candidate
+  invalidate_memoized()
+end
+
 function M.reset()
   current = vim.deepcopy(M.defaults)
+  runtime = {}
   invalidate_memoized()
 end
 

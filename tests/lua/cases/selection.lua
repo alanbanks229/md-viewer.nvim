@@ -22,8 +22,17 @@ return function(t)
     copy_on_select = false,
     find = true,
   }
+  -- Every session md-viewer.state creates re-takes its configuration snapshot
+  -- when the configuration changes; the stand-ins below are not registered
+  -- there, so this does the same for them. Without it a setup() partway
+  -- through a case would leave an already-created session reading the options
+  -- it was made with.
+  local fakes = setmetatable({}, { __mode = "k" })
   local function setup_interaction(overrides)
     config.setup({ interaction = vim.tbl_extend("force", vim.deepcopy(base_interaction), overrides or {}) })
+    for fake in pairs(fakes) do
+      fake.config = config.snapshot()
+    end
   end
 
   config.reset()
@@ -32,7 +41,11 @@ return function(t)
   local PREVIEW_WIN = 5151
 
   local function fake_session()
-    return {
+    local session = {
+      -- Every session state.create makes carries its own configuration
+      -- snapshot; a hand-rolled stand-in needs one too, or it reads nothing at
+      -- all where the real thing reads its options.
+      config = config.snapshot(),
       source_buf = nil,
       source_win = nil,
       preview_win = PREVIEW_WIN,
@@ -46,6 +59,8 @@ return function(t)
       backend = backends.capabilities("kitty_raw"),
       closed = false,
     }
+    fakes[session] = true
+    return session
   end
 
   local function point(row, col, winid) return { screenrow = row, screencol = col, winid = winid or PREVIEW_WIN } end

@@ -449,7 +449,10 @@ return function(t)
       config.setup({ image = { backend = "cells", resident = resident }, render = { ssh_link_bytes_per_sec = rate } })
       config.get().render.ssh_link_bytes_per_sec = rate
       linkrate.invalidate()
-      return resident_session.select_path({ backend = pannable })
+      -- Snapshotted here, after the setup above: a session reads the
+      -- configuration it was created with, and these stand-ins are created one
+      -- per question rather than registered with md-viewer.state.
+      return resident_session.select_path({ backend = pannable, config = config.snapshot() })
     end
 
     local path, reason = path_at(nil, "auto")
@@ -483,7 +486,7 @@ return function(t)
     linkrate.invalidate()
     t.eq(
       "resident",
-      (resident_session.select_path({ backend = pannable })),
+      (resident_session.select_path({ backend = pannable, config = config.snapshot() })),
       "raising image.resident_below_bytes_per_sec admits a faster link"
     )
 
@@ -508,7 +511,7 @@ return function(t)
       render = { ssh_link_bytes_per_sec = 1030000 },
     })
     linkrate.invalidate()
-    path, reason = resident_session.select_path({ backend = refuses })
+    path, reason = resident_session.select_path({ backend = refuses, config = config.snapshot() })
     t.eq("viewport", path, "a terminal that refuses resident_pan is refused whatever the link")
     t.eq("wezterm#7953: repeat placements leak", reason, "and the terminal's own reason survives")
 

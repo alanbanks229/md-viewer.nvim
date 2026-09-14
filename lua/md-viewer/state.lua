@@ -1,3 +1,5 @@
+local config = require("md-viewer.config")
+
 local M = {}
 local sessions = {}
 local panes = {}
@@ -25,6 +27,13 @@ end
 
 function M.create(source_buf, source_win)
   local session = {
+    -- This session's own copy of the configuration, taken here and re-taken by
+    -- M.invalidate whenever the configuration changes. Everything below the
+    -- controller reads `session.config` rather than `config.get()`: the live
+    -- table is the user's, and a rendering path that reads it is reading a
+    -- global that anything could have written to between two frames of the
+    -- same gesture.
+    config = config.snapshot(),
     source_buf = source_buf,
     source_win = source_win,
     document_id = "buffer-" .. source_buf,
@@ -354,6 +363,17 @@ function M.activate(session)
 end
 
 function M.panes() return panes end
+
+---Re-take every session's configuration snapshot. Called by md-viewer.config
+---when the configuration changes, which is the one event that can invalidate
+---one -- the same hook the terminal capability and link-rate caches use.
+function M.invalidate()
+  for _, pane in pairs(panes) do
+    for _, session in ipairs(pane.documents) do
+      session.config = config.snapshot()
+    end
+  end
+end
 
 ---Compatibility view used by the rendering loops and diagnostics: one entry
 ---per open document, keyed by its stable preview buffer when available.

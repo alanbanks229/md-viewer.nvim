@@ -428,7 +428,7 @@ end
 ---the preview, and the first frame landing in an already-focused one.
 function M.place_caret(session)
   if not valid(session) or not session.backend.is_graphical then return end
-  if not config.get().interaction.enabled then return end
+  if not session.config.interaction.enabled then return end
   -- Only for the preview the reader is actually in. A caret in an unfocused
   -- preview is one nobody can see, and placing it costs a round trip -- which
   -- an unrendered document answers with an error, and a failed interact
@@ -488,7 +488,7 @@ function M.display_interact_result(session, result)
     return
   end
   if type(result.pngPath) ~= "string" then return end
-  local cfg = config.get().render
+  local cfg = session.config.render
   local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
   vim.uv.fs_unlink(result.pngPath)
   if not image then

@@ -54,25 +54,37 @@ return function(t)
   preview.update_line_numbers(session)
   t.eq(0, #numbers(), "line numbers default to off")
 
+  -- The mode the commands switch is the session's, and the user's own
+  -- configuration table is not touched on the way. It used to be: the toggle
+  -- wrote `config.get().preview.line_numbers` directly, so nothing afterwards
+  -- could tell an option the reader had set from one a keystroke had changed,
+  -- and the write skipped `validate` entirely.
+  local user_line_numbers = config.get().preview.line_numbers
   vim.cmd("MdViewerToggleAbsoluteLineNumbers")
-  t.eq("absolute", config.get().preview.line_numbers, "the absolute command enables absolute numbering")
+  t.eq("absolute", session.config.preview.line_numbers, "the absolute command enables absolute numbering")
+  t.eq(user_line_numbers, config.get().preview.line_numbers, "and leaves the user's configuration alone")
   t.ok(#numbers() > 0, "enabling a mode redraws the open preview immediately")
   vim.cmd("MdViewerToggleRelativeLineNumbers")
-  t.eq("relative", config.get().preview.line_numbers, "the relative command switches directly from absolute")
+  t.eq("relative", session.config.preview.line_numbers, "the relative command switches directly from absolute")
   vim.cmd("MdViewerToggleAbsoluteLineNumbers")
-  t.eq("absolute", config.get().preview.line_numbers, "the absolute command switches directly from relative")
+  t.eq("absolute", session.config.preview.line_numbers, "the absolute command switches directly from relative")
   vim.cmd("MdViewerToggleAbsoluteLineNumbers")
-  t.eq("off", config.get().preview.line_numbers, "repeating the visible absolute mode turns numbering off")
+  t.eq("off", session.config.preview.line_numbers, "repeating the visible absolute mode turns numbering off")
   vim.cmd("MdViewerToggleRelativeLineNumbers")
-  t.eq("relative", config.get().preview.line_numbers, "relative numbering can be enabled directly from off")
+  t.eq("relative", session.config.preview.line_numbers, "relative numbering can be enabled directly from off")
   vim.cmd("MdViewerToggleRelativeLineNumbers")
-  t.eq("off", config.get().preview.line_numbers, "repeating the visible relative mode turns numbering off")
+  t.eq("off", session.config.preview.line_numbers, "repeating the visible relative mode turns numbering off")
+  t.eq(
+    user_line_numbers,
+    config.get().preview.line_numbers,
+    "after six toggles the user's table still says what they set"
+  )
 
   local placement = preview.placement(session.preview_win, session.backend)
   session.last_placement = placement
   local cell_height = session.viewport_height_render_px / placement.height
   session.latest_lines = { { topPx = 1, bottomPx = cell_height * 2 + 1 } }
-  config.get().preview.line_numbers = "absolute"
+  session.config.preview.line_numbers = "absolute"
   preview.update_line_numbers(session)
   local expected_row = coordinates.css_to_cell(
     { x = 0, y = (session.latest_lines[1].topPx + session.latest_lines[1].bottomPx) / 2 },
@@ -96,7 +108,7 @@ return function(t)
   }
   session.caret_scroll_y = 0
   session.caret_rect = { x = 20, y = 100, width = 8, height = 20 }
-  config.get().preview.line_numbers = "relative"
+  session.config.preview.line_numbers = "relative"
   preview.update_line_numbers(session)
   local relative_labels = labels()
   local ordered = {}
@@ -119,11 +131,11 @@ return function(t)
   t.eq("2", ordered[2][2], "the no-caret fallback remains sequential")
 
   session.backend = backends.capabilities("cells")
-  config.get().preview.line_numbers = "relative"
+  session.config.preview.line_numbers = "relative"
   preview.update_line_numbers(session)
   t.eq(true, vim.wo[session.preview_win].number, "cells relative mode enables the number column")
   t.eq(true, vim.wo[session.preview_win].relativenumber, "cells relative mode uses native relative numbers")
-  config.get().preview.line_numbers = "off"
+  session.config.preview.line_numbers = "off"
   preview.update_line_numbers(session)
   t.eq(false, vim.wo[session.preview_win].number, "cells off mode clears the number column")
   t.eq(false, vim.wo[session.preview_win].relativenumber, "cells off mode clears relative numbers")

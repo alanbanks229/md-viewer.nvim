@@ -1,5 +1,4 @@
 local animation = require("md-viewer.animation")
-local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
 local presenter = require("md-viewer.presenter")
@@ -155,7 +154,7 @@ end
 
 function M.start_ui_poll(session)
   if not session.backend.needs_ui_poll then return end
-  local interval = math.max(0, math.floor(config.get().image.ui_poll_ms or 50))
+  local interval = math.max(0, math.floor(session.config.image.ui_poll_ms or 50))
   if interval == 0 or session.ui_poll_timer then return end
   local timer = vim.uv.new_timer()
   session.ui_poll_timer = timer

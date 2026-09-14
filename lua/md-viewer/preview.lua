@@ -71,7 +71,7 @@ local function update_loading(session)
 end
 
 function M.start_loading(session)
-  local cfg = config.get().preview
+  local cfg = session.config.preview
   if
     not cfg.loading
     or session.loading
@@ -188,7 +188,7 @@ end
 ---requesting `image.backend = "cells"` is not a fallback, so it stays quiet.
 local function fallback_notice(session)
   if not session.backend or session.backend.is_graphical then return nil end
-  if config.get().image.backend ~= "auto" then return nil end
+  if session.config.image.backend ~= "auto" then return nil end
   return "%#WarningMsg#⚠ text-only preview — no Kitty graphics detected (see :MdViewerHealth)%*"
 end
 
@@ -304,7 +304,7 @@ end
 
 function M.update_title(session)
   if
-    not config.get().preview.winbar
+    not session.config.preview.winbar
     or not session.preview_win
     or not vim.api.nvim_win_is_valid(session.preview_win)
   then
@@ -424,7 +424,7 @@ end
 function M.update_line_numbers(session)
   if not (session.preview_buf and vim.api.nvim_buf_is_valid(session.preview_buf)) then return end
   vim.api.nvim_buf_clear_namespace(session.preview_buf, line_number_ns, 0, -1)
-  local mode = config.get().preview.line_numbers
+  local mode = session.config.preview.line_numbers
   if session.backend and not session.backend.is_graphical then
     if session.preview_win and vim.api.nvim_win_is_valid(session.preview_win) then
       vim.wo[session.preview_win].number = mode ~= "off"
@@ -523,7 +523,7 @@ function M.create_buffer(session)
 end
 
 local function configure_window(win, session)
-  local cfg = config.get()
+  local cfg = session.config
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].signcolumn = "no"
@@ -562,7 +562,7 @@ local function configure_window(win, session)
 end
 
 function M.open(position, session, adopt_win)
-  local cfg = config.get()
+  local cfg = session.config
   position = position or cfg.split.position
   local buf = session.preview_buf or M.create_buffer(session)
   local win

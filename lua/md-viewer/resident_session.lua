@@ -7,7 +7,6 @@
 ---The invariant the whole thing rests on: a capture creates a durable chunk, and
 ---a scroll only ever crops chunks that already exist. Nothing here takes a
 ---picture of the reader's viewport.
-local config = require("md-viewer.config")
 local coordinates = require("md-viewer.coordinates")
 local linkrate = require("md-viewer.linkrate")
 local preview = require("md-viewer.preview")
@@ -36,7 +35,7 @@ local function mbps(bytes_per_sec) return ("%.2f MB/s"):format(bytes_per_sec / 1
 ---because "your terminal cannot do this" is what a reader on iTerm2 needs to
 ---hear, not a rate that would have been irrelevant either way.
 function M.select_path(session)
-  local cfg = config.get()
+  local cfg = session.config
   if not session or not session.backend then return "cells", "no backend" end
   if not session.backend.is_graphical then return "cells", "text-only backend" end
   -- Ahead of every resident check: a locally rendered session scrolls by
@@ -132,7 +131,7 @@ end
 ---`meta` is a render reply: it carries the document height the plan is derived
 ---from. Returns false when no plan is possible, which is a demotion.
 function M.begin(session, meta)
-  local cfg = config.get()
+  local cfg = session.config
   local placement = preview.placement(session.preview_win, session.backend)
   if not placement or (placement.height or 0) < 1 then return false, "no preview placement" end
 
@@ -265,7 +264,7 @@ end
 function M.retain(session, center)
   local current = state(session)
   if not current then return end
-  local cfg = config.get()
+  local cfg = session.config
   local keep = resident.retain_window(current.plan, center, {
     max_chunks = cfg.image.resident_max_chunks,
     budget_bytes = cfg.image.resident_memory_mb * 1024 * 1024,

@@ -26,7 +26,7 @@ local function install_wheel(mode, wheel)
   vim.keymap.set(mode, wheel.lhs, function()
     local position = vim.fn.getmousepos()
     local session = position and state.from_preview_win(position.winid)
-    if session and config.get().sync.mouse_scroll then
+    if session and session.config.sync.mouse_scroll then
       vim.schedule(function()
         if callback then callback(session, wheel.action) end
       end)

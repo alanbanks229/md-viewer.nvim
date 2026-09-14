@@ -123,7 +123,7 @@ end
 
 ---Everything `M.locate` needs besides the window/point check itself.
 local function interaction_ready(session)
-  if not config.get().interaction.enabled then return false end
+  if not session.config.interaction.enabled then return false end
   if not (session.backend and session.backend.is_graphical) then return false end
   if not session.last_placement then return false end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return false end
@@ -197,7 +197,7 @@ end
 ---Either can be the bigger, depending on which way `coordinates.viewport`
 ---mis-estimated the cell, so one sheet has to cover both.
 local function sheet_dims(session)
-  local scale = config.get().render.device_scale_factor or 1
+  local scale = session.config.render.device_scale_factor or 1
   local width = (session.viewport_width_px or 0) * scale
   local height = (session.viewport_height_render_px or 0) * scale
   local cell = cellpixels.measure()
@@ -258,7 +258,7 @@ local function attempt_selection_preview(session, pointer, force_device)
   end
   pointer.selection_request_in_flight = true
   local requested_point = point
-  local capture_scale = (force_device or not config.get().interaction.fast_preview) and "device" or "css"
+  local capture_scale = (force_device or not session.config.interaction.fast_preview) and "device" or "css"
   local overlay = overlay_ready(session, pointer)
   local overlay_opts = nil
   if overlay then
@@ -344,12 +344,12 @@ end
 function M.schedule_selection_preview(session)
   local pointer = session.pointer
   if not pointer then return end
-  local cfg = config.get().interaction
+  local cfg = session.config.interaction
   if cfg.fast_preview then
     debounce.call(
       session,
       "selection_idle_settle_timer",
-      config.get().render.scroll_settle_ms,
+      session.config.render.scroll_settle_ms,
       function() attempt_selection_preview(session, pointer, true) end
     )
   end
@@ -442,7 +442,7 @@ function M.settle_selection(session, pointer, anchor, point, on_settled)
     return
   end
   pointer.selection_request_in_flight = true
-  debounce.call(session, "selection_settle_timer", config.get().interaction.settle_ms, function()
+  debounce.call(session, "selection_settle_timer", session.config.interaction.settle_ms, function()
     if session.pointer ~= pointer then return end
     -- The page may have edge-scrolled a long way from where the anchor was
     -- placed, so the commit pins it too: this frame must reproduce exactly the
@@ -457,7 +457,7 @@ function M.settle_selection(session, pointer, anchor, point, on_settled)
         session.selection_content_revision = session.renderer_revision
         session.selection_text_length = type(result.text) == "string" and #result.text or nil
         presenter.display_interact_result(session, result)
-        if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
+        if session.config.interaction.copy_on_select then M.copy_selection(session, true) end
       end
       if pointer.pending_settle then
         local pending = pointer.pending_settle
@@ -509,8 +509,8 @@ function M.visual_active(session) return session ~= nil and session.visual_activ
 ---anchors at the left edge of the caret's line and extends to the right edge of
 ---the focus line, the same widening `V` does in a text buffer.
 function M.visual_start(session, linewise)
-  if not config.get().interaction.visual then return false end
-  if not config.get().interaction.selection then return false end
+  if not session.config.interaction.visual then return false end
+  if not session.config.interaction.selection then return false end
   if not session.last_placement then return false end
   local rect = caret.rect(session)
   if not rect then return false end
@@ -720,7 +720,7 @@ local function send_caret_motion(session, granularity, direction, count, from, o
     if scrolled then
       session.scroll_y = result.scrollY
       session.applied_scroll_y = result.scrollY
-      session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+      session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
     end
     -- Recorded against the scroll the renderer measured it at, which after an
     -- in-page scroll is the position above, not the one this request was sent
@@ -786,7 +786,7 @@ end
 ---as `STALE_INTERACTION` and `send_caret_motion` drops it -- exactly the
 ---existing behaviour for two racing interacts, unrelated to this change.
 function M.caret_motion(session, granularity, direction, count, from)
-  if not config.get().interaction.enabled then return end
+  if not session.config.interaction.enabled then return end
   if not session.renderer_revision then return end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return end
   if not session.last_placement then return end
@@ -1074,7 +1074,7 @@ local function should_edit_in_neovim(path)
 end
 
 function M.open_local_file(session, href)
-  local cfg = config.get()
+  local cfg = session.config
   local name = vim.api.nvim_buf_get_name(session.source_buf)
   local base_dir = name ~= "" and vim.fs.dirname(vim.fs.normalize(name)) or vim.uv.cwd()
   local root =
@@ -1153,7 +1153,7 @@ function M.activate_link(session, result)
   if link.type == "fragment" then
     if result.fragmentResolved and type(result.scrollY) == "number" then
       session.scroll_y = result.scrollY
-      session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+      session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
       host.schedule_scroll(session)
     end
   elseif link.type == "http" or link.type == "https" or link.type == "mailto" then
@@ -1161,7 +1161,7 @@ function M.activate_link(session, result)
   elseif link.type == "local_file" then
     M.open_local_file(session, link.href)
   elseif link.type == "obsidian" then
-    if not config.get().obsidian.enabled then
+    if not session.config.obsidian.enabled then
       vim.notify("md-viewer: Obsidian wikilink navigation is disabled", vim.log.levels.WARN)
       return
     end
@@ -1219,7 +1219,7 @@ function M.scroll_obsidian_anchor(session, anchor)
       return
     end
     session.scroll_y = type(result.scrollY) == "number" and result.scrollY or 0
-    session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+    session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
     host.schedule_scroll(session)
     if not result.found then
       local label = anchor.kind == "block" and ("^" .. anchor.value) or table.concat(anchor.segments, "#")
@@ -1294,7 +1294,7 @@ end
 ---does nothing -- there is no more "jump to source" fallback here (removed
 ---per operator decision, matching the plain click's own removal below).
 function M.activate(session, point, modifiers)
-  if not config.get().interaction.links then return end
+  if not session.config.interaction.links then return end
   M.request_hit(session, point, modifiers, 1, function(result, err, meta)
     if err or not result then
       -- Reported rather than dropped. A ctrl-click whose hit test failed and a

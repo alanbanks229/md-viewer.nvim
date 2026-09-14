@@ -411,7 +411,7 @@ end
 
 function M.schedule(session, delay, timer_name, render_options)
   if not valid(session) then return end
-  debounce.call(session, timer_name or "render_timer", delay or config.get().render.debounce_ms, function()
+  debounce.call(session, timer_name or "render_timer", delay or session.config.render.debounce_ms, function()
     if valid(session) then M.refresh(session, render_options) end
   end)
 end
@@ -742,7 +742,7 @@ function M.schedule_scroll(session)
     -- that function's comment for why local mode does not trade sharpness
     -- for bytes it never spends. `scroll_settle_delay` (still shared) decides
     -- when the settle frame replaces the moving one.
-    local render = config.get().render
+    local render = session.config.render
     local moving, scale_source = local_scroll_capture_scale(render)
     local viewport = session.local_viewport
     if moving and moving >= (viewport.deviceScaleFactor or 1) then
@@ -788,7 +788,7 @@ function M.schedule_scroll(session)
     M.draw_resident(session)
     return
   end
-  local render = config.get().render
+  local render = session.config.render
   local fast_scale = render.fast_scroll and "css" or "device"
   local scale_factor, scale_source = scroll_capture_scale(render)
   -- Recorded rather than re-derived in :MdViewerDebug: the answer depends on
@@ -1182,8 +1182,14 @@ end
 ---switches modes without passing through off.
 function M.toggle_line_numbers(mode)
   assert(mode == "absolute" or mode == "relative", "line-number mode must be absolute or relative")
-  local cfg = config.get()
-  cfg.preview.line_numbers = cfg.preview.line_numbers == mode and "off" or mode
+  -- Through config.set_runtime, not by writing into `config.get()`. That table
+  -- is the user's: a keystroke editing it left nothing able to tell an option
+  -- they set from one a command changed, and skipped `validate` on the way
+  -- past. The runtime layer is validated, is re-applied to every session's
+  -- snapshot here, and reaches previews opened later -- which is what "switch
+  -- every preview" has always meant.
+  local current = config.effective("preview.line_numbers")
+  config.set_runtime("preview.line_numbers", current == mode and "off" or mode)
   each_session(function(session) preview.update_line_numbers(session) end)
 end
 
@@ -1200,7 +1206,7 @@ end
 ---Returns whether the position actually changed.
 function M.scroll_to(session, next_scroll)
   if not valid(session) or not session.backend.is_graphical then return false end
-  local cfg = config.get()
+  local cfg = session.config
   next_scroll = math.max(0, math.min(scroll_maximum(session), next_scroll))
   if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return false end
   session.scroll_y = next_scroll
@@ -1218,7 +1224,7 @@ end
 
 function M.navigate(session, action, count)
   if not valid(session) or not session.backend.is_graphical then return end
-  local cfg = config.get()
+  local cfg = session.config
   count = math.max(1, math.floor(count or 1))
   local maximum = scroll_maximum(session)
   local deltas = {
@@ -1462,8 +1468,8 @@ function M.setup_autocmds()
       -- cursor only shadows it.
       if state.from_preview(args.buf) then return end
       local session = state.get(args.buf)
-      if session and config.get().sync.source_to_preview and config.get().sync.cursor_follow then
-        local cfg = config.get().sync
+      if session and session.config.sync.source_to_preview and session.config.sync.cursor_follow then
+        local cfg = session.config.sync
         sync.source_cursor(
           session,
           function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
@@ -1485,8 +1491,8 @@ function M.setup_autocmds()
         -- source window and a non-numeric `args.match` would otherwise compare
         -- equal and match every scroll in the editor.
         local source_win = state.source_window(session)
-        if source_win and scrolled_win == source_win and config.get().sync.source_to_preview then
-          local cfg = config.get().sync
+        if source_win and scrolled_win == source_win and session.config.sync.source_to_preview then
+          local cfg = session.config.sync
           sync.source_cursor(
             session,
             function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
@@ -1701,7 +1707,10 @@ function M.setup_autocmds()
       -- Preview buffers use bufhidden=hide specifically so switching pane tabs
       -- is not lifecycle. Only the optional unpinned source behavior remains.
       local session
-      if not state.from_preview(args.buf) and not config.get().preview.pinned then session = state.get(args.buf) end
+      if not state.from_preview(args.buf) then
+        local hidden = state.get(args.buf)
+        if hidden and not hidden.config.preview.pinned then session = hidden end
+      end
       if session then close_session(session) end
     end,
   })
