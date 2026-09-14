@@ -17,13 +17,15 @@ Completed:
 - Phase 0, item 5: corrected SECURITY.md to state that the helper distributes
   its token in the control-socket hello and the plugin subsequently embeds it
   in terminal-stream markers visible to pty observers.
+- Phase 0, item 6: re-armed the local-render fallback warning after a
+  successful attachment, so a later demotion after recovery is reported.
 
 Next:
-- Continue Phase 0 with item 6 (re-arm local-render fallback notification
-  after recovery).
+- Run Phase 0 completion verification, then mark Phase 0 complete and Phase A
+  current without starting Phase A.
 
 Last verified commit:
-- `d8236b3` (Phase 0, item 4); this commit is Phase 0, item 5.
+- `9bd9052` (Phase 0, item 5); this commit is Phase 0, item 6.
 
 Notes:
 - Follow docs/refactor-plan.md in order.

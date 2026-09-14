@@ -38,7 +38,7 @@ local state = {
   seq = 0,
   requests = 0,
   notifications = 0,
-  fallback_notified = false,
+  fallback_notified = false, -- one warning per attached interval; re-armed on recovery
 }
 
 -- K4's remote half: marker emit -> `presented` acknowledgement, on this
@@ -443,6 +443,11 @@ local function try_candidate(path, on_done)
         pairing_waiter = function()
           settle_pairing()
           state.phase = "attached"
+          -- A successful recovery starts a new attached interval. If this
+          -- helper later disappears too, that is a new demotion and must be
+          -- reported; recurring attach/demote cycles are the flapping health
+          -- diagnostics tell the operator to investigate.
+          state.fallback_notified = false
           state.socket_path = path
           process.set_transport(transport())
           install_marker_presenter()
