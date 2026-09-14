@@ -10,20 +10,20 @@ local state = require("md-viewer.state")
 local M = {}
 local host
 
----Connect the orchestration decisions that intentionally remain in controller:
----session validity, occlusion, full teardown, and the first caret request.
+---Connect the orchestration decisions that intentionally remain outside presenter:
+---session validity, image visibility, full teardown, and the first caret request.
 ---Functions are closures so controller can wire them before its definitions
 ---are reached and presenter never has to require controller or interaction.
 function M.set_host(value)
   assert(type(value) == "table", "presenter host must be a table")
-  for _, name in ipairs({ "valid", "update_occlusion", "clear_image", "request_caret" }) do
+  for _, name in ipairs({ "valid", "must_hide", "clear_image", "request_caret" }) do
     assert(type(value[name]) == "function", "presenter host is missing " .. name)
   end
   host = value
 end
 
 local function valid(session) return host ~= nil and host.valid(session) end
-local function update_occlusion(session) return host.update_occlusion(session) end
+local function must_hide(session) return host.must_hide(session) end
 local function clear_image(session) return host.clear_image(session) end
 local function notify_error(message) vim.notify("md-viewer: " .. tostring(message), vim.log.levels.ERROR) end
 
@@ -295,7 +295,7 @@ function M.display_selection_overlay(session, result)
   if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.frame_scroll_y or 0)) > 0.5 then
     return false
   end
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     session.refresh_deferred = true
     return false
@@ -477,7 +477,7 @@ function M.display_interact_result(session, result)
       session.applied_scroll_y = result.scrollY
       session.scroll_y = result.scrollY
     end
-    if update_occlusion(session) then
+    if must_hide(session) then
       clear_image(session)
       session.refresh_deferred = true
       return
@@ -506,7 +506,7 @@ function M.display_interact_result(session, result)
     session.applied_scroll_y = result.scrollY
     session.scroll_y = result.scrollY
   end
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     -- The interact PNG is discarded rather than displayed off screen, and
     -- unlike a render frame it never reaches session.last_image_bytes, so the

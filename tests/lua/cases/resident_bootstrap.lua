@@ -15,6 +15,7 @@ return function(t)
   local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
+  local occlusion = require("md-viewer.occlusion")
   local preview = require("md-viewer.preview")
   local renderer = require("md-viewer.renderer")
   local resident = require("md-viewer.resident")
@@ -211,6 +212,12 @@ return function(t)
     t.ok(session.last_placement ~= nil, "and the placement clicks and the caret resolve against")
     t.eq(nil, session.resident_waiting, "nothing is being waited on")
     t.eq(false, session.loading, "and the spinner is down")
+
+    occlusion.clear_image(session)
+    log = {}
+    occlusion.reconcile_resident(session)
+    t.ok(step("compose"), "direct resident reconciliation restores retained chunks after an unplace")
+    t.eq(true, session.resident_screen, "direct resident reconciliation accounts for the restored screen")
 
     -- A pan moves the base every rectangle was measured against.
     log = {}

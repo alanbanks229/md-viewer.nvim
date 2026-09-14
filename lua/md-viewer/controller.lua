@@ -2,7 +2,6 @@ local backends = require("md-viewer.backends")
 local caret = require("md-viewer.caret")
 local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
-local coordinates = require("md-viewer.coordinates")
 local preview = require("md-viewer.preview")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
@@ -18,17 +17,24 @@ local resident_session = require("md-viewer.resident_session")
 local linkrate = require("md-viewer.linkrate")
 local localrender = require("md-viewer.localrender")
 local history = require("md-viewer.history")
+local occlusion = require("md-viewer.occlusion")
 local presenter = require("md-viewer.presenter")
 
 local M = {}
 local group
-local start_ui_poll
-local each_session
 
 local clear_selection_overlay = presenter.clear_selection_overlay
 local apply_image = presenter.apply_image
 local apply_surface = presenter.apply_surface
 local local_mode = presenter.local_mode
+local clear_image = occlusion.clear_image
+local clear_raw_sessions = occlusion.clear_raw_sessions
+local each_session = occlusion.each_session
+local must_hide = occlusion.must_hide
+local reconcile_occlusion = occlusion.reconcile
+local reconcile_placement = occlusion.reconcile_placement
+local refresh_raw_sessions = occlusion.refresh_raw_sessions
+local start_ui_poll = occlusion.start_ui_poll
 
 M.clear_selection_overlay = presenter.clear_selection_overlay
 M.restore_clean_base = presenter.restore_clean_base
@@ -71,53 +77,9 @@ local history_host = {
   retarget = function(...) return M.retarget(...) end,
 }
 
-local function clear_image(session)
-  clear_selection_overlay(session)
-  M.clear_caret_overlay(session)
-  if session.image_id and session.backend then session.backend.clear(session.image_id) end
-  session.image_id = nil
-  session.frame_scroll_y, session.frame_revision = nil, nil
-  session.last_placement = nil
-  -- The resident half of the same thing. A resident session has no `image_id`,
-  -- so the line above was a no-op for it and nothing else held the band ids: an
-  -- occluding float blanked the viewport model's frame and left a resident
-  -- screen compositing underneath it. Only the placements go -- the chunks stay
-  -- in terminal memory, so coming back costs a re-crop rather than the document.
-  session.resident_screen = false
-  resident_session.unplace(session)
-  animation.clear(session)
-end
-
----Must the image be off screen right now? Every path that shows, restores or
----re-places a backend image asks this first, so it is the one place that has
----to know every reason the image may not be displayed.
-local function update_occlusion(session)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  -- The preview window living on a *background* tabpage is one of those
-  -- reasons, and nothing else here can detect it: `preview.occlusion` only
-  -- ever looks at the preview's own tabpage, and `reconcile_placement` sees an
-  -- unchanged placement because the geometry genuinely has not changed -- a
-  -- hidden window keeps reporting its full on-screen rectangle (coordinates
-  -- .window_is_displayed). Left unchecked, the raw image is re-shown at the
-  -- hidden tabpage's coordinates on top of whatever the visible tabpage is
-  -- drawing, which is what any plugin that opens its UI in its own tab
-  -- (codediff.nvim's `:CodeDiff`, for one) triggers.
-  local hidden = not coordinates.window_is_displayed(session.preview_win)
-  session.tabpage_hidden = hidden
-  if hidden then
-    session.occluded = false
-    session.occluding_windows = {}
-    return true
-  end
-  local blocked, windows = preview.occlusion(session.preview_win)
-  session.occluded = blocked
-  session.occluding_windows = windows
-  return blocked or session.ui_suppressed
-end
-
 presenter.set_host({
   valid = valid,
-  update_occlusion = update_occlusion,
+  must_hide = must_hide,
   clear_image = clear_image,
   request_caret = function(session) interaction.caret_motion(session, "none", "forward", 1) end,
 })
@@ -140,7 +102,7 @@ interaction.set_host({
 ---about, and left it z-fighting the bands by image id.
 local function show_cached(session)
   if not valid(session) or session.backend.name == "cells" then return false end
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     return false
   end
@@ -194,6 +156,13 @@ local function show_cached(session)
   return true
 end
 
+occlusion.set_host({
+  valid = valid,
+  show_cached = show_cached,
+  draw_resident = function(session) return M.draw_resident(session) end,
+  schedule = function(...) return M.schedule(...) end,
+})
+
 ---A chunk capture never re-enters the resident bootstrap: it *is* the warm-up.
 local function render_options_is_chunk(render_options)
   return render_options ~= nil and render_options.resident_chunk ~= nil
@@ -211,7 +180,7 @@ function M.refresh(session, render_options)
     return
   end
   session.render_failed = false
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     -- Nothing was captured, so the cached PNG stays a frame behind whatever
     -- triggered this refresh. show_cached() replays it once the image can be
@@ -400,7 +369,7 @@ function M.refresh(session, render_options)
     -- cached clean base cannot be this frame. `apply_image` records the
     -- replacement whenever a selection-free frame does reach the screen.
     if session.selection_active then session.clean_image_bytes = nil end
-    if update_occlusion(session) then
+    if must_hide(session) then
       clear_image(session)
       finish()
       return
@@ -597,7 +566,7 @@ end
 ---but an application of it -- the frame it keeps *is* this position.
 function M.draw_resident(session)
   if not valid(session) or session.render_path ~= "resident" then return end
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     return
   end
@@ -753,7 +722,7 @@ function M.schedule_scroll(session)
   -- no backpressure to manage here either. Above the resident branch on
   -- purpose: local render owns scrolling wherever both could apply.
   if local_mode(session) then
-    if update_occlusion(session) then
+    if must_hide(session) then
       clear_image(session)
       session.refresh_deferred = true
       return
@@ -1263,12 +1232,6 @@ function M.navigate(session, action, count)
   return M.scroll_by(session, (deltas[action] or 0) * count)
 end
 
-each_session = function(fn)
-  for _, session in pairs(state.active_documents()) do
-    if valid(session) then fn(session) end
-  end
-end
-
 ---The session a helper notification names. Notifications carry the document
 ---id because the helper knows nothing smaller; nil for a document whose
 ---session has since closed, which is a stale notification and not an error.
@@ -1276,157 +1239,6 @@ local function session_by_document(doc)
   for _, session in pairs(state.all()) do
     if session.document_id == doc then return session end
   end
-end
-
-local function clear_raw_sessions()
-  each_session(function(session)
-    if session.backend.name == "kitty_raw" then clear_image(session) end
-  end)
-end
-
-local function refresh_raw_sessions()
-  each_session(function(session)
-    if session.backend.name == "kitty_raw" and not session.ui_suppressed then
-      if not show_cached(session) and not update_occlusion(session) then M.schedule(session, 0) end
-    end
-  end)
-end
-
----A placement change the terminal has to be told about -- `coordinates.same`,
----so `exclusions` count, not just row/col/width/height.
----
----The viewport model's re-place, and only that: it moves the one frame this
----session owns. `reconcile_resident` below is the same job for a resident
----screen, which owns no frame and follows a geometry change by composing its
----bands again.
----
----Exclusions have to count because of what `raw_zindex = -1` actually means:
----in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
----below text glyphs but *above* cell background colors.
----A passive float therefore does not occlude the image
----on its own -- only its glyphs and border characters survive, and the image
----keeps compositing across everything else, so a notification renders with the
----Markdown showing through its background instead of its own. Cutting the
----float's rectangle out of the placement is the only thing that gives it back
----an opaque interior, and the cut has to actually reach the terminal.
----
----This comparison used to ignore `exclusions` on purpose, because re-cropping
----on every appearing and disappearing notification was visible as the image
----blinking and rolling by about a row. That was `kitty_raw.move` deleting the
----old placements before sending the new ones; it now emits both in one write,
----new first, so the re-crop is no longer visible as anything.
-local function reconcile_placement(session, force)
-  if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
-  -- In local mode, image_id is a reference that may not have any pixels on
-  -- the terminal yet -- see apply_surface's local_frame_confirmed comment.
-  -- Re-cropping it before its own upload lands addresses an id the terminal
-  -- draws nothing for, so the poll tick that would have done this waits for
-  -- the next one instead; the reconcile is idempotent and this is not lost,
-  -- only deferred.
-  if local_mode(session) and not session.local_frame_confirmed then return end
-  -- Never address the terminal on behalf of a window that is not on screen:
-  -- its reported geometry is a hidden tabpage's, so any placement built from
-  -- it lands on top of the tabpage the user is actually looking at. The
-  -- unconditional `force` callers (CmdlineEnter/CmdlineLeave) reach here
-  -- without an occlusion check of their own.
-  if not coordinates.window_is_displayed(session.preview_win) then return end
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  if force or not coordinates.same(session.last_placement, placement) then
-    local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
-    if not ok then
-      notify_error(moved)
-      return
-    end
-    if not moved then
-      notify_error(err or "failed to update image placement")
-      return
-    end
-    -- The base just moved or re-cropped (a float opened or closed over it);
-    -- overlay rectangles computed against the old placement are wrong now.
-    -- Cleared after the move rather than re-derived: the next selection frame
-    -- repaints them against the new placement within one round trip.
-    clear_selection_overlay(session)
-  end
-  -- Always refresh, even when no move() happened: exclusions (or any other
-  -- field) may have changed and click-resolution reads this on every click.
-  session.last_placement = placement
-  -- Animation frames are positioned against the placement, so a float opening
-  -- over the preview would otherwise leave them painted across it and offset.
-  animation.repaint(session)
-  -- The caret surface is sized from the placement, so it has to follow it here
-  -- too. A re-render would resize it via `apply_image`, but the callers that
-  -- reach this without one -- a float opening, `cmdheight = 0` shrinking the
-  -- window around the command line -- would otherwise leave the caret able to
-  -- sit on a row the image no longer covers, which resolves to nothing.
-  preview.reset_surface(session)
-  preview.update_line_numbers(session)
-end
-
----The resident model's `reconcile_placement`. A viewport frame follows a
----geometry change with `backend.move`; a resident screen follows it by being
----composed again, which is the same few hundred bytes and no pixels either way.
----A resident session with nothing on the pane -- an occlusion that has just
----lifted -- draws for the first time here.
-local function reconcile_resident(session)
-  if session.ui_suppressed then return end
-  -- Never address the terminal on behalf of a window that is not on screen; see
-  -- `reconcile_placement` for what a hidden tabpage's geometry does.
-  if not coordinates.window_is_displayed(session.preview_win) then return end
-  if not session.resident_screen then
-    M.draw_resident(session)
-    return
-  end
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  if not coordinates.same(session.last_placement, placement) then M.draw_resident(session) end
-end
-
-local function reconcile_occlusion()
-  each_session(function(session)
-    if session.backend.name ~= "cells" then
-      if update_occlusion(session) then
-        clear_image(session)
-      elseif session.image_id then
-        -- Includes the resident bootstrap frame, which is an ordinary image and
-        -- re-places through `move` like any other. Hoisting this test ahead of
-        -- the restore arm is behaviour-preserving off the resident path:
-        -- `reconcile_placement` already returned immediately whenever
-        -- `image_id` was nil, so the old `else` arm did nothing in exactly the
-        -- cases that now route elsewhere.
-        reconcile_placement(session)
-      elseif session.render_path == "resident" and session.resident then
-        reconcile_resident(session)
-      elseif not show_cached(session) then
-        M.schedule(session, 0)
-      end
-    end
-  end)
-end
-
-start_ui_poll = function(session)
-  if session.backend.name ~= "kitty_raw" then return end
-  local interval = math.max(0, math.floor(config.get().image.ui_poll_ms or 50))
-  if interval == 0 or session.ui_poll_timer then return end
-  local timer = vim.uv.new_timer()
-  session.ui_poll_timer = timer
-  timer:start(
-    interval,
-    interval,
-    vim.schedule_wrap(function()
-      if valid(session) then
-        if update_occlusion(session) then
-          clear_image(session)
-        elseif session.image_id then
-          reconcile_placement(session)
-        elseif session.render_path == "resident" and session.resident then
-          reconcile_resident(session)
-        elseif not session.ui_suppressed and not session.loading and not session.render_failed then
-          if not show_cached(session) then M.schedule(session, 0) end
-        end
-      else
-        debounce.close(session, "ui_poll_timer")
-      end
-    end)
-  )
 end
 
 ---Copy the current preview selection to the unnamed register (and `+` when
@@ -1689,7 +1501,7 @@ function M.setup_autocmds()
       -- because a resize is genuinely the moment the cell can move.
       cellpixels.invalidate()
       each_session(function(session)
-        if not update_occlusion(session) then M.schedule(session, 80, "resize_timer") end
+        if not must_hide(session) then M.schedule(session, 80, "resize_timer") end
       end)
       vim.schedule(reconcile_occlusion)
     end,
@@ -1736,7 +1548,7 @@ function M.setup_autocmds()
         if
           not session.image_id
           and not session.ui_suppressed
-          and not update_occlusion(session)
+          and not must_hide(session)
           and vim.api.nvim_win_get_tabpage(session.preview_win) == vim.api.nvim_get_current_tabpage()
         then
           if not show_cached(session) then M.schedule(session, 0) end
