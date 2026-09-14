@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase D (needs new test infrastructure first) -- not started
+Current phase: Phase D (needs new test infrastructure first) -- in progress
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -163,6 +163,19 @@ Completed:
   3,464 Lua assertions and 350 Node tests, `stylua --check` passed, and
   `scripts/overlay/live/drive.lua` -- mandatory for all of Phase C -- passed
   after each item, with an unchanged 377,622-byte terminal total throughout.
+
+- Phase D, item 17, harness deliverable 1 of 5: `MD_VIEWER_TEST_FILTER` (a Lua
+  pattern matched against the case name; narrows the list without reordering
+  it, errors when it matches nothing, and labels its summary line so a
+  filtered run cannot be read as the suite) and a per-case teardown contract
+  in `tests/lua/world.lua` covering windows, tabpages, `state.panes()`, the
+  `md-viewer` autocmd group's size and the config singleton. Buffers are
+  exempt by design. It found five leaks: a pane stranded by `config.lua` and
+  `image.backend = "cells"` left in the global config by `controller.lua`,
+  `debug.lua`, `health.lua` and `navigation.lua`. The suite's assertion count
+  moved 3,464 -> 3,457 because `debug.lua` asserts once per line of the
+  `:MdViewerDebug` report and the report enumerates `state.panes()`; seven of
+  those lines described the stranded pane.
 
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
