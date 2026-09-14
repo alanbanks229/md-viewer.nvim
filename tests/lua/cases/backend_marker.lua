@@ -218,6 +218,57 @@ return function(t)
   t.eq(before_oversize.markers, after_oversize.markers, "a refused marker is not counted as emitted")
   t.eq(before_oversize.marker_bytes, after_oversize.marker_bytes, "nor are its bytes counted")
 
+  -- ---------------------------------------------------------------------
+  -- The seam is universal.
+  --
+  -- Eleven operations used to write their escapes straight to the terminal,
+  -- past whatever presenter was installed: every animation call, and the
+  -- resident upload/compose/uncompose trio. That is *why* resident mode and
+  -- animation were structurally unavailable in local mode -- their bytes would
+  -- have gone to the terminal directly while the helper injected everything
+  -- else at its own boundaries, with no ordering between the two.
+  --
+  -- The assertion is the one that catches a new direct write: with a presenter
+  -- installed, nothing reaches nvim_ui_send behind it. A recording presenter
+  -- rather than the marker one, because what is being pinned here is that the
+  -- seam is *reached*, not what any particular presenter does with it.
+  -- ---------------------------------------------------------------------
+  do
+    local seam_png = "\137PNG\r\n\26\n\0\0\0\13IHDR\0\0\0\100\0\0\0\100"
+    local transactions = {}
+    raw.set_presenter(function(tx) transactions[#transactions + 1] = tx end)
+    reset_writes()
+
+    local frame_id = raw.animation_upload("seam-frame", seam_png)
+    t.ok(frame_id, "an animation frame uploads through the presenter")
+    local anim_set =
+      raw.animation_apply(nil, { { image_id = frame_id, x = 5, y = 5, width = 20, height = 10 } }, placement)
+    t.ok(anim_set, "and places through it")
+    raw.animation_clear(anim_set)
+    raw.animation_free({ "seam-frame" })
+
+    local native_id = raw.animation_native_begin("seam-native", seam_png, 70)
+    t.ok(native_id, "a native animation begins through the presenter")
+    t.eq(true, (raw.animation_native_frame("seam-native", seam_png, 200)), "appends frames through it")
+    t.eq(true, (raw.animation_native_finish("seam-native", "infinite")), "and finishes through it")
+    raw.animation_free({ "seam-native" })
+
+    local chunk = raw.upload(seam_png)
+    t.ok(chunk, "a resident chunk uploads through the presenter")
+    t.eq(true, (raw.compose({ { image_id = chunk, row = 0, rows = 10, src_y = 0, src_h = 100 } }, placement)))
+    t.ok(raw.uncompose() > 0, "and comes down through it")
+    raw.retire({ chunk })
+    raw.clear_all()
+
+    t.eq(0, #writes, "no operation writes to the terminal behind an installed presenter")
+    t.ok(#transactions >= 12, "every one of them arrived as a transaction instead: " .. #transactions)
+    for index, tx in ipairs(transactions) do
+      for _, upload in ipairs(tx.uploads or {}) do
+        t.ok(upload.id ~= nil, ("transaction %d names the image it uploads"):format(index))
+      end
+    end
+  end
+
   -- Restoring the default presenter restores the direct bytes.
   raw.set_presenter(nil)
   reset_writes()

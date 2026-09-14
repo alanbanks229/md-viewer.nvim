@@ -61,8 +61,14 @@ end
 ---kitty-writer.js`) to materialize uploads on the terminal's machine, and
 ---`scripts/local/dump-upload-golden.lua` dumps this one's output so the two
 ---can be compared byte-for-byte.
-local function upload_sequence(id, image_bytes)
-  return chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id))
+---
+---`control` overrides the transmission's control block, and only the native
+---animation frame append (`a=f`, which adds a frame to an image that already
+---exists) uses it. The default is the contract: it is what the helper mirrors
+---and what the golden dump compares, and nothing that crosses to JS passes a
+---third argument.
+local function upload_sequence(id, image_bytes, control)
+  return chunks(vim.base64.encode(image_bytes), control or ("a=t,f=100,t=d,q=2,i=%d"):format(id))
 end
 
 -- ---------------------------------------------------------------------------
@@ -77,11 +83,23 @@ end
 -- cut-outs and deletion discipline are identical either way, because they
 -- happen before the seam.
 --
+-- The seam is universal: `send` below has exactly one caller, `direct_present`,
+-- and `tests/lua/cases/backend_marker.lua` pins that with an installed
+-- presenter and an empty terminal stream. It was not always so -- every
+-- animation call and the resident upload/compose/uncompose trio used to write
+-- past it, which is precisely why those two features could not run in local
+-- mode: their bytes would have reached the terminal directly while the helper
+-- injected everything else at its own boundaries, with nothing ordering the
+-- two. Routing them here removes that obstacle; whether either feature is
+-- *enabled* in local mode remains a separate decision, and today neither is.
+--
 -- A transaction: { image_id?, doc?, kill?, delete_first?, uploads = { {id,
--- png = bytes} | {id, ref = descriptor} , ... }, place = escapes, delete =
--- escapes }. `kill` marks content removal (hide/retire/clear), which the
--- marker path must propagate so a pending frame dies with the content it
--- belonged to. `delete_first` preserves the non-double-buffered ordering; the
+-- png = bytes, control?} | {id, ref = descriptor} , ... }, place = escapes,
+-- delete = escapes }. `kill` marks content removal (hide, retire, clear,
+-- uncompose), which the marker path must propagate so a pending frame dies
+-- with the content it belonged to. `control` overrides an upload's
+-- transmission control block, which only the native animation frame append
+-- needs. `delete_first` preserves the non-double-buffered ordering; the
 -- marker path always double-buffers and says so in kitty_marker.
 -- ---------------------------------------------------------------------------
 
@@ -90,7 +108,7 @@ local function direct_present(tx)
   local delete = tx.delete or ""
   if tx.delete_first and delete ~= "" then parts[#parts + 1] = delete end
   for _, upload in ipairs(tx.uploads or {}) do
-    if upload.png then parts[#parts + 1] = upload_sequence(upload.id, upload.png) end
+    if upload.png then parts[#parts + 1] = upload_sequence(upload.id, upload.png, upload.control) end
     -- A ref here means a demotion raced an in-flight local-mode operation:
     -- there are no pixels on this machine to materialize. The placements
     -- still go out (an unknown id draws nothing under q=2) and the fallback
@@ -1011,7 +1029,7 @@ function M.animation_upload(key, bytes)
   if not width then return nil, "frame is not a usable PNG" end
   next_animation_id = next_animation_id + 1
   local id = next_animation_id
-  send(chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
+  present({ image_id = id, uploads = { { id = id, png = bytes } } })
   animation_images[key] = { id = id, complete = true, width_px = width, height_px = height }
   return id, { width_px = width, height_px = height }
 end
@@ -1044,21 +1062,24 @@ function M.animation_native_begin(key, bytes, gap_ms)
   if not width then return nil, "root frame is not a usable PNG" end
   next_animation_id = next_animation_id + 1
   local id = next_animation_id
-  local parts = { chunks(vim.base64.encode(bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)) }
-  -- The root frame is created by the plain transmission above, which carries
-  -- no gap of its own; the protocol sets the root's gap through the control
-  -- action (a=a, frame r=1) instead.
+  -- The root frame is created by the plain transmission the upload below
+  -- becomes, which carries no gap of its own; the protocol sets the root's gap
+  -- through the control action (a=a, frame r=1) instead. Those controls ride
+  -- the transaction's placement half, which is what that half means to both
+  -- presenters: everything in the write that is not an upload and not a
+  -- deletion.
   local gap = math.floor(tonumber(gap_ms) or 0)
-  if gap > 0 then parts[#parts + 1] = command(("a=a,q=2,i=%d,r=1,z=%d"):format(id, gap)) end
-  parts[#parts + 1] = command(("a=a,q=2,i=%d,s=2"):format(id))
-  send(table.concat(parts))
+  local controls = {}
+  if gap > 0 then controls[#controls + 1] = command(("a=a,q=2,i=%d,r=1,z=%d"):format(id, gap)) end
+  controls[#controls + 1] = command(("a=a,q=2,i=%d,s=2"):format(id))
+  present({ image_id = id, uploads = { { id = id, png = bytes } }, place = table.concat(controls) })
   animation_images[key] = { id = id, native = true, complete = false, width_px = width, height_px = height }
   return id, false
 end
 
 ---Transmit one additional frame of a native animation, with its display gap.
 ---
----One frame is one atomic send(), and must stay one: the protocol associates
+---One frame is one atomic transaction, and must stay one: the protocol associates
 ---m=1 continuation chunks with the transmission in progress, so interleaving
 ---*any* other graphics command between one frame's chunks corrupts it. Pacing
 ---therefore happens at whole-frame granularity -- the caller spreads frames
@@ -1071,7 +1092,7 @@ function M.animation_native_frame(key, bytes, gap_ms)
   local gap = math.floor(tonumber(gap_ms) or 0)
   local control = gap > 0 and ("a=f,f=100,t=d,q=2,i=%d,z=%d"):format(entry.id, gap)
     or ("a=f,f=100,t=d,q=2,i=%d"):format(entry.id)
-  send(chunks(vim.base64.encode(bytes), control))
+  present({ image_id = entry.id, uploads = { { id = entry.id, png = bytes, control = control } } })
   return true
 end
 
@@ -1089,7 +1110,7 @@ function M.animation_native_finish(key, loop)
   local v = 1
   local finite = loop ~= "infinite" and tonumber(loop) or nil
   if finite then v = math.max(2, math.floor(finite) + 2) end
-  send(command(("a=a,q=2,i=%d,s=3,v=%d"):format(entry.id, v)))
+  present({ image_id = entry.id, place = command(("a=a,q=2,i=%d,s=3,v=%d"):format(entry.id, v)) })
   entry.complete = true
   return true
 end
@@ -1101,15 +1122,19 @@ end
 ---exactly the keys no live session references, and clear_all remains the
 ---exit-time backstop for whatever that bookkeeping missed.
 function M.animation_free(keys)
-  local deletions = {}
+  local deletions, first_id = {}, nil
   for _, key in ipairs(keys or {}) do
     local entry = animation_images[key]
     if entry then
+      first_id = first_id or entry.id
       deletions[#deletions + 1] = command(("a=d,d=I,q=2,i=%d"):format(entry.id))
       animation_images[key] = nil
     end
   end
-  if #deletions > 0 then send(table.concat(deletions)) end
+  -- No `kill`: frame data is not the document's content. `kill` exists to make
+  -- a pending local-mode frame die with the base image it belongs to, and
+  -- these ids never named that base.
+  if #deletions > 0 then present({ image_id = first_id, delete = table.concat(deletions) }) end
   return #deletions
 end
 
@@ -1247,7 +1272,7 @@ function M.animation_apply(set_id, items, placement)
   -- `overlay_apply` documents above its pre-pass; here the refusal depends on
   -- caller-supplied fractional geometry, so the fix is to keep the diff
   -- read-only rather than to prove the refusal unreachable.
-  local additions, fresh = {}, {}
+  local additions, fresh, first_image_id = {}, {}, nil
   for _, key in ipairs(order) do
     local existing = set.placements[key]
     if existing then
@@ -1261,6 +1286,7 @@ function M.animation_apply(set_id, items, placement)
       -- and the set is exactly as it was before this call.
       if not pid then return nil, "an animation frame could not be expressed as a crop" end
       additions[#additions + 1] = sequence
+      first_image_id = first_image_id or entry.item.image_id
       fresh[key] = { pid = pid, image_id = entry.item.image_id }
     end
   end
@@ -1281,8 +1307,9 @@ function M.animation_apply(set_id, items, placement)
   -- actually drives (see `M.move`: delete-first is a visible blink and a
   -- one-row roll), and WezTerm is gated off for animation entirely. Do not
   -- "fix" this to match theirs without re-running probe check 5.
-  local payload = table.concat(additions) .. table.concat(deletions)
-  if payload ~= "" then send(payload) end
+  local place, delete = table.concat(additions), table.concat(deletions)
+  local payload = place .. delete
+  if payload ~= "" then present({ image_id = first_image_id, place = place, delete = delete }) end
   set.placements = fresh
 
   return set_id, { placed = #additions, deleted = #deletions, bytes = #payload, items = #order }
@@ -1310,11 +1337,12 @@ end
 function M.animation_clear(set_id)
   local set = set_id and animations[set_id] or nil
   if not set then return false end
-  local deletions = {}
+  local deletions, first_id = {}, nil
   for _, entry in ipairs(ordered_animation_placements(set.placements)) do
+    first_id = first_id or entry.image_id
     deletions[#deletions + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(entry.image_id, entry.pid))
   end
-  if #deletions > 0 then send(table.concat(deletions)) end
+  if #deletions > 0 then present({ image_id = first_id, delete = table.concat(deletions) }) end
   animations[set_id] = nil
   return true
 end
@@ -1515,7 +1543,7 @@ function M.upload(image_bytes)
   local width_px, height_px = png_dimensions(image_bytes)
   if not width_px then return nil, "md-viewer: raw Kitty backend received an invalid PNG" end
   owned[id] = { id = id, width_px = width_px, height_px = height_px, placement_ids = {} }
-  send(chunks(vim.base64.encode(image_bytes), ("a=t,f=100,t=d,q=2,i=%d"):format(id)))
+  present({ image_id = id, uploads = { { id = id, png = image_bytes } } })
   return id
 end
 
@@ -1551,7 +1579,11 @@ function M.compose(parts, placement)
     end
     if item then item.placement_ids = {} end
   end
-  send(table.concat(sequences) .. table.concat(removals))
+  present({
+    image_id = drawn[1] and drawn[1].item.id,
+    place = table.concat(sequences),
+    delete = table.concat(removals),
+  })
 
   composed = {}
   for _, entry in ipairs(drawn) do
@@ -1580,16 +1612,19 @@ end
 ---`M.compose` already retires every tracked placement whoever owns it -- and
 ---stands as a known one-preview-at-a-time limitation rather than fixed here.
 function M.uncompose()
-  local removals = {}
+  local removals, first_id = {}, nil
   for image_id in pairs(composed) do
     local item = owned[image_id]
     for _, pid in ipairs(item and item.placement_ids or {}) do
+      first_id = first_id or image_id
       removals[#removals + 1] = command(("a=d,d=i,q=2,i=%d,p=%d"):format(image_id, pid))
     end
     if item then item.placement_ids = {} end
   end
   composed = {}
-  if #removals > 0 then send(table.concat(removals)) end
+  -- `kill`, like `M.hide`: this is that operation for the whole screen, and it
+  -- takes the document's content off the glass.
+  if #removals > 0 then present({ image_id = first_id, delete = table.concat(removals), kill = true }) end
   return #removals
 end
 
@@ -1656,11 +1691,11 @@ function M.clear_all()
     M.animation_clear(set_id)
   end
   for key, entry in pairs(animation_images) do
-    send(command(("a=d,d=I,q=2,i=%d"):format(entry.id)))
+    present({ image_id = entry.id, delete = command(("a=d,d=I,q=2,i=%d"):format(entry.id)) })
     animation_images[key] = nil
   end
   for key, sheet in pairs(sheets) do
-    send(command(("a=d,d=I,q=2,i=%d"):format(sheet.id)))
+    present({ image_id = sheet.id, delete = command(("a=d,d=I,q=2,i=%d"):format(sheet.id)) })
     sheets[key] = nil
   end
 end
