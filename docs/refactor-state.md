@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase A
+Current phase: Phase B
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -51,19 +51,33 @@ Completed:
   out at "settle after y" — same pre-existing failure noted after Phase 0, not
   a regression from this item.
 
+- Phase A, item 10: moved `apply_image`'s `last_*`/`fast_*`/`retina_*` frame
+  telemetry (pure session-field bookkeeping, no `vim.api` calls, feeding only
+  `:MdViewerDebug`) verbatim into a new `metrics.lua`, called once from
+  `apply_image` as `metrics.record_frame(...)`.
+- Phase A complete: all four items (7-10) landed. `make test` passed with
+  3,355 Lua assertions and 350 Node tests, and `stylua --check` passed.
+
 Next:
-- Continue Phase A with item 10 from docs/refactor-plan.md in the next session.
+- Begin Phase B with item 11 from docs/refactor-plan.md in the next session.
+- Phase B item 12 (`presenter.lua`) requires `scripts/overlay/live/drive.lua`
+  passing first (see Notes) — resolve or account for the "settle after y"
+  timeout before attempting item 12.
 
 Last verified commit:
-- `0b6a98c` (Phase A item 9 landed).
+- `1cb8d0a` (Phase A complete; items 7-10 verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
 - Do not start the next major phase without stopping first.
-- `scripts/overlay/live/drive.lua` is not a Phase 0 completion gate. The plan
-  makes it mandatory for Phase B item 12 and all of Phase C; CONTRIBUTING says
-  it is worth running for selection or placement changes.
-- The driver was nevertheless run twice after Phase 0 and both attempts timed
-  out at `settle after y`. This is a non-blocking Phase 0 observation, but it
-  must be resolved or otherwise accounted for before Phase B item 12, where
-  the plan makes the driver mandatory.
+- `scripts/overlay/live/drive.lua` was not a Phase A completion gate (only
+  Phase B item 12 and all of Phase C require it; CONTRIBUTING recommends it
+  for any selection/placement change). It was nevertheless run after Phase 0
+  and again after Phase A item 9 (an overlay-geometry change) — both of the
+  latter two runs, and the two runs after Phase 0, all timed out identically
+  at `settle after y`. Four consecutive identical timeouts across unrelated
+  commits is stronger evidence this is pre-existing and environmental (e.g.
+  this machine/session) rather than caused by any change in Phase 0 or A, but
+  it is still unresolved and **must** be fixed or otherwise accounted for
+  before attempting Phase B item 12, where the plan makes the driver
+  mandatory.
