@@ -109,6 +109,7 @@ return function(t)
 
   vim.cmd("bwipeout!")
   controller.close(source)
+  require("md-viewer.config").reset()
   require("md-viewer.process").stop()
   vim.wait(5000, function() return not require("md-viewer.process").status().running end, 20)
 end

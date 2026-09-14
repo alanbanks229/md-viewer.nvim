@@ -26,9 +26,15 @@ function M.near(expected, actual, tolerance, label)
   end
 end
 
-function M.finish()
+---`filter` is MD_VIEWER_TEST_FILTER, when one was in effect. It is printed
+---so that a green partial run cannot be read as a green suite.
+function M.finish(filter)
   if #M.failures > 0 then error(table.concat(M.failures, "\n\n")) end
-  print(("md-viewer Lua tests: %d assertions passed"):format(M.count))
+  if filter and filter ~= "" then
+    print(("md-viewer Lua tests: %d assertions passed (filter %q -- NOT the full suite)"):format(M.count, filter))
+  else
+    print(("md-viewer Lua tests: %d assertions passed"):format(M.count))
+  end
 end
 
 return M

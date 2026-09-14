@@ -35,11 +35,24 @@ make test            # both suites
 make test-lua        # the Lua suite alone
 make test-node       # the renderer's Node suite alone
 node --test tests/node/hitbox.test.js              # one Node case
+MD_VIEWER_TEST_FILTER=history make test-lua        # one Lua case
 stylua --check build.lua lua/ plugin/ tests/lua/   # formatting — CI checks it; not a make target
 ```
 
-There is no single-case runner for the Lua suite — `tests/lua/run.lua` runs
-every case, with no filter.
+`MD_VIEWER_TEST_FILTER` is a Lua pattern matched against the case name without
+its extension, so a bare name is a substring match and `'^preview_'` selects a
+family. It narrows the list without reordering what remains — case order is
+load-bearing in at least one place — and a filter matching nothing fails
+rather than passing quietly. A filtered run says so in its summary line; only
+an unfiltered one is the suite.
+
+Cases run in one shared Neovim, so each must hand the world back as it found
+it: no leaked windows or tabpages, no pane left in `state.panes()`, no second
+registration of the `md-viewer` autocmd group, and the configuration
+singleton restored (`config.reset()`, or your own `setup()` again). The runner
+asserts all four after every case and names what moved. Buffers are exempt —
+cases create fixture buffers by design, and an unreferenced buffer id changes
+no behavior.
 
 CI runs formatting on Ubuntu and the two suites on Ubuntu (Node 22.12.0 and
 24) and macOS (Node 24), with Neovim pinned to v0.12.4 and stylua to v2.5.2 —

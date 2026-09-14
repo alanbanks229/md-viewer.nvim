@@ -79,5 +79,5 @@ return function(t)
   )
   controller.close(source)
 
-  require("md-viewer").setup({ image = { backend = "cells" } })
+  require("md-viewer.config").reset()
 end

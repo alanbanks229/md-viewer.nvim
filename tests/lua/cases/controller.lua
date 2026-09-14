@@ -564,4 +564,6 @@ return function(t)
     controller.close(source)
     pcall(vim.api.nvim_set_current_win, entry_win)
   end
+
+  config.reset()
 end

@@ -382,6 +382,7 @@ return function(t)
   config.set_runtime("preview.line_numbers", "absolute")
   t.eq("absolute", session.config.preview.line_numbers, "as does a runtime value md-viewer sets for itself")
   state.remove_document(session)
+  state.remove_pane(session.pane)
   config.reset()
   config.setup({})
 end
