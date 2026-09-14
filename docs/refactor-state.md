@@ -205,6 +205,21 @@ Completed:
   which Lua stores no key, so it creates 39. Verified by mutation in both
   directions.
 
+- Phase D, item 17, harness deliverable 4 of 5:
+  `tests/fixtures/shared-constants.json`, emitted by
+  `scripts/dump-shared-constants.js` from the Node modules that own the
+  values -- viewport clamps, device-scale band, single-capture ceilings, local
+  protocol version and marker bound, and every `REGION_`/`STALE_`/`INTERACT_`
+  code. `browser.js` now exports `VIEWPORT_BOUNDS` and
+  `DEVICE_SCALE_FACTOR_BOUNDS` at the sites that had the literals, and
+  `coordinates.lua` exports the bounds it already declared, so both sides of
+  the comparison are the live values rather than copies.
+  `tests/node/shared-constants.test.js` fails while the fixture is stale;
+  `tests/lua/cases/shared_constants.lua` asserts Lua agrees and that every
+  code literal in `lua/` is one the renderer still emits. Verified by mutation
+  in both directions. The live overlay driver passed with an unchanged
+  377,622-byte total after the `browser.js` change.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
