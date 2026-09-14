@@ -1,6 +1,7 @@
 # Refactor State
 
-Current phase: Phase D (needs new test infrastructure first) -- in progress
+Current phase: Phase D -- item 17 complete; item 18 is the current item and is
+blocked on a real terminal (see Next)
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -235,6 +236,26 @@ Completed:
   after the one production change in the set (naming `browser.js`'s clamps).
   Next in item 17: `lanes.lua`.
 
+- Phase D, item 17 (lanes): `lanes.lua` is the Lua half of
+  `renderer/src/lanes.js` -- a content admission invalidates every lane through
+  an epoch (any render re-lays out the page), each other lane invalidates only
+  itself. Four lanes, not the renderer's four: `interact` does not pass through
+  here, and the plugin has one the renderer does not distinguish, the resident
+  chunk, which is the one whose loss was measurable. `request_serial` stays as
+  the monotonic request count and as the serial each lane stores;
+  `:MdViewerDebug` now also reports the per-lane serials. The controller's two
+  "void everything" bumps became `lanes.invalidate`.
+  One consequence needed naming: the two sides' supersession rules are not a
+  superset of each other (the renderer keeps one `capture` lane for what this
+  side splits three ways), so a renderer `STALE_RENDER` now reaches the caller
+  as staleness rather than as a failure -- the shared serial used to hide that
+  case by staling everything, and without it a routine supersession would have
+  surfaced to the reader as an error notification. The wire is unchanged: no
+  lane is sent. `make test` passed with 3,918 Lua assertions and 352 Node
+  tests, `stylua --check` passed, and the live overlay driver passed with an
+  unchanged 377,622-byte total.
+- Phase D, item 17 complete: the five harness deliverables and `lanes.lua`.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
@@ -245,18 +266,33 @@ Not done, and why:
   should be. Run the checklist on a Supported terminal before the next release.
 
 Next:
-- Phase D has not begun, and its first step is test infrastructure rather than
-  a refactor: the autocmd manifest and driver, a single-case runner, the
-  session-shape contract, the generated shared-constants fixture, and
-  skip-on-no-browser for the Lua suite. Items 17 and 19 are gated on that
-  existing and passing; item 18 is gated on `scripts/resident/drive.lua` on a
-  real terminal.
+- Phase D item 18 (`resident_controller.lua`) is the current item and is
+  blocked here. The plan gates it on `scripts/resident/drive.lua` passing on a
+  real terminal, and this session is headless. The gate is not a formality: the
+  plan's own reason for deferring the extraction to Phase D is that
+  `pump_resident` and its siblings are unreachable on every validated host, so
+  a green headless suite proves nothing about the code being moved. To resume:
+  run `scripts/resident/drive.lua` (needs Node, Chromium and a real terminal)
+  on a host where the resident path actually runs, and only then extract
+  `controller.lua:931-1171`.
+- Phase D item 19 (`autocmds.lua`) is gated on the new harness existing and
+  passing, which it now does: `tests/lua/cases/autocmds.lua` pins the manifest,
+  the dispatch order and every event firing. It was not started here because
+  item 18 comes first and stopping was the instruction.
 
 Last verified commit:
-- `aae3ae8` (Phase C item 16 landed and verified; Phase C complete).
+- `98e210a` (Phase D item 17 landed and verified: five harness deliverables and
+  `lanes.lua`).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
+- The Lua suite now has a single-case runner (`MD_VIEWER_TEST_FILTER`, a Lua
+  pattern over case names), a per-case teardown contract
+  (`tests/lua/world.lua`), a session-shape contract enforced across the whole
+  run (`tests/lua/session_shape.lua`), and skips its browser round-trips when
+  no browser is present (`MD_VIEWER_TEST_NO_BROWSER=1` forces that path).
+  A filtered run says so in its summary line and skips the shape contract's
+  completeness half, which only a whole run can assert.
 - Do not start the next major phase without stopping first.
 - `scripts/overlay/live/drive.lua` is mandatory for Phase B item 12 and all of
   Phase C. Its former `settle after y` timeout was a pre-existing harness
