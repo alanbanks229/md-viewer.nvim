@@ -781,8 +781,7 @@ function M.overlay_apply(set_id, base_image_id, rects, viewport, tint, sheet_png
   -- correct whatever the capture size is, including when the render viewport
   -- is exact and the two agree.
   local cell_w, cell_h = cell.width, cell.height
-  local drawn_w = placement.width * cell_w
-  local drawn_h = placement.height * cell_h
+  local drawn_w, drawn_h = cellpixels.drawn_size(placement, cell)
   local scale_x = drawn_w / viewport.widthPx
   local scale_y = drawn_h / viewport.heightPx
   local offset_cfg = config.get().image.raw_cell_offset_px or {}
@@ -1163,8 +1162,7 @@ function M.animation_apply(set_id, items, placement)
   if not cell_is_placeable(cell) then return nil, "the terminal's pixel cell size is unknown" end
 
   local cell_w, cell_h = cell.width, cell.height
-  local drawn_w = placement.width * cell_w
-  local drawn_h = placement.height * cell_h
+  local drawn_w, drawn_h = cellpixels.drawn_size(placement, cell)
   local offset_cfg = config.get().image.raw_cell_offset_px or {}
   -- The same calibration the base placement applies. Anything else detaches
   -- the animation from the picture underneath it by exactly the difference.

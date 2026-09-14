@@ -144,6 +144,15 @@ function M.measure()
   return { width = width, height = height, cols = cols, rows = rows }
 end
 
+---The pixel box a `placement` (cells wide by cells tall) is actually *drawn*
+---at against a measured `cell`, as returned by `M.measure()` -- not the
+---pixels a capture used to produce it. See the module comment above for why
+---that distinction matters. Callers still round to their own needs: nothing
+---here rounds, since a rectangle build (kitty_raw's `overlay_apply`) and a
+---sheet-size build (kitty_raw's `required_sheet_size`, interaction.lua's
+---`sheet_dims`) round this at different points for different reasons.
+function M.drawn_size(placement, cell) return placement.width * cell.width, placement.height * cell.height end
+
 ---A one-line summary, printed by `:MdViewerDebug` as `measured cell`.
 function M.describe()
   local cell, reason = M.measure()

@@ -152,7 +152,8 @@ local function scales(session)
   local width_px = session.viewport_width_px
   local height_px = session.viewport_height_render_px or session.viewport_height_px
   if not width_px or width_px <= 0 or not height_px or height_px <= 0 then return nil end
-  return (placement.width * cell.width) / width_px, (placement.height * cell.height) / height_px
+  local drawn_w, drawn_h = cellpixels.drawn_size(placement, cell)
+  return drawn_w / width_px, drawn_h / height_px
 end
 
 local function strategy_for(session)
