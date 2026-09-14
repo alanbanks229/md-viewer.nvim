@@ -14,12 +14,16 @@ Completed:
 - Phase 0, item 4: unified the local marker emitter, parser, and decoder on a
   64 KiB full-wire limit and made the Lua emitter refuse oversized markers
   before writing or counting them.
+- Phase 0, item 5: corrected SECURITY.md to state that the helper distributes
+  its token in the control-socket hello and the plugin subsequently embeds it
+  in terminal-stream markers visible to pty observers.
 
 Next:
-- Continue Phase 0 with item 5 (correct SECURITY.md's token transport claim).
+- Continue Phase 0 with item 6 (re-arm local-render fallback notification
+  after recovery).
 
 Last verified commit:
-- `0e7ed52` (Phase 0, item 3); this commit is Phase 0, item 4.
+- `d8236b3` (Phase 0, item 4); this commit is Phase 0, item 5.
 
 Notes:
 - Follow docs/refactor-plan.md in order.

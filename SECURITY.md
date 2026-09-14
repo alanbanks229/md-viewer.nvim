@@ -89,13 +89,15 @@ helper is the one listener in the system. Its boundary:
   The remote endpoint is the `ssh -R` forward the helper adds to its own ssh
   invocation; the plugin verifies the remote socket file's owner and
   permissions before use, and garbage-collects stale ones.
-- **A per-run 128-bit token** authenticates markers. It travels only over the
-  control socket's hello, never through the terminal stream, and the one-shot
-  unauthenticated `status` query answers counters only — never the token,
-  never document content. Adoption additionally requires the **pairing
-  probe**: the plugin emits a sequence-0 marker through its own tty, and only
-  the helper whose filter sits on that terminal can confirm it — a spoofed
-  socket can say hello but can never pair.
+- **A per-run 128-bit token** authenticates markers. The helper distributes it
+  to the plugin only in the control socket's hello; the plugin then embeds it
+  in every marker it writes through the terminal stream, including the
+  sequence-0 pairing probe. It is therefore visible to anything already able
+  to observe that pty. The one-shot unauthenticated `status` query answers
+  counters only — never the token, never document content. Adoption
+  additionally requires the **pairing probe**: only the helper whose filter
+  sits on that terminal can confirm it, so a spoofed socket can say hello but
+  can never pair.
 - **Assets are push-only.** The helper can never request a path; the VM
   pushes content-addressed bytes that already passed the unchanged VM-side
   validation (document-root confinement, magic bytes, size caps, the SSRF
