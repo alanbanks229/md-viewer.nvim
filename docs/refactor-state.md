@@ -121,12 +121,33 @@ Completed:
   assertions and 350 Node tests, `stylua --check` passed, and the live overlay
   driver passed.
 
+- Phase C, item 15: routed the eleven direct `send()` calls in `kitty_raw.lua`
+  through the presenter seam -- every animation call plus the resident
+  upload/compose/uncompose trio. `send` now has exactly one caller,
+  `direct_present`. Two shapes needed naming to fit the transaction: an upload
+  entry may carry an explicit `control`, because the native animation frame
+  append transmits under `a=f` rather than the upload contract's `a=t` (the
+  default is still the contract the JS port mirrors); and the native begin's
+  playback controls ride the transaction's placement half, which is the part of
+  a write that is neither upload nor deletion. `uncompose` carries `kill` like
+  the `hide` it is the whole-screen form of; the animation frees do not, since
+  frame data is not the base image a pending local frame belongs to. Routing is
+  not enabling: whether resident mode or animation runs in local mode stays a
+  separate decision, and today neither does. `backend_marker.lua` now pins the
+  seam with a recording presenter and an empty terminal stream. `make test`
+  passed with 3,440 Lua assertions and 350 Node tests, `stylua --check` passed,
+  and the live overlay driver passed with an identical 377,622-byte total,
+  which with the golden stream tests is the byte-identity proof for the direct
+  path. Regenerating `tests/fixtures/local-upload-golden.json` produced the
+  same data, so the committed fixture is untouched.
+
 Next:
-- Phase C item 15 (make the kitty_raw presenter seam universal), then item 16
-  (snapshot config per session).
+- Phase C item 16 (snapshot config per session at open instead of 59 live
+  `config.get()` reads; stop `toggle_line_numbers` writing into the user's
+  config table).
 
 Last verified commit:
-- `d878e50` (Phase C item 14 landed and verified).
+- `11e441e` (Phase C item 15 landed and verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
