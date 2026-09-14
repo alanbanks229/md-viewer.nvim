@@ -1365,24 +1365,30 @@ local function delete_preview_buffer(session)
   end
 end
 
+local SESSION_TIMER_NAMES = {
+  "render_timer",
+  "resize_timer",
+  "scroll_settle_timer",
+  "cursor_scroll_timer",
+  "animation_geometry_timer",
+  "remote_image_timer",
+  "ui_poll_timer",
+  "selection_debounce_timer",
+  "selection_settle_timer",
+  "selection_idle_settle_timer",
+}
+
+local function close_session_timers(session)
+  for _, name in ipairs(SESSION_TIMER_NAMES) do
+    debounce.close(session, name)
+  end
+end
+
 local function release_document(session, forget_renderer, keep_buffer)
   if not session or session.closed then return end
   session.closed = true
   session.request_serial = session.request_serial + 1
-  for _, name in ipairs({
-    "render_timer",
-    "resize_timer",
-    "scroll_settle_timer",
-    "cursor_scroll_timer",
-    "animation_geometry_timer",
-    "remote_image_timer",
-    "ui_poll_timer",
-    "selection_debounce_timer",
-    "selection_settle_timer",
-    "selection_idle_settle_timer",
-  }) do
-    debounce.close(session, name)
-  end
+  close_session_timers(session)
   preview.stop_loading(session)
   preview.restore_cursor()
   caret.forget(session)
@@ -1553,20 +1559,7 @@ local function deactivate_document(session)
   -- Every callback already carries request_serial; advancing it is the pane
   -- activation epoch at the document boundary and makes late frames stale.
   session.request_serial = session.request_serial + 1
-  for _, name in ipairs({
-    "render_timer",
-    "resize_timer",
-    "scroll_settle_timer",
-    "cursor_scroll_timer",
-    "animation_geometry_timer",
-    "remote_image_timer",
-    "ui_poll_timer",
-    "selection_debounce_timer",
-    "selection_settle_timer",
-    "selection_idle_settle_timer",
-  }) do
-    debounce.close(session, name)
-  end
+  close_session_timers(session)
   preview.stop_loading(session)
   interaction.forget(session)
   resident_session.release(session)
