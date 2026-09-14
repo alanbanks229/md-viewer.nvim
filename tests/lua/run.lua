@@ -19,8 +19,16 @@ vim.opt.shadafile = "NONE"
 
 local t = dofile(root .. "/tests/lua/harness.lua")
 local world = dofile(root .. "/tests/lua/world.lua")
+local shape = dofile(root .. "/tests/lua/session_shape.lua")
 
 require("md-viewer.config").reset()
+
+-- Installed before the first case, so every session the suite creates is
+-- inside the shape contract. `tests/lua/cases/session_shape.lua` asserts the
+-- manifest's static half; the sweep below is the half only a whole run can
+-- make -- see the two assertions after the loop.
+shape.track()
+t.on_assert = shape.sample
 
 local cases_dir = root .. "/tests/lua/cases"
 local files = vim.fn.glob(cases_dir .. "/*.lua", true, true)
@@ -43,9 +51,17 @@ for _, file in ipairs(files) do
   local before = world.capture()
   local ok, err = pcall(case, t)
   if not ok then error(("md-viewer: test case %s failed: %s"):format(name, err)) end
+  shape.sample()
   for _, leak in ipairs(world.diff(before, world.capture())) do
     t.eq(nil, leak, ("%s left the shared world modified"):format(name))
   end
+end
+
+-- The cross-case half of the session shape contract. A filtered run sees only
+-- part of the suite, so the completeness direction cannot hold there.
+t.eq({}, shape.undeclared(), "every field a real session carried is described by tests/lua/session_shape.lua")
+if not (filter and filter ~= "") then
+  t.eq({}, shape.missing(), "every field the manifest marks observed turned up on a real session")
 end
 
 t.finish(filter)

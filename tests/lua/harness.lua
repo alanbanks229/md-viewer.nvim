@@ -1,6 +1,13 @@
 local M = { count = 0, failures = {} }
 
+---Called before every assertion, when the runner installs one. The session
+---shape contract uses it to sample the live sessions: a field that exists only
+---between two lines of one handler is still on the table when the assertion
+---about that handler runs.
+M.on_assert = nil
+
 function M.eq(expected, actual, label)
+  if M.on_assert then M.on_assert() end
   M.count = M.count + 1
   if not vim.deep_equal(expected, actual) then
     M.failures[#M.failures + 1] = ("%s\nexpected: %s\nactual:   %s"):format(
@@ -14,6 +21,7 @@ end
 function M.ok(value, label) M.eq(true, not not value, label) end
 
 function M.near(expected, actual, tolerance, label)
+  if M.on_assert then M.on_assert() end
   M.count = M.count + 1
   local within = type(expected) == "number" and type(actual) == "number" and math.abs(expected - actual) <= tolerance
   if not within then
