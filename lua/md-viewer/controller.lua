@@ -2469,13 +2469,6 @@ function M.setup_autocmds()
       end
     end,
   })
-  vim.api.nvim_create_autocmd("WinLeave", {
-    group = group,
-    callback = function()
-      -- Placement is screen-relative and must not depend on the active cursor.
-      -- Intentionally retain normal split images across focus changes.
-    end,
-  })
   vim.api.nvim_create_autocmd({ "CompleteChanged" }, {
     group = group,
     callback = function()

@@ -80,7 +80,6 @@ function M.create(source_buf, source_win)
     loading_timer = nil,
     loading_frame = 0,
     render_failed = false,
-    obsolete_files = {},
     -- Selection/find display state, distinct from the button-scoped
     -- `session.pointer` gesture state: it must survive focus changes (a
     -- pointer press does not), so it is never touched by the
@@ -93,7 +92,6 @@ function M.create(source_buf, source_win)
     -- than from the pointer. See md-viewer.interaction's visual_start.
     visual_active = false,
     visual_linewise = false,
-    visual_columns = nil,
     -- The caret's glyph box, the scroll it was measured at, and the sticky
     -- column line motions aim at (Vim's `curswant`). See md-viewer.caret.
     caret_rect = nil,
@@ -109,8 +107,6 @@ function M.create(source_buf, source_win)
     -- midpoint until the caret is deliberately moved again.
     progress_basis = "viewport",
     last_progress_text = nil,
-    selection_render_in_flight = false,
-    selection_render_pending = false,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
     -- Documents this preview has followed links through, oldest first, and
