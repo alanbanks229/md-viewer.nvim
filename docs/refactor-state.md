@@ -67,7 +67,8 @@ Completed:
   `stylua --check` passed.
 
 Next:
-- Continue Phase B with item 12 from docs/refactor-plan.md in this session.
+- Continue Phase B with item 12 from docs/refactor-plan.md in the next session,
+  after its live-driver prerequisite can pass.
 - Phase B item 12 (`presenter.lua`) requires `scripts/overlay/live/drive.lua`
   passing first (see Notes) — resolve or account for the "settle after y"
   timeout before attempting item 12.
@@ -89,3 +90,8 @@ Notes:
   it is still unresolved and **must** be fixed or otherwise accounted for
   before attempting Phase B item 12, where the plan makes the driver
   mandatory.
+- The mandatory pre-item-12 run after item 11 also failed. The spawned Neovim
+  server exited and became a zombie while the outer driver remained stuck in
+  RPC handling beyond the sum of its declared polling timeouts; SIGTERM did
+  not stop the outer process, so it was terminated with SIGKILL after more
+  than four minutes. No item 12 code was changed.
