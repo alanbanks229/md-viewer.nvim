@@ -177,6 +177,21 @@ Completed:
   `:MdViewerDebug` report and the report enumerates `state.panes()`; seven of
   those lines described the stranded pane.
 
+- Phase D, item 17, harness deliverable 2 of 5: `tests/lua/cases/autocmds.lua`
+  pins the autocmd manifest (21 handlers, identified by callback identity in
+  `nvim_get_autocmds` so a five-event registration reads as one handler, with
+  each one's events, pattern and purpose), the dispatch order of every event
+  with more than one handler, and every event firing against a real session.
+  Two counts in the plan were off: there are eight multi-handler events rather
+  than six, and only seven are an ordering question -- `OptionSet`'s two have
+  disjoint patterns (`background`, `laststatus`) and never both fire. A control
+  experiment pins the assumption the ordering half rests on, that
+  `nvim_get_autocmds` returns handlers in dispatch order. The firing loop wraps
+  `vim.schedule`: without that it reported a green run over eight events whose
+  deferred half threw, since Neovim prints such an error and continues.
+  Verified by mutation -- deleting the `WinNew` registration fails three
+  assertions, and a raising handler fails in either half.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
