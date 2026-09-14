@@ -192,6 +192,19 @@ Completed:
   Verified by mutation -- deleting the `WinNew` registration fails three
   assertions, and a raising handler fails in either half.
 
+- Phase D, item 17, harness deliverable 3 of 5: the session-shape contract.
+  `tests/lua/session_shape.lua` describes all 156 fields the code can put on a
+  session in ten categories, including the `screen` (what is painted now) vs
+  `target` (what the screen should become) split the plan asked for. The
+  runner enforces it across the whole suite: every `state.create` session is
+  sampled at every assertion, then both directions are asserted -- nothing
+  outside the manifest ever appeared, and everything the manifest marks
+  observed did. The completeness direction is skipped under a filter.
+  `tests/lua/cases/session_shape.lua` holds the static half and pins the gap
+  the constructor cannot show: 18 of its 57 field lines assign `nil`, for
+  which Lua stores no key, so it creates 39. Verified by mutation in both
+  directions.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
