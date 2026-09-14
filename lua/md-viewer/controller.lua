@@ -18,6 +18,7 @@ local resident_session = require("md-viewer.resident_session")
 local linkrate = require("md-viewer.linkrate")
 local localrender = require("md-viewer.localrender")
 local metrics = require("md-viewer.metrics")
+local history = require("md-viewer.history")
 
 local M = {}
 local group
@@ -49,6 +50,13 @@ local function current_session(buf)
     or state.visible_in_tab()
   return session and session.pane and session.pane.active or session
 end
+
+local history_host = {
+  current_session = current_session,
+  valid = valid,
+  schedule = function(...) return M.schedule(...) end,
+  retarget = function(...) return M.retarget(...) end,
+}
 
 ---Remove the selection overlay rectangles, if any are on screen. Cheap
 ---no-op otherwise. Every path that invalidates the overlay's geometry funnels
@@ -1439,7 +1447,7 @@ function M.open(position)
     return
   end
   local session = state.create(source_buf, source_win)
-  M.history_init(session)
+  history.init(session)
   session.backend, session.backend_reason = backend, reason
   -- Decided once, here, and never again for the life of this session. A
   -- preview that switches rendering model mid-scroll is one whose behaviour
@@ -1516,7 +1524,7 @@ function M.retarget(session, new_buf, record, restore_scroll, pending_obsidian_a
     target.applied_scroll_y = restore_scroll
   end
   target.pending_obsidian_anchor = pending_obsidian_anchor
-  if record ~= false then M.history_push(session, new_buf) end
+  if record ~= false then history.push(session, new_buf) end
   return M.activate_document(target, { align_history = record == false })
 end
 
@@ -1558,18 +1566,8 @@ function M.activate_document(session, opts)
   session.render_path_reason = session.render_path_reason or (old and old.render_path_reason)
   session.preview_win = pane.preview_win
   session.source_win = pane.source_win
-  session.history = pane.history
-  session.history_index = pane.history_index
   if not preview.show_document(session) then return false end
-  if opts.align_history ~= false and pane.history then
-    for index = #pane.history, 1, -1 do
-      if pane.history[index].buf == session.source_buf then
-        pane.history_index = index
-        break
-      end
-    end
-    session.history_index = pane.history_index
-  end
+  if opts.align_history ~= false then history.align(session) end
   preview.reset_surface(session)
   preview.update_title(session)
   if session.backend and session.backend.name ~= "cells" then preview.start_loading(session) end
@@ -1655,174 +1653,12 @@ function M.reveal_source(session)
   return true
 end
 
--- ---------------------------------------------------------------------------
--- Preview history.
---
--- Following a link activates a document tab, while history retains the route
--- independently of which tabs remain open.
---
--- The list is per session and holds a buffer *and* the file path. The buffer is
--- what makes returning cheap and exact; the path is the fallback for an entry
--- whose buffer has since been wiped, which is the ordinary outcome of
--- `:bwipeout` or a session that has been open a long time.
--- ---------------------------------------------------------------------------
+M.history_init = history.init
+M.history_push = history.push
 
-local function history_entry(buf)
-  local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil, scroll_y = 0 }
-end
+function M.history_back(session) history.back(session, history_host) end
 
-function M.history_init(session)
-  local pane = session.pane
-  local history = { history_entry(session.source_buf) }
-  if pane then
-    pane.history, pane.history_index, pane.history_boundary = history, 1, nil
-  end
-  session.history, session.history_index, session.history_boundary = history, 1, nil
-end
-
----Append `buf` as the newest entry, discarding anything ahead of the current
----position -- the same rule a browser follows: navigating from a point in the
----middle of the history abandons the forward branch rather than interleaving
----with it.
-function M.history_push(session, buf)
-  local pane = session.pane
-  if not (pane and pane.history) and not session.history then M.history_init(session) end
-  local history = pane and pane.history or session.history
-  local history_index = pane and pane.history_index or session.history_index
-  if history[history_index] then history[history_index].scroll_y = session.scroll_y or 0 end
-  for index = #history, history_index + 1, -1 do
-    history[index] = nil
-  end
-  -- Re-entering the document that is already current is not a new entry:
-  -- otherwise a fragment link, or a link back to where the reader just came
-  -- from, would grow the list without adding anywhere to go.
-  if history[history_index] and history[history_index].buf == buf then return end
-  history[#history + 1] = history_entry(buf)
-  local limit = config.get().interaction.history_limit
-  while #history > limit do
-    table.remove(history, 1)
-  end
-  if pane then
-    pane.history_index, pane.history_boundary = #history, nil
-  end
-  session.history_index, session.history_boundary = #history, nil
-end
-
----Resolve a history entry to a buffer that can actually be displayed, reopening
----the file when the buffer it recorded is gone. Returns nil when neither is
----available any more, which is a dead entry rather than an error.
-local function history_buf(entry)
-  if entry.buf and vim.api.nvim_buf_is_valid(entry.buf) then return entry.buf end
-  if not entry.path or not vim.uv.fs_stat(entry.path) then return nil end
-  local buf = vim.fn.bufadd(entry.path)
-  if buf == 0 then return nil end
-  vim.fn.bufload(buf)
-  entry.buf = buf
-  return buf
-end
-
----Move only the preview `step` entries through history. Dead entries are
----stepped over rather than reported: a wiped buffer
----whose file is also gone is not something the reader can act on.
-local function history_go(session, step, direction)
-  if not valid(session) then return false end
-  local pane = session.pane
-  if not (pane and pane.history) then M.history_init(session) end
-  local holder = pane or session
-  local history = holder.history
-  local index = holder.history_index
-  if history[index] then history[index].scroll_y = session.scroll_y or 0 end
-  while true do
-    index = index + step
-    local entry = history[index]
-    if not entry then
-      -- A repeat of the same direction's dead end is not news: only the
-      -- first one is reported, and any successful move (either direction)
-      -- re-arms it below.
-      if holder.history_boundary ~= direction then
-        holder.history_boundary = direction
-        vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
-      end
-      return false
-    end
-    holder.history_boundary = nil
-    local buf = history_buf(entry)
-    if buf then
-      if buf == session.source_buf then
-        if pane then pane.history_index = index end
-        session.history_index = index
-        session.scroll_y = entry.scroll_y or session.scroll_y
-        M.schedule(session, 0)
-        return true
-      end
-      if not M.retarget(session, buf, false, entry.scroll_y) then
-        -- The only way this refuses is another preview already owning that
-        -- document. The source window has moved by now, so saying nothing
-        -- would leave the two panes describing different files with no
-        -- explanation.
-        vim.notify("md-viewer: another preview already owns that document", vim.log.levels.WARN)
-        return false
-      end
-      local active = pane.active
-      pane.history_index = index
-      active.history, active.history_index = history, index
-      active.scroll_y = entry.scroll_y or active.scroll_y or 0
-      return true
-    end
-  end
-end
-
----`session` is passed explicitly by the preview-local `H`/`L` mappings, which
----already know which preview they belong to, and omitted by the commands,
----which resolve it the same way every other :MdViewer* command does.
-function M.history_back(session)
-  session = session or current_session()
-  if not valid(session) then
-    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
-    return
-  end
-  history_go(session, -1, "previous")
-end
-
-function M.history_forward(session)
-  session = session or current_session()
-  if not valid(session) then
-    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
-    return
-  end
-  history_go(session, 1, "next")
-end
-
----Re-point the preview when the source window returns, by any means, to a
----document already in this preview's history -- `<C-o>` after a link click
----being the case that matters. `preview.pinned` stops the preview following
----arbitrary buffer switches, and that stays true: only a document the preview
----itself navigated through is followed, and the move never appends, so the
----forward branch survives to be walked back up.
-local function follow_history_buffer(session, buf)
-  local pane = session.pane
-  local history = pane and pane.history or session.history
-  local history_index = pane and pane.history_index or session.history_index
-  if not history or buf == session.source_buf then return end
-  -- One document can legitimately appear at more than one position (a link
-  -- back to where the reader came from puts it there twice), so search outward
-  -- from where the preview currently is rather than from the start -- landing
-  -- at the far end of the list would make the next `<C-o>` jump somewhere the
-  -- reader has never been. Backwards wins a tie, because the gesture this
-  -- exists for is the backwards one.
-  for distance = 0, #history do
-    for _, index in ipairs({ history_index - distance, history_index + distance }) do
-      if history[index] and history[index].buf == buf then
-        if M.retarget(session, buf, false) then
-          if pane then pane.history_index = index end
-          pane.active.history_index = index
-        end
-        return
-      end
-    end
-  end
-end
+function M.history_forward(session) history.forward(session, history_host) end
 
 function M.toggle(position)
   local session = current_session()
@@ -2358,7 +2194,7 @@ function M.setup_autocmds()
         if source_session then return end
         local win_session = state.from_source_win(vim.api.nvim_get_current_win())
         if win_session and valid(win_session) and vim.api.nvim_get_current_buf() == buf then
-          follow_history_buffer(win_session, buf)
+          history.follow_buffer(win_session, buf, history_host)
         end
       end)
       each_session(function(session)

@@ -109,13 +109,6 @@ function M.create(source_buf, source_win)
     last_progress_text = nil,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
-    -- Documents this preview has followed links through, oldest first, and
-    -- where in that list it currently sits. Entry 1 is the document the
-    -- preview was opened on; `M.retarget` appends, and md-viewer.controller's
-    -- back/forward walk the index without appending.
-    history = nil,
-    history_index = 0,
-    history_boundary = nil,
     find_active = false,
     find_query = nil,
     find_match_count = 0,
@@ -135,6 +128,9 @@ function M.create(source_buf, source_win)
     preview_win = nil,
     documents = { session },
     active = session,
+    -- Documents this preview pane has followed links through, oldest first,
+    -- and where in that list it currently sits. History is pane-scoped so a
+    -- tab activation never has to copy or reconcile it with document state.
     history = nil,
     history_index = 0,
     history_boundary = nil,

@@ -1,6 +1,7 @@
 local state = require("md-viewer.state")
 local process = require("md-viewer.process")
 local config = require("md-viewer.config")
+local history = require("md-viewer.history")
 
 local M = { events = {} }
 
@@ -12,6 +13,7 @@ end
 function M.snapshot()
   local sessions = {}
   for buf, session in pairs(state.all()) do
+    local history_length, history_index = history.status(session)
     sessions[tostring(buf)] = {
       source_win = session.source_win,
       preview_buf = session.preview_buf,
@@ -172,8 +174,8 @@ function M.snapshot()
       -- Where this preview sits in the documents it has followed links
       -- through. Counts and an index only: no paths, which the winbar already
       -- shows for the one that matters.
-      history_length = session.history and #session.history or 0,
-      history_index = session.history_index or 0,
+      history_length = history_length,
+      history_index = history_index,
       selection_active = session.selection_active,
       -- Length only -- see interaction.lua's copy_selection comment. Never
       -- surface the selected text itself in diagnostics.
