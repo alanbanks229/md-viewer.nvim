@@ -32,12 +32,16 @@ Completed:
   plan's "no callers" premise was wrong for this one, so it was left in place
   per instruction to stop rather than guess on a material contradiction.
 
+- Phase A, item 8: extracted the ten-name timer-teardown list duplicated in
+  `release_document` and `deactivate_document` (controller.lua) into a shared
+  `SESSION_TIMER_NAMES` constant and `close_session_timers()` helper, called
+  from both.
+
 Next:
-- Continue Phase A with item 8 from docs/refactor-plan.md in the next session.
+- Continue Phase A with item 9 from docs/refactor-plan.md in the next session.
 
 Last verified commit:
-- `4564c8b` (Phase A item 7 landed; debug.log deletion excluded as a plan
-  contradiction — verified live, not dead).
+- `bbedf00` (Phase A item 8 landed).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
