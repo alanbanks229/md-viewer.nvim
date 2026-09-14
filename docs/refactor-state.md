@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase B complete (stopped before Phase C)
+Current phase: Phase C (interface fixes) -- in progress
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -104,12 +104,29 @@ Completed:
   ranges; no unplanned controller behavior was moved merely to match that
   estimate.
 
+- Phase C, item 14: replaced all 42 `backend.name ==` checks with declared
+  capability flags. The plan's parenthetical named five flags; the count the
+  code actually needs is six, because its own precise claim -- that the 16
+  `kitty_raw` sites are five distinct capabilities -- is right, and
+  `is_graphical` covers the other 26. The sixth is `supports_local_markers`
+  (the seven local-render sites), alongside `places_raw_images`,
+  `accepts_exclusions`, `needs_statusline_guard` and `needs_ui_poll`.
+  `preview.placement` now takes the backend table rather than its name, since
+  its two adjustments answer to two different flags. `health`'s image-support
+  line was converted too: it matched a hardcoded list of backend names, which
+  is the same defect one function further out. The fake backend tables in 12
+  test cases now build on `backends.capabilities(name)`, and
+  `tests/lua/cases/backends.lua` pins the matrix including that every flag is
+  declared as a boolean rather than omitted. `make test` passed with 3,426 Lua
+  assertions and 350 Node tests, `stylua --check` passed, and the live overlay
+  driver passed.
+
 Next:
-- Stop before Phase C as required. The next planned work is Phase C item 14
-  (backend capability flags), but it has not begun.
+- Phase C item 15 (make the kitty_raw presenter seam universal), then item 16
+  (snapshot config per session).
 
 Last verified commit:
-- `4fe45c6` (Phase B item 13 landed and verified).
+- `d878e50` (Phase C item 14 landed and verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
