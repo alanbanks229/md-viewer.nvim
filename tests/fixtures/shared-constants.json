@@ -1,0 +1,33 @@
+{
+  "generated_by": "scripts/dump-shared-constants.js",
+  "viewport": {
+    "min_width_px": 320,
+    "max_width_px": 1920,
+    "min_height_px": 240,
+    "max_height_px": 1440,
+    "default_width_px": 960,
+    "default_height_px": 900
+  },
+  "device_scale_factor": {
+    "min": 1,
+    "max": 3,
+    "default": 2
+  },
+  "region": {
+    "max_region_pixels": 12000000,
+    "max_region_height_px": 16384
+  },
+  "local": {
+    "protocol_version": 1,
+    "max_marker_bytes": 65536
+  },
+  "codes": [
+    "INTERACT_CACHE_MISS",
+    "INTERACT_NOT_READY",
+    "REGION_CAPTURE_UNSUPPORTED",
+    "REGION_ORIGIN_MOVED",
+    "REGION_TOO_LARGE",
+    "STALE_INTERACTION",
+    "STALE_RENDER"
+  ]
+}

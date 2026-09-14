@@ -16,6 +16,22 @@ no direct route out* -- the two pieces of hardware no test machine has. A third
 group needs a *second machine*: `local/` drives the local-render helper against
 a real remote host, and `rig/` deploys to one.
 
+`dump-shared-constants.js` also sits at the top level, and is the one script
+here that needs nothing special: no display, no terminal, no second machine.
+It regenerates `tests/fixtures/shared-constants.json` — the viewport clamps,
+the device-scale band, the single-capture ceilings, the local protocol version
+and marker bound, and every `REGION_`/`STALE_`/`INTERACT_` code — from the
+Node modules that define them. Run it after changing any of those:
+
+```sh
+node scripts/dump-shared-constants.js
+```
+
+`tests/node/shared-constants.test.js` fails while the committed fixture is
+stale, and `tests/lua/cases/shared_constants.lua` fails when the Lua side
+disagrees with it, so regenerating is a step in the change rather than a fixup
+afterwards.
+
 `ssh-link-speed.sh` sits at the top level rather than in a feature directory
 because it measures the link itself, not a feature. Run it from the shell inside
 an SSH session with Neovim closed; `--write-cache` files the answer where

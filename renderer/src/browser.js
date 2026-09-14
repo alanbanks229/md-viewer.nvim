@@ -67,6 +67,24 @@ const PRIMER_TIMEOUT_MS = 60000;
 export const MAX_REGION_PIXELS = 12000000;
 export const MAX_REGION_HEIGHT_PX = 16384;
 
+/// The page viewport, in CSS pixels. Mirrored by `coordinates.lua`, because
+/// the numbers Lua reports as the viewport become the denominator of every hit
+/// test, overlay scale and animation frame: a viewport outside these is a
+/// silent scale error on the other side of the protocol. Both sides are
+/// compared against `tests/fixtures/shared-constants.json`.
+export const VIEWPORT_BOUNDS = {
+  minWidthPx: 320,
+  maxWidthPx: 1920,
+  minHeightPx: 240,
+  maxHeightPx: 1440,
+  defaultWidthPx: 960,
+  defaultHeightPx: 900,
+};
+
+/// What `deviceScaleFactor` may be. `config.lua` refuses anything outside the
+/// same band rather than letting this side silently clamp it.
+export const DEVICE_SCALE_FACTOR_BOUNDS = { min: 1, max: 3, default: 2 };
+
 /// Clamp a requested document region and refuse one Chromium cannot capture in
 /// a single call. Pure, so the arithmetic is testable without a browser.
 export function resolveCaptureRegion(requested, { documentHeight, viewportWidth, deviceScaleFactor }) {
@@ -176,8 +194,9 @@ export class BrowserRenderer {
     return executable;
   }
 
-  async ensure(options = {}, deviceScaleFactor = 2) {
-    const scale = Math.max(1, Math.min(3, Number(deviceScaleFactor) || 2));
+  async ensure(options = {}, deviceScaleFactor = DEVICE_SCALE_FACTOR_BOUNDS.default) {
+    const { min, max, default: fallback } = DEVICE_SCALE_FACTOR_BOUNDS;
+    const scale = Math.max(min, Math.min(max, Number(deviceScaleFactor) || fallback));
     // Re-read on every call, ahead of the early return below, so flipping the
     // setting takes effect on the next frame rather than needing a relaunch.
     this.fastPngEncode = options.fast_png_encode !== false;
@@ -550,8 +569,15 @@ export class BrowserRenderer {
   async render(params, html, requestId) {
     const started = performance.now();
     const viewport = params.viewport ?? {};
-    const width = Math.max(320, Math.min(1920, Math.round(viewport.widthPx ?? 960)));
-    const height = Math.max(240, Math.min(1440, Math.round(viewport.heightPx ?? 900)));
+    const bounds = VIEWPORT_BOUNDS;
+    const width = Math.max(
+      bounds.minWidthPx,
+      Math.min(bounds.maxWidthPx, Math.round(viewport.widthPx ?? bounds.defaultWidthPx)),
+    );
+    const height = Math.max(
+      bounds.minHeightPx,
+      Math.min(bounds.maxHeightPx, Math.round(viewport.heightPx ?? bounds.defaultHeightPx)),
+    );
     await this.ensure(params.browser, viewport.deviceScaleFactor);
     const viewportChanged = !this.viewport || this.viewport.width !== width || this.viewport.height !== height;
     if (viewportChanged) {
