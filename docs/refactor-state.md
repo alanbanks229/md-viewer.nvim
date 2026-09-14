@@ -220,6 +220,21 @@ Completed:
   in both directions. The live overlay driver passed with an unchanged
   377,622-byte total after the `browser.js` change.
 
+- Phase D, item 17, harness deliverable 5 of 5: skip-on-no-browser for the Lua
+  suite. `tests/lua/browser.lua` asks the renderer's own discovery module --
+  the same question the Node suite asks -- after two cheaper checks (no node,
+  renderer dependencies not installed) that are also reasons the round-trip
+  cannot happen. `debug.lua` and `health.lua` skip their renderer round-trips
+  instead of waiting 30 seconds each and failing about the machine.
+  `MD_VIEWER_TEST_NO_BROWSER=1` forces that path; under it the suite runs 3,419
+  assertions and two named skips in 7 seconds instead of 3,868 in 67.
+  `t.skip` takes a session-shape sample, because a skip is where a case stops.
+- Phase D, item 17: all five harness deliverables landed. `make test` passes
+  with 3,868 Lua assertions and 352 Node tests, `stylua --check` passes, and
+  `scripts/overlay/live/drive.lua` passed with an unchanged 377,622-byte total
+  after the one production change in the set (naming `browser.js`'s clamps).
+  Next in item 17: `lanes.lua`.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
