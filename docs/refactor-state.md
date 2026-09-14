@@ -66,12 +66,18 @@ Completed:
   module. `make test` passed with 3,358 Lua assertions and 350 Node tests, and
   `stylua --check` passed.
 
+- Phase B, item 12 prerequisite: the live overlay failure was reproduced at
+  `93df07f`, the commit immediately before item 11, so item 11 is excluded as
+  its cause. The driver had retained two stale expectations after production
+  behavior changed: leaving preview Visual mode now clears the selection
+  immediately after its sharp commit, and the caret is deliberately redrawn as
+  the one remaining overlay. The driver now asserts the full current `y`
+  lifecycle (commit, copy, clear, caret redraw) and uses embedded RPC so a
+  failed child cannot strand it on a dead Unix socket. Two consecutive live
+  runs passed, as did `make test` (3,359 Lua assertions and 350 Node tests).
+
 Next:
-- Continue Phase B with item 12 from docs/refactor-plan.md in the next session,
-  after its live-driver prerequisite can pass.
-- Phase B item 12 (`presenter.lua`) requires `scripts/overlay/live/drive.lua`
-  passing first (see Notes) — resolve or account for the "settle after y"
-  timeout before attempting item 12.
+- Continue Phase B with item 12 (`presenter.lua`) from docs/refactor-plan.md.
 
 Last verified commit:
 - `75f31b0` (Phase B item 11 landed and verified).
@@ -79,19 +85,7 @@ Last verified commit:
 Notes:
 - Follow docs/refactor-plan.md in order.
 - Do not start the next major phase without stopping first.
-- `scripts/overlay/live/drive.lua` was not a Phase A completion gate (only
-  Phase B item 12 and all of Phase C require it; CONTRIBUTING recommends it
-  for any selection/placement change). It was nevertheless run after Phase 0
-  and again after Phase A item 9 (an overlay-geometry change) — both of the
-  latter two runs, and the two runs after Phase 0, all timed out identically
-  at `settle after y`. Four consecutive identical timeouts across unrelated
-  commits is stronger evidence this is pre-existing and environmental (e.g.
-  this machine/session) rather than caused by any change in Phase 0 or A, but
-  it is still unresolved and **must** be fixed or otherwise accounted for
-  before attempting Phase B item 12, where the plan makes the driver
-  mandatory.
-- The mandatory pre-item-12 run after item 11 also failed. The spawned Neovim
-  server exited and became a zombie while the outer driver remained stuck in
-  RPC handling beyond the sum of its declared polling timeouts; SIGTERM did
-  not stop the outer process, so it was terminated with SIGKILL after more
-  than four minutes. No item 12 code was changed.
+- `scripts/overlay/live/drive.lua` is mandatory for Phase B item 12 and all of
+  Phase C. Its former `settle after y` timeout was a pre-existing harness
+  defect, reproduced unchanged before item 11 and corrected in the item 12
+  prerequisite above; no md-viewer behavior was changed to make it pass.

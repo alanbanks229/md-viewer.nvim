@@ -196,10 +196,10 @@ Spawns a second Neovim over RPC, opens `tests/fixtures/kitchen-sink.md`, and
 drives a real `v`/motions preview visual selection through `nvim_input`
 against the real renderer and real Chromium -- the keyboard equivalent of
 what used to be a real mouse drag, since highlighting only happens through
-vim-like motions now. 16 assertions covering the whole lifecycle: moving
-frames opt out of capture and cost hundreds of bytes rather than a megabyte,
-the tint sheet is uploaded once and not per frame, `y` settles with a true
-device-scale capture, and every overlay placement is deleted afterwards.
+vim-like motions now. 21 assertions cover the whole lifecycle: moving frames
+opt out of capture and cost hundreds of bytes rather than a megabyte, the tint
+sheet is uploaded once and not per frame, and `y` commits at device scale,
+copies the live DOM selection, clears its placements, and redraws the caret.
 Exits non-zero on failure.
 
 Needs `npm ci --prefix renderer` and a Chrome/Chromium install. No display
