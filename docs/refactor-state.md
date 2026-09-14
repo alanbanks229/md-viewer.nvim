@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase B
+Current phase: Phase B complete (stopped before Phase C)
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -88,11 +88,28 @@ Completed:
   the mandatory live overlay driver passed against the real renderer and
   Chromium.
 
+- Phase B, item 13: extracted image visibility and reconciliation into
+  `occlusion.lua`: the background-tab/float/UI-suppression decision, complete
+  image teardown, active-session iteration, viewport placement reconciliation,
+  resident-screen restoration, raw-session recovery, and the UI poll. The old
+  `update_occlusion` return value is now explicitly named `must_hide`, making
+  clear that it includes transient UI suppression as well as geometric
+  occlusion. Added direct coverage for the previously indirect
+  `reconcile_resident` path, a forced same-placement redraw, and the extracted
+  active-session iterator. `make test` passed with 3,365 Lua assertions and 350
+  Node tests, `stylua --check` passed, and the live overlay driver passed.
+- Phase B complete: all three items (11-13) landed. `controller.lua` is now
+  1,780 lines, down from 2,597 before Phase B. The plan's approximate 1,100-line
+  target is not arithmetically reachable from its three specified source
+  ranges; no unplanned controller behavior was moved merely to match that
+  estimate.
+
 Next:
-- Continue Phase B with item 13 (`occlusion.lua`) from docs/refactor-plan.md.
+- Stop before Phase C as required. The next planned work is Phase C item 14
+  (backend capability flags), but it has not begun.
 
 Last verified commit:
-- `0d6ae36` (Phase B item 12 landed and verified).
+- `4fe45c6` (Phase B item 13 landed and verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
