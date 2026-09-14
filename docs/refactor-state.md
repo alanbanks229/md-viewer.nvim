@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase C (interface fixes) -- in progress
+Current phase: Phase D (needs new test infrastructure first) -- not started
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -141,13 +141,48 @@ Completed:
   path. Regenerating `tests/fixtures/local-upload-golden.json` produced the
   same data, so the committed fixture is untouched.
 
+- Phase C, item 16: every session now carries its own configuration snapshot.
+  `state.create` takes `config.snapshot()` and re-takes it whenever the
+  configuration changes, through the same `invalidate_memoized` hook the
+  terminal-capability and link-rate caches already used, so reconfiguring a
+  running Neovim still reaches previews that are already open. The 55
+  session-scoped `config.get()` reads became `session.config`; the remaining
+  ones are the sites where no session is the right question (backend selection,
+  terminal capability, health, the global wheel and keymap installers, the
+  animation tick's shared FPS floor, `preview.placement`, `open_external`).
+  `toggle_line_numbers` now goes through a new validated `config.set_runtime`
+  layer, applied over the user's options as each snapshot is taken and cleared
+  by `setup`/`reset` exactly as the old in-place write was -- so the toggle
+  still reaches previews opened later without editing the reader's table.
+  `config.effective(path)` reads one value as a session sees it, which is what
+  the toggle needs to know which way to switch. Unused `config` requires were
+  dropped from the five modules that no longer have one. `make test` passed
+  with 3,464 Lua assertions and 350 Node tests, `stylua --check` passed, and
+  the live overlay driver passed.
+- Phase C complete: all three items (14-16) landed. `make test` passed with
+  3,464 Lua assertions and 350 Node tests, `stylua --check` passed, and
+  `scripts/overlay/live/drive.lua` -- mandatory for all of Phase C -- passed
+  after each item, with an unchanged 377,622-byte terminal total throughout.
+
+Not done, and why:
+- The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
+  terminal. That was not run: this session is headless and the checklist needs
+  a person looking at pixels. The headless evidence that stands in its place is
+  narrower and worth naming -- the golden byte-stream tests, the marker tests,
+  and the live overlay driver's byte totals all pin the direct path's output as
+  unchanged, but none of them can see whether anything is composited where it
+  should be. Run the checklist on a Supported terminal before the next release.
+
 Next:
-- Phase C item 16 (snapshot config per session at open instead of 59 live
-  `config.get()` reads; stop `toggle_line_numbers` writing into the user's
-  config table).
+- Phase D has not begun, and its first step is test infrastructure rather than
+  a refactor: the autocmd manifest and driver, a single-case runner, the
+  session-shape contract, the generated shared-constants fixture, and
+  skip-on-no-browser for the Lua suite. Items 17 and 19 are gated on that
+  existing and passing; item 18 is gated on `scripts/resident/drive.lua` on a
+  real terminal.
 
 Last verified commit:
-- `11e441e` (Phase C item 15 landed and verified).
+- `aae3ae8` (Phase C item 16 landed and verified; Phase C complete).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
