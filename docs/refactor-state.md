@@ -8,13 +8,15 @@ Completed:
 - Phase 0, item 2: restricted local `presented` notifications to injected
   frame transactions, so placement, deletion, and sheet traffic cannot
   confirm pixels that have not resolved.
+- Phase 0, item 3: separated overlay-sheet transactions from the injector's
+  frame supersession lane and refused selection overlays until their local
+  base frame is confirmed.
 
 Next:
-- Continue Phase 0 with item 3 (overlay-sheet uploads must not evict a pending
-  frame).
+- Continue Phase 0 with item 4 (unify and enforce local marker size bounds).
 
 Last verified commit:
-- `07447fc` (Phase 0, item 1); this commit is Phase 0, item 2.
+- `88b7f56` (Phase 0, item 2); this commit is Phase 0, item 3.
 
 Notes:
 - Follow docs/refactor-plan.md in order.

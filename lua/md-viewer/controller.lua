@@ -376,6 +376,12 @@ function M.display_selection_overlay(session, result)
   -- `session.image_id`, which is nil there and which the backend now reads as
   -- "size the sheet from the placement".
   if not (state.screen_up(session) and session.last_placement) then return false end
+  -- Local mode must not upload or place a tint sheet over a frame reference
+  -- whose pixels have not resolved yet. Besides drawing against an unknown
+  -- image id, sheet uploads used to enter the helper's frame-supersession slot
+  -- and evict the pending base frame outright. The injector now distinguishes
+  -- the two upload kinds, but this guard still prevents the invalid overlay.
+  if local_mode(session) and not session.local_frame_confirmed then return false end
   if type(result) ~= "table" or type(result.rects) ~= "table" then return false end
   if result.rectsTruncated then return false end
   if result.contentRevision ~= session.renderer_revision then return false end

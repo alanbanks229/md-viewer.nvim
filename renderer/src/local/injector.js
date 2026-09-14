@@ -14,17 +14,16 @@
 //    the exact defect the resident bootstrap work exists to prevent. If no
 //    later injection ever comes, teardown() flushes them.
 //
-// 2. Per-document surface ordering. A surface transaction (one that uploads a
-//    frame or sheet) is refused if a newer surface transaction for the same
-//    document has already been injected -- a slow render must not overwrite
-//    the frame that superseded it. Placement-only and deletion-only
-//    transactions are exempt: they re-arrange or remove content that is
-//    already on screen and must neither be dropped as "stale" nor invalidate
-//    a newer frame still rendering. (A placement-only re-place injected ahead
-//    of a pending frame can land that frame without the re-place's cut-outs
-//    for up to one reconcile tick, ~50 ms -- the same transient the remote
-//    path already exhibits between a capture and the float that appeared
-//    after it. The ui_poll reconcile heals it.)
+// 2. Per-document frame ordering. A frame transaction is refused if a newer
+//    frame transaction for the same document has already been injected -- a
+//    slow render must not overwrite the frame that superseded it. Overlay
+//    sheets, placements, and deletions are exempt: they decorate, re-arrange,
+//    or remove content and must neither evict a frame still rendering nor
+//    raise the staleness floor that frame is checked against. (A re-place
+//    injected ahead of a pending frame can land that frame without the
+//    re-place's cut-outs for up to one reconcile tick, ~50 ms -- the same
+//    transient the remote path already exhibits between a capture and the
+//    float that appeared after it. The ui_poll reconcile heals it.)
 //
 // 3. Boundary-only, atomic writes. Injection happens only when the stream
 //    parser reports a safe boundary, and one transaction is one write():
@@ -38,6 +37,10 @@
 import { uploadSequence, deleteImage } from "./kitty-writer.js";
 import { parseMarkerPayload } from "./markers.js";
 import { createReservoir } from "./timing.js";
+
+function isFrameTransaction(tx) {
+  return tx.uploads.some((upload) => upload.kind === "frame");
+}
 
 export class Injector {
   constructor({ token, write, resolveUpload, boundary, onPairing, now }) {
@@ -66,10 +69,10 @@ export class Injector {
     // frame's pixels reached the glass, so they never call this hook.
     this.onInjected = () => {};
 
-    this.pendingByDoc = new Map(); // doc -> parsed surface transaction, newest only
-    this.immediateQueue = []; // placement-only / deletion-only, in arrival order
+    this.pendingByDoc = new Map(); // doc -> parsed frame transaction, newest only
+    this.immediateQueue = []; // sheets / placements / deletions, in arrival order
     this.carriedDeletions = []; // Buffers from superseded/refused transactions
-    this.lastSurfaceSeq = new Map(); // doc -> seq of the newest injected surface tx
+    this.lastSurfaceSeq = new Map(); // doc -> seq of the newest injected frame tx
     // Every image id this injector ever uploaded. Most are freed by later
     // injected deletions, but those bytes are opaque to us by design, so the
     // set only grows; teardown re-deletes every id, and `d=I` on an already
@@ -114,7 +117,7 @@ export class Injector {
       parsed.receivedAt = this.now();
     }
 
-    if (parsed.uploads.length === 0) {
+    if (!isFrameTransaction(parsed)) {
       if (parsed.kill) {
         // Content removal: a frame still pending for this document must die
         // with it, or a hidden window gets fresh pixels injected onto it
@@ -146,8 +149,25 @@ export class Injector {
     if (!this.boundary()) return;
 
     const injectable = [];
-    for (const tx of this.immediateQueue) injectable.push({ tx, uploads: null });
-    this.immediateQueue = [];
+    const deferredImmediate = [];
+    for (const tx of this.immediateQueue) {
+      const resolved = [];
+      let ready = true;
+      for (const upload of tx.uploads) {
+        const bytes = this.resolveUpload(upload, tx.doc);
+        if (bytes === null || bytes === undefined) {
+          ready = false;
+          break;
+        }
+        resolved.push({ id: upload.id, bytes });
+      }
+      if (!ready) {
+        deferredImmediate.push(tx);
+        continue;
+      }
+      injectable.push({ tx, uploads: tx.uploads.length > 0 ? resolved : null });
+    }
+    this.immediateQueue = deferredImmediate;
 
     for (const [doc, tx] of [...this.pendingByDoc]) {
       const resolved = [];
@@ -183,7 +203,9 @@ export class Injector {
           parts.push(Buffer.from(uploadSequence(id, bytes), "latin1"));
           this.uploadedIds.add(id);
         }
-        this.lastSurfaceSeq.set(tx.doc, Math.max(tx.seq, this.lastSurfaceSeq.get(tx.doc) ?? -1));
+        if (isFrameTransaction(tx)) {
+          this.lastSurfaceSeq.set(tx.doc, Math.max(tx.seq, this.lastSurfaceSeq.get(tx.doc) ?? -1));
+        }
       }
       parts.push(tx.placements, tx.deletions);
       if (i === 0 && this.carriedDeletions.length > 0) {
@@ -196,7 +218,7 @@ export class Injector {
       this.stats.injectedBytes += transaction.length;
       if (tx.receivedAt !== undefined) this.frameTiming.add(this.now() - tx.receivedAt);
       this.write(transaction);
-      if (tx.uploads.some((upload) => upload.kind === "frame")) this.onInjected(tx);
+      if (isFrameTransaction(tx)) this.onInjected(tx);
     }
   }
 
@@ -225,8 +247,8 @@ export class Injector {
   /// after the first (whichever ran first) is a safe no-op over already
   /// -emptied sets.
   ///
-  /// `lastSurfaceSeq` is cleared here too: it is the per-document seq floor
-  /// that refuses an "older" frame once a newer one has landed
+  /// `lastSurfaceSeq` is cleared here too: it is the per-document frame-seq
+  /// floor that refuses an "older" frame once a newer one has landed
   /// (`tryInject`'s `refusedStaleSurface` check), and a fresh Neovim
   /// session's markers restart near seq=1 -- left at the outgoing session's
   /// high-water mark, they would refuse every one of the new session's early

@@ -92,6 +92,33 @@ test("an unresolvable upload defers, and a later tryInject lands it", () => {
   assert.ok(writes[0].includes("pixels".length === 6 ? Buffer.from(png).toString("base64") : ""), "the upload rode along");
 });
 
+test("an overlay-sheet upload cannot evict a pending frame or raise its sequence floor", () => {
+  let frameReady = false;
+  const { injector, writes } = harness({
+    resolve: (upload) => (upload.kind === "sheet" ? Buffer.from("sheet") : frameReady ? Buffer.from("frame") : null),
+  });
+  injector.acceptMarker(payload({ seq: 1, doc: "buffer-1", uploads: [frameUpload(7)], placements: Buffer.from("FRAME") }));
+  injector.acceptMarker(
+    payload({
+      seq: 2,
+      doc: "buffer-1",
+      uploads: [
+        { kind: "sheet", id: 8, tint: "3a7bd5cc", widthPx: 20, heightPx: 10, marginX: 0, marginY: 0 },
+      ],
+      placements: Buffer.from("OVERLAY"),
+    })
+  );
+  assert.equal(writes.length, 1, "the ready sheet does not wait behind the frame");
+  assert.ok(writes[0].includes(Buffer.from("OVERLAY")));
+  assert.equal(injector.stats.superseded, 0, "the sheet did not supersede the pending frame");
+
+  frameReady = true;
+  injector.tryInject();
+  assert.equal(writes.length, 2, "the older pending frame still lands after the newer sheet");
+  assert.ok(writes[1].includes(Buffer.from("FRAME")));
+  assert.equal(injector.stats.refusedStaleSurface, 0, "the sheet did not raise the frame staleness floor");
+});
+
 test("supersession drops a stale frame's placements but carries its deletions", () => {
   const readiness = new Map();
   const { injector, writes } = harness({ resolve: (upload) => readiness.get(upload.id) ?? null });

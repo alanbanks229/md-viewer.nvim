@@ -426,15 +426,25 @@ return function(t)
   )
   t.eq(40, session.applied_scroll_y, "the interact's scroll position is applied")
 
-  -- -- selection overlay: crops composite over a synthesized sheet ----------
+  -- -- selection overlay: wait for the base, then synthesize the sheet ------
 
-  local writes_before_overlay = #writes
-  local applied, overlay_reason = controller.display_selection_overlay(session, {
+  local overlay_result = {
     rects = { { x = 4, y = 4, width = 30, height = 12 } },
     contentRevision = session.renderer_revision,
     scrollY = session.applied_scroll_y,
     selectionTint = { r = 58, g = 123, b = 213, a = 0.8 },
-  })
+  }
+  local writes_before_pending_overlay = #writes
+  local applied = controller.display_selection_overlay(session, overlay_result)
+  t.eq(false, applied, "an overlay cannot address a frame reference whose pixels are still pending")
+  t.eq(writes_before_pending_overlay, #writes, "the refused overlay emits no sheet or placement marker")
+
+  local interact_seq = tonumber(interact_frames[#interact_frames]:match(";s=(%d+);"))
+  helper.notify({ event = "presented", seq = interact_seq, doc = session.document_id, scrollY = 40 })
+  vim.wait(2000, function() return session.local_frame_confirmed end, 10)
+  local writes_before_overlay = #writes
+  local overlay_reason
+  applied, overlay_reason = controller.display_selection_overlay(session, overlay_result)
   t.eq(true, applied, "the overlay applied without any sheet bytes: " .. tostring(overlay_reason))
   local sheet_write = writes[writes_before_overlay + 1]
   t.ok(
