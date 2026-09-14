@@ -1,6 +1,6 @@
 # Refactor State
 
-Current phase: Phase 0
+Current phase: Phase A
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -19,14 +19,22 @@ Completed:
   in terminal-stream markers visible to pty observers.
 - Phase 0, item 6: re-armed the local-render fallback warning after a
   successful attachment, so a later demotion after recovery is reported.
+- Phase 0 complete: all six items landed; `make test` passed with 3,355 Lua
+  assertions and 350 Node tests, and StyLua passed.
 
 Next:
-- Run Phase 0 completion verification, then mark Phase 0 complete and Phase A
-  current without starting Phase A.
+- Begin Phase A with item 7 from docs/refactor-plan.md in the next session.
 
 Last verified commit:
-- `9bd9052` (Phase 0, item 5); this commit is Phase 0, item 6.
+- `1d2453b` (Phase 0 complete; items 1-6 verified).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
 - Do not start the next major phase without stopping first.
+- `scripts/overlay/live/drive.lua` is not a Phase 0 completion gate. The plan
+  makes it mandatory for Phase B item 12 and all of Phase C; CONTRIBUTING says
+  it is worth running for selection or placement changes.
+- The driver was nevertheless run twice after Phase 0 and both attempts timed
+  out at `settle after y`. This is a non-blocking Phase 0 observation, but it
+  must be resolved or otherwise accounted for before Phase B item 12, where
+  the plan makes the driver mandatory.
