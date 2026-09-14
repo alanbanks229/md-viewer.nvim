@@ -37,11 +37,25 @@ Completed:
   `SESSION_TIMER_NAMES` constant and `close_session_timers()` helper, called
   from both.
 
+- Phase A, item 9: extracted the identical, unrounded drawn-pixel-box formula
+  (`placement.width * cell.width`, `placement.height * cell.height`) shared by
+  `kitty_raw.lua`'s `overlay_apply` and `animation_apply` and `animation.lua`'s
+  `scales` into `cellpixels.drawn_size(placement, cell)`. Deliberately left
+  `kitty_raw.lua`'s `required_sheet_size` and `interaction.lua`'s `sheet_dims`
+  unmerged per the plan's caveat: both round the same drawn term differently
+  (ceil-before-max vs floor-after-max+margin) as two halves of one
+  overlay_needs_sheet/sheet_dims contract, and `sheet_dims`'s cell-based
+  branch has no unit test pinning it, so unifying now risks an unverifiable
+  1px divergence.
+  `scripts/overlay/live/drive.lua` was re-run after this item and still times
+  out at "settle after y" — same pre-existing failure noted after Phase 0, not
+  a regression from this item.
+
 Next:
-- Continue Phase A with item 9 from docs/refactor-plan.md in the next session.
+- Continue Phase A with item 10 from docs/refactor-plan.md in the next session.
 
 Last verified commit:
-- `bbedf00` (Phase A item 8 landed).
+- `0b6a98c` (Phase A item 9 landed).
 
 Notes:
 - Follow docs/refactor-plan.md in order.
