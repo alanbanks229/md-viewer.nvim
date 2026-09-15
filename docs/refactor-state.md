@@ -1,7 +1,9 @@
 # Refactor State
 
-Current phase: Phase D -- items 17 and 18 complete; item 19 (`autocmds.lua`)
-is the current item and the last in the phase
+Current phase: Phase D is COMPLETE -- every migration phase in
+docs/refactor-plan.md section 6 has landed. The next major phase is the plan's
+section 7 deliverables (see Next); do not start it without reading that section
+first.
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -284,6 +286,41 @@ Completed:
   overlay driver was run too, though Phase D does not require it, and passed
   with the unchanged 377,622-byte total.
 
+- Phase D, item 19: extracted the autocmd group into `autocmds.lua` -- the
+  augroup and its 21 handlers, 368 lines and 39 registrations. It is the layer
+  above controller that `commands.lua` already models: it requires controller
+  and controller never requires it back, so the arrow the target architecture
+  draws (wiring -> orchestration) is now real in both directions rather than
+  only on paper.
+  `setup_autocmds` also held two things that are not autocmds -- the renderer
+  process's exit hook and local rendering's four helper events. Those stayed in
+  controller as `M.setup_listeners()`, because what they do is session
+  bookkeeping rather than wiring, and `init.lua` now calls both. The plan's
+  diagram puts only "commands / autocmds" in the top layer, which is what
+  settled that split.
+  Five controller names became public for the layer above (`valid`,
+  `show_cached`, `close_session`, `schedule_source_scroll`, and a
+  `history_follow_buffer` wrapper so no caller has to assemble `history_host`).
+  That is the whole of what the handlers needed that was not already public;
+  the bodies are otherwise verbatim, `M.x` -> `controller.x`.
+  Verification, because this is the move the plan calls the most dangerous:
+  `tests/lua/cases/autocmds.lua` passes (123 assertions -- the manifest, the
+  seven ordering questions, every event fired against a real session), and the
+  plugin was loaded in a real Neovim both TTY-attached (1 UI) and headless,
+  sourced through `plugin/md-viewer.lua` on the runtimepath, where the
+  `md-viewer` group comes up with 39 registrations across 21 handlers, the
+  user commands install, a preview opens, and dispatched events do not raise.
+  `make test` 3,918 Lua assertions and 352 Node tests, `stylua --check` clean,
+  the live overlay driver unchanged at 377,622 bytes, and
+  `scripts/resident/drive.lua` 12/12 both ways.
+- Phase D complete: all three items (17-19) landed. `controller.lua` is now
+  1,215 lines, down from 1,796 at the start of the phase and 2,597 before
+  Phase B. Phase-wide verification on the committed tree: `make test` 3,918 Lua
+  assertions and 352 Node tests with 0 skips, `stylua --check` clean,
+  `scripts/resident/drive.lua` 12/12 plain and with `--slow-chunks=2000` (item
+  18's gate), and the live overlay driver at the unchanged 377,622-byte total.
+  Every migration phase in the plan's section 6 has now landed.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
@@ -322,20 +359,28 @@ Corrections:
   time.
 
 Next:
-- Phase D item 19 (`autocmds.lua`) is the current item and the last in the
-  phase. It is gated on the new harness existing and passing, which it now
-  does: `tests/lua/cases/autocmds.lua` pins the manifest, the dispatch order
-  and every event firing. Note two plan counts that
-  deliverable 2 corrected: there are eight multi-handler events rather than
-  six, and seven of them are an ordering question. This is the riskiest change
-  in the plan -- a broken registration is a plugin that does not load -- so
-  confirm the group registers in a real Neovim before pushing it.
+- The migration is done. What remains is docs/refactor-plan.md section 7,
+  "Deliverables", which is the next major phase and has not been started:
+    1. `docs/architecture.md` -- still the original 153 lines. The plan asks
+       for a rewrite into the full contributor-facing document: the four
+       rendering models, the state map, the counter/lane story, both diagrams.
+       Everything it has to describe now exists and is named, which was not
+       true when the plan was written.
+    2. A published artifact -- the same content as a browsable page with
+       rendered diagrams.
+  Read section 7 before starting; it is a writing phase, not a code phase, and
+  nothing in it should change behavior.
+- Still outstanding from Phase C, and unrelated to the above:
+  `scripts/manual-checklist.md` on a real terminal, before the next release.
+  See "Not done, and why".
 
 Last verified commit:
-- `07834e4` (Phase D item 18 landed and verified: `resident_controller.lua`).
-  `make test` 3,918 Lua assertions and 352 Node tests, `stylua --check` clean,
-  `scripts/resident/drive.lua` 12/12 both plain and with `--slow-chunks=2000`,
-  and the live overlay driver unchanged at 377,622 bytes.
+- `116b50b` (Phase D item 19 landed, and with it the whole phase:
+  `autocmds.lua`). Verified on that tree: `make test` 3,918 Lua assertions and
+  352 Node tests, `stylua --check` clean, `scripts/resident/drive.lua` 12/12
+  plain and with `--slow-chunks=2000`, the live overlay driver unchanged at
+  377,622 bytes, and a real-Neovim load (TTY-attached and headless) showing the
+  `md-viewer` group at 39 registrations across 21 handlers.
 
 Notes:
 - Follow docs/refactor-plan.md in order.
@@ -357,3 +402,12 @@ Notes:
   their own requirements in their headers and in `scripts/README.md`; where the
   plan and a script disagree about what a harness needs, the script is right.
   That disagreement has already cost one session.
+- The module layout the migration produced, top to bottom:
+  `commands.lua` / `autocmds.lua` (event wiring; both require controller and
+  neither is ever required back) -> `controller.lua` -> the peer feature
+  modules (`history`, `occlusion`, `resident_controller`, `lanes`, `metrics`)
+  -> `presenter.lua` -> `state` / `config` / `backends` / `renderer`. Four
+  modules take an injected host rather than requiring controller
+  (`presenter`, `interaction`, `occlusion`, `resident_controller`); that is
+  what keeps the graph acyclic, so adding a `require("md-viewer.controller")`
+  to any of them puts the cycle back.
