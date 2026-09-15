@@ -1,8 +1,7 @@
 # Refactor State
 
-Current phase: Phase D -- item 17 complete; item 18 is the current item and is
-NOT blocked (see Next; the "real terminal" gate recorded here earlier was
-wrong)
+Current phase: Phase D -- items 17 and 18 complete; item 19 (`autocmds.lua`)
+is the current item and the last in the phase
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -257,6 +256,34 @@ Completed:
   unchanged 377,622-byte total.
 - Phase D, item 17 complete: the five harness deliverables and `lanes.lua`.
 
+- Phase D, item 18: extracted the resident loop into `resident_controller.lua`
+  -- `pump_resident`, `holding_position`, `draw_resident`, `begin_resident`, 239
+  lines of `controller.lua`. It is the third and outermost of the resident
+  layers: `resident.lua` is the arithmetic, `resident_session.lua` is the
+  per-session state machine, and this is what spends the renderer and the wire
+  on that plan. The host seam is three functions (`valid`, `markdown`,
+  `refresh`), so the new module reaches presenter, occlusion, preview, renderer,
+  linkrate and resident_session directly and never requires controller.
+  Controller keeps the three names as aliases, the same pattern `history.lua`
+  and `presenter.lua` already use, so `occlusion`'s host, `:MdViewerDebug` and
+  `tests/lua/cases/resident_bootstrap.lua` call exactly what they called before
+  -- which is what makes the before/after gate runs comparable at all.
+  The moved body is verbatim apart from four rebinds forced by the move
+  (`M.refresh` -> the injected `refresh` x3, and an inline
+  `require("md-viewer.linkrate")` that is now a top-level require),
+  `M.clear_caret_overlay`/`M.place_caret` -> `presenter.*`, and comment
+  references re-qualified for their new file. Two locals orphaned in controller
+  (`linkrate`, `clear_selection_overlay`) were dropped.
+  `make test` passed with 3,918 Lua assertions and 352 Node tests -- unchanged,
+  as expected for a path the suite cannot reach -- and `stylua --check` passed.
+  The gate is what matters: `scripts/resident/drive.lua` passed 12/12 both
+  plain and with `--slow-chunks=2000`, before and after the move, with
+  identical numbers each time (21/21 chunks, 22 images on the wire, 40 scrolls
+  costing 0 renderer requests and 0 uploads, 58 placements in 40 writes, 196
+  bytes per write, the preview following the reader to chunk 9). The live
+  overlay driver was run too, though Phase D does not require it, and passed
+  with the unchanged 377,622-byte total.
+
 Not done, and why:
 - The plan gates Phase C items 14-15 on `scripts/manual-checklist.md` on a real
   terminal. That was not run: this session is headless and the checklist needs
@@ -295,23 +322,20 @@ Corrections:
   time.
 
 Next:
-- Phase D item 18 (`resident_controller.lua` <- `controller.lua:931-1171`) is
-  the current item and is ready to start. Its gate is satisfied and reproducible
-  by the two commands above.
-- Phase D item 19 (`autocmds.lua`) is gated on the new harness existing and
-  passing, which it now does: `tests/lua/cases/autocmds.lua` pins the manifest,
-  the dispatch order and every event firing. Note two plan counts that
+- Phase D item 19 (`autocmds.lua`) is the current item and the last in the
+  phase. It is gated on the new harness existing and passing, which it now
+  does: `tests/lua/cases/autocmds.lua` pins the manifest, the dispatch order
+  and every event firing. Note two plan counts that
   deliverable 2 corrected: there are eight multi-handler events rather than
   six, and seven of them are an ordering question. This is the riskiest change
   in the plan -- a broken registration is a plugin that does not load -- so
   confirm the group registers in a real Neovim before pushing it.
 
 Last verified commit:
-- `98e210a` (Phase D item 17 landed and verified: five harness deliverables and
-  `lanes.lua`). Re-verified on the corrected docs: `make test` 3,918 Lua
-  assertions and 352 Node tests, `stylua --check` clean, the live overlay
-  driver unchanged at 377,622 bytes, and `scripts/resident/drive.lua` 12/12
-  both ways.
+- `07834e4` (Phase D item 18 landed and verified: `resident_controller.lua`).
+  `make test` 3,918 Lua assertions and 352 Node tests, `stylua --check` clean,
+  `scripts/resident/drive.lua` 12/12 both plain and with `--slow-chunks=2000`,
+  and the live overlay driver unchanged at 377,622 bytes.
 
 Notes:
 - Follow docs/refactor-plan.md in order.
