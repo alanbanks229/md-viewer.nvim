@@ -177,7 +177,7 @@ renderer request and no image bytes.** Against this repo's own README on Ubuntu
 ```
 
 **Run this after touching `resident.lua`, `resident_session.lua`,
-`controller.lua` or the backend's compose path.** It is the only check that
+`resident_controller.lua`, `controller.lua` or the backend's compose path.** It is the only check that
 exercises the chain rather than the links.
 
 ## `rig/first-frame.lua` — did the first capture keep the fast encoder?

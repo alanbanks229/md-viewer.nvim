@@ -7,8 +7,8 @@
 -- *any* newer request invalidated *every* older one. The costs of that were
 -- documented twice at the sites that paid them:
 --
---   controller.lua's chunk callback -- "a settle capture, a resize, a
---   ColorScheme or an OptionSet is enough to stale a chunk that is in
+--   resident_controller.lua's chunk callback -- "a settle capture, a resize,
+--   a ColorScheme or an OptionSet is enough to stale a chunk that is in
 --   flight ... the warm-up simply stopped at n/N and stayed there."
 --
 -- The rule set, in one place, mirroring `lanes.js`:

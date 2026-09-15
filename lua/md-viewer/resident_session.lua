@@ -318,10 +318,10 @@ end
 ---does not touch it yet".
 ---
 ---KEEP_IN_MIND: dormant on every host this plugin runs on as of 2026-08-29.
----This function's only caller (`controller.pump_resident`'s settle-before-
----placing check) is reached only when a session is on the resident render
----path, which the default `image.resident = "off"` never selects at all. Under
----`"auto"` it needs both a measured link under
+---This function's only caller (`resident_controller.pump_resident`'s
+---settle-before-placing check) is reached only when a session is on the
+---resident render path, which the default `image.resident = "off"` never
+---selects at all. Under `"auto"` it needs both a measured link under
 ---`image.resident_below_bytes_per_sec` (4 MB/s; see `select_path` above) and a
 ---terminal profile that does not refuse resident_pan (kitty, ghostty, warp,
 ---generic_kitty -- not iTerm2, which now refuses it in terminal.lua, and not
