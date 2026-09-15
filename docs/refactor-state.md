@@ -1,7 +1,8 @@
 # Refactor State
 
 Current phase: Phase D -- item 17 complete; item 18 is the current item and is
-blocked on a real terminal (see Next)
+NOT blocked (see Next; the "real terminal" gate recorded here earlier was
+wrong)
 
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
@@ -264,25 +265,53 @@ Not done, and why:
   and the live overlay driver's byte totals all pin the direct path's output as
   unchanged, but none of them can see whether anything is composited where it
   should be. Run the checklist on a Supported terminal before the next release.
+  This one is real and still outstanding -- do not confuse it with the
+  correction below, which is a different script.
+
+Corrections:
+- 2026-09-14: item 18 was recorded here as blocked on a real
+  terminal. It is not, and never was. `scripts/resident/drive.lua` runs
+  headless -- its own header and `scripts/README.md` both say it needs "no
+  display and no graphics terminal -- only Node and a Chrome/Chromium",
+  because it spawns a child Neovim with a *faked* Kitty-capable terminal and
+  records the byte stream instead of drawing it. The claim came from
+  `docs/refactor-plan.md`, which has been corrected at both places it appeared.
+  The gate was then run on this machine, headless, and passed twice:
+
+    nvim --headless -u NONE -i NONE -l scripts/resident/drive.lua
+      12/12 checks passed -- 21/21 chunks resident, each uploaded once;
+      40 scrolls over an 11,762px document costing 0 renderer requests,
+      0 image uploads, 58 placements in 40 writes, 196 bytes per write.
+
+    ... same, with --slow-chunks=2000 (the warm-up path, which is what the
+    knob exists for)
+      12/12 checks passed -- 0 of 24 warm-up samples showed pixels nobody
+      could vouch for.
+
+  What the gate genuinely means still stands: `pump_resident` and its siblings
+  are unreachable on every validated host, so `make test` proves nothing about
+  this extraction. The driver is the oracle. Run it plain and with
+  `--slow-chunks=2000` both before and after the move, and require 12/12 each
+  time.
 
 Next:
-- Phase D item 18 (`resident_controller.lua`) is the current item and is
-  blocked here. The plan gates it on `scripts/resident/drive.lua` passing on a
-  real terminal, and this session is headless. The gate is not a formality: the
-  plan's own reason for deferring the extraction to Phase D is that
-  `pump_resident` and its siblings are unreachable on every validated host, so
-  a green headless suite proves nothing about the code being moved. To resume:
-  run `scripts/resident/drive.lua` (needs Node, Chromium and a real terminal)
-  on a host where the resident path actually runs, and only then extract
-  `controller.lua:931-1171`.
+- Phase D item 18 (`resident_controller.lua` <- `controller.lua:931-1171`) is
+  the current item and is ready to start. Its gate is satisfied and reproducible
+  by the two commands above.
 - Phase D item 19 (`autocmds.lua`) is gated on the new harness existing and
   passing, which it now does: `tests/lua/cases/autocmds.lua` pins the manifest,
-  the dispatch order and every event firing. It was not started here because
-  item 18 comes first and stopping was the instruction.
+  the dispatch order and every event firing. Note two plan counts that
+  deliverable 2 corrected: there are eight multi-handler events rather than
+  six, and seven of them are an ordering question. This is the riskiest change
+  in the plan -- a broken registration is a plugin that does not load -- so
+  confirm the group registers in a real Neovim before pushing it.
 
 Last verified commit:
 - `98e210a` (Phase D item 17 landed and verified: five harness deliverables and
-  `lanes.lua`).
+  `lanes.lua`). Re-verified on the corrected docs: `make test` 3,918 Lua
+  assertions and 352 Node tests, `stylua --check` clean, the live overlay
+  driver unchanged at 377,622 bytes, and `scripts/resident/drive.lua` 12/12
+  both ways.
 
 Notes:
 - Follow docs/refactor-plan.md in order.
@@ -298,3 +327,9 @@ Notes:
   Phase C. Its former `settle after y` timeout was a pre-existing harness
   defect, reproduced unchanged before item 11 and corrected in the item 12
   prerequisite above; no md-viewer behavior was changed to make it pass.
+- `scripts/resident/drive.lua` is mandatory for Phase D item 18 and runs
+  headless. Run it both ways -- plain, and `--slow-chunks=2000` for the warm-up
+  path -- and require 12/12 from each. Both harnesses under `scripts/` state
+  their own requirements in their headers and in `scripts/README.md`; where the
+  plan and a script disagree about what a harness needs, the script is right.
+  That disagreement has already cost one session.

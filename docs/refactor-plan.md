@@ -398,7 +398,15 @@ Target after Phase B: `controller.lua` ≈ 1,100 lines.
     (`lanes.lua`), replacing the shared `request_serial`.
 18. **`resident_controller.lua`** ← `controller.lua:931-1171`. Deferred to here, not Phase B:
     the code is unreachable on every validated host, so extraction cannot be verified by the
-    suite. Gate on `scripts/resident/drive.lua` passing on a real terminal.
+    suite. Gate on `scripts/resident/drive.lua` passing.
+
+    **Correction (2026-09-14):** this line and the verification note below both said the
+    driver needs a real terminal. It does not. The script's own header and
+    `scripts/README.md` both say it needs "no display and no graphics terminal — only Node
+    and a Chrome/Chromium": it spawns a child Neovim with a *faked* Kitty-capable terminal
+    and records the byte stream instead of drawing it. The claim cost one session, which
+    read the gate here, believed itself blocked, and stopped. Run it plain and with
+    `--slow-chunks=2000`, which is the knob that exercises the warm-up.
 19. Only then `autocmds.lua` — 24 of 34 events untested, ordering assumptions documented only
     in prose, and three events have two handlers each whose registration order is behavioral.
 
@@ -445,5 +453,6 @@ Target after Phase B: `controller.lua` ≈ 1,100 lines.
   `nvim --headless -u NONE -i NONE -l scripts/overlay/live/drive.lua`
 - For Phase C steps 14–15, work `scripts/manual-checklist.md` on a real terminal — the headless
   suites cannot see a pixel.
-- Phase D step 18 is gated on `scripts/resident/drive.lua` (needs Node + Chromium + a real
-  terminal); steps 17 and 19 are gated on the new harness existing and passing first.
+- Phase D step 18 is gated on `scripts/resident/drive.lua` (needs Node + Chromium; **not** a
+  real terminal — see the correction under step 18); steps 17 and 19 are gated on the new
+  harness existing and passing first.
