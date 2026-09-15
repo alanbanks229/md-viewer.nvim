@@ -1,10 +1,12 @@
 -- The autocmd manifest.
 --
--- `controller.setup()` registers 39 autocmds in one group, and until this file
+-- `autocmds.setup()` registers 39 autocmds in one group, and until this file
 -- existed nothing asserted the set: 24 of the events were never fired by a
 -- test, and *deleting* a registration broke nothing anywhere in the suite. The
--- plan's last phase moves this block into its own module, which is the most
--- dangerous move it lists, precisely because a handler can go missing silently.
+-- plan's last phase moved this block out of `controller.lua` into its own
+-- module, which is the most dangerous move it lists, precisely because a
+-- handler can go missing silently. This file is what made that move safe, and
+-- it is why the manifest below is written out rather than derived.
 --
 -- Three things are pinned here, in order:
 --
