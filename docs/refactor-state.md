@@ -358,6 +358,51 @@ Corrections:
   `--slow-chunks=2000` both before and after the move, and require 12/12 each
   time.
 
+- 2026-09-15, not a phase: a bug fix landed between Phase D and the plan's
+  section 7, so the architecture rewrite is not blindsided by a config surface
+  that moved underneath it.
+
+  **Config surface changed.** `interaction.keymaps` gained a third entry,
+  `copy`, defaulting to `"y"` -- the key that key has always been. Every entry
+  in that table (`tab_previous`, `tab_next`, `copy`) now also accepts a *list*
+  of keys as well as a single key or `false`; `navigation.lua` reads all three
+  shapes through one `keys_for` helper. Documented at `md-viewer-copy-key` in
+  `doc/md-viewer.txt`, with the option table and the mapping list updated to
+  match. The README was deliberately left alone: it enumerates no individual
+  options and points at `:help md-viewer-options` instead.
+
+  This was option 2 of the three the fix plan offered, chosen over a
+  vault-side-only `FileType` autocmd (option 1) and over the plugin hardcoding
+  a second `<leader>y` mapping for everyone (option 3). The reported symptom
+  was that `<leader>y` does nothing over the preview while typing `"+y` by
+  hand works, and the cause is a user-config collision rather than a plugin
+  defect: a `noremap` `<leader>y` -> `"+y` feeds its right-hand side through
+  as non-remappable, so the trailing `y` runs Neovim's builtin operator
+  instead of the preview buffer's copy handler. Option 1 leaves every other
+  user with the same habit at the same wall; option 3 has a public plugin
+  claiming a leader key by default, which is a product decision and not a bug
+  fix. A configurable seam is neither. The list shape exists so `"y"` and
+  `"<leader>y"` can both be live, which a single-string field could not do.
+
+  **The selection-highlight symptom reported alongside it is NOT fixed, and
+  its cause is still unknown.** What was ruled out, from `:MdViewerDebug`
+  taken on the failing preview: the overlay is *supported and on* (`overlay:
+  on, layer -1 over base -3`), the profile resolved correctly to `iterm2`, the
+  multiplexer field reads `none`, and the cell size is reported
+  (16.00x48.00px) -- so none of `kitty_raw.overlay_supported`'s three refusal
+  reasons applies. The live overlay driver passes unchanged at 377,622 bytes,
+  so the pipeline itself is sound. What the dump shows instead is
+  `overlay_frames = 0` with `overlay_last_error` unset. Those two together
+  mean `presenter.display_selection_overlay` never once reached its
+  `pcall(backend.overlay_apply, ...)` -- it returned at one of its eight early
+  guards, and **not one of those guards records why**. `overlay_last_error`
+  only covers the pcall branch. That is a real diagnostic gap: no
+  `:MdViewerDebug` capture can currently distinguish a stale
+  `contentRevision`, a `rectsTruncated`, a scrollY disagreement with
+  `frame_scroll_y`, or a `must_hide` from each other. Closing it means new
+  session fields, which means `tests/lua/session_shape.lua` changes, which the
+  fix plan names as a stop-and-ask -- so it was raised, not implemented.
+
 Next:
 - The migration is done. What remains is docs/refactor-plan.md section 7,
   "Deliverables", which is the next major phase and has not been started:
@@ -375,6 +420,15 @@ Next:
   See "Not done, and why".
 
 Last verified commit:
+- `1e84034` (the `interaction.keymaps.copy` fix above, which is not a
+  phase). Verified on that tree: `make test` 3,929 Lua assertions and 352 Node
+  tests with 0 skips, `stylua --check` clean, the live overlay driver unchanged
+  at 377,622 bytes, and a real-Neovim load showing the `md-viewer` group at 39
+  registrations. The Lua count moved 3,918 -> 3,929 because
+  `tests/lua/cases/config.lua` gained six assertions for the new entry and its
+  list shape and `tests/lua/cases/navigation.lua` gained five for the mappings
+  it installs. `scripts/resident/drive.lua` was not re-run: nothing on the
+  resident path was touched.
 - `116b50b` (Phase D item 19 landed, and with it the whole phase:
   `autocmds.lua`). Verified on that tree: `make test` 3,918 Lua assertions and
   352 Node tests, `stylua --check` clean, `scripts/resident/drive.lua` 12/12
