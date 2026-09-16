@@ -1,4 +1,5 @@
 return function(t)
+  local backends = require("md-viewer.backends")
   local mouse = require("md-viewer.mouse")
   local state = require("md-viewer.state")
   local interaction = require("md-viewer.interaction")
@@ -23,13 +24,12 @@ return function(t)
   -- mapped there before -- the same technique the wheel mappings already use.
   vim.api.nvim_set_current_buf(source)
   local session = assert(controller.open("right"))
-  session.backend = {
-    name = "kitty_raw",
+  session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
-  }
+  })
 
   local modes = { "n", "i", "v" }
   -- Every modifier combination of press and release is mapped, not just the
@@ -151,13 +151,12 @@ return function(t)
   require("md-viewer").setup({ interaction = { enabled = false } })
   vim.api.nvim_set_current_buf(source)
   local disabled_session = assert(controller.open("right"))
-  disabled_session.backend = {
-    name = "kitty_raw",
+  disabled_session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
-  }
+  })
   mouse.attach(controller.navigate)
   local down_mapping = vim.fn.maparg("<ScrollWheelDown>", "n", false, true)
   t.ok(not vim.tbl_isempty(down_mapping), "wheel mapping still installs when interaction.enabled is false")

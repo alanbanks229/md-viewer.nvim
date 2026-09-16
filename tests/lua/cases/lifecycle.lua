@@ -19,8 +19,7 @@ return function(t)
 
   local function stub_backend()
     local cleared = {}
-    return {
-      name = "kitty_raw",
+    return vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       clear = function(image_id)
         cleared[#cleared + 1] = image_id
         return true
@@ -29,7 +28,7 @@ return function(t)
       update = function() return 1 end,
       move = function() return true end,
       clear_all = function() end,
-    },
+    }),
       cleared
   end
 

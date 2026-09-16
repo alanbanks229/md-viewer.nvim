@@ -8,6 +8,7 @@ return function(t)
   -- reporting that window's full, unchanged, on-screen geometry, so the
   -- image was re-shown at the hidden tab's coordinates on top of the diff
   -- panes and stayed there for as long as the diff view was open.
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local coordinates = require("md-viewer.coordinates")
@@ -23,8 +24,7 @@ return function(t)
   local preview_tab = vim.api.nvim_win_get_tabpage(session.preview_win)
 
   local shows, moves, clears = {}, 0, 0
-  session.backend = {
-    name = "kitty_raw",
+  session.backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function()
       clears = clears + 1
       return true
@@ -37,10 +37,10 @@ return function(t)
       moves = moves + 1
       return image_id
     end,
-  }
+  })
   session.image_id = 77
   session.last_image_bytes = "cached-png"
-  session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+  session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
   local before = vim.deepcopy(session.last_placement)
 
   t.eq(true, coordinates.window_is_displayed(session.preview_win), "the preview window starts on the displayed tabpage")
@@ -58,7 +58,7 @@ return function(t)
   t.ok(diff_tab ~= preview_tab, "sanity: the diff view opened in its own tabpage")
 
   -- The heart of the bug: none of this is visible through window geometry.
-  local hidden_placement = preview.placement(session.preview_win, "kitty_raw")
+  local hidden_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
   t.eq(true, vim.api.nvim_win_is_valid(session.preview_win), "a hidden tabpage's window still reports as valid")
   t.eq(before.row, hidden_placement.row, "a hidden tabpage's window still reports its old screen row")
   t.eq(before.col, hidden_placement.col, "a hidden tabpage's window still reports its old screen column")

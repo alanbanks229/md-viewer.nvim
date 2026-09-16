@@ -16,7 +16,7 @@ local wheels = {
 
 local function has_graphical_session()
   for _, session in pairs(state.all()) do
-    if not session.closed and session.backend and session.backend.name ~= "cells" then return true end
+    if not session.closed and session.backend and session.backend.is_graphical then return true end
   end
   return false
 end
@@ -26,7 +26,7 @@ local function install_wheel(mode, wheel)
   vim.keymap.set(mode, wheel.lhs, function()
     local position = vim.fn.getmousepos()
     local session = position and state.from_preview_win(position.winid)
-    if session and config.get().sync.mouse_scroll then
+    if session and session.config.sync.mouse_scroll then
       vim.schedule(function()
         if callback then callback(session, wheel.action) end
       end)

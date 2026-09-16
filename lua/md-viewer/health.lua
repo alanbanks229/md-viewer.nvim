@@ -650,10 +650,12 @@ local function backend_label(report, cfg)
   return report.selected_backend
 end
 
+---Asked of the backend's own declaration rather than of a list of names kept
+---here, which would answer "unavailable" for any backend added later.
 local function image_support_text(selected_backend)
-  if selected_backend == "cells" then return "reduced (text-cell rendering)" end
-  if selected_backend == "nvim_img" or selected_backend == "kitty_raw" then return "available" end
-  return "unavailable"
+  local capabilities = selected_backend and backends.capabilities(selected_backend)
+  if not capabilities then return "unavailable" end
+  return capabilities.is_graphical and "available" or "reduced (text-cell rendering)"
 end
 
 local function process_summary(process)

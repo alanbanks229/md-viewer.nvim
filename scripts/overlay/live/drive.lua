@@ -7,7 +7,8 @@
 -- so this is the keyboard equivalent of what used to be a real mouse drag.
 -- Asserts the overlay path end to end: moving frames opt out of capture and
 -- are drawn as overlay placements, `y` settles with a true captured frame,
--- and every overlay placement is deleted after settle. Also invokes
+-- copies the selected text, clears the selection placements, and redraws the
+-- caret over the final clear frame. Also invokes
 -- :MdViewerDebug and :MdViewerHealth -- the exact user commands -- since both
 -- report overlay fields.
 --
@@ -21,7 +22,6 @@
 
 local script = debug.getinfo(1, "S").source:sub(2)
 local repo = vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(vim.fs.dirname(script))))
-local sock = vim.fn.tempname() .. ".sock"
 
 local failures = {}
 local function check(ok, label)
@@ -34,11 +34,11 @@ local function check(ok, label)
   return ok
 end
 
-local server = vim.system({
+local server_errors = {}
+local chan = vim.fn.jobstart({
   vim.v.progpath,
+  "--embed",
   "--headless",
-  "--listen",
-  sock,
   "-u",
   "NONE",
   "-i",
@@ -47,26 +47,37 @@ local server = vim.system({
   ("set runtimepath+=%s"):format(repo),
   "-c",
   ("luafile %s/scripts/overlay/live/setup.lua"):format(repo),
-}, { env = { MD_VIEWER_REPO = repo, PATH = vim.env.PATH, HOME = vim.env.HOME } })
+}, {
+  rpc = true,
+  env = { MD_VIEWER_REPO = repo, PATH = vim.env.PATH, HOME = vim.env.HOME },
+  on_stderr = function(_, data)
+    for _, line in ipairs(data or {}) do
+      if line ~= "" then server_errors[#server_errors + 1] = line end
+    end
+  end,
+})
+if chan <= 0 then error(("failed to start embedded Neovim server (jobstart returned %d)"):format(chan)) end
 
-local deadline = vim.uv.now() + 15000
-while vim.uv.fs_stat(sock) == nil do
-  if vim.uv.now() > deadline then
-    io.write("server socket never appeared\n")
-    server:kill(15)
-    os.exit(1)
-  end
-  vim.uv.sleep(50)
-end
-
-local chan = vim.fn.sockconnect("pipe", sock, { rpc = true })
 local function rx(code, ...) return vim.rpcrequest(chan, "nvim_exec_lua", code, { ... }) end
+
+local function server_failure(label)
+  local status = vim.fn.jobwait({ chan }, 0)[1]
+  if status == -1 then return nil end
+  local detail = #server_errors > 0 and (": " .. table.concat(server_errors, "\n")) or ""
+  return ("embedded Neovim server exited with status %d while waiting for %s%s"):format(status, label, detail)
+end
 
 local function poll(label, timeout_ms, code)
   local until_ms = vim.uv.now() + timeout_ms
   while vim.uv.now() < until_ms do
+    local failure = server_failure(label)
+    if failure then error(failure) end
     local ok, value = pcall(rx, code)
     if ok and value ~= vim.NIL and value ~= false and value ~= nil then return value end
+    if not ok then
+      failure = server_failure(label)
+      if failure then error(failure) end
+    end
     vim.uv.sleep(100)
   end
   error(("timed out waiting for %s"):format(label))
@@ -158,31 +169,47 @@ check(
 )
 
 -- `y`: the same key a reader presses to finish a selection. It settles (the
--- keyboard equivalent of a mouse release) and copies in one motion.
+-- keyboard equivalent of a mouse release), copies, then clears the highlight
+-- in one motion -- the same state transition as leaving Vim's Visual mode.
+local retina_before_y = rx(SESSION .. [[return session.retina_frame_count or 0]])
 input("y")
 
-local settled = poll("settle after y", 20000, SESSION .. [[
-  if session.selection_active and not session.overlay_set and session.retina_png_bytes then
+local settled = poll("settle after y", 20000, SESSION .. ([=[
+  local retina_before_y = %d
+  if not session.visual_active
+    and not session.selection_active
+    and not session.overlay_set
+    and (session.retina_frame_count or 0) >= retina_before_y + 2
+    and session.retina_png_bytes
+  then
     return {
-      selection_len = session.selection_text_length,
+      copied_len = #vim.fn.getreg('"'),
       retina_bytes = session.retina_png_bytes,
       capture_scale = session.last_capture_scale,
       viewport_w = session.viewport_width_px,
       viewport_h = session.viewport_height_render_px,
       capture_ms = session.retina_capture_ms,
       overlay_frames = session.overlay_frames,
+      caret_overlay_set = session.caret_overlay_set ~= nil,
       health = require("md-viewer.backends.kitty_raw").health(),
       envelopes = _G.__mdviewer_live.envelopes,
       ui = _G.__mdviewer_live.ui,
     }
   end
   return nil
-]])
-check(settled.health.overlay_placements == 0, "every overlay placement is deleted after the settle frame")
+]=]):format(retina_before_y))
+check(settled.caret_overlay_set, "the caret is redrawn over the final clear frame")
+check(
+  settled.health.overlay_sets == 1 and settled.health.overlay_placements == 1,
+  ("every selection placement is deleted while the caret remains (%d set, %d placement)"):format(
+    settled.health.overlay_sets,
+    settled.health.overlay_placements
+  )
+)
 check(settled.health.overlay_sheets >= 1, "the tint sheet stays cached for the next gesture")
 check(
-  (settled.selection_len or 0) > 0,
-  ("the committed selection has real text (%d chars)"):format(settled.selection_len or 0)
+  (settled.copied_len or 0) > 0,
+  ("y copied real selected text before clearing it (%d chars)"):format(settled.copied_len or 0)
 )
 -- Not an absolute byte count: PNG size is a function of the fixture, the pane
 -- and the font, so a threshold picked on one machine reads as a regression on
@@ -191,7 +218,7 @@ check(
 -- is checkable without knowing how well this particular page compresses.
 check(
   settled.capture_scale == "device",
-  ("the settle frame is the device tier, not the CSS one (%s)"):format(tostring(settled.capture_scale))
+  ("the final clear frame is the device tier, not the CSS one (%s)"):format(tostring(settled.capture_scale))
 )
 check(
   settled.retina_bytes > 20000,
@@ -203,8 +230,9 @@ check(
 )
 
 -- Envelope audit: recorded from the real gesture, answered by the real
--- renderer. Moving frames opt out of capture; the commit does not.
-local previews, previews_no_capture, commits, commits_no_capture, sheets = 0, 0, 0, 0, 0
+-- renderer. Moving frames opt out of capture; the commit and clear do not.
+local previews, previews_no_capture, commits, commits_no_capture, clears, clears_no_capture, copies, sheets =
+  0, 0, 0, 0, 0, 0, 0, 0
 for _, envelope in ipairs(settled.envelopes) do
   if envelope.method == "interact" and envelope.params.action == "selection_preview" then
     previews = previews + 1
@@ -215,12 +243,20 @@ for _, envelope in ipairs(settled.envelopes) do
     commits = commits + 1
     if envelope.params.capture == false then commits_no_capture = commits_no_capture + 1 end
   end
+  if envelope.method == "interact" and envelope.params.action == "selection_clear" then
+    clears = clears + 1
+    if envelope.params.capture == false then clears_no_capture = clears_no_capture + 1 end
+  end
+  if envelope.method == "interact" and envelope.params.action == "selection_text" then copies = copies + 1 end
 end
 check(previews >= 2, ("the extension produced real preview envelopes (%d)"):format(previews))
 check(previews_no_capture == previews, "every moving preview frame opted out of the capture")
 check(sheets >= 1 and sheets <= 2, ("the tint sheet was requested once, not per frame (%d)"):format(sheets))
 check(commits == 1, ("y produced exactly one settle commit (%d)"):format(commits))
 check(commits_no_capture == 0, "the commit frame captured a real browser frame")
+check(copies == 1, ("y queried the live DOM selection exactly once (%d)"):format(copies))
+check(clears == 1, ("leaving visual mode cleared the highlight exactly once (%d)"):format(clears))
+check(clears_no_capture == 0, "the clear frame captured a real browser frame")
 
 -- The exact commands a user would run, since both report overlay fields.
 --
@@ -270,8 +306,8 @@ io.write(
 -- `MdViewerToggle` is the only visibility command; there is no MdViewerClose.
 pcall(rx, [[vim.cmd("MdViewerToggle")]])
 pcall(vim.rpcrequest, chan, "nvim_command", "qa!")
-vim.uv.sleep(200)
-server:kill(15)
+vim.fn.jobwait({ chan }, 1000)
+if vim.fn.jobwait({ chan }, 0)[1] == -1 then vim.fn.jobstop(chan) end
 
 if #failures > 0 then
   io.write(("\n%d FAILURES:\n  %s\n"):format(#failures, table.concat(failures, "\n  ")))

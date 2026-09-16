@@ -1,6 +1,8 @@
 local state = require("md-viewer.state")
 local process = require("md-viewer.process")
 local config = require("md-viewer.config")
+local history = require("md-viewer.history")
+local lanes = require("md-viewer.lanes")
 
 local M = { events = {} }
 
@@ -12,6 +14,7 @@ end
 function M.snapshot()
   local sessions = {}
   for buf, session in pairs(state.all()) do
+    local history_length, history_index = history.status(session)
     sessions[tostring(buf)] = {
       source_win = session.source_win,
       preview_buf = session.preview_buf,
@@ -20,6 +23,11 @@ function M.snapshot()
       image_id = session.image_id,
       requested = session.request_serial,
       applied = session.applied_serial,
+      -- Which request each lane is waiting on, and the epoch a content render
+      -- bumps. "requested" above counts every request this document issued;
+      -- these say which of them a late reply would still be measured against,
+      -- which is the question when a warm-up stops advancing.
+      lanes = lanes.snapshot(session),
       scroll_y = session.scroll_y,
       document_height_px = session.document_height_px,
       applied_scroll_y = session.applied_scroll_y,
@@ -172,8 +180,8 @@ function M.snapshot()
       -- Where this preview sits in the documents it has followed links
       -- through. Counts and an index only: no paths, which the winbar already
       -- shows for the one that matters.
-      history_length = session.history and #session.history or 0,
-      history_index = session.history_index or 0,
+      history_length = history_length,
+      history_index = history_index,
       selection_active = session.selection_active,
       -- Length only -- see interaction.lua's copy_selection comment. Never
       -- surface the selected text itself in diagnostics.

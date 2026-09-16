@@ -11,6 +11,16 @@ local cellpixels = require("md-viewer.cellpixels")
 local MIN_VIEWPORT_WIDTH_PX, MIN_VIEWPORT_HEIGHT_PX = 320, 240
 local MAX_VIEWPORT_WIDTH_PX, MAX_VIEWPORT_HEIGHT_PX = 1920, 1440
 
+-- Exported so the mirroring is a fact rather than a comment:
+-- `tests/lua/cases/shared_constants.lua` compares these against the bounds
+-- `browser.js` itself emitted into `tests/fixtures/shared-constants.json`.
+M.VIEWPORT_BOUNDS = {
+  min_width_px = MIN_VIEWPORT_WIDTH_PX,
+  max_width_px = MAX_VIEWPORT_WIDTH_PX,
+  min_height_px = MIN_VIEWPORT_HEIGHT_PX,
+  max_height_px = MAX_VIEWPORT_HEIGHT_PX,
+}
+
 -- What a terminal cell can plausibly measure in *CSS* pixels -- the unit the
 -- browser lays text out in. A cell is one character of a monospace font, so the
 -- band is really a statement about font sizes: 5 CSS px wide is a ~7pt font and

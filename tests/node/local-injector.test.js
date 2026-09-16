@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildMarkerPayload, parseMarkerPayload, wrapMarker, markerPrefix } from "../../renderer/src/local/markers.js";
+import {
+  buildMarkerPayload,
+  parseMarkerPayload,
+  wrapMarker,
+  markerPrefix,
+  MAX_MARKER_BYTES,
+} from "../../renderer/src/local/markers.js";
 import { uploadSequence, deleteImage, chunks, command } from "../../renderer/src/local/kitty-writer.js";
 import { Injector } from "../../renderer/src/local/injector.js";
 
@@ -67,6 +73,15 @@ test("a document id that needs escaping survives the round trip", () => {
   assert.equal(parseMarkerPayload(built).doc, "buffer 5;weird\x1b");
 });
 
+test("marker builders and parsers enforce the shared full-wire size bound", () => {
+  assert.throws(
+    () => payload({ seq: 1, doc: "buffer-1", placements: Buffer.alloc(MAX_MARKER_BYTES, "P") }),
+    /marker is .* bytes; the bound is 65536/
+  );
+  assert.throws(() => parseMarkerPayload("A".repeat(MAX_MARKER_BYTES)), /the bound is 65536/);
+  assert.throws(() => wrapMarker("A".repeat(MAX_MARKER_BYTES)), /the bound is 65536/);
+});
+
 test("a ready surface transaction injects as one write: uploads, placements, deletions", () => {
   const png = Buffer.from("not-really-a-png-but-bytes");
   const { injector, writes } = harness({ resolve: () => png });
@@ -90,6 +105,33 @@ test("an unresolvable upload defers, and a later tryInject lands it", () => {
   injector.tryInject();
   assert.equal(writes.length, 1);
   assert.ok(writes[0].includes("pixels".length === 6 ? Buffer.from(png).toString("base64") : ""), "the upload rode along");
+});
+
+test("an overlay-sheet upload cannot evict a pending frame or raise its sequence floor", () => {
+  let frameReady = false;
+  const { injector, writes } = harness({
+    resolve: (upload) => (upload.kind === "sheet" ? Buffer.from("sheet") : frameReady ? Buffer.from("frame") : null),
+  });
+  injector.acceptMarker(payload({ seq: 1, doc: "buffer-1", uploads: [frameUpload(7)], placements: Buffer.from("FRAME") }));
+  injector.acceptMarker(
+    payload({
+      seq: 2,
+      doc: "buffer-1",
+      uploads: [
+        { kind: "sheet", id: 8, tint: "3a7bd5cc", widthPx: 20, heightPx: 10, marginX: 0, marginY: 0 },
+      ],
+      placements: Buffer.from("OVERLAY"),
+    })
+  );
+  assert.equal(writes.length, 1, "the ready sheet does not wait behind the frame");
+  assert.ok(writes[0].includes(Buffer.from("OVERLAY")));
+  assert.equal(injector.stats.superseded, 0, "the sheet did not supersede the pending frame");
+
+  frameReady = true;
+  injector.tryInject();
+  assert.equal(writes.length, 2, "the older pending frame still lands after the newer sheet");
+  assert.ok(writes[1].includes(Buffer.from("FRAME")));
+  assert.equal(injector.stats.refusedStaleSurface, 0, "the sheet did not raise the frame staleness floor");
 });
 
 test("supersession drops a stale frame's placements but carries its deletions", () => {
@@ -157,6 +199,27 @@ test("a placement-only transaction neither waits for nor invalidates a pending f
   ready = true;
   injector.tryInject();
   assert.equal(writes.length, 2, "the frame still lands -- a re-place is not a supersession");
+});
+
+test("only an injected frame confirms presentation", () => {
+  const { injector } = harness({ resolve: () => Buffer.from("png") });
+  const presented = [];
+  injector.onInjected = (tx) => presented.push(tx.seq);
+
+  injector.acceptMarker(payload({ seq: 1, doc: "buffer-1", placements: Buffer.from("PLACE") }));
+  injector.acceptMarker(payload({ seq: 2, doc: "buffer-1", deletions: Buffer.from("DELETE") }));
+  injector.acceptMarker(
+    payload({
+      seq: 3,
+      doc: "buffer-1",
+      uploads: [{ kind: "sheet", id: 7, tint: "3a7bd5cc", widthPx: 20, heightPx: 10, marginX: 0, marginY: 0 }],
+      placements: Buffer.from("OVERLAY"),
+    })
+  );
+  assert.deepEqual(presented, [], "non-frame transactions cannot confirm a pending frame");
+
+  injector.acceptMarker(payload({ seq: 4, doc: "buffer-1", uploads: [frameUpload(8)], placements: Buffer.from("FRAME") }));
+  assert.deepEqual(presented, [4], "the frame transaction confirms itself after its bytes are written");
 });
 
 test("a surface transaction older than one already injected is refused, not drawn", () => {

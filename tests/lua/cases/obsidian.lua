@@ -17,9 +17,12 @@ return function(t)
 
   local source = vim.fn.bufadd(vault .. "/current.md")
   vim.fn.bufload(source)
-  local session = { source_buf = source }
   config.reset()
   config.setup({ obsidian = { enabled = true, vault_root = vault } })
+  -- After the setup above, not before: a session snapshots the configuration
+  -- as it stands when it is created, and this stand-in is not registered with
+  -- md-viewer.state, so nothing re-takes it when the configuration changes.
+  local session = { source_buf = source, config = config.snapshot() }
 
   local resolved, reason
   obsidian.resolve(session, "folder/Note", function(path, why)

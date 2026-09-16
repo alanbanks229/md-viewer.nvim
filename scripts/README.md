@@ -16,6 +16,22 @@ no direct route out* -- the two pieces of hardware no test machine has. A third
 group needs a *second machine*: `local/` drives the local-render helper against
 a real remote host, and `rig/` deploys to one.
 
+`dump-shared-constants.js` also sits at the top level, and is the one script
+here that needs nothing special: no display, no terminal, no second machine.
+It regenerates `tests/fixtures/shared-constants.json` — the viewport clamps,
+the device-scale band, the single-capture ceilings, the local protocol version
+and marker bound, and every `REGION_`/`STALE_`/`INTERACT_` code — from the
+Node modules that define them. Run it after changing any of those:
+
+```sh
+node scripts/dump-shared-constants.js
+```
+
+`tests/node/shared-constants.test.js` fails while the committed fixture is
+stale, and `tests/lua/cases/shared_constants.lua` fails when the Lua side
+disagrees with it, so regenerating is a step in the change rather than a fixup
+afterwards.
+
 `ssh-link-speed.sh` sits at the top level rather than in a feature directory
 because it measures the link itself, not a feature. Run it from the shell inside
 an SSH session with Neovim closed; `--write-cache` files the answer where
@@ -161,7 +177,7 @@ renderer request and no image bytes.** Against this repo's own README on Ubuntu
 ```
 
 **Run this after touching `resident.lua`, `resident_session.lua`,
-`controller.lua` or the backend's compose path.** It is the only check that
+`resident_controller.lua`, `controller.lua` or the backend's compose path.** It is the only check that
 exercises the chain rather than the links.
 
 ## `rig/first-frame.lua` — did the first capture keep the fast encoder?
@@ -196,10 +212,10 @@ Spawns a second Neovim over RPC, opens `tests/fixtures/kitchen-sink.md`, and
 drives a real `v`/motions preview visual selection through `nvim_input`
 against the real renderer and real Chromium -- the keyboard equivalent of
 what used to be a real mouse drag, since highlighting only happens through
-vim-like motions now. 16 assertions covering the whole lifecycle: moving
-frames opt out of capture and cost hundreds of bytes rather than a megabyte,
-the tint sheet is uploaded once and not per frame, `y` settles with a true
-device-scale capture, and every overlay placement is deleted afterwards.
+vim-like motions now. 21 assertions cover the whole lifecycle: moving frames
+opt out of capture and cost hundreds of bytes rather than a megabyte, the tint
+sheet is uploaded once and not per frame, and `y` commits at device scale,
+copies the live DOM selection, clears its placements, and redraws the caret.
 Exits non-zero on failure.
 
 Needs `npm ci --prefix renderer` and a Chrome/Chromium install. No display

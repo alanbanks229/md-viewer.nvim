@@ -5,11 +5,24 @@ local coordinates = require("md-viewer.coordinates")
 local debounce = require("md-viewer.debounce")
 local obsidian = require("md-viewer.obsidian")
 local preview = require("md-viewer.preview")
+local presenter = require("md-viewer.presenter")
 local process = require("md-viewer.process")
 local security = require("md-viewer.security")
 local state = require("md-viewer.state")
 
 local M = {}
+local host
+
+---Controller orchestration needed after an interaction changes documents or
+---scroll position. Injected once so this module can depend on presenter at the
+---top level without requiring controller back and recreating the cycle.
+function M.set_host(value)
+  assert(type(value) == "table", "interaction host must be a table")
+  for _, name in ipairs({ "retarget", "schedule_scroll" }) do
+    assert(type(value[name]) == "function", "interaction host is missing " .. name)
+  end
+  host = value
+end
 
 -- The session currently "owning" an in-progress left-button press. Mouse
 -- capture is button-scoped, not window-scoped: once a press lands on preview
@@ -90,7 +103,7 @@ function M.forget_selection(session)
   session.visual_linewise = false
   -- A renderer restart or content change orphans any overlay rectangles on
   -- screen: nothing will ever supersede them, so they must go now.
-  require("md-viewer.controller").clear_selection_overlay(session)
+  presenter.clear_selection_overlay(session)
   session.selection_active = false
   session.selection_content_revision = nil
   session.selection_text_length = nil
@@ -110,8 +123,8 @@ end
 
 ---Everything `M.locate` needs besides the window/point check itself.
 local function interaction_ready(session)
-  if not config.get().interaction.enabled then return false end
-  if not (session.backend and session.backend.name ~= "cells") then return false end
+  if not session.config.interaction.enabled then return false end
+  if not (session.backend and session.backend.is_graphical) then return false end
   if not session.last_placement then return false end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return false end
   return true
@@ -166,7 +179,7 @@ local function overlay_ready(session, pointer)
   -- that there is no clean base to draw on, so this gesture runs on captured
   -- frames, which repaint the whole preview and are therefore always right.
   if session.base_selection_painted then
-    if not require("md-viewer.controller").restore_clean_base(session) then
+    if not presenter.restore_clean_base(session) then
       pointer.overlay_fallback = true
       return false
     end
@@ -184,7 +197,7 @@ end
 ---Either can be the bigger, depending on which way `coordinates.viewport`
 ---mis-estimated the cell, so one sheet has to cover both.
 local function sheet_dims(session)
-  local scale = config.get().render.device_scale_factor or 1
+  local scale = session.config.render.device_scale_factor or 1
   local width = (session.viewport_width_px or 0) * scale
   local height = (session.viewport_height_render_px or 0) * scale
   local cell = cellpixels.measure()
@@ -221,7 +234,7 @@ end
 ---
 ---On the overlay path the request opts out of capturing entirely:
 ---the renderer answers with selection rectangles from the same evaluate that
----applied the selection, and `controller.display_selection_overlay` draws
+---applied the selection, and `presenter.display_selection_overlay` draws
 ---them over the base image already on screen. A frame the overlay cannot
 ---display correctly falls back to the captured path -- for the rest of the
 ---gesture when the reason is structural (`overlay_fallback`), or for exactly
@@ -245,7 +258,7 @@ local function attempt_selection_preview(session, pointer, force_device)
   end
   pointer.selection_request_in_flight = true
   local requested_point = point
-  local capture_scale = (force_device or not config.get().interaction.fast_preview) and "device" or "css"
+  local capture_scale = (force_device or not session.config.interaction.fast_preview) and "device" or "css"
   local overlay = overlay_ready(session, pointer)
   local overlay_opts = nil
   if overlay then
@@ -273,7 +286,7 @@ local function attempt_selection_preview(session, pointer, force_device)
       session.selection_text_length = type(result.text) == "string" and #result.text or nil
       if overlay then
         pointer.overlay_want_sheet = false
-        local applied, reason = require("md-viewer.controller").display_selection_overlay(session, result)
+        local applied, reason = presenter.display_selection_overlay(session, result)
         if not applied then
           if reason == "need_sheet" and not (overlay_opts and overlay_opts.sheet) then
             -- Expected once per color: re-request with the sheet attached.
@@ -287,7 +300,7 @@ local function attempt_selection_preview(session, pointer, force_device)
           M.schedule_selection_preview(session)
         end
       else
-        require("md-viewer.controller").display_interact_result(session, result)
+        presenter.display_interact_result(session, result)
       end
     end
     if pointer.pending_settle then
@@ -331,12 +344,12 @@ end
 function M.schedule_selection_preview(session)
   local pointer = session.pointer
   if not pointer then return end
-  local cfg = config.get().interaction
+  local cfg = session.config.interaction
   if cfg.fast_preview then
     debounce.call(
       session,
       "selection_idle_settle_timer",
-      config.get().render.scroll_settle_ms,
+      session.config.render.scroll_settle_ms,
       function() attempt_selection_preview(session, pointer, true) end
     )
   end
@@ -429,7 +442,7 @@ function M.settle_selection(session, pointer, anchor, point, on_settled)
     return
   end
   pointer.selection_request_in_flight = true
-  debounce.call(session, "selection_settle_timer", config.get().interaction.settle_ms, function()
+  debounce.call(session, "selection_settle_timer", session.config.interaction.settle_ms, function()
     if session.pointer ~= pointer then return end
     -- The page may have edge-scrolled a long way from where the anchor was
     -- placed, so the commit pins it too: this frame must reproduce exactly the
@@ -443,8 +456,8 @@ function M.settle_selection(session, pointer, anchor, point, on_settled)
         session.selection_active = true
         session.selection_content_revision = session.renderer_revision
         session.selection_text_length = type(result.text) == "string" and #result.text or nil
-        require("md-viewer.controller").display_interact_result(session, result)
-        if config.get().interaction.copy_on_select then M.copy_selection(session, true) end
+        presenter.display_interact_result(session, result)
+        if session.config.interaction.copy_on_select then M.copy_selection(session, true) end
       end
       if pointer.pending_settle then
         local pending = pointer.pending_settle
@@ -496,8 +509,8 @@ function M.visual_active(session) return session ~= nil and session.visual_activ
 ---anchors at the left edge of the caret's line and extends to the right edge of
 ---the focus line, the same widening `V` does in a text buffer.
 function M.visual_start(session, linewise)
-  if not config.get().interaction.visual then return false end
-  if not config.get().interaction.selection then return false end
+  if not session.config.interaction.visual then return false end
+  if not session.config.interaction.selection then return false end
   if not session.last_placement then return false end
   local rect = caret.rect(session)
   if not rect then return false end
@@ -698,7 +711,6 @@ local function send_caret_motion(session, granularity, direction, count, from, o
       if on_done then on_done() end
       return
     end
-    local controller = require("md-viewer.controller")
     -- A motion past the edge of the viewport scrolls the page in-page, the same
     -- way a find step does. Nothing captures a frame for a read-only action, so
     -- the new position has to be recorded and a frame asked for explicitly --
@@ -708,7 +720,7 @@ local function send_caret_motion(session, granularity, direction, count, from, o
     if scrolled then
       session.scroll_y = result.scrollY
       session.applied_scroll_y = result.scrollY
-      session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
+      session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
     end
     -- Recorded against the scroll the renderer measured it at, which after an
     -- in-page scroll is the position above, not the one this request was sent
@@ -738,14 +750,14 @@ local function send_caret_motion(session, granularity, direction, count, from, o
     if scrolled then
       -- The new frame repaints the caret itself once it lands; drawing now as
       -- well would put it over the pre-scroll image for one frame.
-      controller.schedule_scroll(session)
+      host.schedule_scroll(session)
     else
       local sheet_png = nil
       if type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
         local decoded_ok, decoded = pcall(vim.base64.decode, result.overlaySheetPng)
         if decoded_ok then sheet_png = decoded end
       end
-      controller.display_caret_overlay(session, result.selectionTint, sheet_png)
+      presenter.display_caret_overlay(session, result.selectionTint, sheet_png)
     end
     M.visual_update(session)
     if on_done then on_done() end
@@ -774,7 +786,7 @@ end
 ---as `STALE_INTERACTION` and `send_caret_motion` drops it -- exactly the
 ---existing behaviour for two racing interacts, unrelated to this change.
 function M.caret_motion(session, granularity, direction, count, from)
-  if not config.get().interaction.enabled then return end
+  if not session.config.interaction.enabled then return end
   if not session.renderer_revision then return end
   if not (session.viewport_width_px and session.viewport_height_render_px) then return end
   if not session.last_placement then return end
@@ -857,7 +869,7 @@ function M.clear_selection(session)
     viewportHeightPx = session.viewport_height_render_px or 0,
     scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
-    if not err and result then require("md-viewer.controller").display_interact_result(session, result) end
+    if not err and result then presenter.display_interact_result(session, result) end
   end)
 end
 
@@ -866,7 +878,7 @@ end
 ---resolves fresh from the rect rather than trusting a character index find
 ---never computes. Reuses whatever tint `display_caret_overlay` already has
 ---cached rather than asking the renderer for one -- by the time a search
----runs, `M.place_caret` has always already seeded it once.
+---runs, `presenter.place_caret` has always already seeded it once.
 ---
 ---Called after `display_interact_result`, which repaints the whole frame and
 ---would carry no caret box of its own onto it even if this ran first.
@@ -875,7 +887,7 @@ local function move_caret_to_match(session, result)
   caret.set_rect(session, result.activeRect, session.applied_scroll_y or 0, nil)
   preview.set_progress_basis(session, "caret")
   preview.update_line_numbers(session)
-  require("md-viewer.controller").display_caret_overlay(session)
+  presenter.display_caret_overlay(session)
 end
 
 function M.find_set(session, query)
@@ -901,7 +913,7 @@ function M.find_set(session, query)
     session.find_query = result.query
     session.find_match_count = result.matchCount or 0
     session.find_active_index = result.activeIndex
-    require("md-viewer.controller").display_interact_result(session, result)
+    presenter.display_interact_result(session, result)
     move_caret_to_match(session, result)
     if session.find_match_count == 0 then
       vim.notify(("md-viewer: no matches for %q"):format(query), vim.log.levels.INFO)
@@ -925,7 +937,7 @@ local function find_step(session, action)
     if err or not result then return end
     session.find_active_index = result.activeIndex
     session.find_match_count = result.matchCount or session.find_match_count
-    require("md-viewer.controller").display_interact_result(session, result)
+    presenter.display_interact_result(session, result)
     move_caret_to_match(session, result)
   end)
 end
@@ -947,7 +959,7 @@ function M.find_clear(session)
     viewportHeightPx = session.viewport_height_render_px or 0,
     scrollY = session.applied_scroll_y or 0,
   }, function(result, err)
-    if not err and result then require("md-viewer.controller").display_interact_result(session, result) end
+    if not err and result then presenter.display_interact_result(session, result) end
   end)
 end
 
@@ -1062,7 +1074,7 @@ local function should_edit_in_neovim(path)
 end
 
 function M.open_local_file(session, href)
-  local cfg = config.get()
+  local cfg = session.config
   local name = vim.api.nvim_buf_get_name(session.source_buf)
   local base_dir = name ~= "" and vim.fs.dirname(vim.fs.normalize(name)) or vim.uv.cwd()
   local root =
@@ -1114,7 +1126,7 @@ function M.edit_in_source_window(session, path, filetype)
       return
     end
     vim.fn.bufload(new_buf)
-    require("md-viewer.controller").retarget(session, new_buf)
+    host.retarget(session, new_buf)
     return
   end
   local win = session.source_win
@@ -1141,15 +1153,15 @@ function M.activate_link(session, result)
   if link.type == "fragment" then
     if result.fragmentResolved and type(result.scrollY) == "number" then
       session.scroll_y = result.scrollY
-      session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
-      require("md-viewer.controller").schedule_scroll(session)
+      session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
+      host.schedule_scroll(session)
     end
   elseif link.type == "http" or link.type == "https" or link.type == "mailto" then
     M.open_external(link.href)
   elseif link.type == "local_file" then
     M.open_local_file(session, link.href)
   elseif link.type == "obsidian" then
-    if not config.get().obsidian.enabled then
+    if not session.config.obsidian.enabled then
       vim.notify("md-viewer: Obsidian wikilink navigation is disabled", vim.log.levels.WARN)
       return
     end
@@ -1179,7 +1191,7 @@ function M.activate_link(session, result)
         return
       end
       vim.fn.bufload(new_buf)
-      require("md-viewer.controller").retarget(session, new_buf, true, link.anchor and 0 or nil, link.anchor)
+      host.retarget(session, new_buf, true, link.anchor and 0 or nil, link.anchor)
     end)
   else
     vim.notify("md-viewer: refused to activate unsafe link: " .. tostring(link.href), vim.log.levels.WARN)
@@ -1207,8 +1219,8 @@ function M.scroll_obsidian_anchor(session, anchor)
       return
     end
     session.scroll_y = type(result.scrollY) == "number" and result.scrollY or 0
-    session.manual_scroll_until = vim.uv.now() + config.get().sync.manual_scroll_hold_ms
-    require("md-viewer.controller").schedule_scroll(session)
+    session.manual_scroll_until = vim.uv.now() + session.config.sync.manual_scroll_hold_ms
+    host.schedule_scroll(session)
     if not result.found then
       local label = anchor.kind == "block" and ("^" .. anchor.value) or table.concat(anchor.segments, "#")
       vim.notify("md-viewer: Obsidian anchor not found: " .. label, vim.log.levels.WARN)
@@ -1282,7 +1294,7 @@ end
 ---does nothing -- there is no more "jump to source" fallback here (removed
 ---per operator decision, matching the plain click's own removal below).
 function M.activate(session, point, modifiers)
-  if not config.get().interaction.links then return end
+  if not session.config.interaction.links then return end
   M.request_hit(session, point, modifiers, 1, function(result, err, meta)
     if err or not result then
       -- Reported rather than dropped. A ctrl-click whose hit test failed and a

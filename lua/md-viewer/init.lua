@@ -16,7 +16,8 @@ function M.setup(opts)
   if not initialized then
     initialized = true
     require("md-viewer.commands").setup()
-    require("md-viewer.controller").setup_autocmds()
+    require("md-viewer.controller").setup_listeners()
+    require("md-viewer.autocmds").setup()
   end
   return M
 end

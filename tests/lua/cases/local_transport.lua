@@ -166,8 +166,11 @@ return function(t)
 
   -- The helper dying demotes: transport cleared, phase recorded, one loud
   -- notification, listeners fired -- and only once.
-  local demoted
-  localrender.on("demoted", function(payload) demoted = payload end)
+  local demoted, demotion_count = nil, 0
+  localrender.on("demoted", function(payload)
+    demoted = payload
+    demotion_count = demotion_count + 1
+  end)
   helper.close()
   vim.wait(3000, function() return demoted ~= nil end, 10)
   vim.wait(1000, function() return #notifications > 0 end, 10)
@@ -178,6 +181,32 @@ return function(t)
   t.ok(
     notifications[1] and notifications[1].msg:match("rendering on this host"),
     "the notification says what happens next"
+  )
+
+  -- A successful reattach re-arms the warning. The first demotion's
+  -- once-only guard suppresses duplicate callbacks from that same failure,
+  -- not a later helper failure after recovery; silence there would hide the
+  -- attach/demote flapping health explicitly tells the operator to inspect.
+  local recovered_path = dir .. "/r-aaaa02.sock"
+  local recovered = fake_helper(recovered_path, {})
+  vim.env.MD_VIEWER_LOCAL_SOCKET = recovered_path
+  local probes_before_recovery = #sent_ui
+  local recovered_ok, recovered_reason
+  localrender.attach(function(ok, reason)
+    recovered_ok, recovered_reason = ok, reason
+  end)
+  vim.wait(3000, function() return #sent_ui > probes_before_recovery end, 10)
+  recovered.notify({ event = "presented", seq = 0 })
+  vim.wait(3000, function() return recovered_ok ~= nil end, 10)
+  t.eq(true, recovered_ok, "reattach completed after recovery: " .. tostring(recovered_reason))
+  recovered.close()
+  vim.wait(3000, function() return demotion_count == 2 end, 10)
+  vim.wait(1000, function() return #notifications == 2 end, 10)
+  t.eq(2, demotion_count, "the recovered helper's failure is a second demotion")
+  t.eq(2, #notifications, "the post-recovery demotion produces its own user-visible warning")
+  t.ok(
+    notifications[2] and notifications[2].msg:match("rendering on this host"),
+    "the re-armed warning again says what happens next"
   )
 
   -- Version skew: a mismatched hello refuses the candidate, with the code in

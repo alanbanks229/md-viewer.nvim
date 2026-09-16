@@ -1,4 +1,3 @@
-local config = require("md-viewer.config")
 local security = require("md-viewer.security")
 
 local M = {}
@@ -11,7 +10,7 @@ end
 
 function M.vault_root(session)
   if not (session and session.source_buf) then return nil, "malformed" end
-  local cfg = config.get()
+  local cfg = session.config
   local configured = cfg.obsidian.vault_root
   local root = configured and vim.fs.normalize(vim.fn.expand(configured))
     or security.document_root(session.source_buf, cfg.security.document_root, cfg.security.document_root_markers)

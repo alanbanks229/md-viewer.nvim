@@ -2,7 +2,6 @@ local backends = require("md-viewer.backends")
 local caret = require("md-viewer.caret")
 local cellpixels = require("md-viewer.cellpixels")
 local config = require("md-viewer.config")
-local coordinates = require("md-viewer.coordinates")
 local preview = require("md-viewer.preview")
 local renderer = require("md-viewer.renderer")
 local state = require("md-viewer.state")
@@ -14,14 +13,41 @@ local animation = require("md-viewer.animation")
 local navigation = require("md-viewer.navigation")
 local mouse = require("md-viewer.mouse")
 local interaction = require("md-viewer.interaction")
+local lanes = require("md-viewer.lanes")
+local resident_controller = require("md-viewer.resident_controller")
 local resident_session = require("md-viewer.resident_session")
-local linkrate = require("md-viewer.linkrate")
 local localrender = require("md-viewer.localrender")
+local history = require("md-viewer.history")
+local occlusion = require("md-viewer.occlusion")
+local presenter = require("md-viewer.presenter")
 
 local M = {}
-local group
-local start_ui_poll
-local each_session
+
+local apply_image = presenter.apply_image
+local apply_surface = presenter.apply_surface
+local local_mode = presenter.local_mode
+local begin_resident = resident_controller.begin_resident
+local draw_resident = resident_controller.draw_resident
+local pump_resident = resident_controller.pump_resident
+local clear_image = occlusion.clear_image
+local clear_raw_sessions = occlusion.clear_raw_sessions
+local each_session = occlusion.each_session
+local must_hide = occlusion.must_hide
+local reconcile_occlusion = occlusion.reconcile
+local reconcile_placement = occlusion.reconcile_placement
+local refresh_raw_sessions = occlusion.refresh_raw_sessions
+local start_ui_poll = occlusion.start_ui_poll
+
+M.clear_selection_overlay = presenter.clear_selection_overlay
+M.restore_clean_base = presenter.restore_clean_base
+M.display_selection_overlay = presenter.display_selection_overlay
+M.display_caret_overlay = presenter.display_caret_overlay
+M.place_caret = presenter.place_caret
+M.clear_caret_overlay = presenter.clear_caret_overlay
+M.display_interact_result = presenter.display_interact_result
+M.pump_resident = resident_controller.pump_resident
+M.draw_resident = resident_controller.draw_resident
+M.begin_resident = resident_controller.begin_resident
 
 local function valid(session)
   return session
@@ -49,568 +75,30 @@ local function current_session(buf)
   return session and session.pane and session.pane.active or session
 end
 
----Remove the selection overlay rectangles, if any are on screen. Cheap
----no-op otherwise. Every path that invalidates the overlay's geometry funnels
----through here: a new base frame (apply_image -- scroll, render, settle), the
----image leaving the screen (clear_image), a placement move under a passive
----float (reconcile_placement), and interaction.forget_selection.
-local function clear_selection_overlay(session)
-  local set = session.overlay_set
-  if not set then return end
-  session.overlay_set = nil
-  session.overlay_rect_count = 0
-  if session.backend and session.backend.overlay_clear then pcall(session.backend.overlay_clear, set) end
-end
+local history_host = {
+  current_session = current_session,
+  valid = valid,
+  schedule = function(...) return M.schedule(...) end,
+  retarget = function(...) return M.retarget(...) end,
+}
 
-function M.clear_selection_overlay(session) clear_selection_overlay(session) end
+presenter.set_host({
+  valid = valid,
+  must_hide = must_hide,
+  clear_image = clear_image,
+  request_caret = function(session) interaction.caret_motion(session, "none", "forward", 1) end,
+})
 
-local function clear_image(session)
-  clear_selection_overlay(session)
-  M.clear_caret_overlay(session)
-  if session.image_id and session.backend then session.backend.clear(session.image_id) end
-  session.image_id = nil
-  session.frame_scroll_y, session.frame_revision = nil, nil
-  session.last_placement = nil
-  -- The resident half of the same thing. A resident session has no `image_id`,
-  -- so the line above was a no-op for it and nothing else held the band ids: an
-  -- occluding float blanked the viewport model's frame and left a resident
-  -- screen compositing underneath it. Only the placements go -- the chunks stay
-  -- in terminal memory, so coming back costs a re-crop rather than the document.
-  session.resident_screen = false
-  resident_session.unplace(session)
-  animation.clear(session)
-end
+interaction.set_host({
+  retarget = function(...) return M.retarget(...) end,
+  schedule_scroll = function(...) return M.schedule_scroll(...) end,
+})
 
----Must the image be off screen right now? Every path that shows, restores or
----re-places a backend image asks this first, so it is the one place that has
----to know every reason the image may not be displayed.
-local function update_occlusion(session)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  -- The preview window living on a *background* tabpage is one of those
-  -- reasons, and nothing else here can detect it: `preview.occlusion` only
-  -- ever looks at the preview's own tabpage, and `reconcile_placement` sees an
-  -- unchanged placement because the geometry genuinely has not changed -- a
-  -- hidden window keeps reporting its full on-screen rectangle (coordinates
-  -- .window_is_displayed). Left unchecked, the raw image is re-shown at the
-  -- hidden tabpage's coordinates on top of whatever the visible tabpage is
-  -- drawing, which is what any plugin that opens its UI in its own tab
-  -- (codediff.nvim's `:CodeDiff`, for one) triggers.
-  local hidden = not coordinates.window_is_displayed(session.preview_win)
-  session.tabpage_hidden = hidden
-  if hidden then
-    session.occluded = false
-    session.occluding_windows = {}
-    return true
-  end
-  local blocked, windows = preview.occlusion(session.preview_win)
-  session.occluded = blocked
-  session.occluding_windows = windows
-  return blocked or session.ui_suppressed
-end
-
----Deliver an image to the backend and record the placement/diagnostic
----bookkeeping that goes with it. The single choke point both `M.refresh`'s
----render/capture path and `display_interact_result`'s interact path funnel
----through, so there is exactly one place that knows how to show/update a
----backend image.
-local function apply_image(session, image_bytes, capture_scale, png_bytes, capture_ms, capture_encoder)
-  preview.stop_loading(session)
-  preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  session.preview_width_cells = placement.width
-  session.preview_height_cells = placement.height
-  local image_started = vim.uv.hrtime()
-  local ok, image_id, image_err = pcall(function()
-    if session.image_id then return session.backend.update(session.image_id, image_bytes, placement) end
-    return session.backend.show(image_bytes, placement)
-  end)
-  if not ok or not image_id then
-    session.render_failed = true
-    notify_error(ok and (image_err or "failed to display rendered image") or image_id)
-    return false
-  end
-  session.last_image_update_ms = (vim.uv.hrtime() - image_started) / 1000000
-  if png_bytes then session.last_png_bytes = png_bytes end
-  if capture_ms then session.last_capture_ms = capture_ms end
-  if capture_scale then session.last_capture_scale = capture_scale end
-  -- Which of the renderer's two screenshot paths produced this frame. The fast
-  -- one falls back silently and permanently on its first failure, so without
-  -- this a browser that refused it would just look inexplicably slow.
-  if capture_encoder then session.last_capture_encoder = capture_encoder end
-  -- The `*_png_bytes` fields above are the *last* frame of each kind; the
-  -- counters below are every one of them. Both are needed and neither implies
-  -- the other: the size says what a frame costs, the count says how many were
-  -- actually paid for. Without the count the only available stand-in was
-  -- `coalesced_scroll_events`, which counts the opposite thing -- events
-  -- superseded *before* capture, so frames that were never produced and never
-  -- transmitted -- and reading it as frames sent overstates the traffic badly.
-  if capture_scale == "css" then
-    session.fast_png_bytes = session.last_png_bytes
-    session.fast_capture_ms = session.last_capture_ms
-    session.fast_image_update_ms = session.last_image_update_ms
-    session.fast_frame_count = (session.fast_frame_count or 0) + 1
-    session.fast_bytes_total = (session.fast_bytes_total or 0) + (session.last_png_bytes or 0)
-    -- Interval between consecutive moving frames, which is the only honest
-    -- measure of how fast this pipeline can actually turn. Frames divided by
-    -- wall-clock is not: a scroll driven by hand has pauses in it, and they
-    -- land in the denominator as though the pipeline had been busy. The
-    -- *minimum* is the floor -- the fastest this loop went when it was
-    -- genuinely saturated -- and it is what a per-frame cost has to be compared
-    -- against to say whether transit is the constraint or something else is.
-    local now = vim.uv.hrtime()
-    if session.fast_last_ns then
-      local interval = (now - session.fast_last_ns) / 1e6
-      session.fast_interval_min_ms = math.min(session.fast_interval_min_ms or interval, interval)
-      session.fast_interval_sum_ms = (session.fast_interval_sum_ms or 0) + interval
-      session.fast_interval_count = (session.fast_interval_count or 0) + 1
-    end
-    session.fast_last_ns = now
-  elseif capture_scale == "device" then
-    session.retina_png_bytes = session.last_png_bytes
-    session.retina_capture_ms = session.last_capture_ms
-    session.retina_image_update_ms = session.last_image_update_ms
-    session.retina_frame_count = (session.retina_frame_count or 0) + 1
-    session.retina_bytes_total = (session.retina_bytes_total or 0) + (session.last_png_bytes or 0)
-  end
-  session.image_id = image_id
-  session.last_placement = placement
-  -- What the frame *now on screen* is a picture of. `applied_scroll_y` was set
-  -- from this render's own `meta.scrollY` before we were called, so it is this
-  -- frame's position and not a newer request's.
-  --
-  -- Deliberately not the `clean_image_*` block below, which answers the same
-  -- question about the newest *selection-free* frame: a settle frame with a
-  -- browser-painted highlight in it supersedes what is on screen without
-  -- replacing that cache, so reading `clean_image_scroll_y` as "what is up right
-  -- now" would vouch for a frame that is not up -- the exact class of error the
-  -- resident invariant exists to stop.
-  session.frame_scroll_y = session.applied_scroll_y or 0
-  session.frame_revision = session.renderer_revision
-  -- Whether this frame has a browser-painted selection baked into it. Any
-  -- capture taken while a DOM selection exists does, and `selection_active` is
-  -- always updated before the frame is applied (interaction.lua sets it in the
-  -- request callback, ahead of display).
-  --
-  -- The selection overlay composites *over* this frame, so it can only ever
-  -- add a highlight -- never remove one. Starting a second gesture on top of a
-  -- frame that still shows the first gesture's highlight leaves that
-  -- highlight on screen for the whole gesture, which is exactly what the
-  -- operator reported on 2026-08-08. `M.restore_clean_base` is how a gesture
-  -- gets out of it.
-  session.base_selection_painted = session.selection_active == true
-  -- The newest frame known to carry no browser-painted selection, kept so a
-  -- gesture starting on top of an earlier one can get a clean base back
-  -- without a renderer round trip (see `M.restore_clean_base`).
-  --
-  -- Recorded here, at the one place every full frame passes through, rather
-  -- than in `M.refresh` alone. A scroll taken while a selection was up used to
-  -- drop this cache and nothing put it back: interact frames never reached
-  -- `M.refresh`, so clicking to deselect -- which produces a perfectly good
-  -- clean frame -- left the selection overlay disabled until some later
-  -- render happened to land with nothing selected. `restore_clean_base`
-  -- re-applies through here with `selection_active` still true, so it cannot
-  -- overwrite the entry it is reading.
-  if not session.base_selection_painted then
-    session.clean_image_bytes = image_bytes
-    session.clean_image_scroll_y = session.applied_scroll_y or 0
-    session.clean_image_revision = session.renderer_revision
-    session.clean_image_scale = capture_scale
-  end
-  -- Any full frame supersedes the selection overlay: a settle frame has the
-  -- highlight baked in by the browser, and a scroll/render frame moves the
-  -- geometry the overlay rectangles were computed against. Cleared *after*
-  -- the new frame was placed, never before -- deleting first would blank the
-  -- highlight for the gap between the two writes (the M.move hazard).
-  clear_selection_overlay(session)
-  -- Same rule for the caret, and then straight back: its rectangle was measured
-  -- against the frame that has just been superseded, but the caret itself has
-  -- not moved. Redrawing here is local (no round trip), so the caret survives
-  -- every scroll and re-render without a flicker or a request.
-  --
-  -- `place_caret` rather than a bare redraw because this is also the moment a
-  -- preview that was focused before it had ever rendered gets its first caret:
-  -- there was nothing to place one on until now.
-  M.clear_caret_overlay(session)
-  M.place_caret(session)
-  preview.update_progress(session)
-  preview.update_line_numbers(session)
-  -- After the caret, because both draw over the base that has just landed and
-  -- the animation is the lower of the two layers. `adopt` re-places the current
-  -- step in this same tick, so a scroll frame does not drop the animation for
-  -- 200ms on its way past.
-  animation.adopt(session)
-  return true
-end
-
----Is this session rendering beside the terminal? True only while the helper
----is attached and the backend can speak markers; every local branch in this
----file asks this one question.
-local function local_mode(session)
-  return localrender.active() and session.backend and session.backend.name == "kitty_raw"
-end
-
----`apply_image` for a frame whose pixels live beside the terminal: emit one
----frame marker referencing the surface `(doc, rev, scrollY, viewport, epoch)`
----and do the placement/overlay bookkeeping that goes with a new base frame.
----No pixels, no request, no waiting -- the helper resolves the reference
----against its replica and injects at the marker's stream position.
----
----The scroll position recorded here is the *requested* one; a clamped
----request is reconciled from the render response's achieved `scrollY`, the
----same way `M.refresh`'s callback consumes `meta.scrollY` today. Scroll-only
----markers have no response, and need none: the clamp arithmetic
----(`scroll_maximum`) already bounded the request against the last known
----document height.
----
----`opts.scale` overrides the reference's capture scale below the viewport's
----device factor: the moving frame of a scroll burst. In local mode the
----pixels never touch the wire, so what the reduced scale buys is not bytes
----but *capture time* -- the helper screenshots sixteen times fewer pixels at
----0.5 than at a Retina 2, and capture time is the whole of the frame cadence
----while a key is held. The settle re-reference restores the device factor,
----so the frame a reader actually looks at is never the reduced one -- the
----same never-soft-at-rest rule `render.scroll_scale` documents.
-local function apply_surface(session, revision, scroll_y, viewport, opts)
-  preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  session.preview_width_cells = placement.width
-  session.preview_height_cells = placement.height
-  local scale = opts and opts.scale or viewport.deviceScaleFactor or 1
-  local descriptor = {
-    width_px = math.floor(viewport.widthPx * scale + 0.5),
-    height_px = math.floor(viewport.heightPx * scale + 0.5),
-    ref = {
-      doc = session.document_id,
-      rev = revision,
-      scrollY = scroll_y,
-      epoch = session.visual_epoch or 0,
-      widthPx = viewport.widthPx,
-      heightPx = viewport.heightPx,
-      scale = scale,
-    },
-  }
-  local ok, image_id, image_err = pcall(function()
-    if session.image_id then return session.backend.update_surface(session.image_id, descriptor, placement) end
-    return session.backend.show_surface(descriptor, placement)
-  end)
-  if not ok or not image_id then
-    session.render_failed = true
-    notify_error(ok and (image_err or "failed to reference local surface") or image_id)
-    return false
-  end
-  session.image_id = image_id
-  -- Not yet true: `image_id` here is a reference the marker just carried
-  -- toward the helper, not proof any pixels exist on the terminal for it.
-  -- The upload is a network round trip in local mode (never true of the
-  -- direct path's apply_image, which ships real bytes synchronously in the
-  -- same transaction) -- so anything that addresses this id before its own
-  -- `presented` notification lands (below, set true) is placing or cropping
-  -- around a reference the terminal has nothing to draw for. Measured live
-  -- (2026-08-27): the ui_poll's reconcile_placement and the caret's
-  -- overlay_apply both fired within one 50ms tick of a fresh open, against
-  -- an id whose upload had not arrived, leaving a patchwork of resolved and
-  -- unresolved placements on screen until an unrelated later frame overwrote
-  -- it clean -- which is why scrolling "fixed" it.
-  session.local_frame_confirmed = false
-  session.last_placement = placement
-  session.local_viewport = viewport
-  session.local_marker_frames = (session.local_marker_frames or 0) + 1
-  session.frame_scroll_y = scroll_y
-  session.frame_revision = revision
-  session.applied_scroll_y = scroll_y
-  session.viewport_width_px = viewport.widthPx
-  session.viewport_height_render_px = viewport.heightPx
-  session.viewport_calibration_tier = viewport.tier
-  -- Same supersession rules as apply_image, same order: the base under the
-  -- overlays has moved, clear after the new frame is referenced, then put the
-  -- caret straight back.
-  clear_selection_overlay(session)
-  M.clear_caret_overlay(session)
-  M.place_caret(session)
-  preview.update_progress(session)
-  preview.update_line_numbers(session)
-  return true
-end
-
----Put a selection-free frame back on screen so overlay rectangles have a
----clean base to composite over, using the cached PNG rather than a renderer
----round trip -- this runs on the first frame of a gesture and must not cost
----one.
----
----Returns false when there is no cached frame that is known to be both
----selection-free and taken at the scroll position now displayed, which is the
----honest answer whenever the page was scrolled while a selection was up. The
----caller falls back to captured frames for that gesture.
-function M.restore_clean_base(session)
-  if not session.base_selection_painted then return true end
-  if not valid(session) or session.backend.name == "cells" then return false end
-  if not session.clean_image_bytes then return false end
-  if math.abs((session.clean_image_scroll_y or 0) - (session.applied_scroll_y or 0)) > 0.5 then return false end
-  if session.clean_image_revision ~= session.renderer_revision then return false end
-  -- `selection_active` is still true (the DOM selection this frame predates is
-  -- what the new gesture is replacing), so apply_image would re-mark the base
-  -- as painted. It is not: this frame is the cached selection-free one.
-  if not apply_image(session, session.clean_image_bytes, session.clean_image_scale) then return false end
-  session.base_selection_painted = false
-  return true
-end
-
----Display the selection overlay a no-capture `selection_preview` result
----describes: translucent rectangles composited over the base image already on
----screen, in place of the full re-captured frame that used to carry every
----moving selection. The base image stays exactly what it was -- it remains
----authoritative for hit-testing and diagnostics; only backend overlay
----placements change.
----
----Refuses (returns false) whenever the result's geometry cannot be proven to
----match the frame on screen: wrong content revision, wrong scroll position,
----no base image, or a backend without overlay support. The caller falls back
----to the captured-frame path -- correct and slow beats fast and wrong.
-function M.display_selection_overlay(session, result)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  local backend = session.backend
-  if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
-  -- "Is there a screen to composite over", not "is there a frame this session
-  -- owns": a resident screen is bands cropped out of chunks and deliberately
-  -- carries no `image_id`. The `overlay_apply` call below still passes
-  -- `session.image_id`, which is nil there and which the backend now reads as
-  -- "size the sheet from the placement".
-  if not (state.screen_up(session) and session.last_placement) then return false end
-  if type(result) ~= "table" or type(result.rects) ~= "table" then return false end
-  if result.rectsTruncated then return false end
-  if result.contentRevision ~= session.renderer_revision then return false end
-  -- The rects were measured at the page scroll the renderer reports; the base
-  -- image on screen shows `frame_scroll_y`, not `applied_scroll_y` -- a caret
-  -- motion that scrolls bumps `applied_scroll_y` the instant its response
-  -- lands, before the scroll capture it triggered has actually replaced the
-  -- frame on screen, so checking against it here would pass during that gap
-  -- and composite the highlight over the wrong, stale pixels. Any
-  -- disagreement with what is actually painted means the highlight would
-  -- land on the wrong text.
-  if type(result.scrollY) == "number" and math.abs(result.scrollY - (session.frame_scroll_y or 0)) > 0.5 then
-    return false
-  end
-  if update_occlusion(session) then
-    clear_image(session)
-    session.refresh_deferred = true
-    return false
-  end
-  local started = vim.uv.hrtime()
-  local sheet_png = nil
-  if local_mode(session) then
-    -- Never bytes here: the helper synthesizes the sheet from the reference
-    -- the backend completes (tint, size, margin), so "need_sheet" cannot
-    -- occur in local mode and no PNG rides any response.
-    sheet_png = { ref = true }
-  elseif type(result.overlaySheetPng) == "string" and result.overlaySheetPng ~= "" then
-    local ok, decoded = pcall(vim.base64.decode, result.overlaySheetPng)
-    if ok then sheet_png = decoded end
-  end
-  local ok, set_id, stats = pcall(
-    backend.overlay_apply,
-    session.overlay_set,
-    session.image_id,
-    result.rects,
-    { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px },
-    result.selectionTint,
-    sheet_png,
-    session.last_placement
-  )
-  if not ok or not set_id then
-    -- "need_sheet" is expected once per color (the next request asks for the
-    -- sheet); anything else disables the overlay for this gesture upstream.
-    session.overlay_last_error = ok and stats or tostring(set_id)
-    return false, session.overlay_last_error
-  end
-  session.overlay_set = set_id
-  session.overlay_rect_count = type(stats) == "table" and stats.rects or #result.rects
-  session.overlay_frames = (session.overlay_frames or 0) + 1
-  session.overlay_last_bytes = type(stats) == "table" and stats.bytes or nil
-  session.overlay_last_ms = (vim.uv.hrtime() - started) / 1000000
-  session.overlay_last_error = nil
-  return true
-end
-
----Draw the caret: one overlay rectangle, shaped like the glyph it sits on.
----
----The same `overlay_apply` the selection highlight uses, in its own rect set, so the
----two coexist without either having to know about the other -- a caret inside a
----selection is simply two sets of rectangles over one base image. It carries
----its own, heavier tint (`CARET_TINT` in the renderer): a selection is a wash
----over a span the reader is already looking at, a caret is one glyph they have
----to find.
----
----Local: no renderer round trip, so an ordinary scroll can re-place the caret
----without asking anyone where it went.
----
----Returns false when the caret cannot be drawn -- no overlay support (the
----backend, or the terminal profile), nothing on the pane at all, or the caret
----has scrolled out of view. The terminal's own cursor is left visible where
----there is no caret to draw at all; a caret that is merely off screen keeps it
----hidden. See `preview.hide_cursor`, and the nil branch below.
-function M.display_caret_overlay(session, tint, sheet_png)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  local backend = session.backend
-  if not (backend.overlay_apply and backend.overlay_supported and backend.overlay_supported()) then return false end
-  -- Either model's screen will do; see `display_selection_overlay`. Without
-  -- this a resident preview had no caret at all except when `show_cached`
-  -- happened to have restored a frame for it to sit on.
-  if not (state.screen_up(session) and session.last_placement) then return false end
-  -- Local mode: session.image_id may still be an unresolved reference (see
-  -- apply_surface). Cropping the caret's tint out of it before its own
-  -- upload lands addresses an id the terminal has nothing to draw for.
-  -- Neovim's own cursor stays visible in the meantime, same as any other
-  -- "cannot draw the caret yet" case this function already returns false for.
-  if local_mode(session) and not session.local_frame_confirmed then return false end
-  local rect = caret.rect(session)
-  if not rect then
-    M.clear_caret_overlay(session)
-    -- A caret that is merely scrolled out of view is still the reader's
-    -- position, and Neovim's own cursor is not a stand-in for it: it sits on
-    -- the cell `caret.shadow_cursor` last parked it on, the scroll has moved
-    -- the text out from under it, and nothing moves it again until the next
-    -- motion -- the preview window itself never scrolls. Restoring here put a
-    -- one-cell bar in the middle of unrelated prose for the whole of every
-    -- scroll past the caret, which is what was reported on 2026-08-29. Only a
-    -- session with no caret at all has nothing better to offer.
-    if not (session and session.caret_rect) then preview.restore_cursor() end
-    return false
-  end
-  session.caret_tint = tint or session.caret_tint
-  if not session.caret_tint then return false end
-  -- Same rule as the selection overlay: local mode passes a reference and the
-  -- helper synthesizes the caret sheet beside the terminal.
-  if local_mode(session) then sheet_png = { ref = true } end
-  local ok, set_id = pcall(
-    backend.overlay_apply,
-    session.caret_overlay_set,
-    session.image_id,
-    { rect },
-    { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px },
-    session.caret_tint,
-    sheet_png,
-    session.last_placement
-  )
-  if not ok or not set_id then
-    -- "need_sheet" is expected once per colour. The sheet is the renderer's to
-    -- build, so the next motion asks for one by carrying the tint again; until
-    -- then the caret is simply not drawn, which is honest rather than wrong.
-    session.caret_overlay_error = ok and set_id or tostring(set_id)
-    return false
-  end
-  session.caret_overlay_set = set_id
-  session.caret_overlay_error = nil
-  -- The block just moved, so the shadow underneath it has to move too.
-  -- `caret.set_rect` shadows on a motion, but a motion that also scrolled
-  -- shadows against the frame still on screen -- `caret.rect` is deliberately
-  -- frame-relative -- and an ordinary scroll is not a motion at all. This is
-  -- the one place that knows which cell the block landed on, which is the only
-  -- cell the shadow has any business being on.
-  caret.shadow_cursor(session, rect)
-  -- The block is on screen now, so Neovim's own cursor would be a second,
-  -- differently-sized caret sitting somewhere else. Hidden here, at the one
-  -- place that knows the block was actually drawn, rather than on a window
-  -- event that has to guess -- guessing is what left both visible at once.
-  if vim.api.nvim_get_current_win() == session.preview_win then preview.hide_cursor(session) end
-  return true
-end
-
----Make sure this preview has a caret, and that it is drawn.
----
----Cheap and idempotent: an existing caret is simply redrawn locally, and only
----the first call for a session costs the round trip that finds a character to
----put it on. Called from every path that can make a caret visible -- focusing
----the preview, and the first frame landing in an already-focused one.
-function M.place_caret(session)
-  if not valid(session) or session.backend.name == "cells" then return end
-  if not config.get().interaction.enabled then return end
-  -- Only for the preview the reader is actually in. A caret in an unfocused
-  -- preview is one nobody can see, and placing it costs a round trip -- which
-  -- an unrendered document answers with an error, and a failed interact
-  -- restarts the renderer, whose exit hook drops selection and find state on
-  -- every open session.
-  if vim.api.nvim_get_current_win() ~= session.preview_win then return end
-  if session.caret_rect then
-    -- The shadow follows the block wherever there is one -- `display_caret_overlay`
-    -- parks it on the cell it drew into. Where the overlay cannot be drawn the
-    -- terminal's own cursor *is* the caret, so it still has to follow the
-    -- scroll, and nothing else would move it.
-    if not M.display_caret_overlay(session) then caret.shadow_cursor(session) end
-    return
-  end
-  if not (session.renderer_revision and session.last_placement) then return end
-  interaction.caret_motion(session, "none", "forward", 1)
-end
-
-function M.clear_caret_overlay(session)
-  local set = session and session.caret_overlay_set
-  if not set then return end
-  session.caret_overlay_set = nil
-  if session.backend and session.backend.overlay_clear then pcall(session.backend.overlay_clear, set) end
-end
-
----Display the PNG an interact response captured (every mutating selection/find
----action always captures one, in the same queued operation the mutation
----itself ran in -- see renderer/src/interact.js's `mutatesVisibleState`).
----Interact requests bypass `renderer.lua`'s request/response envelope
----entirely (`interaction.lua` calls `process.request("interact", ...)`
----directly, exactly as `request_hit` already did before this part), so this
----is the fetch half `M.refresh`'s render/capture path gets from
----`renderer.lua`; the display half is `apply_image`, shared verbatim.
-function M.display_interact_result(session, result)
-  if not valid(session) or session.backend.name == "cells" then return end
-  if type(result) ~= "table" then return end
-  if local_mode(session) then
-    -- No PNG crossed the socket and none was captured. The mutation lives in
-    -- the helper's DOM behind the visual epoch its response carried (recorded
-    -- by interaction.lua's funnel before this ran), so displaying it is one
-    -- frame marker: the new epoch makes the old surface unresolvable and
-    -- forces the capture beside the terminal.
-    if result.contentRevision and result.contentRevision ~= session.renderer_revision then return end
-    if type(result.scrollY) == "number" then
-      if math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then session.progress_basis = "viewport" end
-      session.applied_scroll_y = result.scrollY
-      session.scroll_y = result.scrollY
-    end
-    if update_occlusion(session) then
-      clear_image(session)
-      session.refresh_deferred = true
-      return
-    end
-    if session.renderer_revision and session.local_viewport then
-      apply_surface(session, session.renderer_revision, session.scroll_y or 0, session.local_viewport)
-    end
-    return
-  end
-  if type(result.pngPath) ~= "string" then return end
-  local cfg = config.get().render
-  local image, read_err = renderer.read_png(result.pngPath, cfg.max_png_bytes)
-  vim.uv.fs_unlink(result.pngPath)
-  if not image then
-    notify_error(read_err)
-    return
-  end
-  -- A find step and a fragment link both scroll the shared page inside the
-  -- interact call and report where they landed. Not recording it left
-  -- `applied_scroll_y` describing the position *before* the jump, so the next
-  -- interact sent that stale value and `ensureDocumentActive` scrolled the page
-  -- back before hit-testing -- a click after a search resolved against a
-  -- different position than the image on screen showed.
-  if type(result.scrollY) == "number" then
-    if math.abs(result.scrollY - (session.applied_scroll_y or 0)) > 0.5 then session.progress_basis = "viewport" end
-    session.applied_scroll_y = result.scrollY
-    session.scroll_y = result.scrollY
-  end
-  if update_occlusion(session) then
-    clear_image(session)
-    -- The interact PNG is discarded rather than displayed off screen, and
-    -- unlike a render frame it never reaches session.last_image_bytes, so the
-    -- cache cannot show this selection/find state. Re-render on restore.
-    session.refresh_deferred = true
-    return
-  end
-  apply_image(session, image, result.captureScale, result.pngBytes, result.captureMs, result.captureEncoder)
-end
+resident_controller.set_host({
+  valid = valid,
+  markdown = markdown,
+  refresh = function(session) return M.refresh(session) end,
+})
 
 ---Put back on screen whatever this session already has, without a renderer
 ---round trip. For the viewport model that is the cached PNG; for the resident
@@ -624,13 +112,13 @@ end
 ---branch re-uploaded a full-viewport frame the resident compositor knows nothing
 ---about, and left it z-fighting the bands by image id.
 local function show_cached(session)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  if update_occlusion(session) then
+  if not valid(session) or not session.backend.is_graphical then return false end
+  if must_hide(session) then
     clear_image(session)
     return false
   end
   if session.render_path == "resident" and session.resident then
-    M.draw_resident(session)
+    draw_resident(session)
     -- Same catch-up the cached branch does below, and for the same reason: a
     -- render dropped while the pane could not be drawn left the document a
     -- frame behind the source, and an idle preview issues no renders.
@@ -641,14 +129,16 @@ local function show_cached(session)
     -- True whatever `draw_resident` decided. It has already put up a screen, or
     -- kept the bootstrap frame, or gone blank on purpose and said so in the
     -- winbar -- and in none of those cases does the caller's fallback (a full
-    -- document re-render) help. That re-render is also a `request_serial` bump,
-    -- which is what used to lose an in-flight chunk.
+    -- document re-render) help. That re-render is also a content admission,
+    -- which voids an in-flight chunk -- deliberately now (it re-lays out the
+    -- page the chunk was cut from), where it used to be a side effect of one
+    -- serial shared by everything.
     return true
   end
   if not session.last_image_bytes then return false end
   preview.stop_loading(session)
   preview.reset_surface(session)
-  local placement = preview.placement(session.preview_win, session.backend.name)
+  local placement = preview.placement(session.preview_win, session.backend)
   local ok, image_id, image_err = pcall(session.backend.show, session.last_image_bytes, placement)
   if not ok or not image_id then
     session.render_failed = true
@@ -661,7 +151,8 @@ local function show_cached(session)
   -- Unknown, and said so. `last_image_bytes` carries no record of the position
   -- it was captured at, and the page may well have scrolled since, so nothing
   -- here can vouch for this frame the way `apply_image` vouches for its own.
-  -- `holding_position` refuses on nil, which is the answer we want.
+  -- `resident_controller`'s `holding_position` refuses on nil, which is the
+  -- answer we want.
   session.frame_scroll_y, session.frame_revision = nil, nil
   -- This path does not go through `apply_image`, so nothing else would put the
   -- frames back: a preview restored from cache after an occlusion would show a
@@ -679,6 +170,13 @@ local function show_cached(session)
   return true
 end
 
+occlusion.set_host({
+  valid = valid,
+  show_cached = show_cached,
+  draw_resident = draw_resident,
+  schedule = function(...) return M.schedule(...) end,
+})
+
 ---A chunk capture never re-enters the resident bootstrap: it *is* the warm-up.
 local function render_options_is_chunk(render_options)
   return render_options ~= nil and render_options.resident_chunk ~= nil
@@ -689,14 +187,14 @@ function M.refresh(session, render_options)
   session = session or current_session()
   if not valid(session) then return end
   if explicit then session.render_epoch = (session.render_epoch or 0) + 1 end
-  if session.backend.name == "cells" then
+  if not session.backend.is_graphical then
     session.backend.render(session.preview_buf, markdown(session))
     session.dirty = false
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
   session.render_failed = false
-  if update_occlusion(session) then
+  if must_hide(session) then
     clear_image(session)
     -- Nothing was captured, so the cached PNG stays a frame behind whatever
     -- triggered this refresh. show_cached() replays it once the image can be
@@ -711,19 +209,21 @@ function M.refresh(session, render_options)
   -- opening are exactly when this fires). Both attach outcomes re-render:
   -- success through the "attached" listener, failure through M.open's
   -- continuation.
-  if localrender.enabled() and session.backend.name == "kitty_raw" and localrender.status().phase == "connecting" then
+  if
+    localrender.enabled()
+    and session.backend.supports_local_markers
+    and localrender.status().phase == "connecting"
+  then
     session.refresh_deferred = true
     if render_options and render_options.on_complete then render_options.on_complete(false, nil) end
     return
   end
   -- A render of the document's content, as opposed to a chunk capture, has
-  -- right of way over the warm-up while it is in flight. `pump_resident` issues
-  -- `renderer.request` too and every request bumps `request_serial`, so an edit
-  -- made during warm-up could be staled by the very next chunk -- and a staled
-  -- render is dropped silently below, with nothing to re-issue it until the
-  -- reader typed again. On a host where the warm-up is minutes rather than
-  -- seconds that is easy to hit. `pump_resident` waits; the callback below
-  -- restarts it either way.
+  -- right of way over the warm-up while it is in flight. The lane rules mean a
+  -- chunk can no longer stale a render outright, but the queueing is still
+  -- worth keeping: a chunk capture is 116-373ms of renderer time and about a
+  -- second of wire, spent ahead of an edit the reader is waiting to see.
+  -- `pump_resident` waits; the callback below restarts it either way.
   local content_render = not render_options_is_chunk(render_options)
   if content_render then session.content_render_in_flight = true end
   if local_mode(session) and content_render then
@@ -736,7 +236,7 @@ function M.refresh(session, render_options)
     -- is computed here, so pixels never wait for any response. The helper
     -- holds the marker until its own render resolves the reference.
     local revision = renderer.content_revision(session)
-    local viewport = preview.viewport(session.preview_win, session.backend.name)
+    local viewport = preview.viewport(session.preview_win, session.backend)
     apply_surface(session, revision, session.scroll_y or 0, viewport)
   end
   renderer.request(session, markdown(session), render_options, function(result, err, stale)
@@ -745,10 +245,10 @@ function M.refresh(session, render_options)
       if render_options and render_options.on_complete then render_options.on_complete(stale, err) end
       -- The warm-up deferred to this render and has to be told it may go on,
       -- whatever the outcome. The success path re-pumps through
-      -- `M.begin_resident` below; this covers the error and stale exits, which
-      -- would otherwise leave the queue parked forever.
+      -- `begin_resident`; this covers the error and stale exits, which would
+      -- otherwise leave the queue parked forever.
       if content_render and session.render_path == "resident" and session.resident then
-        vim.schedule(function() M.pump_resident(session) end)
+        vim.schedule(function() pump_resident(session) end)
       end
     end
     if not valid(session) then
@@ -885,7 +385,7 @@ function M.refresh(session, render_options)
     -- cached clean base cannot be this frame. `apply_image` records the
     -- replacement whenever a selection-free frame does reach the screen.
     if session.selection_active then session.clean_image_bytes = nil end
-    if update_occlusion(session) then
+    if must_hide(session) then
       clear_image(session)
       finish()
       return
@@ -907,12 +407,12 @@ function M.refresh(session, render_options)
     -- derived from, and its frame is the reader's own position rather than a
     -- remembered one -- so it doubles as first paint while the chunks warm.
     -- `draw_resident` keeps it up for exactly as long as that is true (see
-    -- `holding_position`); it used to blank it one call later, which is what the
-    -- reader on a slow link saw as a flash of "waiting for this page" over an
-    -- empty pane. After this, a resident session captures chunks and nothing
-    -- else.
+    -- `holding_position` in resident_controller); it used to blank it one call
+    -- later, which is what the reader on a slow link saw as a flash of "waiting
+    -- for this page" over an empty pane. After this, a resident session captures
+    -- chunks and nothing else.
     if session.render_path == "resident" and not render_options_is_chunk(render_options) then
-      M.begin_resident(session, meta)
+      begin_resident(session, meta)
     end
     vim.schedule(function()
       if valid(session) then interaction.resolve_pending_obsidian_anchor(session) end
@@ -923,251 +423,9 @@ end
 
 function M.schedule(session, delay, timer_name, render_options)
   if not valid(session) then return end
-  debounce.call(session, timer_name or "render_timer", delay or config.get().render.debounce_ms, function()
+  debounce.call(session, timer_name or "render_timer", delay or session.config.render.debounce_ms, function()
     if valid(session) then M.refresh(session, render_options) end
   end)
-end
-
--- ---------------------------------------------------------------------------
--- Resident mode: the document held in the terminal, scrolling by placement.
--- ---------------------------------------------------------------------------
-
----Capture the next chunk the warm-up queue wants, one at a time.
----
----One in flight is the whole of the backpressure. A chunk capture is 116-373ms
----and about a second of wire on a slow link, so queueing several would only move
----the wait from the renderer to the socket.
-function M.pump_resident(session)
-  -- KEEP_IN_MIND: this whole function is currently unreached on every host
-  -- this plugin runs on -- the render_path ~= "resident" guard right below
-  -- returns before any of the settle-before-placing logic further down
-  -- runs. Reachable in principle, not orphaned; do not delete for lack of a
-  -- live caller. See the fuller note on resident_session.is_needed in
-  -- resident_session.lua for exactly what would have to be true for this to
-  -- run again, and a real, runnable snippet (lifted from
-  -- scripts/resident/drive.lua) that forces this path for local testing
-  -- without a slow real host. Raise removing the path itself with the
-  -- operator/orchestrator rather than deciding it here.
-  if not valid(session) or session.render_path ~= "resident" then return end
-  -- A render of the reader's content outranks the warm-up: issuing a chunk
-  -- capture now would bump `request_serial` and stale it, and a staled content
-  -- render is dropped with nothing to re-issue it. `M.refresh`'s callback
-  -- restarts the pump on every exit, so this is a wait rather than a stop.
-  if session.content_render_in_flight then return end
-  local state = session.resident
-  if not state or state.in_flight then return end
-  local index = resident_session.next_chunk(session)
-  if not index then
-    preview.update_title(session)
-    return
-  end
-  local options = resident_session.capture_options(session, index)
-  if not options then return end
-  state.in_flight = index
-  renderer.request(session, markdown(session), options, function(result, err, stale)
-    if not valid(session) or session.render_path ~= "resident" then return end
-    local live = session.resident
-    if not live or live ~= state then return end
-    state.in_flight = nil
-    if stale then
-      -- Superseded, but not necessarily by anything that invalidates this plan.
-      -- *Every* renderer.request bumps `request_serial`, so a settle capture, a
-      -- resize, a ColorScheme or an OptionSet is enough to stale a chunk that is
-      -- in flight -- and `next_chunk` has already removed this index from the
-      -- queue, so returning here dropped it for good. Nothing rebuilds the
-      -- queue: `resident_session.begin` early-returns on an unchanged key, so
-      -- the warm-up simply stopped at n/N and stayed there, and the region was
-      -- only ever captured if the reader happened to scroll into it. On a link
-      -- where a chunk is a second of wire that is not a rare race.
-      --
-      -- A reply that really does belong to a dead plan is caught above, by
-      -- `live ~= state`: a content change builds a new state table and a
-      -- demotion nils it. Reaching here means the plan is still the live one, so
-      -- put the chunk back and carry on -- the same treatment the error branch
-      -- below has always given.
-      state.queue[#state.queue + 1] = index
-      vim.schedule(function() M.pump_resident(session) end)
-      return
-    end
-    if err then
-      local code = tostring(err)
-      if
-        code:match("REGION_CAPTURE_UNSUPPORTED")
-        or code:match("REGION_ORIGIN_MOVED")
-        or code:match("REGION_TOO_LARGE")
-      then
-        resident_session.demote(session, code)
-        notify_error("resident preview unavailable, falling back to per-scroll capture: " .. code)
-        M.refresh(session)
-        return
-      end
-      -- Anything else is this one chunk's problem. Put it back and carry on;
-      -- the reader is told by the winbar that it is still warming.
-      state.queue[#state.queue + 1] = index
-      vim.schedule(function() M.pump_resident(session) end)
-      return
-    end
-    local ok, adopt_err = resident_session.adopt(session, index, result.image, result.metadata)
-    if not ok then
-      resident_session.demote(session, adopt_err)
-      notify_error("resident preview refused a chunk: " .. tostring(adopt_err))
-      M.refresh(session)
-      return
-    end
-    resident_session.retain(session, live.drawn or index)
-    -- KEEP_IN_MIND: this branch (and is_needed itself) is currently
-    -- unreached on every host this plugin runs on -- pump_resident only
-    -- runs at all when session.render_path == "resident" (guarded at the
-    -- top of this function), which under `image.resident = "auto"` needs a
-    -- measured link under image.resident_below_bytes_per_sec on a terminal
-    -- profile that allows resident_pan. See the fuller note on
-    -- resident_session.is_needed in resident_session.lua for why, and how to
-    -- exercise this deliberately with `image.resident = "on"`.
-    -- Unexercised, not orphaned -- do not delete for lack of a live caller;
-    -- raise removing the path itself with the operator/orchestrator first.
-    if resident_session.is_needed(session, session.scroll_y or 0, index) then
-      -- The reader is waiting on exactly the chunk that just landed.
-      -- `nvim_ui_send` only queues bytes for Neovim's own UI channel to
-      -- drain -- it does not wait for them to cross the wire -- and a Kitty
-      -- terminal decodes a large image asynchronously with respect to how
-      -- fast it can parse the placement that follows it. Composing right
-      -- away can crop a buffer the terminal has not finished decoding, which
-      -- is indistinguishable from this side: the reply already proved the
-      -- pixels are the right ones. Waiting roughly as long as this chunk's
-      -- own bytes take to cross the measured link gives the terminal a
-      -- realistic chance to finish before being asked to crop it. Only the
-      -- placement waits; the next capture request does not.
-      local bytes = (result.metadata and result.metadata.pngBytes) or #result.image
-      local rate = linkrate.resolve()
-      local settle_ms = rate and math.min(2000, math.max(50, math.ceil(bytes / rate * 1000))) or 200
-      vim.defer_fn(function()
-        if not valid(session) or session.render_path ~= "resident" then return end
-        M.draw_resident(session)
-        preview.update_title(session)
-      end, settle_ms)
-    else
-      M.draw_resident(session)
-      preview.update_title(session)
-    end
-    vim.schedule(function() M.pump_resident(session) end)
-  end)
-end
-
----Is the frame already on screen provably a picture of `scroll_y`?
----
----The same proof `M.restore_clean_base` demands before it re-shows a cached
----frame, asked of the frame that is up rather than of the cached one: an image
----is placed, it was captured against this content, and it was captured at this
----position. Anything short of all three is a refusal.
----
----This is what stops the resident bootstrap blanking its own first paint.
----`apply_image` lands the render that measured the document -- the reader's own
----position, captured a call ago -- and `begin_resident` runs one line later with
----no chunks captured yet, so `draw` can only say "waiting". Waiting is not a
----reason to take correct pixels down; it is a reason to leave them up until the
----chunks can replace them. What the invariant forbids is presenting a frame of
----*somewhere else* as this position, and this is how the two are told apart.
-local function holding_position(session, scroll_y)
-  if not session.image_id then return false end
-  if session.frame_revision ~= session.renderer_revision then return false end
-  return math.abs((session.frame_scroll_y or 0) - scroll_y) <= 0.5
-end
-
----Draw the reader's position from resident chunks, or clear the preview.
----
----A position not yet covered shows nothing rather than the previous screen:
----leaving the old picture up presents pixels of somewhere else as though they
----belonged to this position, and the reader has no way to tell. The one
----exception is `holding_position` above, which is not an exception to that rule
----but an application of it -- the frame it keeps *is* this position.
-function M.draw_resident(session)
-  if not valid(session) or session.render_path ~= "resident" then return end
-  if update_occlusion(session) then
-    clear_image(session)
-    return
-  end
-  local scroll_y = session.scroll_y or 0
-  -- Ahead of the compose, for the reason `apply_image` takes it down ahead of
-  -- `backend.show`: the indicator is a passive float, so it punches an exclusion
-  -- out of the placement, and taking it down afterwards would leave a
-  -- spinner-shaped hole in the screen that replaced it until the next poll.
-  if not resident_session.missing(session, scroll_y) then preview.stop_loading(session) end
-  local outcome, detail = resident_session.draw(session, scroll_y)
-  if outcome == "drawn" then
-    session.resident_waiting = nil
-    -- The bootstrap frame this screen has just replaced. `compose` retires only
-    -- the bands it tracks itself, so an ordinary frame left placed underneath
-    -- goes on compositing -- and every band shares a z layer with it, which
-    -- Kitty ties by image id, so whether the dead frame draws over the live one
-    -- comes down to which integer happened to be larger. Deleted after the
-    -- compose rather than before it, the same create-then-delete rule `M.move`
-    -- and `M.update` follow: deleting first is a blank pane for one write.
-    if session.image_id then
-      pcall(session.backend.clear, session.image_id)
-      session.image_id = nil
-      -- Not `frame_scroll_y`: the compose above has already recorded what the
-      -- bands now on screen are a picture of, and this is only the frame they
-      -- replaced. Clearing it here left `caret.rect` measuring its drift
-      -- against 0, so a resident preview had no caret anywhere but the top of
-      -- the document.
-      session.frame_revision = nil
-    end
-    -- Same rule `apply_image` follows, for the same reason: the base under the
-    -- highlight has moved, so rectangles measured against the old one are on the
-    -- wrong text now.
-    clear_selection_overlay(session)
-    M.clear_caret_overlay(session)
-    M.place_caret(session)
-    preview.update_progress(session)
-    preview.update_line_numbers(session)
-    preview.update_title(session)
-    return
-  end
-  if outcome == "waiting" then
-    if holding_position(session, scroll_y) then
-      -- Nothing to do and nothing to say: the pane is showing this position,
-      -- captured by the render that measured the document. `resident_waiting`
-      -- stays nil so the winbar reads the grey "warming n/N" rather than the
-      -- yellow "waiting for this page" -- the yellow notice means the reader is
-      -- looking at a blank pane, and they are not.
-      preview.update_title(session)
-      M.pump_resident(session)
-      return
-    end
-    session.resident_waiting = detail
-    clear_image(session)
-    -- The pane is genuinely empty now. During bootstrap that is the state the
-    -- spinner exists for, and stopping it at first paint was right only because
-    -- there *was* a first paint; here there is not. Once the resident path has
-    -- drawn a screen the winbar carries this instead -- a spinner blinking into
-    -- the middle of the pane on every scroll that outruns the warm-up would be
-    -- noise.
-    if not (session.resident and session.resident.drawn) then preview.start_loading(session) end
-    preview.update_title(session)
-    M.pump_resident(session)
-    return
-  end
-  resident_session.demote(session, detail)
-  notify_error("resident preview could not draw this position: " .. tostring(detail))
-  M.refresh(session)
-end
-
----Start resident mode from the render that measured the document.
-function M.begin_resident(session, meta)
-  if not valid(session) or session.render_path ~= "resident" then return end
-  local ok, reason = resident_session.begin(session, meta)
-  if not ok then
-    resident_session.demote(session, reason)
-    return
-  end
-  -- The one place the link rate is worth mentioning unprompted: a warm-up is
-  -- about to run and the winbar has no idea how long it will take. Said once per
-  -- Neovim and never once per preview -- linkrate owns that guard -- and phrased
-  -- as a suggestion, because an unmeasured link is not a fault and nothing else
-  -- in md-viewer treats it as one.
-  require("md-viewer.linkrate").notice_unknown()
-  M.draw_resident(session)
-  M.pump_resident(session)
 end
 
 ---The pixel scale for the *moving* frame of a scroll, as a fraction of its
@@ -1238,7 +496,7 @@ function M.schedule_scroll(session)
   -- no backpressure to manage here either. Above the resident branch on
   -- purpose: local render owns scrolling wherever both could apply.
   if local_mode(session) then
-    if update_occlusion(session) then
+    if must_hide(session) then
       clear_image(session)
       session.refresh_deferred = true
       return
@@ -1254,7 +512,7 @@ function M.schedule_scroll(session)
     -- that function's comment for why local mode does not trade sharpness
     -- for bytes it never spends. `scroll_settle_delay` (still shared) decides
     -- when the settle frame replaces the moving one.
-    local render = config.get().render
+    local render = session.config.render
     local moving, scale_source = local_scroll_capture_scale(render)
     local viewport = session.local_viewport
     if moving and moving >= (viewport.deviceScaleFactor or 1) then
@@ -1297,10 +555,10 @@ function M.schedule_scroll(session)
   -- on the wire. The document is already in the terminal and a scroll is a
   -- placement.
   if session.render_path == "resident" and session.resident then
-    M.draw_resident(session)
+    draw_resident(session)
     return
   end
-  local render = config.get().render
+  local render = session.config.render
   local fast_scale = render.fast_scroll and "css" or "device"
   local scale_factor, scale_source = scroll_capture_scale(render)
   -- Recorded rather than re-derived in :MdViewerDebug: the answer depends on
@@ -1359,24 +617,30 @@ local function delete_preview_buffer(session)
   end
 end
 
+local SESSION_TIMER_NAMES = {
+  "render_timer",
+  "resize_timer",
+  "scroll_settle_timer",
+  "cursor_scroll_timer",
+  "animation_geometry_timer",
+  "remote_image_timer",
+  "ui_poll_timer",
+  "selection_debounce_timer",
+  "selection_settle_timer",
+  "selection_idle_settle_timer",
+}
+
+local function close_session_timers(session)
+  for _, name in ipairs(SESSION_TIMER_NAMES) do
+    debounce.close(session, name)
+  end
+end
+
 local function release_document(session, forget_renderer, keep_buffer)
   if not session or session.closed then return end
   session.closed = true
-  session.request_serial = session.request_serial + 1
-  for _, name in ipairs({
-    "render_timer",
-    "resize_timer",
-    "scroll_settle_timer",
-    "cursor_scroll_timer",
-    "animation_geometry_timer",
-    "remote_image_timer",
-    "ui_poll_timer",
-    "selection_debounce_timer",
-    "selection_settle_timer",
-    "selection_idle_settle_timer",
-  }) do
-    debounce.close(session, name)
-  end
+  lanes.invalidate(session)
+  close_session_timers(session)
   preview.stop_loading(session)
   preview.restore_cursor()
   caret.forget(session)
@@ -1461,7 +725,7 @@ function M.open(position)
     return
   end
   local session = state.create(source_buf, source_win)
-  M.history_init(session)
+  history.init(session)
   session.backend, session.backend_reason = backend, reason
   -- Decided once, here, and never again for the life of this session. A
   -- preview that switches rendering model mid-scroll is one whose behaviour
@@ -1484,13 +748,13 @@ function M.open(position)
   -- `preview.open` cannot do it itself, since the placement it measures needs
   -- the window handle this line is what assigns.
   preview.reset_surface(session)
-  if backend.name ~= "cells" then
+  if backend.is_graphical then
     preview.start_loading(session)
     navigation.attach(session, M.navigate)
     mouse.attach(M.navigate)
   end
   if not adopt_win then vim.api.nvim_set_current_win(source_win) end
-  if localrender.enabled() and backend.name == "kitty_raw" and not localrender.active() then
+  if localrender.enabled() and backend.supports_local_markers and not localrender.active() then
     -- The first render waits for the attach to settle rather than racing it:
     -- losing the race would spawn this host's Chromium and ship one full PNG
     -- over the very link local mode exists to spare. On success the
@@ -1505,7 +769,7 @@ function M.open(position)
       -- Every raw session, not just this one: refreshes deferred while the
       -- attach was settling have no other continuation on the failure path.
       each_session(function(deferred)
-        if deferred.backend.name == "kitty_raw" then M.refresh(deferred) end
+        if deferred.backend.supports_local_markers then M.refresh(deferred) end
       end)
     end)
   else
@@ -1531,36 +795,23 @@ function M.retarget(session, new_buf, record, restore_scroll, pending_obsidian_a
     target.backend, target.backend_reason = session.backend, session.backend_reason
     target.render_path, target.render_path_reason = session.render_path, session.render_path_reason
     target.preview_buf = preview.create_buffer(target)
-    if target.backend.name ~= "cells" then navigation.attach(target, M.navigate) end
+    if target.backend.is_graphical then navigation.attach(target, M.navigate) end
   end
   if type(restore_scroll) == "number" then
     target.scroll_y = restore_scroll
     target.applied_scroll_y = restore_scroll
   end
   target.pending_obsidian_anchor = pending_obsidian_anchor
-  if record ~= false then M.history_push(session, new_buf) end
+  if record ~= false then history.push(session, new_buf) end
   return M.activate_document(target, { align_history = record == false })
 end
 
 local function deactivate_document(session)
   if not session or session.closed then return end
-  -- Every callback already carries request_serial; advancing it is the pane
+  -- Every callback already carries a lane ticket; voiding them all is the pane
   -- activation epoch at the document boundary and makes late frames stale.
-  session.request_serial = session.request_serial + 1
-  for _, name in ipairs({
-    "render_timer",
-    "resize_timer",
-    "scroll_settle_timer",
-    "cursor_scroll_timer",
-    "animation_geometry_timer",
-    "remote_image_timer",
-    "ui_poll_timer",
-    "selection_debounce_timer",
-    "selection_settle_timer",
-    "selection_idle_settle_timer",
-  }) do
-    debounce.close(session, name)
-  end
+  lanes.invalidate(session)
+  close_session_timers(session)
   preview.stop_loading(session)
   interaction.forget(session)
   resident_session.release(session)
@@ -1593,21 +844,11 @@ function M.activate_document(session, opts)
   session.render_path_reason = session.render_path_reason or (old and old.render_path_reason)
   session.preview_win = pane.preview_win
   session.source_win = pane.source_win
-  session.history = pane.history
-  session.history_index = pane.history_index
   if not preview.show_document(session) then return false end
-  if opts.align_history ~= false and pane.history then
-    for index = #pane.history, 1, -1 do
-      if pane.history[index].buf == session.source_buf then
-        pane.history_index = index
-        break
-      end
-    end
-    session.history_index = pane.history_index
-  end
+  if opts.align_history ~= false then history.align(session) end
   preview.reset_surface(session)
   preview.update_title(session)
-  if session.backend and session.backend.name ~= "cells" then preview.start_loading(session) end
+  if session.backend and session.backend.is_graphical then preview.start_loading(session) end
   M.refresh(session)
   if start_ui_poll then start_ui_poll(session) end
   return true
@@ -1690,174 +931,12 @@ function M.reveal_source(session)
   return true
 end
 
--- ---------------------------------------------------------------------------
--- Preview history.
---
--- Following a link activates a document tab, while history retains the route
--- independently of which tabs remain open.
---
--- The list is per session and holds a buffer *and* the file path. The buffer is
--- what makes returning cheap and exact; the path is the fallback for an entry
--- whose buffer has since been wiped, which is the ordinary outcome of
--- `:bwipeout` or a session that has been open a long time.
--- ---------------------------------------------------------------------------
+M.history_init = history.init
+M.history_push = history.push
 
-local function history_entry(buf)
-  local name = vim.api.nvim_buf_is_valid(buf) and vim.api.nvim_buf_get_name(buf) or ""
-  return { buf = buf, path = name ~= "" and vim.fs.normalize(name) or nil, scroll_y = 0 }
-end
+function M.history_back(session) history.back(session, history_host) end
 
-function M.history_init(session)
-  local pane = session.pane
-  local history = { history_entry(session.source_buf) }
-  if pane then
-    pane.history, pane.history_index, pane.history_boundary = history, 1, nil
-  end
-  session.history, session.history_index, session.history_boundary = history, 1, nil
-end
-
----Append `buf` as the newest entry, discarding anything ahead of the current
----position -- the same rule a browser follows: navigating from a point in the
----middle of the history abandons the forward branch rather than interleaving
----with it.
-function M.history_push(session, buf)
-  local pane = session.pane
-  if not (pane and pane.history) and not session.history then M.history_init(session) end
-  local history = pane and pane.history or session.history
-  local history_index = pane and pane.history_index or session.history_index
-  if history[history_index] then history[history_index].scroll_y = session.scroll_y or 0 end
-  for index = #history, history_index + 1, -1 do
-    history[index] = nil
-  end
-  -- Re-entering the document that is already current is not a new entry:
-  -- otherwise a fragment link, or a link back to where the reader just came
-  -- from, would grow the list without adding anywhere to go.
-  if history[history_index] and history[history_index].buf == buf then return end
-  history[#history + 1] = history_entry(buf)
-  local limit = config.get().interaction.history_limit
-  while #history > limit do
-    table.remove(history, 1)
-  end
-  if pane then
-    pane.history_index, pane.history_boundary = #history, nil
-  end
-  session.history_index, session.history_boundary = #history, nil
-end
-
----Resolve a history entry to a buffer that can actually be displayed, reopening
----the file when the buffer it recorded is gone. Returns nil when neither is
----available any more, which is a dead entry rather than an error.
-local function history_buf(entry)
-  if entry.buf and vim.api.nvim_buf_is_valid(entry.buf) then return entry.buf end
-  if not entry.path or not vim.uv.fs_stat(entry.path) then return nil end
-  local buf = vim.fn.bufadd(entry.path)
-  if buf == 0 then return nil end
-  vim.fn.bufload(buf)
-  entry.buf = buf
-  return buf
-end
-
----Move only the preview `step` entries through history. Dead entries are
----stepped over rather than reported: a wiped buffer
----whose file is also gone is not something the reader can act on.
-local function history_go(session, step, direction)
-  if not valid(session) then return false end
-  local pane = session.pane
-  if not (pane and pane.history) then M.history_init(session) end
-  local holder = pane or session
-  local history = holder.history
-  local index = holder.history_index
-  if history[index] then history[index].scroll_y = session.scroll_y or 0 end
-  while true do
-    index = index + step
-    local entry = history[index]
-    if not entry then
-      -- A repeat of the same direction's dead end is not news: only the
-      -- first one is reported, and any successful move (either direction)
-      -- re-arms it below.
-      if holder.history_boundary ~= direction then
-        holder.history_boundary = direction
-        vim.notify(("md-viewer: no %s document in the preview history"):format(direction), vim.log.levels.INFO)
-      end
-      return false
-    end
-    holder.history_boundary = nil
-    local buf = history_buf(entry)
-    if buf then
-      if buf == session.source_buf then
-        if pane then pane.history_index = index end
-        session.history_index = index
-        session.scroll_y = entry.scroll_y or session.scroll_y
-        M.schedule(session, 0)
-        return true
-      end
-      if not M.retarget(session, buf, false, entry.scroll_y) then
-        -- The only way this refuses is another preview already owning that
-        -- document. The source window has moved by now, so saying nothing
-        -- would leave the two panes describing different files with no
-        -- explanation.
-        vim.notify("md-viewer: another preview already owns that document", vim.log.levels.WARN)
-        return false
-      end
-      local active = pane.active
-      pane.history_index = index
-      active.history, active.history_index = history, index
-      active.scroll_y = entry.scroll_y or active.scroll_y or 0
-      return true
-    end
-  end
-end
-
----`session` is passed explicitly by the preview-local `H`/`L` mappings, which
----already know which preview they belong to, and omitted by the commands,
----which resolve it the same way every other :MdViewer* command does.
-function M.history_back(session)
-  session = session or current_session()
-  if not valid(session) then
-    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
-    return
-  end
-  history_go(session, -1, "previous")
-end
-
-function M.history_forward(session)
-  session = session or current_session()
-  if not valid(session) then
-    vim.notify("md-viewer: no preview open", vim.log.levels.WARN)
-    return
-  end
-  history_go(session, 1, "next")
-end
-
----Re-point the preview when the source window returns, by any means, to a
----document already in this preview's history -- `<C-o>` after a link click
----being the case that matters. `preview.pinned` stops the preview following
----arbitrary buffer switches, and that stays true: only a document the preview
----itself navigated through is followed, and the move never appends, so the
----forward branch survives to be walked back up.
-local function follow_history_buffer(session, buf)
-  local pane = session.pane
-  local history = pane and pane.history or session.history
-  local history_index = pane and pane.history_index or session.history_index
-  if not history or buf == session.source_buf then return end
-  -- One document can legitimately appear at more than one position (a link
-  -- back to where the reader came from puts it there twice), so search outward
-  -- from where the preview currently is rather than from the start -- landing
-  -- at the far end of the list would make the next `<C-o>` jump somewhere the
-  -- reader has never been. Backwards wins a tie, because the gesture this
-  -- exists for is the backwards one.
-  for distance = 0, #history do
-    for _, index in ipairs({ history_index - distance, history_index + distance }) do
-      if history[index] and history[index].buf == buf then
-        if M.retarget(session, buf, false) then
-          if pane then pane.history_index = index end
-          pane.active.history_index = index
-        end
-        return
-      end
-    end
-  end
-end
+function M.history_forward(session) history.forward(session, history_host) end
 
 function M.toggle(position)
   local session = current_session()
@@ -1873,8 +952,14 @@ end
 ---switches modes without passing through off.
 function M.toggle_line_numbers(mode)
   assert(mode == "absolute" or mode == "relative", "line-number mode must be absolute or relative")
-  local cfg = config.get()
-  cfg.preview.line_numbers = cfg.preview.line_numbers == mode and "off" or mode
+  -- Through config.set_runtime, not by writing into `config.get()`. That table
+  -- is the user's: a keystroke editing it left nothing able to tell an option
+  -- they set from one a command changed, and skipped `validate` on the way
+  -- past. The runtime layer is validated, is re-applied to every session's
+  -- snapshot here, and reaches previews opened later -- which is what "switch
+  -- every preview" has always meant.
+  local current = config.effective("preview.line_numbers")
+  config.set_runtime("preview.line_numbers", current == mode and "off" or mode)
   each_session(function(session) preview.update_line_numbers(session) end)
 end
 
@@ -1890,8 +975,8 @@ end
 ---the manual-scroll hold and the source-sync opt-in are stated once.
 ---Returns whether the position actually changed.
 function M.scroll_to(session, next_scroll)
-  if not valid(session) or session.backend.name == "cells" then return false end
-  local cfg = config.get()
+  if not valid(session) or not session.backend.is_graphical then return false end
+  local cfg = session.config
   next_scroll = math.max(0, math.min(scroll_maximum(session), next_scroll))
   if math.abs(next_scroll - (session.scroll_y or 0)) < 1 then return false end
   session.scroll_y = next_scroll
@@ -1903,13 +988,13 @@ function M.scroll_to(session, next_scroll)
 end
 
 function M.scroll_by(session, delta_px)
-  if not valid(session) or session.backend.name == "cells" then return false end
+  if not valid(session) or not session.backend.is_graphical then return false end
   return M.scroll_to(session, (session.scroll_y or 0) + delta_px)
 end
 
 function M.navigate(session, action, count)
-  if not valid(session) or session.backend.name == "cells" then return end
-  local cfg = config.get()
+  if not valid(session) or not session.backend.is_graphical then return end
+  local cfg = session.config
   count = math.max(1, math.floor(count or 1))
   local maximum = scroll_maximum(session)
   local deltas = {
@@ -1927,12 +1012,6 @@ function M.navigate(session, action, count)
   return M.scroll_by(session, (deltas[action] or 0) * count)
 end
 
-each_session = function(fn)
-  for _, session in pairs(state.active_documents()) do
-    if valid(session) then fn(session) end
-  end
-end
-
 ---The session a helper notification names. Notifications carry the document
 ---id because the helper knows nothing smaller; nil for a document whose
 ---session has since closed, which is a stale notification and not an error.
@@ -1940,157 +1019,6 @@ local function session_by_document(doc)
   for _, session in pairs(state.all()) do
     if session.document_id == doc then return session end
   end
-end
-
-local function clear_raw_sessions()
-  each_session(function(session)
-    if session.backend.name == "kitty_raw" then clear_image(session) end
-  end)
-end
-
-local function refresh_raw_sessions()
-  each_session(function(session)
-    if session.backend.name == "kitty_raw" and not session.ui_suppressed then
-      if not show_cached(session) and not update_occlusion(session) then M.schedule(session, 0) end
-    end
-  end)
-end
-
----A placement change the terminal has to be told about -- `coordinates.same`,
----so `exclusions` count, not just row/col/width/height.
----
----The viewport model's re-place, and only that: it moves the one frame this
----session owns. `reconcile_resident` below is the same job for a resident
----screen, which owns no frame and follows a geometry change by composing its
----bands again.
----
----Exclusions have to count because of what `raw_zindex = -1` actually means:
----in the Kitty graphics protocol a negative z above INT32_MIN/2 draws the image
----below text glyphs but *above* cell background colors.
----A passive float therefore does not occlude the image
----on its own -- only its glyphs and border characters survive, and the image
----keeps compositing across everything else, so a notification renders with the
----Markdown showing through its background instead of its own. Cutting the
----float's rectangle out of the placement is the only thing that gives it back
----an opaque interior, and the cut has to actually reach the terminal.
----
----This comparison used to ignore `exclusions` on purpose, because re-cropping
----on every appearing and disappearing notification was visible as the image
----blinking and rolling by about a row. That was `kitty_raw.move` deleting the
----old placements before sending the new ones; it now emits both in one write,
----new first, so the re-crop is no longer visible as anything.
-local function reconcile_placement(session, force)
-  if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
-  -- In local mode, image_id is a reference that may not have any pixels on
-  -- the terminal yet -- see apply_surface's local_frame_confirmed comment.
-  -- Re-cropping it before its own upload lands addresses an id the terminal
-  -- draws nothing for, so the poll tick that would have done this waits for
-  -- the next one instead; the reconcile is idempotent and this is not lost,
-  -- only deferred.
-  if local_mode(session) and not session.local_frame_confirmed then return end
-  -- Never address the terminal on behalf of a window that is not on screen:
-  -- its reported geometry is a hidden tabpage's, so any placement built from
-  -- it lands on top of the tabpage the user is actually looking at. The
-  -- unconditional `force` callers (CmdlineEnter/CmdlineLeave) reach here
-  -- without an occlusion check of their own.
-  if not coordinates.window_is_displayed(session.preview_win) then return end
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  if force or not coordinates.same(session.last_placement, placement) then
-    local ok, moved, err = pcall(session.backend.move, session.image_id, placement)
-    if not ok then
-      notify_error(moved)
-      return
-    end
-    if not moved then
-      notify_error(err or "failed to update image placement")
-      return
-    end
-    -- The base just moved or re-cropped (a float opened or closed over it);
-    -- overlay rectangles computed against the old placement are wrong now.
-    -- Cleared after the move rather than re-derived: the next selection frame
-    -- repaints them against the new placement within one round trip.
-    clear_selection_overlay(session)
-  end
-  -- Always refresh, even when no move() happened: exclusions (or any other
-  -- field) may have changed and click-resolution reads this on every click.
-  session.last_placement = placement
-  -- Animation frames are positioned against the placement, so a float opening
-  -- over the preview would otherwise leave them painted across it and offset.
-  animation.repaint(session)
-  -- The caret surface is sized from the placement, so it has to follow it here
-  -- too. A re-render would resize it via `apply_image`, but the callers that
-  -- reach this without one -- a float opening, `cmdheight = 0` shrinking the
-  -- window around the command line -- would otherwise leave the caret able to
-  -- sit on a row the image no longer covers, which resolves to nothing.
-  preview.reset_surface(session)
-  preview.update_line_numbers(session)
-end
-
----The resident model's `reconcile_placement`. A viewport frame follows a
----geometry change with `backend.move`; a resident screen follows it by being
----composed again, which is the same few hundred bytes and no pixels either way.
----A resident session with nothing on the pane -- an occlusion that has just
----lifted -- draws for the first time here.
-local function reconcile_resident(session)
-  if session.ui_suppressed then return end
-  -- Never address the terminal on behalf of a window that is not on screen; see
-  -- `reconcile_placement` for what a hidden tabpage's geometry does.
-  if not coordinates.window_is_displayed(session.preview_win) then return end
-  if not session.resident_screen then
-    M.draw_resident(session)
-    return
-  end
-  local placement = preview.placement(session.preview_win, session.backend.name)
-  if not coordinates.same(session.last_placement, placement) then M.draw_resident(session) end
-end
-
-local function reconcile_occlusion()
-  each_session(function(session)
-    if session.backend.name ~= "cells" then
-      if update_occlusion(session) then
-        clear_image(session)
-      elseif session.image_id then
-        -- Includes the resident bootstrap frame, which is an ordinary image and
-        -- re-places through `move` like any other. Hoisting this test ahead of
-        -- the restore arm is behaviour-preserving off the resident path:
-        -- `reconcile_placement` already returned immediately whenever
-        -- `image_id` was nil, so the old `else` arm did nothing in exactly the
-        -- cases that now route elsewhere.
-        reconcile_placement(session)
-      elseif session.render_path == "resident" and session.resident then
-        reconcile_resident(session)
-      elseif not show_cached(session) then
-        M.schedule(session, 0)
-      end
-    end
-  end)
-end
-
-start_ui_poll = function(session)
-  if session.backend.name ~= "kitty_raw" then return end
-  local interval = math.max(0, math.floor(config.get().image.ui_poll_ms or 50))
-  if interval == 0 or session.ui_poll_timer then return end
-  local timer = vim.uv.new_timer()
-  session.ui_poll_timer = timer
-  timer:start(
-    interval,
-    interval,
-    vim.schedule_wrap(function()
-      if valid(session) then
-        if update_occlusion(session) then
-          clear_image(session)
-        elseif session.image_id then
-          reconcile_placement(session)
-        elseif session.render_path == "resident" and session.resident then
-          reconcile_resident(session)
-        elseif not session.ui_suppressed and not session.loading and not session.render_failed then
-          if not show_cached(session) then M.schedule(session, 0) end
-        end
-      else
-        debounce.close(session, "ui_poll_timer")
-      end
-    end)
-  )
 end
 
 ---Copy the current preview selection to the unnamed register (and `+` when
@@ -2183,7 +1111,12 @@ function M.find_prompt(session)
   end)
 end
 
-function M.setup_autocmds()
+---Install the session-lifetime listeners that are not autocmds: the renderer
+---process's exit, and local rendering's four helper events. `autocmds.lua`
+---owns everything registered against Neovim's own events; these two sources
+---are md-viewer's own, and what they do is session bookkeeping rather than
+---wiring, so they stay here.
+function M.setup_listeners()
   -- Session-level selection/find display state is not tied to any specific
   -- in-flight request (unlike process.lua's own deliver_error, which already
   -- handles those correctly), so it needs its own hook: the renderer's
@@ -2237,7 +1170,7 @@ function M.setup_autocmds()
   -- direct frame each session had up.
   localrender.on("attached", function()
     each_session(function(session)
-      if session.backend.name == "kitty_raw" then M.schedule(session, 0) end
+      if session.backend.supports_local_markers then M.schedule(session, 0) end
     end)
   end)
   -- The helper died. Injected surfaces died with it (its teardown deletes
@@ -2246,385 +1179,28 @@ function M.setup_autocmds()
   -- put back in charge -- presenter included.
   localrender.on("demoted", function()
     each_session(function(session)
-      if session.backend.name == "kitty_raw" then
+      if session.backend.supports_local_markers then
         clear_image(session)
         M.schedule(session, 0)
       end
     end)
   end)
-  group = vim.api.nvim_create_augroup("md-viewer", { clear = true })
-  vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI", "TextChangedP" }, {
-    group = group,
-    callback = function(args)
-      for _, session in ipairs(state.documents_for_source(args.buf)) do
-        if state.is_active(session) then
-          M.schedule(session)
-        else
-          session.dirty = true
-        end
-      end
-    end,
-  })
-  -- Neovim's own Visual mode is not usable inside a graphical preview, and
-  -- `navigation.lua` says so where it maps `v`/`V` to a *preview* selection
-  -- instead. Saying it was not the same as enforcing it: the plugin maps only
-  -- a plain click and its release over the preview, not a drag, so an
-  -- ordinary mouse drag -- or `<C-v>` -- still puts Neovim in Visual mode over
-  -- the surface, where it selects blank cells and paints a highlight across
-  -- the image. Reported from Warp as the preview blinking to a blank pane
-  -- with a blue rectangle on it -- that rectangle was V-BLOCK.
-  --
-  -- Excluded for the `cells` backend, whose buffer holds real styled text where
-  -- Visual mode and `y` do exactly what a reader would expect.
-  vim.api.nvim_create_autocmd("ModeChanged", {
-    group = group,
-    pattern = "*:[vV\22sS\19]*",
-    callback = function(args)
-      local session = state.from_preview(args.buf)
-      if not session or session.closed then return end
-      if not (session.backend and session.backend.name ~= "cells") then return end
-      -- One escape per tick. Without this a stream of drag events -- each
-      -- re-entering Visual as fast as the escape leaves it -- would spin.
-      if session.leaving_visual then return end
-      session.leaving_visual = true
-      vim.schedule(function()
-        session.leaving_visual = nil
-        if session.closed or not vim.api.nvim_buf_is_valid(args.buf) then return end
-        if vim.api.nvim_get_current_buf() ~= args.buf then return end
-        if not vim.fn.mode():match("^[vV\22sS\19]") then return end
-        -- "n", not "m": the buffer-local <Esc> mapping clears the reader's find
-        -- and preview selection, and this is not them asking for that. "x" as
-        -- well, so the mode is actually back to normal when this returns
-        -- rather than whenever the typeahead next drains -- a drag delivers the
-        -- next event immediately, and a queued escape would arrive after it.
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
-      end)
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
-    group = group,
-    callback = function(args)
-      -- Nothing to do for the preview's own buffer: the caret is a position in
-      -- the rendered document, not Neovim's cursor, so it moves through
-      -- `interaction.caret_motion` and never through a cursor event. Neovim's
-      -- cursor only shadows it.
-      if state.from_preview(args.buf) then return end
-      local session = state.get(args.buf)
-      if session and config.get().sync.source_to_preview and config.get().sync.cursor_follow then
-        local cfg = config.get().sync
-        sync.source_cursor(
-          session,
-          function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
-          cfg.alignment_tolerance
-        )
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd("WinScrolled", {
-    group = group,
-    callback = function(args)
-      local scrolled_win = tonumber(args.match)
-      each_session(function(session)
-        -- Compared against the window the source *buffer* is in, not against
-        -- `session.source_win` directly: a window keeps its id when its buffer
-        -- changes, so scrolling SECURITY.md after opening it in the window a
-        -- README.md preview was started from satisfied this test and scrolled
-        -- README's preview. The nil check is not decoration -- an unresolvable
-        -- source window and a non-numeric `args.match` would otherwise compare
-        -- equal and match every scroll in the editor.
-        local source_win = state.source_window(session)
-        if source_win and scrolled_win == source_win and config.get().sync.source_to_preview then
-          local cfg = config.get().sync
-          sync.source_cursor(
-            session,
-            function(value) schedule_source_scroll(value, cfg.cursor_debounce_ms) end,
-            cfg.alignment_tolerance
-          )
-        end
-      end)
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "WinResized", "VimResized" }, {
-    group = group,
-    callback = function()
-      -- A terminal font-size change moves the pixel cell without changing
-      -- anything Neovim reports except the grid. `cellpixels` no longer caches
-      -- at all for exactly that reason, so this is now a formality; it stays
-      -- because a resize is genuinely the moment the cell can move.
-      cellpixels.invalidate()
-      each_session(function(session)
-        if not update_occlusion(session) then M.schedule(session, 80, "resize_timer") end
-      end)
-      vim.schedule(reconcile_occlusion)
-    end,
-  })
-  -- FocusGained covers the terminal-side transitions Neovim has no direct
-  -- event for (alternate-screen returns, multiplexer pane/window switches):
-  -- any of them can silently drop a raw Kitty placement, so treat regained
-  -- focus the same as VimResume and recreate it from the cached PNG.
-  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "TabEnter", "VimResume", "FocusGained" }, {
-    group = group,
-    callback = function(args)
-      -- Deferred rather than read synchronously off `args`: a compound
-      -- command like `:split other.md` fires `WinEnter` for the *new*
-      -- window while it still, transiently, shows the window it split
-      -- from's buffer -- the buffer swap to `other.md` (and that file's own
-      -- `BufEnter`) happens a moment later, in the same command. Reading
-      -- `nvim_get_current_buf()` synchronously here reassigns
-      -- `session.source_win` to that new window on the strength of a buffer
-      -- pairing that is already gone by the time the command finishes,
-      -- stranding cursor-follow (WinScrolled below compares against
-      -- `source_win` by identity) on a window that no longer shows the
-      -- source buffer, with nothing left to correct it since the *real*
-      -- source window was never touched. Deferring to the next tick lets
-      -- the whole command settle first, so this only ever fires once the
-      -- window/buffer pairing is the one the user actually ended up with.
-      local buf = args.buf
-      vim.schedule(function()
-        local source_session = state.get(buf)
-        if source_session and vim.api.nvim_get_current_buf() == buf then
-          state.set_source_window(source_session, vim.api.nvim_get_current_win())
-        end
-        -- The source window arriving back at a document this preview has
-        -- already shown (`<C-o>` after following a link) takes the preview
-        -- with it. Deliberately narrow: only buffers in this session's own
-        -- history qualify, so `preview.pinned` still holds for every other
-        -- buffer switch.
-        if source_session then return end
-        local win_session = state.from_source_win(vim.api.nvim_get_current_win())
-        if win_session and valid(win_session) and vim.api.nvim_get_current_buf() == buf then
-          follow_history_buffer(win_session, buf)
-        end
-      end)
-      each_session(function(session)
-        if
-          not session.image_id
-          and not session.ui_suppressed
-          and not update_occlusion(session)
-          and vim.api.nvim_win_get_tabpage(session.preview_win) == vim.api.nvim_get_current_tabpage()
-        then
-          if not show_cached(session) then M.schedule(session, 0) end
-        end
-      end)
-    end,
-  })
-  -- Neovim's cursor is hidden only while a preview with a drawable overlay
-  -- caret is focused, so these two autocmds own the whole of that state. Restore
-  -- is unconditional and idempotent: leaving a reader with an invisible cursor
-  -- is far worse than restoring one that was never hidden.
-  --
-  -- `FocusGained` is here because `FocusLost` restores the cursor without any
-  -- window changing, so nothing fires `WinEnter` on the way back: leaving the
-  -- terminal and returning to it left Neovim's own cursor sitting beside the
-  -- overlay caret until some later motion happened to redraw it.
-  --
-  -- `VimSuspend`, the other event that restores without a window change, needs
-  -- no counterpart here: it drops the image outright (below), and the resume
-  -- that puts one back goes through display_image, which calls place_caret
-  -- itself once there is something to draw the caret over.
-  vim.api.nvim_create_autocmd({ "WinEnter", "BufEnter", "FocusGained" }, {
-    group = group,
-    callback = function()
-      local session = state.from_preview_win(vim.api.nvim_get_current_win())
-      if not (session and valid(session)) then
-        preview.restore_cursor()
-        return
-      end
-      -- Focusing a preview is when a caret first becomes something the reader
-      -- can see, so this is where one gets placed. Snapping with no motion puts
-      -- it on the first character of whatever is on screen; drawing it is what
-      -- then hides Neovim's own cursor, so the two can never both be up.
-      M.place_caret(session)
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "WinLeave", "BufLeave", "TabLeave", "VimSuspend", "VimLeavePre", "FocusLost" }, {
-    group = group,
-    callback = function()
-      preview.restore_cursor()
-      -- And take the block down with it. The caret marks where the *focused*
-      -- reader is, so one left drawn in a preview nobody is in claims a focus
-      -- that has moved on -- and on `FocusLost`, which gives the real cursor
-      -- back without any window changing, it would sit there beside it: two
-      -- carets at once, the thing this pair exists to prevent. The current
-      -- window is still the one being left when these fire.
-      --
-      -- Only the overlay. `caret_rect` is kept, so coming back redraws the
-      -- caret exactly where it was, locally, through the `place_caret` on the
-      -- matching enter autocmd -- no round trip and no lost position.
-      local session = state.from_preview_win(vim.api.nvim_get_current_win())
-      if session and valid(session) then M.clear_caret_overlay(session) end
-    end,
-  })
-  vim.api.nvim_create_autocmd("BufFilePost", {
-    group = group,
-    callback = function(args)
-      for _, session in ipairs(state.documents_for_source(args.buf)) do
-        preview.update_title(session)
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd("WinLeave", {
-    group = group,
-    callback = function()
-      -- Placement is screen-relative and must not depend on the active cursor.
-      -- Intentionally retain normal split images across focus changes.
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "CompleteChanged" }, {
-    group = group,
-    callback = function()
-      each_session(function(session)
-        if session.backend.name == "kitty_raw" then session.ui_suppressed = true end
-      end)
-      clear_raw_sessions()
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "CompleteDone", "WinClosed" }, {
-    group = group,
-    callback = function(args)
-      if args.event ~= "WinClosed" then
-        each_session(function(session)
-          if session.backend.name == "kitty_raw" then session.ui_suppressed = false end
-        end)
-      end
-      vim.schedule(function()
-        if args.event == "WinClosed" then
-          reconcile_occlusion()
-        else
-          refresh_raw_sessions()
-        end
-      end)
-    end,
-  })
-  -- The command-line reserves its own screen row(s) below every window, so
-  -- unlike a real floating window it can never geometrically overlap the
-  -- preview under normal Neovim layout. The one exception is `cmdheight = 0`,
-  -- which temporarily shrinks the window above the command line for as long
-  -- as it's open. Rather than hide the image for the whole time (blanking it
-  -- on every `:`, `/`, or `?`), just re-place it at the placement's current
-  -- geometry -- a no-op send when nothing changed, and a same-tick resize
-  -- when it did, so the image stays visible and confined instead of
-  -- disappearing. `force = true` bypasses the usual same-placement skip so a
-  -- terminal that erases graphics on its own cmdline redraw gets them
-  -- redrawn immediately rather than waiting for the next unrelated event.
-  vim.api.nvim_create_autocmd({ "CmdlineEnter", "CmdlineLeave" }, {
-    group = group,
-    callback = function()
-      each_session(function(session) reconcile_placement(session, true) end)
-    end,
-  })
-  -- Any new window can legitimately resize/reposition an existing preview
-  -- split -- not only a floating one. WinResized/VimResized (below) is the
-  -- other, more usual way that gets caught, but a plugin that opens several
-  -- plain splits "relative to editor" (codediff.nvim's diff/explorer panes,
-  -- for one -- see the operator report this fixed) can shrink/move the
-  -- preview window as an immediate side effect of WinNew itself, before a
-  -- separate WinResized round-trip; reconciling here too closes that gap
-  -- rather than depending on the 50ms ui_poll_timer to eventually catch up.
-  vim.api.nvim_create_autocmd("WinNew", {
-    group = group,
-    callback = function() vim.schedule(reconcile_occlusion) end,
-  })
-  vim.api.nvim_create_autocmd({ "ColorScheme" }, {
-    group = group,
-    callback = function()
-      each_session(function(session) M.schedule(session, 0) end)
-    end,
-  })
-  vim.api.nvim_create_autocmd("OptionSet", {
-    group = group,
-    pattern = "background",
-    callback = function()
-      each_session(function(session) M.schedule(session, 0) end)
-    end,
-  })
-  -- 'laststatus' decides whether the raw Kitty backend gives a statusline guard
-  -- row back (coordinates.for_window, preview.placement), so it changes the
-  -- caret surface's height with no resize event of any kind to announce it --
-  -- and under `laststatus = 1` it does so whenever the tabpage's window count
-  -- crosses one, which is not a change to the preview window at all.
-  vim.api.nvim_create_autocmd("OptionSet", {
-    group = group,
-    pattern = "laststatus",
-    callback = function()
-      each_session(function(session) preview.reset_surface(session) end)
-    end,
-  })
-  vim.api.nvim_create_autocmd("BufHidden", {
-    group = group,
-    callback = function(args)
-      -- Preview buffers use bufhidden=hide specifically so switching pane tabs
-      -- is not lifecycle. Only the optional unpinned source behavior remains.
-      local session
-      if not state.from_preview(args.buf) and not config.get().preview.pinned then session = state.get(args.buf) end
-      if session then close_session(session) end
-    end,
-  })
-  vim.api.nvim_create_autocmd("BufWipeout", {
-    group = group,
-    callback = function(args)
-      local preview_document = state.from_preview(args.buf)
-      if preview_document then
-        M.tab_close(preview_document)
-        return
-      end
-      for _, session in ipairs(state.documents_for_source(args.buf)) do
-        M.tab_close(session)
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd("WinClosed", {
-    group = group,
-    callback = function(args)
-      local closed = tonumber(args.match)
-      for _, pane in pairs(state.panes()) do
-        if pane.preview_win == closed and not pane.closed then
-          -- The window is already invalid; teardown skips closing/restoring it
-          -- and still releases every document and renderer cache.
-          close_session(pane.active)
-          break
-        end
-      end
-    end,
-  })
-  vim.api.nvim_create_autocmd({ "TabLeave", "VimSuspend" }, {
-    group = group,
-    callback = function()
-      each_session(function(session)
-        -- clear_image() rather than a hand-rolled clear: the placement this
-        -- drops must go with the image, since interaction.locate resolves
-        -- clicks against session.last_placement and there is no longer an
-        -- image on screen for one to land on.
-        clear_image(session)
-        -- The preview survives a tab leave or suspend, but a mouse press
-        -- captured against it does not: there is no guarantee the matching
-        -- release ever reaches Neovim across that boundary.
-        interaction.forget(session)
-      end)
-    end,
-  })
-  -- Wrapped rather than passed directly: an autocmd callback receives the event
-  -- table as its first argument, which `close_all` now reads as `opts`.
-  vim.api.nvim_create_autocmd("VimLeavePre", {
-    group = group,
-    callback = function()
-      -- Detach before tearing down sessions: this closes the control-socket
-      -- pipe, which the helper's socket server sees as a real `close` event
-      -- on its next tick -- concrete and immediate, unlike the marker-based
-      -- image deletions below it, which only reach the helper if a captured
-      -- frame happens to carry them before the process exits. Without this,
-      -- the operator's own workflow (one helper process wrapping many
-      -- Neovim restarts in the same ssh session) leaves every per-document
-      -- epoch/seq counter on the helper (replica.js's `docs`, injector.js's
-      -- `lastSurfaceSeq`) sitting at whatever the outgoing session left it
-      -- at, so the next Neovim session's first frame reference can be
-      -- silently refused as stale -- a preview that renders solid black on
-      -- reopen, measured live (2026-08-27).
-      if localrender.active() then localrender.detach() end
-      M.close_all({ blocking = true })
-    end,
-  })
 end
+
+-- The event layer's seam. `autocmds.lua` sits above controller -- the arrow in
+-- the target architecture points down, wiring to orchestration -- so it reaches
+-- these by plain require, the way `commands.lua` already reaches the rest of
+-- this module. They are the whole of what its handlers need that was not
+-- already public, and nothing else uses them.
+M.valid = valid
+M.show_cached = show_cached
+M.close_session = close_session
+M.schedule_source_scroll = schedule_source_scroll
+
+---Follow the source window back to a buffer this preview has already shown.
+---Wrapped rather than exposing `history_host`: the host table is controller's
+---own wiring and no caller should have to assemble it.
+function M.history_follow_buffer(session, buf) history.follow_buffer(session, buf, history_host) end
 
 -- Exported for `tests/lua/cases/scroll_scale.lua` only.
 --

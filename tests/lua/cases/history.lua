@@ -1,6 +1,7 @@
 -- Pane-scoped preview history is independent of both the editable source
 -- window and the set of currently open preview tabs.
 return function(t)
+  local backends = require("md-viewer.backends")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
   local interaction = require("md-viewer.interaction")
@@ -21,13 +22,12 @@ return function(t)
   local document_a = assert(controller.open("right"))
   local pane, source_win = document_a.pane, document_a.source_win
   local source_buf = vim.api.nvim_win_get_buf(source_win)
-  local backend = {
-    name = "kitty_raw",
+  local backend = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
     clear = function() return true end,
     show = function() return 1 end,
     update = function() return 1 end,
     move = function() return true end,
-  }
+  })
   document_a.backend = backend
   local original_refresh = controller.refresh
   controller.refresh = function() end
@@ -43,6 +43,9 @@ return function(t)
   t.eq(source_buf, vim.api.nvim_win_get_buf(source_win), "link navigation never replaces the editable source")
   t.eq(3, #pane.history, "link navigation appends pane history")
   t.eq(3, pane.history_index, "history points at the linked destination")
+  t.eq(nil, document_a.history, "history is not duplicated onto the first document")
+  t.eq(nil, document_b.history, "history is not duplicated onto linked documents")
+  t.eq(nil, document_c.history_index, "the pane alone owns the history index")
 
   controller.history_back()
   t.eq(document_b, pane.active, "history back activates the prior preview document")
@@ -99,7 +102,7 @@ return function(t)
 
   config.reset()
   config.setup({ interaction = { history_limit = 2 } })
-  local bounded = { source_buf = 1, history = nil, history_index = 0 }
+  local bounded = { source_buf = 1, history = nil, history_index = 0, config = config.snapshot() }
   controller.history_init(bounded)
   for buf = 2, 6 do
     controller.history_push(bounded, buf)

@@ -79,11 +79,11 @@ end
 return function(t)
   require("md-viewer").setup({})
   local health = require("md-viewer.health")
+  local auto_cfg = { image = { backend = "auto" } }
 
   -- Status classification is pure and fast via M._diagnose -- no renderer
   -- round-trip or real terminal/env state needed to cover the decision logic.
   do
-    local auto_cfg = { image = { backend = "auto" } }
     local cells_cfg = { image = { backend = "cells" } }
 
     local healthy = health._diagnose(base_report(), auto_cfg)
@@ -168,8 +168,6 @@ return function(t)
   -- assert the two ways it used to be broken: provenance filed as a warning,
   -- and a stated configuration argued with as if it were a fault.
   do
-    local auto_cfg = { image = { backend = "auto" } }
-
     local noisy = base_report()
     noisy.graphics_caveats = {
       { kind = "note", text = "Selection-overlay placements were validated by the operator on 2026-08-07." },
@@ -343,12 +341,22 @@ return function(t)
     t.eq(0, #health._diagnose(allowed, auto_cfg).warnings, "an overlay a validated profile allows is not a warning")
   end
 
+  -- Everything above is pure `_diagnose` arithmetic over synthetic reports and
+  -- needs nothing but Lua. The round-trip below is the one part that does: the
+  -- renderer subprocess has to spin up and launch a real Chromium, and a cold
+  -- launch on a loaded CI runner can take well longer than on a warm local
+  -- machine. Without a browser there is no report to assert about, so it is
+  -- skipped rather than waited out.
+  local executable, no_browser = t.browser()
+  if not executable then
+    t.skip(":MdViewerHealth's renderer round-trip", no_browser)
+    require("md-viewer.config").reset()
+    return
+  end
+
   local original_tmux = vim.env.TMUX
   vim.env.TMUX = "/tmp/tmux-501/default,1234,0" -- forces a second, multi-entry caveat
 
-  -- The renderer subprocess has to spin up and launch a real Chromium for
-  -- this round-trip; a cold launch on a loaded CI runner can take well
-  -- longer than it does on a warm local machine.
   health.show()
   vim.wait(30000, function() return vim.bo.filetype == "md-viewer-health" end, 20)
   t.eq("md-viewer-health", vim.bo.filetype, "MdViewerHealth renders its report buffer")
@@ -368,6 +376,7 @@ return function(t)
   vim.cmd("bwipeout!")
 
   vim.env.TMUX = original_tmux
+  require("md-viewer.config").reset()
   require("md-viewer.process").stop()
   vim.wait(5000, function() return not require("md-viewer.process").status().running end, 20)
 end

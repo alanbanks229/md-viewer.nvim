@@ -12,9 +12,11 @@
 -- Nothing here spawns a renderer: `renderer.request` is stubbed, so a chunk
 -- capture is whatever this file decides it is, including a slow or a lost one.
 return function(t)
+  local backends = require("md-viewer.backends")
   local caret = require("md-viewer.caret")
   local config = require("md-viewer.config")
   local controller = require("md-viewer.controller")
+  local occlusion = require("md-viewer.occlusion")
   local preview = require("md-viewer.preview")
   local renderer = require("md-viewer.renderer")
   local resident = require("md-viewer.resident")
@@ -45,8 +47,7 @@ return function(t)
   end
 
   local function stub_backend()
-    return {
-      name = "kitty_raw",
+    return vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       clear = function(id)
         log[#log + 1] = "clear:" .. tostring(id)
         return true
@@ -75,7 +76,7 @@ return function(t)
       retire = function() return 0 end,
       overlay_clear = function(set) log[#log + 1] = "overlay_clear:" .. tostring(set) end,
       overlay_supported = function() return true end,
-    }
+    })
   end
 
   -- A session on the resident path with a real chunk plan and no chunks yet:
@@ -93,7 +94,7 @@ return function(t)
     session.render_path = "resident"
     session.render_path_reason = "forced by tests"
     session.renderer_revision = "1:0"
-    local placement = preview.placement(session.preview_win, "kitty_raw")
+    local placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     local rows = placement.height
     local plan = assert(resident.chunk_plan({
       document_h = 30 * rows,
@@ -133,7 +134,7 @@ return function(t)
     session.image_id = 5
     session.frame_scroll_y = 0
     session.frame_revision = "1:0"
-    session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+    session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
 
     controller.draw_resident(session)
 
@@ -190,7 +191,7 @@ return function(t)
     session.image_id = 5
     session.frame_scroll_y = 0
     session.frame_revision = "1:0"
-    session.last_placement = preview.placement(session.preview_win, "kitty_raw")
+    session.last_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     session.resident.images[1] = 900
     session.resident.captured = 1
     session.resident.queue = {}
@@ -211,6 +212,12 @@ return function(t)
     t.ok(session.last_placement ~= nil, "and the placement clicks and the caret resolve against")
     t.eq(nil, session.resident_waiting, "nothing is being waited on")
     t.eq(false, session.loading, "and the spinner is down")
+
+    occlusion.clear_image(session)
+    log = {}
+    occlusion.reconcile_resident(session)
+    t.ok(step("compose"), "direct resident reconciliation restores retained chunks after an unplace")
+    t.eq(true, session.resident_screen, "direct resident reconciliation accounts for the restored screen")
 
     -- A pan moves the base every rectangle was measured against.
     log = {}
@@ -235,7 +242,7 @@ return function(t)
     -- resident session does not have, so the document went on compositing
     -- underneath the float.
     log = {}
-    local float_placement = preview.placement(session.preview_win, "kitty_raw")
+    local float_placement = preview.placement(session.preview_win, backends.capabilities("kitty_raw"))
     local float_buf = vim.api.nvim_create_buf(false, true)
     local float_win = vim.api.nvim_open_win(float_buf, false, {
       relative = "editor",
@@ -271,11 +278,12 @@ return function(t)
   -- ---------------------------------------------------------------------
   -- A stale chunk reply must not lose the chunk.
   --
-  -- Every renderer.request bumps `request_serial`, so a settle capture, a
-  -- resize or a ColorScheme is enough to stale a chunk in flight -- and
-  -- `next_chunk` has already taken it off the queue. The invariant asserted
-  -- here is the one that was broken: queue + captured + in-flight accounts for
-  -- every chunk in the plan, at every step.
+  -- A chunk in flight can still be staled -- by another chunk, or by a content
+  -- render, which re-lays out the page it was cut from. (Before md-viewer.lanes
+  -- a settle capture, a resize or a ColorScheme was enough too.) `next_chunk`
+  -- has already taken the index off the queue, so the invariant asserted here
+  -- is the one that was broken: queue + captured + in-flight accounts for every
+  -- chunk in the plan, at every step.
   -- ---------------------------------------------------------------------
   do
     local session, plan = open_resident()
@@ -433,12 +441,19 @@ return function(t)
   do
     local linkrate = require("md-viewer.linkrate")
     -- The terminal half, granted. Every assertion below varies only the link.
-    local pannable = { name = "kitty_raw", resident_pan_supported = function() return true end }
+    local pannable = vim.tbl_extend(
+      "force",
+      backends.capabilities("kitty_raw"),
+      { resident_pan_supported = function() return true end }
+    )
     local function path_at(rate, resident)
       config.setup({ image = { backend = "cells", resident = resident }, render = { ssh_link_bytes_per_sec = rate } })
       config.get().render.ssh_link_bytes_per_sec = rate
       linkrate.invalidate()
-      return resident_session.select_path({ backend = pannable })
+      -- Snapshotted here, after the setup above: a session reads the
+      -- configuration it was created with, and these stand-ins are created one
+      -- per question rather than registered with md-viewer.state.
+      return resident_session.select_path({ backend = pannable, config = config.snapshot() })
     end
 
     local path, reason = path_at(nil, "auto")
@@ -472,7 +487,7 @@ return function(t)
     linkrate.invalidate()
     t.eq(
       "resident",
-      (resident_session.select_path({ backend = pannable })),
+      (resident_session.select_path({ backend = pannable, config = config.snapshot() })),
       "raising image.resident_below_bytes_per_sec admits a faster link"
     )
 
@@ -489,16 +504,15 @@ return function(t)
 
     -- The terminal still gets the first and final word: a refusal there is not
     -- a rate the reader could fix by measuring anything.
-    local refuses = {
-      name = "kitty_raw",
+    local refuses = vim.tbl_extend("force", backends.capabilities("kitty_raw"), {
       resident_pan_supported = function() return false, "wezterm#7953: repeat placements leak" end,
-    }
+    })
     config.setup({
       image = { backend = "cells", resident = "on" },
       render = { ssh_link_bytes_per_sec = 1030000 },
     })
     linkrate.invalidate()
-    path, reason = resident_session.select_path({ backend = refuses })
+    path, reason = resident_session.select_path({ backend = refuses, config = config.snapshot() })
     t.eq("viewport", path, "a terminal that refuses resident_pan is refused whatever the link")
     t.eq("wezterm#7953: repeat placements leak", reason, "and the terminal's own reason survives")
 

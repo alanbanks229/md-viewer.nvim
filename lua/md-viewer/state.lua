@@ -1,3 +1,6 @@
+local config = require("md-viewer.config")
+local lanes = require("md-viewer.lanes")
+
 local M = {}
 local sessions = {}
 local panes = {}
@@ -25,6 +28,13 @@ end
 
 function M.create(source_buf, source_win)
   local session = {
+    -- This session's own copy of the configuration, taken here and re-taken by
+    -- M.invalidate whenever the configuration changes. Everything below the
+    -- controller reads `session.config` rather than `config.get()`: the live
+    -- table is the user's, and a rendering path that reads it is reading a
+    -- global that anything could have written to between two frames of the
+    -- same gesture.
+    config = config.snapshot(),
     source_buf = source_buf,
     source_win = source_win,
     document_id = "buffer-" .. source_buf,
@@ -45,6 +55,12 @@ function M.create(source_buf, source_win)
     backend = nil,
     request_serial = 0,
     applied_serial = 0,
+    -- Per-lane staleness. `request_serial` above is still the count of
+    -- requests this document has issued -- and still the serial each lane
+    -- stores -- but which replies it invalidates is md-viewer.lanes' question
+    -- now, not "any newer request invalidates any older one".
+    lanes = lanes.fields(),
+    lane_epoch = 0,
     render_epoch = 0,
     renderer_revision = nil,
     latest_blocks = {},
@@ -80,7 +96,6 @@ function M.create(source_buf, source_win)
     loading_timer = nil,
     loading_frame = 0,
     render_failed = false,
-    obsolete_files = {},
     -- Selection/find display state, distinct from the button-scoped
     -- `session.pointer` gesture state: it must survive focus changes (a
     -- pointer press does not), so it is never touched by the
@@ -93,7 +108,6 @@ function M.create(source_buf, source_win)
     -- than from the pointer. See md-viewer.interaction's visual_start.
     visual_active = false,
     visual_linewise = false,
-    visual_columns = nil,
     -- The caret's glyph box, the scroll it was measured at, and the sticky
     -- column line motions aim at (Vim's `curswant`). See md-viewer.caret.
     caret_rect = nil,
@@ -109,17 +123,8 @@ function M.create(source_buf, source_win)
     -- midpoint until the caret is deliberately moved again.
     progress_basis = "viewport",
     last_progress_text = nil,
-    selection_render_in_flight = false,
-    selection_render_pending = false,
     selection_debounce_timer = nil,
     selection_settle_timer = nil,
-    -- Documents this preview has followed links through, oldest first, and
-    -- where in that list it currently sits. Entry 1 is the document the
-    -- preview was opened on; `M.retarget` appends, and md-viewer.controller's
-    -- back/forward walk the index without appending.
-    history = nil,
-    history_index = 0,
-    history_boundary = nil,
     find_active = false,
     find_query = nil,
     find_match_count = 0,
@@ -139,6 +144,9 @@ function M.create(source_buf, source_win)
     preview_win = nil,
     documents = { session },
     active = session,
+    -- Documents this preview pane has followed links through, oldest first,
+    -- and where in that list it currently sits. History is pane-scoped so a
+    -- tab activation never has to copy or reconcile it with document state.
     history = nil,
     history_index = 0,
     history_boundary = nil,
@@ -362,6 +370,17 @@ function M.activate(session)
 end
 
 function M.panes() return panes end
+
+---Re-take every session's configuration snapshot. Called by md-viewer.config
+---when the configuration changes, which is the one event that can invalidate
+---one -- the same hook the terminal capability and link-rate caches use.
+function M.invalidate()
+  for _, pane in pairs(panes) do
+    for _, session in ipairs(pane.documents) do
+      session.config = config.snapshot()
+    end
+  end
+end
 
 ---Compatibility view used by the rendering loops and diagnostics: one entry
 ---per open document, keyed by its stable preview buffer when available.

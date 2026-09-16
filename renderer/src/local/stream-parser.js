@@ -32,6 +32,8 @@
 // codepoint into a replacement glyph. Invalid UTF-8 passes through untouched
 // -- the tracker exists for boundary safety, not validation.
 
+import { MAX_MARKER_BYTES } from "./markers.js";
+
 const GROUND = "ground";
 const ESC = "esc";
 const ESC_INT = "esc-int";
@@ -49,8 +51,8 @@ const KIND_MARKER = "marker";
 // nothing: the candidate is flushed the moment one byte disagrees with the
 // token prefix, so only the genuine token holder can make the filter buffer.
 // A matching candidate is still bounded -- past this, it is flushed verbatim
-// and the terminal's own unknown-APC tolerance disposes of it.
-const MARKER_CANDIDATE_MAX = 4096;
+// and the terminal's own unknown-APC tolerance disposes of it. This is the
+// same full-wire bound the Lua emitter checks before writing.
 
 // Control strings on real Kitty commands are tens of bytes. A "control" that
 // never reaches its `;` stops being introspected but keeps streaming.
@@ -85,8 +87,8 @@ export class StreamParser {
 
     // The one withheld region: a possible marker being disambiguated (plus
     // the 1-2 framing bytes of any escape opener before its kind is known).
-    // Bounded by MARKER_CANDIDATE_MAX plus framing; everything not in here
-    // has already been emitted.
+    // Bounded by MAX_MARKER_BYTES; everything not in here has already been
+    // emitted.
     this.pending = [];
     this.markerCommitted = false;
     this.markerPrefixPos = 0;
@@ -284,13 +286,18 @@ export class StreamParser {
           if (kind === KIND_MARKER) {
             this.pending.push(b);
             if (this.markerCommitted) {
-              const payload = Buffer.from(this.pending.slice(3, -2)).toString("latin1");
-              this.stats.markerCount += 1;
-              this.stats.markerBytes += this.pending.length;
-              this.pending = [];
-              this.markerCommitted = false;
-              this.markerPrefixPos = 0;
-              this.onMarker(payload);
+              if (this.pending.length > MAX_MARKER_BYTES) {
+                this.stats.malformedMarkers += 1;
+                this.releasePending();
+              } else {
+                const payload = Buffer.from(this.pending.slice(3, -2)).toString("latin1");
+                this.stats.markerCount += 1;
+                this.stats.markerBytes += this.pending.length;
+                this.pending = [];
+                this.markerCommitted = false;
+                this.markerPrefixPos = 0;
+                this.onMarker(payload);
+              }
             } else {
               // `ESC _ M` that ended before the prefix could match.
               this.stats.rejectedCandidates += 1;
@@ -342,7 +349,7 @@ export class StreamParser {
           case KIND_MARKER: {
             this.hold(chunk, i, b);
             if (this.markerCommitted) {
-              if (this.pending.length > MARKER_CANDIDATE_MAX) {
+              if (this.pending.length > MAX_MARKER_BYTES) {
                 this.stats.malformedMarkers += 1;
                 this.stringKind = KIND_APC_OPAQUE;
                 this.releasePending();
@@ -445,4 +452,4 @@ export class StreamParser {
   }
 }
 
-export { MARKER_CANDIDATE_MAX };
+export { MAX_MARKER_BYTES };

@@ -26,8 +26,8 @@
 ---disagree, which is what deleted the stale-rect race the previous design
 ---carried. Frames come over the side channel (`process.request("animation")`)
 ---addressed purely by content hash and drawn size. **This module never calls
----`renderer.request`** -- a frame fetch must never bump `request_serial` and
----mark a user's render stale.
+---`renderer.request`** -- a frame fetch must never be admitted to a lane at
+---all, let alone the content one, which would mark a user's render stale.
 ---
 ---Terminal ownership: uploaded images are cached under stable content keys
 ---(hashes of source bytes and drawn size, never temp paths) and shared across
@@ -106,7 +106,7 @@ local function permitted(session)
   local backend = session.backend
   -- `cells` has no pixels at all, and `nvim_img` exposes no sub-cell placement
   -- API to position a frame with.
-  if not backend or backend.name ~= "kitty_raw" then return false, "backend does not place raw images" end
+  if not backend or not backend.places_raw_images then return false, "backend does not place raw images" end
   if not backend.animation_supported then return false, "backend has no animation support" end
   local ok, reason = backend.animation_supported()
   if not ok then return false, reason end
@@ -152,7 +152,8 @@ local function scales(session)
   local width_px = session.viewport_width_px
   local height_px = session.viewport_height_render_px or session.viewport_height_px
   if not width_px or width_px <= 0 or not height_px or height_px <= 0 then return nil end
-  return (placement.width * cell.width) / width_px, (placement.height * cell.height) / height_px
+  local drawn_w, drawn_h = cellpixels.drawn_size(placement, cell)
+  return drawn_w / width_px, drawn_h / height_px
 end
 
 local function strategy_for(session)
@@ -641,7 +642,7 @@ end
 ---on screen, and the geometry that arrived with it is the geometry the frames
 ---must be positioned against.
 function M.adopt(session)
-  if config.get().render.animate ~= true then return end
+  if session.config.render.animate ~= true then return end
   sessions[session] = true
   -- Placements from the superseded frame refer to a base that has just been
   -- replaced, so they go before anything else is drawn -- and the current
