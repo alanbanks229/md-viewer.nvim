@@ -83,6 +83,15 @@ local mappings = {
   { "G", function(s) move(s, "document", "forward", 1) end, "Document end" },
 }
 
+---An `interaction.keymaps` entry as the list of keys it names: one key,
+---several, or none at all when the action is turned off. Every entry accepts
+---all three shapes, so each action reads its own the same way.
+local function keys_for(entry)
+  if type(entry) == "table" then return entry end
+  if type(entry) == "string" then return { entry } end
+  return {}
+end
+
 ---Selection, search, history and Escape keys. Kept as a second, small loop
 ---rather than folded into `mappings` above: each is individually gated by its
 ---own `interaction.*` config flag, where the caret motions are not.
@@ -135,17 +144,20 @@ local function interaction_mappings(session)
     "Reserved: Neovim's visual mode is not usable over the preview surface",
   }
   if cfg.copy then
-    list[#list + 1] = {
-      "y",
-      function(session)
-        -- In visual mode `y` yanks and leaves it, as it does in a text buffer.
-        -- The settle frame lands first so the copy reads the same selection the
-        -- reader is looking at, rather than one preview frame behind it.
-        interaction.visual_stop(session, true)
-        interaction.copy_selection(session, false)
-      end,
-      "Copy preview selection",
-    }
+    local copy = function(session)
+      -- In visual mode `y` yanks and leaves it, as it does in a text buffer.
+      -- The settle frame lands first so the copy reads the same selection the
+      -- reader is looking at, rather than one preview frame behind it.
+      interaction.visual_stop(session, true)
+      interaction.copy_selection(session, false)
+    end
+    -- One handler, however many keys name it. `<leader>` in one of them is
+    -- expanded by `vim.keymap.set` from `vim.g.mapleader` as it is now, which
+    -- is when the preview opens -- a leader changed after that does not move
+    -- the mapping.
+    for _, lhs in ipairs(keys_for(cfg.keymaps.copy)) do
+      list[#list + 1] = { lhs, copy, "Copy preview selection" }
+    end
   end
   if cfg.find then
     -- Same entry point as `:MdViewerFind` with no argument, so the prompt
@@ -184,16 +196,16 @@ local function interaction_mappings(session)
     function(session) controller().tab_previous(session) end,
     "Previous document tab in this preview pane",
   }
-  if cfg.keymaps.tab_previous then
+  for _, lhs in ipairs(keys_for(cfg.keymaps.tab_previous)) do
     list[#list + 1] = {
-      cfg.keymaps.tab_previous,
+      lhs,
       function(session) controller().tab_previous(session) end,
       "Previous document tab in this preview pane",
     }
   end
-  if cfg.keymaps.tab_next then
+  for _, lhs in ipairs(keys_for(cfg.keymaps.tab_next)) do
     list[#list + 1] = {
-      cfg.keymaps.tab_next,
+      lhs,
       function(session) controller().tab_next(session) end,
       "Next document tab in this preview pane",
     }

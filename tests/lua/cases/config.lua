@@ -212,8 +212,9 @@ return function(t)
   config.reset()
   t.eq(true, (pcall(config.setup, {})), "zero configuration is unaffected by the removed-key guard")
 
-  -- interaction.keymaps: which key cycles preview tabs. Each entry is a
-  -- non-empty string, or `false` to leave that action unmapped.
+  -- interaction.keymaps: which key cycles preview tabs, and which copies the
+  -- selection. Each entry is a non-empty string, a list of them, or `false` to
+  -- leave that action unmapped.
   config.reset()
   local keymaps_cfg = config.setup({ interaction = { keymaps = { tab_previous = "gh" } } })
   t.eq("gh", keymaps_cfg.interaction.keymaps.tab_previous, "interaction.keymaps.tab_previous is overridable")
@@ -230,6 +231,31 @@ return function(t)
     "the keymaps.tab_previous error names the offending option"
   )
   config.reset()
+
+  -- keymaps.copy: the key(s) that copy the preview selection, defaulting to
+  -- the `y` this has always been mapped to. A list is what lets a reader keep
+  -- `y` and add their own `<leader>y`, which their global `"+y` noremap
+  -- otherwise swallows before it reaches the preview's handler.
+  local copy_default = config.setup({})
+  t.eq("y", copy_default.interaction.keymaps.copy, "interaction.keymaps.copy defaults to y")
+  config.reset()
+  local copy_list_cfg = config.setup({ interaction = { keymaps = { copy = { "y", "<leader>y" } } } })
+  t.eq({ "y", "<leader>y" }, copy_list_cfg.interaction.keymaps.copy, "interaction.keymaps.copy accepts a list of keys")
+  config.reset()
+  local copy_off_cfg = config.setup({ interaction = { keymaps = { copy = false } } })
+  t.eq(false, copy_off_cfg.interaction.keymaps.copy, "interaction.keymaps.copy accepts false")
+  config.reset()
+  local empty_list_ok, empty_list_err = pcall(config.setup, { interaction = { keymaps = { copy = {} } } })
+  t.eq(false, empty_list_ok, "an empty interaction.keymaps.copy list is rejected rather than read as false")
+  t.ok(
+    tostring(empty_list_err):match("interaction%.keymaps%.copy"),
+    "the empty keymaps.copy list error names the offending option"
+  )
+  config.reset()
+  local bad_list_entry_ok = pcall(config.setup, { interaction = { keymaps = { copy = { "y", "" } } } })
+  t.eq(false, bad_list_entry_ok, "an empty string inside an interaction.keymaps list is rejected")
+  config.reset()
+
   local bad_keymaps_shape_ok, bad_keymaps_shape_err = pcall(config.setup, { interaction = { keymaps = "H" } })
   t.eq(false, bad_keymaps_shape_ok, "a non-table interaction.keymaps is rejected")
   t.ok(

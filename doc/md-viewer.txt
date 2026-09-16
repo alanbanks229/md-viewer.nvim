@@ -19,6 +19,7 @@ CONTENTS                                                  *md-viewer-contents*
 5.  Preview navigation ................... |md-viewer-navigation|
       Mappings ........................... |md-viewer-mappings|
       Keyboard selection ................. |md-viewer-visual|
+      The copy key ....................... |md-viewer-copy-key|
 6.  Mouse interaction .................... |md-viewer-interaction|
 7.  Preview history ...................... |md-viewer-history|
 8.  Obsidian wikilinks ................... |md-viewer-obsidian|
@@ -226,8 +227,11 @@ interaction ~
     find                         true       / and :MdViewerFind
     history_limit                32         documents kept per preview
                                             (|md-viewer-history|)
-    keymaps                      H, L       which key cycles document tabs;
-                                            either can be set to false
+    keymaps                      H, L, y    which key cycles document tabs
+                                            (tab_previous, tab_next) and
+                                            which copies the selection
+                                            (copy); each takes a key, a list
+                                            of keys, or false to unmap
     external_open_timeout_ms     5000       how long a handler is watched
 
 terminal ~
@@ -636,7 +640,10 @@ wearing a count:
     o                        Swap which end of the selection the caret
                              holds
     y                        Copy the current selection (:MdViewerCopy),
-                             leaving visual mode
+                             leaving visual mode. Configurable through
+                             `interaction.keymaps.copy`, which takes a list
+                             -- see |md-viewer-copy-key| if <leader>y does
+                             nothing here
     <Esc>                    Clear the search, then the selection; a third
                              press is an ordinary <Esc>
     /                        Prompt and search (:MdViewerFind), moving the
@@ -694,6 +701,24 @@ selection, so it gets an instant overlay highlight where the terminal
 supports one, a sharp settle frame, copy, and exact source-position
 reporting. Extending past the bottom of the window scrolls, so `vG` selects
 to the end of the document.
+
+                                                          *md-viewer-copy-key*
+If your own config maps `<leader>y` to `"+y` -- a common habit -- you will
+find it does nothing over the preview, while typing `"+y` by hand works. That
+is not a defect here: |:map-<nowait>| aside, a `noremap` mapping feeds its
+right-hand side through as non-remappable, so the trailing `y` runs Neovim's
+builtin operator rather than the preview's buffer-local copy handler, and an
+operator with no motion visibly does nothing.
+
+Name the key here and it is mapped directly, which is what lets it reach the
+handler: >lua
+    require("md-viewer").setup({
+      interaction = { keymaps = { copy = { "y", "<leader>y" } } },
+    })
+<
+Every `interaction.keymaps` entry takes a key, a list of keys, or `false` to
+leave that action unmapped. `<leader>` is expanded from 'mapleader' as it
+stands when the preview opens.
 
 =============================================================================
 MOUSE INTERACTION                                      *md-viewer-interaction*

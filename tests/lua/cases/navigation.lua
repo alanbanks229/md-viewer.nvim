@@ -79,5 +79,41 @@ return function(t)
   )
   controller.close(source)
 
+  -- keymaps.copy names the key(s) that copy the preview selection. A list
+  -- maps every one of them to the same handler, which is how a reader keeps
+  -- `y` and adds the `<leader>y` their own `"+y` noremap would otherwise
+  -- swallow before it ever reached this buffer.
+  require("md-viewer").setup({
+    image = { backend = "cells" },
+    interaction = { keymaps = { copy = { "y", "<leader>y" } } },
+  })
+  -- Pinned rather than assumed: `<leader>` is expanded by `vim.keymap.set`
+  -- from whatever `mapleader` is at the moment the preview opens, so the lhs
+  -- to look up afterwards is only knowable if the test sets it. Restored
+  -- below, since a case hands the world back as it found it.
+  local saved_mapleader = vim.g.mapleader
+  vim.g.mapleader = ","
+  vim.api.nvim_set_current_buf(source)
+  local copy_keys = assert(controller.open("right"))
+  navigation.attach(copy_keys, function() end)
+  for _, lhs in ipairs({ "y", ",y" }) do
+    local mapping = preview_map(lhs, copy_keys.preview_buf)
+    t.ok(not vim.tbl_isempty(mapping), ("preview-local %q copy mapping exists"):format(lhs))
+    t.eq("Copy preview selection", mapping.desc, ("%q carries the copy description"):format(lhs))
+  end
+  controller.close(source)
+  vim.g.mapleader = saved_mapleader
+
+  -- And `false` leaves the action unmapped, the same as the tab entries.
+  require("md-viewer").setup({
+    image = { backend = "cells" },
+    interaction = { keymaps = { copy = false } },
+  })
+  vim.api.nvim_set_current_buf(source)
+  local no_copy = assert(controller.open("right"))
+  navigation.attach(no_copy, function() end)
+  t.ok(vim.tbl_isempty(preview_map("y", no_copy.preview_buf)), "y is unmapped when keymaps.copy is false")
+  controller.close(source)
+
   require("md-viewer.config").reset()
 end

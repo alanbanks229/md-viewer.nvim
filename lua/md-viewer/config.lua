@@ -311,11 +311,21 @@ M.defaults = {
     -- path, and a reader following links for an hour should not accumulate an
     -- ever-growing list.
     history_limit = 32,
-    -- Which physical key activates each preview-tab action. Either key can be
-    -- set to `false` to leave that action unmapped.
+    -- Which physical key activates each preview action. Every entry takes a
+    -- key, a list of keys, or `false` to leave that action unmapped.
+    --
+    -- `copy` is the entry a list exists for. A reader whose own config maps
+    -- `<leader>y` to `"+y` with the usual `noremap = true` finds it does
+    -- nothing over the preview: a noremap expansion feeds its right-hand side
+    -- through as non-remappable, so the trailing `y` runs Neovim's builtin
+    -- operator instead of this buffer's copy handler, and an operator with no
+    -- motion visibly does nothing. Naming the leader key here maps it
+    -- directly, which is what lets it reach the handler at all -- and keeping
+    -- `"y"` alongside it is why the entry takes a list rather than one key.
     keymaps = {
       tab_previous = "H",
       tab_next = "L",
+      copy = "y",
     },
     -- How long to keep watching a system handler md-viewer started for an
     -- external link before assuming it is running normally. Only failures that
@@ -563,12 +573,22 @@ local function validate(cfg)
     "md-viewer: interaction.history_limit must be a positive integer"
   )
   assert(type(cfg.interaction.keymaps) == "table", "md-viewer: interaction.keymaps must be a table")
-  for _, name in ipairs({ "tab_previous", "tab_next" }) do
+  for _, name in ipairs({ "tab_previous", "tab_next", "copy" }) do
     local value = cfg.interaction.keymaps[name]
-    assert(
-      value == false or (type(value) == "string" and value ~= ""),
-      ("md-viewer: interaction.keymaps.%s must be a non-empty string or false"):format(name)
+    local message = ("md-viewer: interaction.keymaps.%s must be a non-empty string, a list of them, or false"):format(
+      name
     )
+    if type(value) == "table" then
+      -- `#value > 0` rejects both `{}` and a map-shaped table, which would
+      -- otherwise pass silently as "no keys" and unmap the action without
+      -- anyone having asked for that -- `false` is how an action is turned off.
+      assert(#value > 0, message)
+      for _, key in ipairs(value) do
+        assert(type(key) == "string" and key ~= "", message)
+      end
+    else
+      assert(value == false or (type(value) == "string" and value ~= ""), message)
+    end
   end
   assert(
     type(cfg.interaction.external_open_timeout_ms) == "number" and cfg.interaction.external_open_timeout_ms >= 0,
