@@ -5,6 +5,16 @@ docs/refactor-plan.md section 6 has landed. The next major phase is the plan's
 section 7 deliverables (see Next); do not start it without reading that section
 first.
 
+Where this work lives (2026-09-15): on the branch `md-viewer-refactor`, as
+draft PR #11, and NOT on `main`. All 49 commits were moved off `main` and
+`main` was reset to `b50f3b3` (tag `v0.3.0`, the last release) so that `main`
+again equals what the README tells users to install and this effort is
+reviewable as one change. **`main` contains none of what this document
+describes** -- not `presenter.lua`, not `autocmds.lua`, not this file. Do the
+remaining work on this branch; branching from `main` would start from a tree
+that predates all of it. The merge needs `gh pr merge --squash --admin`,
+because the repo ruleset blocks self-approval.
+
 Completed:
 - Phase 0, item 1: fixed the health test's `auto_cfg` scope so all intended
   `_diagnose` assertions use the explicit test configuration.
