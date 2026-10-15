@@ -389,11 +389,19 @@ export class BrowserRenderer {
           this.cdpCaptureTimeoutMs,
           "scroll-origin evaluate",
         );
+        // `captureBeyondViewport: true` even though the clip is the viewport.
+        // With it false, Chrome 155 headless paints the bottom ~87 CSS px of
+        // the clip from the wrong place -- the top of the page again, or bare
+        // background -- while innerHeight, 100vh and the window bounds all
+        // report the full viewport. A fixed band whatever the height (940 and
+        // 420 measured), so every frame's last rows came back missing.
+        // macOS 26 / Chrome 155.0.8059.40; the region capture below needed
+        // the same flag for the same kind of reason. ~2ms per frame.
         const { data } = await withTimeout(
           this.cdp.send("Page.captureScreenshot", {
             format: "png",
             optimizeForSpeed: true,
-            captureBeyondViewport: false,
+            captureBeyondViewport: true,
             clip: {
               x: origin.x,
               y: origin.y,
