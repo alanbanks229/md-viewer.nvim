@@ -141,13 +141,27 @@ function M.float_rect(win)
   }
 end
 
+---A float drawn as a cursor effect rather than as content: smear-cursor's 1x1
+---animation cells. Cutting one out of the base re-crops the image on every
+---animation step -- and wiped the selection overlay mid-gesture -- to protect a
+---cell that is gone 17ms later. Matched by filetype, not `winblend = 100`: that
+---makes only the background transparent, so a notification at full blend still
+---shows text the cut-out exists for.
+local function cursor_effect(win) return vim.bo[vim.api.nvim_win_get_buf(win)].filetype == "smear-cursor" end
+
 local function floating_windows(rect, ignored_win, focusable)
   local result = {}
   local tab = ignored_win and vim.api.nvim_win_get_tabpage(ignored_win) or vim.api.nvim_get_current_tabpage()
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(tab)) do
     if win ~= ignored_win and vim.api.nvim_win_is_valid(win) then
       local cfg = vim.api.nvim_win_get_config(win)
-      if cfg.relative ~= "" and (cfg.focusable ~= false) == focusable and not cfg.hide and not cfg.external then
+      if
+        cfg.relative ~= ""
+        and (cfg.focusable ~= false) == focusable
+        and not cfg.hide
+        and not cfg.external
+        and not cursor_effect(win)
+      then
         local ok, float_rect = pcall(M.float_rect, win)
         if ok and M.intersects(rect, float_rect) then result[#result + 1] = { win = win, rect = float_rect } end
       end

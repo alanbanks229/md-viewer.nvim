@@ -47,7 +47,7 @@ Despite the browser-like behavior, this is not an embedded webview. The renderer
 ```lua
 {
   "alanbanks229/md-viewer.nvim",
-  version = "v0.3.0",
+  version = "v0.3.1",
   ft = "markdown",
   cmd = { "MdViewerToggle", "MdViewerHealth", "MdViewerDebug" },
   opts = {},
@@ -82,7 +82,7 @@ vim.api.nvim_create_autocmd("PackChanged", {
 vim.pack.add({
   {
     src = "https://github.com/alanbanks229/md-viewer.nvim",
-    version = "v0.3.0",
+    version = "v0.3.1",
   },
 })
 

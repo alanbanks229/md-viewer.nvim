@@ -5,6 +5,22 @@ All notable changes to this project will be documented here. The project uses
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-15
+
+### Fixed
+
+- **The bottom rows of the preview no longer come back blank.** Chrome 155
+  painted the last ~87 CSS px of every viewport capture from the wrong place,
+  so the preview stopped a few rows short of the statusline with its last line
+  cut mid-glyph; the capture now asks Chrome to paint the whole clip.
+- **A visual-mode highlight survives a floating window opening or closing over
+  the preview.** The re-crop that makes room for a notification deleted the
+  selection overlay and left it gone until the next keypress; the highlight is
+  now re-cut against the new placement.
+- **smear-cursor's animation no longer cuts holes in the preview.** Its 1x1
+  cursor floats were treated as notifications, re-cropping the image on every
+  animation step, which is also what made the visual-mode highlight blink.
+
 ## [0.3.0] - 2026-08-31
 
 Highlighting is now exclusively a keyboard gesture, the preview pane carries a
@@ -347,7 +363,8 @@ First public release.
   report. Per-terminal validation records live in
   [docs/terminal-support.md](docs/terminal-support.md).
 
-[Unreleased]: https://github.com/alanbanks229/md-viewer.nvim/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/alanbanks229/md-viewer.nvim/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.1
 [0.3.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.3.0
 [0.2.1]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.1
 [0.2.0]: https://github.com/alanbanks229/md-viewer.nvim/releases/tag/v0.2.0

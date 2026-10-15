@@ -59,6 +59,7 @@ local function clear_selection_overlay(session)
   if not set then return end
   session.overlay_set = nil
   session.overlay_rect_count = 0
+  session.overlay_source = nil
   if session.backend and session.backend.overlay_clear then pcall(session.backend.overlay_clear, set) end
 end
 
@@ -428,6 +429,14 @@ function M.display_selection_overlay(session, result)
   session.overlay_last_bytes = type(stats) == "table" and stats.bytes or nil
   session.overlay_last_ms = (vim.uv.hrtime() - started) / 1000000
   session.overlay_last_error = nil
+  -- Kept so a re-crop under a passive float can repaint the highlight itself
+  -- (`restore_selection_overlay`) instead of waiting for the next keypress.
+  session.overlay_source = {
+    rects = result.rects,
+    tint = result.selectionTint,
+    revision = result.contentRevision,
+    scroll_y = session.frame_scroll_y or 0,
+  }
   return true
 end
 
@@ -1979,6 +1988,60 @@ end
 ---blinking and rolling by about a row. That was `kitty_raw.move` deleting the
 ---old placements before sending the new ones; it now emits both in one write,
 ---new first, so the re-crop is no longer visible as anything.
+---Re-cut the selection highlight against a placement the base image has just
+---moved to, from the rects the last selection frame measured.
+---
+---Clearing and leaving the repaint to "the next selection frame" was wrong in
+---visual mode: there is no next frame until the reader presses another key,
+---so a float opening or closing over the preview (a notification, a cursor
+---animation's 1x1 floats) erased the highlight mid-gesture and it stayed gone.
+---
+---Only an exclusion change re-applies into the same set -- its pieces are keyed
+---in image pixels, so a moved or resized placement would keep pieces on the
+---cells they were cut for. Anything else starts a fresh set. Where the saved
+---rects no longer describe the frame on screen, or the backend refuses, this
+---clears as before and asks the renderer for a new selection frame.
+local function restore_selection_overlay(session, previous, placement)
+  local source = session.overlay_source
+  if not (session.overlay_set and source) then
+    clear_selection_overlay(session)
+    return
+  end
+  local geometry_same = previous
+    and previous.row == placement.row
+    and previous.col == placement.col
+    and previous.width == placement.width
+    and previous.height == placement.height
+  local current = source.revision == session.renderer_revision
+    and math.abs(source.scroll_y - (session.frame_scroll_y or 0)) <= 0.5
+  if current and not geometry_same then
+    clear_selection_overlay(session)
+    session.overlay_source = source
+  end
+  local ok, set_id, stats = false, nil, nil
+  if current then
+    ok, set_id, stats = pcall(
+      session.backend.overlay_apply,
+      session.overlay_set,
+      session.image_id,
+      source.rects,
+      { widthPx = session.viewport_width_px, heightPx = session.viewport_height_render_px },
+      source.tint,
+      -- Local mode's sheet is synthesized from a reference; current-host bytes
+      -- are not kept, so a grown sheet answers "need_sheet" and falls through.
+      local_mode(session) and { ref = true } or nil,
+      placement
+    )
+  end
+  if ok and set_id then
+    session.overlay_set = set_id
+    session.overlay_rect_count = type(stats) == "table" and stats.rects or #source.rects
+    return
+  end
+  clear_selection_overlay(session)
+  interaction.visual_update(session)
+end
+
 local function reconcile_placement(session, force)
   if session.backend.name ~= "kitty_raw" or not session.image_id or session.ui_suppressed then return end
   -- In local mode, image_id is a reference that may not have any pixels on
@@ -2006,10 +2069,8 @@ local function reconcile_placement(session, force)
       return
     end
     -- The base just moved or re-cropped (a float opened or closed over it);
-    -- overlay rectangles computed against the old placement are wrong now.
-    -- Cleared after the move rather than re-derived: the next selection frame
-    -- repaints them against the new placement within one round trip.
-    clear_selection_overlay(session)
+    -- overlay rectangles cut against the old placement are wrong now.
+    restore_selection_overlay(session, session.last_placement, placement)
   end
   -- Always refresh, even when no move() happened: exclusions (or any other
   -- field) may have changed and click-resolution reads this on every click.

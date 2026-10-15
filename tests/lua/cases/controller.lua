@@ -146,6 +146,89 @@ return function(t)
   vim.wait(200)
   t.eq(0, move_calls, "an unchanged placement never re-places the image")
 
+  -- smear-cursor animates with 1x1 non-focusable floats, one move per step.
+  -- Treated as notifications, each step re-cropped the base and -- through
+  -- reconcile_placement -- wiped the visual selection mid-gesture.
+  local smear_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[smear_buf].filetype = "smear-cursor"
+  local smear_win = vim.api.nvim_open_win(smear_buf, false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = 1,
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.wo[smear_win].winblend = 100
+  t.eq(0, #preview.placement(session.preview_win, "kitty_raw").exclusions, "a cursor-animation float is not cut out")
+  vim.wait(200)
+  t.eq(0, move_calls, "a cursor-animation float never re-crops the image")
+  vim.api.nvim_win_close(smear_win, true)
+
+  -- Regression: a re-crop used to clear the selection overlay and trust "the
+  -- next selection frame" to repaint it. In visual mode nothing sends one until
+  -- the next keypress, so a notification opening mid-gesture erased the
+  -- highlight. The saved rects are re-applied against the new placement.
+  local applied, cleared_overlays = {}, 0
+  session.backend.overlay_apply = function(set_id, _, rects, _, tint, _, applied_placement)
+    applied[#applied + 1] = { set_id = set_id, rects = rects, tint = tint, placement = applied_placement }
+    return set_id or 41, { rects = #rects }
+  end
+  session.backend.overlay_clear = function() cleared_overlays = cleared_overlays + 1 end
+  local saved_rects = { { x = 0, y = 0, width = 40, height = 12 } }
+  local function select_overlay(revision)
+    session.overlay_set = 40
+    session.overlay_source = {
+      rects = saved_rects,
+      tint = "#264f78",
+      revision = revision,
+      scroll_y = session.frame_scroll_y or 0,
+    }
+  end
+  select_overlay(session.renderer_revision)
+  local restore_win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.wait(300, function() return #applied > 0 end, 10)
+  t.eq(1, #applied, "a re-crop re-applies the selection overlay")
+  t.eq(40, applied[1].set_id, "an exclusion-only change diffs into the set already on screen")
+  t.eq(saved_rects, applied[1].rects, "the re-apply uses the rects the last selection frame measured")
+  t.eq("#264f78", applied[1].tint, "... and its tint")
+  t.eq(1, #applied[1].placement.exclusions, "... cut against the placement carrying the new float")
+  t.eq(0, cleared_overlays, "the highlight is never cleared on the way")
+  t.eq(40, session.overlay_set, "the overlay is still on screen")
+  vim.api.nvim_win_close(restore_win, true)
+  vim.wait(300, function() return #applied > 1 end, 10)
+  t.eq(2, #applied, "closing the float re-applies it uncut")
+
+  -- Rects measured against other content cannot be trusted on this frame:
+  -- cleared, exactly as before.
+  select_overlay((session.renderer_revision or 0) + 1)
+  applied = {}
+  local stale_win = vim.api.nvim_open_win(vim.api.nvim_create_buf(false, true), false, {
+    relative = "editor",
+    row = placement.row,
+    col = placement.col,
+    width = math.min(10, placement.width),
+    height = 1,
+    style = "minimal",
+    focusable = false,
+  })
+  vim.wait(300, function() return session.overlay_set == nil end, 10)
+  t.eq(0, #applied, "stale rects are not re-applied")
+  t.eq(1, cleared_overlays, "stale rects are cleared instead")
+  t.eq(nil, session.overlay_source, "and forgotten")
+  vim.api.nvim_win_close(stale_win, true)
+  vim.wait(200)
+  session.backend.overlay_apply, session.backend.overlay_clear = nil, nil
+
   -- Regression: a plain (non-floating) split opened elsewhere -- e.g. a
   -- third-party diff/explorer plugin's own panes, opened "relative to
   -- editor" -- can shrink or reposition the preview split as an immediate
